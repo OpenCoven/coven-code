@@ -170,7 +170,7 @@ claurst --version
 A successful installation prints the version string, for example:
 
 ```
-claurst 0.1.1
+claurst 0.1.2
 ```
 
 To confirm the binary is the one you installed:
