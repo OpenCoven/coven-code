@@ -394,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
         return upgrade::run_upgrade(&raw_args[2..]).await;
     }
 
-    // Fast-path: `claude acp` — start the Agent Client Protocol stdio server.
+    // Fast-path: `coven-code acp` — start the Agent Client Protocol stdio server.
     if raw_args.get(1).map(|s| s.as_str()) == Some("acp") {
         return claurst_acp::run_acp_server().await;
     }

@@ -35,6 +35,8 @@ impl ColorPalette {
     /// Get the color palette for a given theme name.
     pub fn for_theme(theme_name: &str) -> Self {
         match theme_name {
+            "coven" | "coven-code" => Self::default_theme(),
+            "coven-dark" => Self::coven_dark(),
             "deuteranopia" => Self::deuteranopia(),
             "dark" => Self::dark(),
             "light" => Self::light(),
@@ -46,22 +48,50 @@ impl ColorPalette {
         }
     }
 
-    /// Default Coven Code theme
-    /// OpenCoven seam: replace palette here with violet/coven brand colors.
-    /// Target: primary=#8B5CF6 (violet-500), accent=#EC4899 (pink-500)
+    /// Default Coven Code theme — OpenCoven brand palette
+    ///
+    /// Violet-first dark theme matching the OpenCoven brand:
+    ///   primary/accent:   #8B5CF6  violet-500
+    ///   secondary_accent: #EC4899  pink-500
+    ///   action:           #A78BFA  violet-400 (slightly lighter for interactive)
+    ///   info:             #C4B5FD  violet-300 (readable on dark)
+    ///   border:           #4C1D95  violet-900 (dark border, not grey)
+    ///   success:          #34D399  emerald-400 (distinct from violet)
+    ///   warning:          #FBBF24  amber-400
+    ///   error:            #F87171  red-400
     fn default_theme() -> Self {
         Self {
-            error: Color::Rgb(255, 87, 51),        // Bright red-orange
-            success: Color::Rgb(76, 175, 80),      // Green
-            warning: Color::Rgb(255, 152, 0),      // Orange
-            info: Color::Cyan,
-            action: Color::Cyan,
-            disabled: Color::DarkGray,
-            accent: Color::Cyan,
-            secondary_accent: Color::Rgb(233, 30, 99), // Magenta
-            text_light: Color::White,
-            text_dark: Color::Black,
-            border: Color::DarkGray,
+            // Violet/pink brand palette
+            accent:           Color::Rgb(139, 92, 246),  // #8B5CF6 violet-500
+            secondary_accent: Color::Rgb(236, 72, 153),  // #EC4899 pink-500
+            action:           Color::Rgb(167, 139, 250), // #A78BFA violet-400
+            info:             Color::Rgb(196, 181, 253), // #C4B5FD violet-300
+            border:           Color::Rgb(76, 29, 149),   // #4C1D95 violet-900
+            // Semantic states — distinct from violet family
+            success:          Color::Rgb(52, 211, 153),  // #34D399 emerald-400
+            warning:          Color::Rgb(251, 191, 36),  // #FBBF24 amber-400
+            error:            Color::Rgb(248, 113, 113), // #F87171 red-400
+            // Text / disabled
+            disabled:         Color::Rgb(109, 40, 217),  // #6D28D9 violet-700 (muted)
+            text_light:       Color::White,
+            text_dark:        Color::Black,
+        }
+    }
+
+    /// Coven Code dark variant — violet palette on a true dark background
+    fn coven_dark() -> Self {
+        Self {
+            accent:           Color::Rgb(139, 92, 246),  // #8B5CF6 violet-500
+            secondary_accent: Color::Rgb(236, 72, 153),  // #EC4899 pink-500
+            action:           Color::Rgb(167, 139, 250), // #A78BFA violet-400
+            info:             Color::Rgb(196, 181, 253), // #C4B5FD violet-300
+            border:           Color::Rgb(55, 14, 110),   // #37006E violet-950
+            success:          Color::Rgb(52, 211, 153),  // #34D399 emerald-400
+            warning:          Color::Rgb(251, 191, 36),  // #FBBF24 amber-400
+            error:            Color::Rgb(248, 113, 113), // #F87171 red-400
+            disabled:         Color::Rgb(76, 29, 149),   // #4C1D95 violet-900 (dimmer)
+            text_light:       Color::Rgb(237, 233, 254), // #EDE9FE violet-100
+            text_dark:        Color::Rgb(15, 5, 40),     // near-black with violet tint
         }
     }
 
