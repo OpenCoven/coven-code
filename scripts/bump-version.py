@@ -55,8 +55,14 @@ def bump_cargo_lock(version: str) -> None:
         if re.search(r"^source = ", block, flags=re.MULTILINE):
             continue  # registry / git dep — leave alone
         name_match = re.search(r'^name = "([^"]+)"', block, flags=re.MULTILINE)
-        if not name_match or not name_match.group(1).startswith("coven-code"):
-            continue  # any future non-coven-code path dep — also leave alone
+        if not name_match:
+            continue
+        # Workspace crates are named "claurst" or "claurst-*" (internal crate
+        # names are preserved from upstream for merge-friendliness; the compiled
+        # binary and user-facing package name are "coven-code").
+        crate_name = name_match.group(1)
+        if crate_name != "claurst" and not crate_name.startswith("claurst-"):
+            continue
         new_block, n = re.subn(
             r'^version = "[^"]+"$',
             f'version = "{version}"',
@@ -65,7 +71,7 @@ def bump_cargo_lock(version: str) -> None:
             flags=re.MULTILINE,
         )
         if n != 1:
-            die(f"Cargo.lock: workspace block for {name_match.group(1)} had no version line")
+            die(f"Cargo.lock: workspace block for {crate_name} had no version line")
         blocks[i] = new_block
         touched += 1
 
@@ -105,11 +111,10 @@ def main() -> None:
     pkg_path.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
     print(f"  npm/package.json")
 
-    # 4. README.md badge + Beta callout
+    # 4. README.md — Beta callout + attribution version line
     readme = ROOT / "README.md"
-    replace(readme, r"Version-\d+\.\d+\.\d+-2E8B57", f"Version-{version}-2E8B57", count=1)
-    replace(readme, r'alt="Version \d+\.\d+\.\d+"', f'alt="Version {version}"', count=1)
-    replace(readme, r"Beta \(v\d+\.\d+\.\d+\)", f"Beta (v{version})", count=1)
+    replace(readme, r"Beta \(v\d+\.\d+\.\d+\)\.", f"Beta (v{version}).", count=1)
+    replace(readme, r"Claurst v\d+\.\d+\.\d+", f"Claurst v{version}", count=1)
 
     # 5. docs/index.md
     replace(
