@@ -27,13 +27,13 @@ possible; on Linux it links against the system glibc.
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-irm https://github.com/OpenCoven/coven-codes/releases/latest/download/install.ps1 | iex
+irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
 ```
 
 Both installers:
@@ -117,7 +117,7 @@ new binary, and replaces the running executable atomically. Settings in
 ## Manual install from GitHub Releases
 
 If you'd rather not run an install script, grab archives directly from
-[**GitHub Releases**](https://github.com/OpenCoven/coven-codes/releases):
+[**GitHub Releases**](https://github.com/OpenCoven/coven-code/releases):
 
 | Archive | Platform |
 |---------|----------|
@@ -131,7 +131,7 @@ Every archive contains a single binary named `coven-code` (or `coven-code.exe`).
 Extract it and put it somewhere on your `PATH`. For example on Linux:
 
 ```bash
-curl -L https://github.com/OpenCoven/coven-codes/releases/latest/download/coven-code-linux-x86_64.tar.gz \
+curl -L https://github.com/OpenCoven/coven-code/releases/latest/download/coven-code-linux-x86_64.tar.gz \
   | tar -xz
 chmod +x coven-code
 sudo mv coven-code /usr/local/bin/
@@ -204,7 +204,7 @@ That directory is added to `PATH` automatically by `rustup`.
 ### Option B: Clone and Build
 
 ```bash
-git clone https://github.com/OpenCoven/coven-codes.git
+git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
 
 # Debug build (fast to compile, larger binary, extra runtime checks)

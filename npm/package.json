@@ -5,11 +5,11 @@
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OpenCoven/coven-codes.git"
+    "url": "git+https://github.com/OpenCoven/coven-code.git"
   },
   "homepage": "https://opencoven.ai",
   "bugs": {
-    "url": "https://github.com/OpenCoven/coven-codes/issues"
+    "url": "https://github.com/OpenCoven/coven-code/issues"
   },
   "keywords": [
     "ai",

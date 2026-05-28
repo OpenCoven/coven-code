@@ -1,7 +1,7 @@
 # @opencoven/coven-code
 
 [![Version](https://img.shields.io/npm/v/@opencoven/coven-code?style=flat-square)](https://www.npmjs.com/package/@opencoven/coven-code)
-[![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/OpenCoven/coven-codes/blob/main/LICENSE.md)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/OpenCoven/coven-code/blob/main/LICENSE.md)
 
 **Coven Code** — open-source, multi-provider agentic coding TUI built in Rust.  
 OpenCoven fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta (GPL-3.0).
@@ -14,7 +14,7 @@ npm install -g @opencoven/coven-code
 bun install -g @opencoven/coven-code
 ```
 
-On install, the correct pre-built native binary for your platform is automatically downloaded from [GitHub Releases](https://github.com/OpenCoven/coven-codes/releases). No compilation required.
+On install, the correct pre-built native binary for your platform is automatically downloaded from [GitHub Releases](https://github.com/OpenCoven/coven-code/releases). No compilation required.
 
 ## Usage
 
@@ -40,6 +40,6 @@ Env prefix: `COVEN_CODE_*`
 ## Links
 
 - [OpenCoven](https://opencoven.ai)
-- [GitHub](https://github.com/OpenCoven/coven-codes)
-- [Issues](https://github.com/OpenCoven/coven-codes/issues)
+- [GitHub](https://github.com/OpenCoven/coven-code)
+- [Issues](https://github.com/OpenCoven/coven-code/issues)
 - [Upstream (Claurst)](https://github.com/Kuberwastaken/claurst)

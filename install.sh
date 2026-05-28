@@ -3,17 +3,17 @@
 # Upstream: Claurst installer by Kuber Mehta (GPL-3.0), rebranded for OpenCoven/coven-codes.
 #
 # Quick install:
-#   curl -fsSL https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
 #
 # Offline / pinned:
-#   curl -fsSL -O https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh
+#   curl -fsSL -O https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh
 #   chmod +x install.sh
 #   ./install.sh --version 0.1.4
 
 set -euo pipefail
 
 APP=coven-code
-REPO=OpenCoven/coven-codes
+REPO=OpenCoven/coven-code
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; MUTED='\033[0;90m'; NC='\033[0m'; BOLD='\033[1m'
@@ -44,7 +44,7 @@ OPTIONS:
     -h, --help          Show this help
 
 EXAMPLES:
-    curl -fsSL https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh | bash
+    curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
     ./install.sh --version 0.1.4
     ./install.sh --binary /path/to/coven-code
 EOF

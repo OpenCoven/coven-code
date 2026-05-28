@@ -11,7 +11,7 @@
 //
 // Used by `cc-commands::ShareCommand`, which uploads the resulting file as a
 // secret GitHub gist via the `gh` CLI and constructs a viewer URL of the form
-// `https://opencoven.github.io/coven-codes/session/#<gist-id>` (overridable via
+// `https://opencoven.github.io/coven-code/session/#<gist-id>` (overridable via
 // `COVEN_CODE_SHARE_VIEWER_URL`).
 
 use std::path::Path;
@@ -27,7 +27,7 @@ const TEMPLATE_CSS: &str = include_str!("template.css");
 const TEMPLATE_JS: &str = include_str!("template.js");
 
 /// Default viewer base URL used when `COVEN_CODE_SHARE_VIEWER_URL` is unset.
-pub const DEFAULT_SHARE_VIEWER_URL: &str = "https://opencoven.github.io/coven-codes/session/";
+pub const DEFAULT_SHARE_VIEWER_URL: &str = "https://opencoven.github.io/coven-code/session/";
 
 /// Environment variable that overrides the share viewer base URL.
 pub const ENV_SHARE_VIEWER_URL: &str = "COVEN_CODE_SHARE_VIEWER_URL";
@@ -161,7 +161,7 @@ mod tests {
         std::env::remove_var(ENV_SHARE_VIEWER_URL);
         assert_eq!(
             share_viewer_url("deadbeef"),
-            "https://opencoven.github.io/coven-codes/session/#deadbeef"
+            "https://opencoven.github.io/coven-code/session/#deadbeef"
         );
 
         std::env::set_var(ENV_SHARE_VIEWER_URL, "https://example.test/v");

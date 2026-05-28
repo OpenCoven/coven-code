@@ -30,13 +30,13 @@ Recent highlights:
 ### Quick install (Linux / macOS)
 
 ```bash
-curl -fsSL https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
 ```
 
 ### Quick install (Windows PowerShell)
 
 ```powershell
-irm https://github.com/OpenCoven/coven-codes/releases/latest/download/install.ps1 | iex
+irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
 ```
 
 This drops `coven-code` into `~/.coven-code/bin` (or `%USERPROFILE%\.coven-code\bin` on Windows) and adds it to your `PATH`. Open a new terminal and run `coven-code`.
@@ -66,7 +66,7 @@ Pin a version: `coven-code upgrade --version 0.1.0`.
 
 ## Manual install
 
-Pre-built archives are on [**GitHub Releases**](https://github.com/OpenCoven/coven-codes/releases):
+Pre-built archives are on [**GitHub Releases**](https://github.com/OpenCoven/coven-code/releases):
 
 | Platform | Archive |
 |---|---|
@@ -83,8 +83,8 @@ Each archive contains a single `coven-code` (or `coven-code.exe`) binary.
 ## Build from source
 
 ```bash
-git clone https://github.com/OpenCoven/coven-codes.git
-cd coven-codes/src-rust
+git clone https://github.com/OpenCoven/coven-code.git
+cd coven-code/src-rust
 cargo build --release --package claurst   # binary outputs as coven-code
 ```
 
@@ -161,6 +161,6 @@ Coven Code is designed to grow into the OpenCoven ecosystem. Key seams for futur
 ## Links
 
 - [OpenCoven](https://opencoven.ai)
-- [GitHub](https://github.com/OpenCoven/coven-codes)
-- [Issues](https://github.com/OpenCoven/coven-codes/issues)
+- [GitHub](https://github.com/OpenCoven/coven-code)
+- [Issues](https://github.com/OpenCoven/coven-code/issues)
 - [Upstream (Claurst)](https://github.com/Kuberwastaken/claurst) — original project by Kuber Mehta

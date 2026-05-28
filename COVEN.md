@@ -1,6 +1,6 @@
 # OpenCoven Integration Guide
 
-This document describes the extensibility seams in `coven-codes` for OpenCoven-specific work.  
+This document describes the extensibility seams in `coven-code` for OpenCoven-specific work.  
 It is a living document — update it as new integration surfaces are added.
 
 ---
@@ -31,7 +31,7 @@ are rebranded. This boundary is explicit and documented below.
 | User-Agent | `src-rust/crates/tools/src/web_search.rs`, `update_check.rs` | `CovenCode/x.y` |
 | System prompt identity | `src-rust/crates/core/src/system_prompt.rs` | "You are Coven Code…" |
 | ACP registry template | `src-rust/crates/acp/registry-template/agent.json` | `coven-code` |
-| Install scripts | `install.sh`, `install.ps1`, `npm/install.js` | `OpenCoven/coven-codes` |
+| Install scripts | `install.sh`, `install.ps1`, `npm/install.js` | `OpenCoven/coven-code` |
 
 ## Intentionally preserved upstream names (internal crate identifiers)
 
@@ -98,10 +98,10 @@ Add Coven-specific tools (e.g. `coven_session_tool.rs`) and register in `tools/s
 
 ## Release checklist
 
-When cutting a `coven-codes` release:
+When cutting a `coven-code` release:
 1. Update version in `src-rust/Cargo.toml` `[workspace.package]` and run `scripts/bump-version.py <version>`.
 2. Update `src-rust/crates/acp/registry-template/agent.json` archive URLs.
 3. Update `npm/package.json` version.
 4. Build release binaries for all 5 platforms; name them `coven-code-{platform}-{arch}[.exe]`.
-5. Create GitHub release on `OpenCoven/coven-codes` with those archives + `install.sh` + `install.ps1`.
+5. Create GitHub release on `OpenCoven/coven-code` with those archives + `install.sh` + `install.ps1`.
 6. `npm publish --access public` for `@opencoven/coven-code` from `npm/`.

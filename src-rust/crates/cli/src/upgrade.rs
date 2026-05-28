@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const REPO: &str = "OpenCoven/coven-codes";
+const REPO: &str = "OpenCoven/coven-code";
 const APP: &str = "coven-code";
 
 pub async fn run_upgrade(args: &[String]) -> Result<()> {

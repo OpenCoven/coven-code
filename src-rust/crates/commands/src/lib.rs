@@ -4414,7 +4414,7 @@ impl SlashCommand for ShareCommand {
         "Usage: /share\n\n\
          Renders the current session as a single self-contained HTML file,\n\
          uploads it as a secret GitHub gist via the `gh` CLI, and prints a\n\
-         viewer URL of the form https://opencoven.github.io/coven-codes/session/#<gist-id>.\n\n\
+         viewer URL of the form https://opencoven.github.io/coven-code/session/#<gist-id>.\n\n\
          Requirements:\n  \
            - GitHub CLI (gh) installed and logged in (`gh auth login`).\n\n\
          The viewer base URL can be overridden with COVEN_CODE_SHARE_VIEWER_URL.\n\
@@ -6220,13 +6220,13 @@ impl SlashCommand for UpgradeCommand {
                 return CommandResult::Message(format!(
                     "Current version: {current}\n\
                      Could not check for updates (HTTP client error: {e})\n\
-                     Visit https://github.com/OpenCoven/coven-codes/releases for updates."
+                     Visit https://github.com/OpenCoven/coven-code/releases for updates."
                 ))
             }
         };
 
         let resp = client
-            .get("https://api.github.com/repos/OpenCoven/coven-codes/releases/latest")
+            .get("https://api.github.com/repos/OpenCoven/coven-code/releases/latest")
             .send()
             .await;
 
@@ -6244,7 +6244,7 @@ impl SlashCommand for UpgradeCommand {
                 let url = json
                     .get("html_url")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("https://github.com/OpenCoven/coven-codes/releases");
+                    .unwrap_or("https://github.com/OpenCoven/coven-code/releases");
 
                 if tag == current || tag == "unknown" {
                     CommandResult::Message(format!(
@@ -6269,13 +6269,13 @@ impl SlashCommand for UpgradeCommand {
                 CommandResult::Message(format!(
                     "Current version: v{current}\n\
                      Could not check for updates (HTTP {status}).\n\
-                     Visit https://github.com/OpenCoven/coven-codes/releases for updates."
+                     Visit https://github.com/OpenCoven/coven-code/releases for updates."
                 ))
             }
             Err(e) => CommandResult::Message(format!(
                 "Current version: v{current}\n\
                  Could not check for updates: {e}\n\
-                 Visit https://github.com/OpenCoven/coven-codes/releases for updates."
+                 Visit https://github.com/OpenCoven/coven-code/releases for updates."
             )),
         }
     }
@@ -6315,13 +6315,13 @@ impl SlashCommand for ReleaseNotesCommand {
             Err(_) => {
                 return CommandResult::Message(format!(
                     "Coven Code {tag} release notes:\n\
-                     Visit https://github.com/OpenCoven/coven-codes/releases/tag/{tag}"
+                     Visit https://github.com/OpenCoven/coven-code/releases/tag/{tag}"
                 ))
             }
         };
 
         let url = format!(
-            "https://api.github.com/repos/OpenCoven/coven-codes/releases/tags/{}",
+            "https://api.github.com/repos/OpenCoven/coven-code/releases/tags/{}",
             tag
         );
 
@@ -6355,17 +6355,17 @@ impl SlashCommand for ReleaseNotesCommand {
             }
             Ok(r) if r.status().as_u16() == 404 => CommandResult::Message(format!(
                 "No release found for {tag}.\n\
-                 View all releases: https://github.com/OpenCoven/coven-codes/releases"
+                 View all releases: https://github.com/OpenCoven/coven-code/releases"
             )),
             Ok(r) => CommandResult::Message(format!(
                 "Could not fetch release notes (HTTP {}).\n\
-                 View at: https://github.com/OpenCoven/coven-codes/releases/tag/{}",
+                 View at: https://github.com/OpenCoven/coven-code/releases/tag/{}",
                 r.status(),
                 tag
             )),
             Err(e) => CommandResult::Message(format!(
                 "Could not fetch release notes: {e}\n\
-                 View at: https://github.com/OpenCoven/coven-codes/releases/tag/{tag}"
+                 View at: https://github.com/OpenCoven/coven-code/releases/tag/{tag}"
             )),
         }
     }

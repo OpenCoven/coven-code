@@ -17,7 +17,7 @@ The original Claurst license is preserved in full in `LICENSE.md`.
 - Landing page (`index.html`), docs, and installer scripts rebranded
 - Mascot renamed from "Rustle" to "Rune" (doc comments; internal Rust identifiers `RustlePose`/`rustle_lines` intentionally preserved for merge-friendliness)
 - ACP server identity updated to `coven-code`
-- Share viewer URL updated to `opencoven.github.io/coven-codes/session/`
+- Share viewer URL updated to `opencoven.github.io/coven-code/session/`
 - `CNAME` file removed (upstream pointed to `claurst.kuber.studio`)
 - `.gitignore` entry updated from `.claurst/` to `.coven-code/`
 - Devcontainer updated to `coven-code` volume names
@@ -43,6 +43,6 @@ then all `use claurst_*` imports across the codebase.
 
 All original copyright notices, the GPL-3.0 license text, and upstream attribution
 remain intact and unmodified. Source code is available at:
-https://github.com/OpenCoven/coven-codes
+https://github.com/OpenCoven/coven-code
 
 This fork is maintained by OpenCoven / Valentina (Soul Protocol LLC).

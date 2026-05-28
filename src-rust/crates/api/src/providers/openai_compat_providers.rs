@@ -293,7 +293,7 @@ pub fn openrouter() -> OpenAiCompatProvider {
         "https://openrouter.ai/api/v1",
     )
     .with_api_key(key)
-    .with_header("HTTP-Referer", "https://github.com/OpenCoven/coven-codes")
+    .with_header("HTTP-Referer", "https://github.com/OpenCoven/coven-code")
     .with_header("X-Title", "Coven Code")
     .with_quirks(ProviderQuirks {
         include_usage_in_stream: true,

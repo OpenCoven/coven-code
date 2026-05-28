@@ -10,7 +10,7 @@ const { execFileSync } = require('child_process');
 
 const pkg = require('./package.json');
 const VERSION = pkg.version;
-const REPO = 'OpenCoven/coven-codes';
+const REPO = 'OpenCoven/coven-code';
 const BASE_URL = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const NATIVE_DIR = path.join(__dirname, 'native');
 
