@@ -11,7 +11,7 @@
 //! The detection mirrors `messages::markdown::URL_PATTERN`, so what the
 //! markdown renderer underlines in cyan is exactly what gets linked here.
 //!
-//! Disable with `CLAURST_NO_HYPERLINKS=1`.
+//! Disable with `COVEN_CODE_NO_HYPERLINKS=1`.
 
 use std::io::{self, Write};
 
@@ -51,7 +51,7 @@ pub struct UrlHit {
 }
 
 fn enabled() -> bool {
-    match std::env::var("CLAURST_NO_HYPERLINKS").as_deref() {
+    match std::env::var("COVEN_CODE_NO_HYPERLINKS").as_deref() {
         Ok(v) => !matches!(v.trim(), "1" | "true" | "yes" | "on"),
         Err(_) => true,
     }
@@ -308,20 +308,20 @@ mod tests {
     fn enabled_respects_env_var() {
         // Save & restore the env var around the asserts so other tests don't
         // observe stray state. (No #[serial] crate available here.)
-        let prev = std::env::var("CLAURST_NO_HYPERLINKS").ok();
+        let prev = std::env::var("COVEN_CODE_NO_HYPERLINKS").ok();
 
-        std::env::remove_var("CLAURST_NO_HYPERLINKS");
+        std::env::remove_var("COVEN_CODE_NO_HYPERLINKS");
         assert!(enabled());
 
-        std::env::set_var("CLAURST_NO_HYPERLINKS", "1");
+        std::env::set_var("COVEN_CODE_NO_HYPERLINKS", "1");
         assert!(!enabled());
 
-        std::env::set_var("CLAURST_NO_HYPERLINKS", "0");
+        std::env::set_var("COVEN_CODE_NO_HYPERLINKS", "0");
         assert!(enabled());
 
         match prev {
-            Some(v) => std::env::set_var("CLAURST_NO_HYPERLINKS", v),
-            None => std::env::remove_var("CLAURST_NO_HYPERLINKS"),
+            Some(v) => std::env::set_var("COVEN_CODE_NO_HYPERLINKS", v),
+            None => std::env::remove_var("COVEN_CODE_NO_HYPERLINKS"),
         }
     }
 }

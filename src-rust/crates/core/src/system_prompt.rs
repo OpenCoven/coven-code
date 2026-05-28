@@ -155,7 +155,7 @@ impl SystemPromptPrefix {
             return Self::Bedrock;
         }
 
-        if std::env::var("CLAURST_REMOTE").is_ok() {
+        if std::env::var("COVEN_CODE_REMOTE").is_ok() {
             return Self::Remote;
         }
 
@@ -174,11 +174,11 @@ impl SystemPromptPrefix {
     pub fn attribution_text(self) -> &'static str {
         match self {
             Self::Cli | Self::Vertex | Self::Bedrock | Self::Remote => {
-                "You are Claurst, Anthropic's official CLI for Claude."
+                "You are Coven Code, an open-source agentic coding assistant by OpenCoven (based on Claurst/GPL-3.0)."
             }
             Self::SdkPreset => {
-                "You are Claurst, Anthropic's official CLI for Claude, \
-                running within the Claude Agent SDK."
+                "You are Coven Code, an open-source agentic coding assistant by OpenCoven, \
+                running within the agent SDK."
             }
             Self::Sdk => {
                 "You are a Claude agent, built on Anthropic's Claude Agent SDK."
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_attribution() {
         let prompt = build_system_prompt(&default_opts());
-        assert!(prompt.contains("Claurst"), "Default prompt must contain attribution");
+        assert!(prompt.contains("Coven Code"), "Default prompt must contain attribution");
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
     fn test_sdk_preset_prefix_non_interactive_with_append() {
         let prefix = SystemPromptPrefix::detect(true, true);
         assert_eq!(prefix, SystemPromptPrefix::SdkPreset);
-        assert!(prefix.attribution_text().contains("Claude Agent SDK"));
+        assert!(prefix.attribution_text().contains("agent SDK"));
     }
 
     #[test]

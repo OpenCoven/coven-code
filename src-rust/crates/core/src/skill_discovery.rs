@@ -213,7 +213,7 @@ pub fn discover_skills(
 /// On first access the repo is cloned with `--depth=1`.
 /// Subsequent calls use the already-cloned cache directory as-is.
 fn fetch_git_skills(url: &str) -> Option<Vec<DiscoveredSkill>> {
-    let cache_dir = dirs::cache_dir()?.join("claurst").join("skills");
+    let cache_dir = dirs::cache_dir()?.join("coven-code").join("skills");
 
     // Use the last path segment of the URL as the local directory name.
     let repo_name = url

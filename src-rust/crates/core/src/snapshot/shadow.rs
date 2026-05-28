@@ -38,7 +38,7 @@ impl ShadowSnapshot {
             return None;
         }
         let repo_root = find_repo_root(working_dir)?;
-        let data_dir = dirs::data_dir()?.join("claurst").join("snapshot");
+        let data_dir = dirs::data_dir()?.join("coven-code").join("snapshot");
         let project_hash = path_hash(&repo_root);
         let worktree_hash = path_hash(working_dir);
         let gitdir = data_dir.join(project_hash).join(worktree_hash);

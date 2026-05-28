@@ -42,7 +42,7 @@ use crate::messages::{
 use crate::notifications::{render_notification_banner, Notification, NotificationKind};
 use crate::overlays::{
     render_global_search, render_help_overlay, render_history_search_overlay, render_rewind_flow,
-    CLAURST_ACCENT,
+    COVEN_CODE_ACCENT,
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{InputMode, TypeaheadSource, VimMode, input_height, render_prompt_input};
@@ -902,7 +902,7 @@ fn render_context_menu(frame: &mut Frame, app: &App) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .style(Style::default().fg(Color::White).bg(Color::Rgb(24, 24, 30)))
-            .border_style(Style::default().fg(CLAURST_ACCENT));
+            .border_style(Style::default().fg(COVEN_CODE_ACCENT));
         menu_block.render(menu_area, frame.buffer_mut());
 
         // Render menu items
@@ -928,7 +928,7 @@ fn render_context_menu(frame: &mut Frame, app: &App) {
             };
 
             let bg_color = if is_selected {
-                if *enabled { CLAURST_ACCENT } else { Color::Rgb(24, 24, 30) }
+                if *enabled { COVEN_CODE_ACCENT } else { Color::Rgb(24, 24, 30) }
             } else {
                 Color::Rgb(24, 24, 30)
             };
@@ -2290,7 +2290,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
             parts.push(Span::styled(
                 format!("[{}]", badge),
-                Style::default().fg(CLAURST_ACCENT),
+                Style::default().fg(COVEN_CODE_ACCENT),
             ));
         }
 

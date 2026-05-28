@@ -64,7 +64,7 @@ pub async fn check_for_updates() -> Option<UpdateInfo> {
     // --- Network fetch -------------------------------------------------------
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .user_agent(format!("Claurst/{}", current))
+        .user_agent(format!("CovenCode/{}", current))
         .build()
         .ok()?;
 
@@ -108,7 +108,7 @@ pub async fn check_for_updates() -> Option<UpdateInfo> {
 // ---------------------------------------------------------------------------
 
 fn update_cache_path() -> Option<std::path::PathBuf> {
-    dirs::cache_dir().map(|d| d.join("claurst").join("update_check.txt"))
+    dirs::cache_dir().map(|d| d.join("coven-code").join("update_check.txt"))
 }
 
 /// Compare two semver strings.  Returns `true` when `latest` > `current`.

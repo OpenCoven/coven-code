@@ -38,13 +38,13 @@ fn normalize_name(name: &str) -> String {
 
 /// Check whether a named feature gate is enabled.
 ///
-/// Reads `CLAURST_FEATURE_<NORMALIZED_NAME>` and returns `true` when the
+/// Reads `COVEN_CODE_FEATURE_<NORMALIZED_NAME>` and returns `true` when the
 /// value is truthy ("1", "true", "yes", "on" — case-insensitive).
 ///
 /// Mirrors `checkStatsigFeatureGate_CACHED_MAY_BE_STALE` from the TypeScript
 /// GrowthBook integration.
 pub fn is_feature_enabled(gate_name: &str) -> bool {
-    let key = format!("CLAURST_FEATURE_{}", normalize_name(gate_name));
+    let key = format!("COVEN_CODE_FEATURE_{}", normalize_name(gate_name));
     is_env_truthy(std::env::var(&key).ok().as_deref())
 }
 
@@ -54,12 +54,12 @@ pub fn is_feature_enabled(gate_name: &str) -> bool {
 
 /// Read a JSON-encoded dynamic config from an environment variable.
 ///
-/// Reads `CLAURST_DYNAMIC_CONFIG_<NORMALIZED_NAME>`.  If the variable is
+/// Reads `COVEN_CODE_DYNAMIC_CONFIG_<NORMALIZED_NAME>`.  If the variable is
 /// not set, or parsing fails, `default` is returned unchanged.
 ///
 /// Mirrors `getDynamicConfig_CACHED_MAY_BE_STALE` from the TypeScript source.
 pub fn get_dynamic_config<T: DeserializeOwned>(name: &str, default: T) -> T {
-    let key = format!("CLAURST_DYNAMIC_CONFIG_{}", normalize_name(name));
+    let key = format!("COVEN_CODE_DYNAMIC_CONFIG_{}", normalize_name(name));
     match std::env::var(&key) {
         Ok(val) => serde_json::from_str(&val).unwrap_or(default),
         Err(_) => default,
@@ -74,11 +74,11 @@ pub fn get_dynamic_config<T: DeserializeOwned>(name: &str, default: T) -> T {
 ///
 /// Bare mode skips LSP, plugin, and MCP startup for a faster, lighter
 /// experience.  It is enabled by either:
-///   - The `CLAURST_SIMPLE=1` environment variable, OR
+///   - The `COVEN_CODE_SIMPLE=1` environment variable, OR
 ///   - The `--bare` flag in `std::env::args()`.
 pub fn is_bare_mode() -> bool {
     // Check env var
-    if is_env_truthy(std::env::var("CLAURST_SIMPLE").ok().as_deref()) {
+    if is_env_truthy(std::env::var("COVEN_CODE_SIMPLE").ok().as_deref()) {
         return true;
     }
     // Check CLI args without going through clap (avoids a full parse at this stage)

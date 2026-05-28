@@ -174,9 +174,9 @@ fn normalize_url(url: &str) -> Option<String> {
 /// Fire-and-forget fetch of `https://api.anthropic.com/mcp-registry/v0/servers`.
 /// Populates `OFFICIAL_URLS` so that `is_official_mcp_url` works.
 ///
-/// Skipped when `CLAURST_DISABLE_NONESSENTIAL_TRAFFIC` is set.
+/// Skipped when `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set.
 pub async fn prefetch_official_mcp_urls() {
-    if std::env::var("CLAURST_DISABLE_NONESSENTIAL_TRAFFIC").is_ok() {
+    if std::env::var("COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_ok() {
         return;
     }
 

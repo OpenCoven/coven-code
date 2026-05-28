@@ -315,9 +315,9 @@ impl GoalStore {
 // ---------------------------------------------------------------------------
 
 /// Returns true when the /goal feature is enabled.
-/// Disabled only if CLAURST_GOALS=0 is set explicitly.
+/// Disabled only if COVEN_CODE_GOALS=0 is set explicitly.
 pub fn goals_enabled() -> bool {
-    std::env::var("CLAURST_GOALS")
+    std::env::var("COVEN_CODE_GOALS")
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(true)
 }

@@ -476,7 +476,7 @@ pub fn clear_codex_tokens() -> anyhow::Result<()> {
 
 /// Returns true if the user has a valid Codex access token.
 /// Tokens are obtained via `/connect → OpenAI Codex` (browser OAuth flow)
-/// or by setting `CLAURST_USE_OPENAI=1` with a manually stored token.
+/// or by setting `COVEN_CODE_USE_OPENAI=1` with a manually stored token.
 pub fn is_codex_subscriber() -> bool {
     get_codex_tokens()
         .map(|t| !t.access_token.is_empty())

@@ -259,11 +259,11 @@ struct Cli {
     fallback_model: Option<String>,
 
     /// LLM provider to use (default: anthropic). Examples: openai, google, ollama
-    #[arg(long, env = "CLAURST_PROVIDER")]
+    #[arg(long, env = "COVEN_CODE_PROVIDER")]
     provider: Option<String>,
 
     /// Override the API base URL for the selected provider
-    #[arg(long, env = "CLAURST_API_BASE")]
+    #[arg(long, env = "COVEN_CODE_API_BASE")]
     api_base: Option<String>,
 
     /// Named agent to use (e.g., build, plan, explore)
@@ -874,18 +874,18 @@ fn build_tools_with_mcp(
 fn model_cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("claurst")
+        .join("coven-code")
 }
 
 /// Resolve the models.dev source URL, honoring env-var overrides.
 fn models_source_url() -> String {
-    std::env::var("CLAURST_MODELS_URL")
+    std::env::var("COVEN_CODE_MODELS_URL")
         .or_else(|_| std::env::var("MODELS_DEV_URL"))
         .unwrap_or_else(|_| "https://models.dev/api.json".to_string())
 }
 
 /// Default cache filename — derived from the source URL so a custom
-/// `CLAURST_MODELS_URL` doesn't stomp the canonical models.dev cache.
+/// `COVEN_CODE_MODELS_URL` doesn't stomp the canonical models.dev cache.
 fn models_cache_path() -> PathBuf {
     let url = models_source_url();
     let filename = if url == "https://models.dev/api.json" {
@@ -1085,9 +1085,9 @@ async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
 
 fn load_cached_model_registry() -> Arc<claurst_api::ModelRegistry> {
     let mut reg = claurst_api::ModelRegistry::new();
-    // CLAURST_MODELS_PATH wins outright — useful for offline dev where you
+    // COVEN_CODE_MODELS_PATH wins outright — useful for offline dev where you
     // pin a known-good api.json on disk.
-    if let Ok(custom) = std::env::var("CLAURST_MODELS_PATH") {
+    if let Ok(custom) = std::env::var("COVEN_CODE_MODELS_PATH") {
         reg.load_cache(&PathBuf::from(custom));
     } else {
         reg.load_cache(&models_cache_path());
@@ -1119,13 +1119,13 @@ fn cache_is_fresh(path: &std::path::Path, ttl: std::time::Duration) -> bool {
 /// Background-refresh the models cache from the configured source URL.
 ///
 /// Honors:
-/// * `CLAURST_DISABLE_MODELS_FETCH` — skips the network call entirely.
-/// * `CLAURST_MODELS_URL` / `MODELS_DEV_URL` — overrides the source URL.
+/// * `COVEN_CODE_DISABLE_MODELS_FETCH` — skips the network call entirely.
+/// * `COVEN_CODE_MODELS_URL` / `MODELS_DEV_URL` — overrides the source URL.
 /// * 5-minute mtime-based freshness check — avoids hammering models.dev
 ///   on every CLI invocation.
 fn spawn_models_cache_refresh() {
-    if std::env::var("CLAURST_DISABLE_MODELS_FETCH").is_ok() {
-        tracing::debug!("CLAURST_DISABLE_MODELS_FETCH set — skipping models.dev refresh");
+    if std::env::var("COVEN_CODE_DISABLE_MODELS_FETCH").is_ok() {
+        tracing::debug!("COVEN_CODE_DISABLE_MODELS_FETCH set — skipping models.dev refresh");
         return;
     }
 
@@ -1149,7 +1149,7 @@ fn spawn_models_cache_refresh() {
         let url = models_source_url();
         let resp = match client
             .get(&url)
-            .header("User-Agent", concat!("Claurst/", env!("CARGO_PKG_VERSION")))
+            .header("User-Agent", concat!("CovenCode/", env!("CARGO_PKG_VERSION")))
             .send()
             .await
         {

@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 const VOICE_REQUIRED_SCOPES: &[&str] = &["user:inference", "user:profile"];
 
 /// Environment variable that disables voice mode when set (any value)
-const KILL_SWITCH_ENV: &str = "CLAURST_VOICE_DISABLED";
+const KILL_SWITCH_ENV: &str = "COVEN_CODE_VOICE_DISABLED";
 
 /// Whether voice mode is available given the current OAuth tokens.
 #[derive(Debug, Clone, PartialEq)]

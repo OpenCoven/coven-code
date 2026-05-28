@@ -17,7 +17,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget};
 
-use crate::overlays::{CLAURST_ACCENT, CLAURST_MUTED, CLAURST_PANEL_BG, CLAURST_TEXT};
+use crate::overlays::{COVEN_CODE_ACCENT, COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT};
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -149,27 +149,27 @@ pub fn render_memory_update_notification(
 
     let line = Line::from(vec![
         Span::styled(" ", Style::default()),
-        Span::styled("\u{1f9e0} ", Style::default().fg(CLAURST_ACCENT)),
-        Span::styled("Memory updated in ", Style::default().fg(CLAURST_TEXT)),
+        Span::styled("\u{1f9e0} ", Style::default().fg(COVEN_CODE_ACCENT)),
+        Span::styled("Memory updated in ", Style::default().fg(COVEN_CODE_TEXT)),
         Span::styled(
             display_path,
             Style::default()
-                .fg(CLAURST_ACCENT)
+                .fg(COVEN_CODE_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" \u{00b7} ", Style::default().fg(CLAURST_MUTED)),
+        Span::styled(" \u{00b7} ", Style::default().fg(COVEN_CODE_MUTED)),
         Span::styled(
             "/memory",
             Style::default()
-                .fg(CLAURST_ACCENT)
+                .fg(COVEN_CODE_ACCENT)
                 .add_modifier(Modifier::UNDERLINED),
         ),
-        Span::styled(" to edit", Style::default().fg(CLAURST_MUTED)),
-        Span::styled("  Esc dismiss", Style::default().fg(CLAURST_MUTED)),
+        Span::styled(" to edit", Style::default().fg(COVEN_CODE_MUTED)),
+        Span::styled("  Esc dismiss", Style::default().fg(COVEN_CODE_MUTED)),
     ]);
 
     Paragraph::new(line)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
         .render(notif_area, buf);
 }
 

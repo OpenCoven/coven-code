@@ -7,8 +7,8 @@
 use claurst_core::config::{Config, Settings};
 use claurst_core::output_styles::{builtin_styles, find_style};
 use crate::overlays::{
-    centered_rect, modal_search_line, render_dark_overlay, render_dialog_bg, CLAURST_ACCENT,
-    CLAURST_MUTED, CLAURST_PANEL_BG,
+    centered_rect, modal_search_line, render_dark_overlay, render_dialog_bg, COVEN_CODE_ACCENT,
+    COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -460,18 +460,18 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
 
     // Header
     let title = Line::from(vec![
-        Span::styled(" Settings", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
-        Span::styled(" — Claurst", Style::default().fg(CLAURST_MUTED)),
+        Span::styled(" Settings", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" — Claurst", Style::default().fg(COVEN_CODE_MUTED)),
         Span::styled(
             format!("{:>width$}", "Esc close", width = inner.width.saturating_sub(19) as usize),
-            Style::default().fg(CLAURST_MUTED),
+            Style::default().fg(COVEN_CODE_MUTED),
         ),
     ]);
-    frame.render_widget(Paragraph::new(title).style(Style::default().bg(CLAURST_PANEL_BG)), header_area);
+    frame.render_widget(Paragraph::new(title).style(Style::default().bg(COVEN_CODE_PANEL_BG)), header_area);
 
     // Search
-    let search_line = modal_search_line(&screen.search_query, "Type to search settings...", Color::DarkGray, CLAURST_ACCENT);
-    frame.render_widget(Paragraph::new(search_line).style(Style::default().bg(CLAURST_PANEL_BG)), search_area);
+    let search_line = modal_search_line(&screen.search_query, "Type to search settings...", Color::DarkGray, COVEN_CODE_ACCENT);
+    frame.render_widget(Paragraph::new(search_line).style(Style::default().bg(COVEN_CODE_PANEL_BG)), search_area);
 
     // Content
     render_settings_list(frame, screen, content_area);
@@ -514,23 +514,23 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
     // Footer
     let footer = if screen.edit_field.is_some() {
         Line::from(vec![
-            Span::styled(" Enter ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" Enter ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
             Span::raw("save  "),
             Span::styled(" Esc ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw("cancel"),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" ↑↓ ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" ↑↓ ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
             Span::raw("navigate  "),
-            Span::styled(" Enter ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" Enter ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
             Span::raw("toggle/edit  "),
             Span::styled(" Esc ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw("close"),
         ])
     };
     let footer_para = Paragraph::new(vec![footer])
-        .style(Style::default().fg(CLAURST_MUTED).bg(CLAURST_PANEL_BG))
+        .style(Style::default().fg(COVEN_CODE_MUTED).bg(COVEN_CODE_PANEL_BG))
         .alignment(Alignment::Center);
     frame.render_widget(footer_para, footer_area);
 }
@@ -570,7 +570,7 @@ fn render_settings_list(frame: &mut Frame, screen: &SettingsScreen, area: Rect) 
         let row_style = if is_selected {
             Style::default()
                 .fg(Color::Black)
-                .bg(CLAURST_ACCENT)
+                .bg(COVEN_CODE_ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()

@@ -204,10 +204,10 @@ pub fn is_enhanced_telemetry_enabled() -> bool {
 }
 
 /// Returns telemetry status based on environment variable.
-/// Defaults to off; users can opt-in with CLAURST_ENABLE_TELEMETRY=1.
+/// Defaults to off; users can opt-in with COVEN_CODE_ENABLE_TELEMETRY=1.
 /// The free/OSS build respects this preference but does not phone home.
 pub fn is_telemetry_enabled() -> bool {
-    std::env::var("CLAURST_ENABLE_TELEMETRY")
+    std::env::var("COVEN_CODE_ENABLE_TELEMETRY")
         .as_deref()
         .unwrap_or("0")
         == "1"

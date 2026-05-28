@@ -1460,7 +1460,7 @@ impl SlashCommand for GoalCommand {
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         if !claurst_core::goals_enabled() {
             return CommandResult::Message(
-                "Goals are disabled. Unset CLAURST_GOALS=0 (or remove it) to re-enable.".to_string(),
+                "Goals are disabled. Unset COVEN_CODE_GOALS=0 (or remove it) to re-enable.".to_string(),
             );
         }
 
@@ -4417,7 +4417,7 @@ impl SlashCommand for ShareCommand {
          viewer URL of the form https://claurst.kuber.studio/session/#<gist-id>.\n\n\
          Requirements:\n  \
            - GitHub CLI (gh) installed and logged in (`gh auth login`).\n\n\
-         The viewer base URL can be overridden with CLAURST_SHARE_VIEWER_URL.\n\
+         The viewer base URL can be overridden with COVEN_CODE_SHARE_VIEWER_URL.\n\
          Secret gists are unlisted but readable by anyone who has the link."
     }
 
@@ -4505,9 +4505,9 @@ impl SlashCommand for ShareCommand {
         let viewer = share_viewer_url(gist_id);
 
         // Auto-open in the system browser unless the user opted out — saves the
-        // copy/paste dance after a /share. Skipped when `CLAURST_SHARE_NO_OPEN`
+        // copy/paste dance after a /share. Skipped when `COVEN_CODE_SHARE_NO_OPEN`
         // is set (e.g. on a headless box) or when `open` can't find a handler.
-        let opted_out = std::env::var_os("CLAURST_SHARE_NO_OPEN")
+        let opted_out = std::env::var_os("COVEN_CODE_SHARE_NO_OPEN")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
         let opened = if opted_out {
@@ -4598,7 +4598,7 @@ impl SlashCommand for LinksCommand {
          /links <N>        Open the Nth URL from /links list.\n\
          /links last       Same as /links (open most recent).\n\n\
          URLs are detected in user/assistant message text. Set\n\
-         CLAURST_SHARE_NO_OPEN=1 to disable the auto-open behavior in /share."
+         COVEN_CODE_SHARE_NO_OPEN=1 to disable the auto-open behavior in /share."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -5196,10 +5196,10 @@ impl SlashCommand for RemoteControlCommand {
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "(unknown host)".to_string());
 
-                let bridge_url = std::env::var("CLAURST_BRIDGE_URL")
+                let bridge_url = std::env::var("COVEN_CODE_BRIDGE_URL")
                     .unwrap_or_else(|_| "https://claude.ai".to_string());
 
-                let token_status = if std::env::var("CLAURST_BRIDGE_TOKEN").is_ok()
+                let token_status = if std::env::var("COVEN_CODE_BRIDGE_TOKEN").is_ok()
                     || std::env::var("CLAUDE_BRIDGE_OAUTH_TOKEN").is_ok()
                 {
                     "configured via environment variable"
@@ -5249,7 +5249,7 @@ impl SlashCommand for RemoteControlCommand {
                      How to connect\n\
                      ──────────────\n\
                      1. Obtain a session token from claude.ai (Settings → Remote Control)\n\
-                     2. Set it:  export CLAURST_BRIDGE_TOKEN=<your-token>\n\
+                     2. Set it:  export COVEN_CODE_BRIDGE_TOKEN=<your-token>\n\
                      3. Enable:  /remote-control start\n\
                      4. Restart Claurst — the bridge will connect automatically\n\
                      5. Open {bridge_url}/claude-code in your browser\n\
@@ -5272,9 +5272,9 @@ impl SlashCommand for RemoteControlCommand {
                 if let Err(e) = save_settings_mutation(|s| s.remote_control_at_startup = true) {
                     return CommandResult::Error(format!("Failed to save settings: {}", e));
                 }
-                let bridge_url = std::env::var("CLAURST_BRIDGE_URL")
+                let bridge_url = std::env::var("COVEN_CODE_BRIDGE_URL")
                     .unwrap_or_else(|_| "https://claude.ai".to_string());
-                let token_note = if std::env::var("CLAURST_BRIDGE_TOKEN").is_ok()
+                let token_note = if std::env::var("COVEN_CODE_BRIDGE_TOKEN").is_ok()
                     || std::env::var("CLAUDE_BRIDGE_OAUTH_TOKEN").is_ok()
                 {
                     "Session token detected in environment — bridge will connect on next start."
@@ -5283,7 +5283,7 @@ impl SlashCommand for RemoteControlCommand {
                     format!(
                         "No session token found.\n\
                          Get a token from {bridge_url} (Settings → Remote Control)\n\
-                         then run:  export CLAURST_BRIDGE_TOKEN=<token>",
+                         then run:  export COVEN_CODE_BRIDGE_TOKEN=<token>",
                         bridge_url = bridge_url
                     )
                 };

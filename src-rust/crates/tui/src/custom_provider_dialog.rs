@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::overlays::{centered_rect, render_dark_overlay, render_dialog_bg, CLAURST_PANEL_BG};
+use crate::overlays::{centered_rect, render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomProviderField {
@@ -111,7 +111,7 @@ pub fn render_custom_provider_dialog(
     let pink = Color::Rgb(233, 30, 99);
     let dim = Color::Rgb(90, 90, 90);
     let muted = Color::Rgb(180, 180, 180);
-    let dialog_bg = CLAURST_PANEL_BG;
+    let dialog_bg = COVEN_CODE_PANEL_BG;
 
     render_dark_overlay(frame, area);
 

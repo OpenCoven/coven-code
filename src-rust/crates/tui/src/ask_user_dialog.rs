@@ -25,7 +25,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::overlays::{centered_rect, CLAURST_PANEL_BG};
+use crate::overlays::{centered_rect, COVEN_CODE_PANEL_BG};
 
 const BORDER_FG: Color = Color::Rgb(120, 120, 170);
 const TITLE_FG: Color = Color::Rgb(200, 160, 255);
@@ -219,13 +219,13 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
         for x in modal_area.left()..modal_area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(' ');
-                cell.set_bg(CLAURST_PANEL_BG);
+                cell.set_bg(COVEN_CODE_PANEL_BG);
             }
         }
     }
 
     // ---- border ----
-    let border_style = Style::default().fg(BORDER_FG).bg(CLAURST_PANEL_BG);
+    let border_style = Style::default().fg(BORDER_FG).bg(COVEN_CODE_PANEL_BG);
     let inner_w = modal_area.width.saturating_sub(2) as usize;
     for y in modal_area.top()..modal_area.bottom() {
         let is_top = y == modal_area.top();
@@ -252,7 +252,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
     // ---- title ----
     let title = " Question ";
     let title_x = modal_area.left() + 2;
-    let title_style = Style::default().fg(TITLE_FG).bg(CLAURST_PANEL_BG).add_modifier(Modifier::BOLD);
+    let title_style = Style::default().fg(TITLE_FG).bg(COVEN_CODE_PANEL_BG).add_modifier(Modifier::BOLD);
     for (i, ch) in title.chars().enumerate() {
         let x = title_x + i as u16;
         if x < modal_area.right() - 1 {
@@ -287,7 +287,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
     for wrap_line in word_wrap(&state.question, inner_w) {
         write_line!(
             row,
-            Line::from(Span::styled(wrap_line, Style::default().fg(QUESTION_FG).bg(CLAURST_PANEL_BG)))
+            Line::from(Span::styled(wrap_line, Style::default().fg(QUESTION_FG).bg(COVEN_CODE_PANEL_BG)))
         );
         row += 1;
         if row >= inner.y + inner.height {
@@ -308,7 +308,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
             let prefix = if is_sel { "▶ " } else { "  " };
             let num_str = format!("{}", i + 1);
             let label = format!(" {}", opt);
-            let style_bg = if is_sel { SELECTED_BG } else { CLAURST_PANEL_BG };
+            let style_bg = if is_sel { SELECTED_BG } else { COVEN_CODE_PANEL_BG };
             write_line!(row, Line::from(vec![
                 Span::styled(prefix, Style::default().fg(if is_sel { SELECTED_FG } else { HINT_FG }).bg(style_bg)),
                 Span::styled(num_str, Style::default().fg(NUMBER_FG).bg(style_bg)),
@@ -324,7 +324,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
         let is_sel = state.in_custom_input || state.options.is_none();
         let prefix = if is_sel { "❯ " } else { "  " };
         let cursor = if is_sel { "█" } else { "" };
-        let style_bg = if is_sel { SELECTED_BG } else { CLAURST_PANEL_BG };
+        let style_bg = if is_sel { SELECTED_BG } else { COVEN_CODE_PANEL_BG };
         let mut spans = vec![
             Span::styled(prefix, Style::default().fg(if is_sel { SELECTED_FG } else { HINT_FG }).bg(style_bg)),
         ];
@@ -350,7 +350,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
         } else {
             "  Type answer, then Enter to confirm   Esc: skip"
         };
-        write_line!(row, Line::from(Span::styled(hint, Style::default().fg(HINT_FG).bg(CLAURST_PANEL_BG))));
+        write_line!(row, Line::from(Span::styled(hint, Style::default().fg(HINT_FG).bg(COVEN_CODE_PANEL_BG))));
     }
 
     let _ = row;

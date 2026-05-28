@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use crate::overlays::{
-    begin_modal_buf, modal_header_line_area, render_modal_title_buf, CLAURST_ACCENT,
-    CLAURST_MUTED, CLAURST_PANEL_BG, CLAURST_TEXT,
+    begin_modal_buf, modal_header_line_area, render_modal_title_buf, COVEN_CODE_ACCENT,
+    COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT,
 };
 
 // ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ pub fn render_hooks_config_menu(
     if let Some(subtitle_area) = modal_header_line_area(layout.header_area, 1) {
         Paragraph::new(Line::from(vec![Span::styled(
             breadcrumb,
-            Style::default().fg(CLAURST_MUTED),
+            Style::default().fg(COVEN_CODE_MUTED),
         )]))
         .render(subtitle_area, buf);
     }
@@ -385,7 +385,7 @@ pub fn render_hooks_config_menu(
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
-        .style(Style::default().bg(CLAURST_PANEL_BG))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG))
         .render(layout.body_area, buf);
     let footer = match state.mode {
         HooksMenuMode::SelectEvent => " enter drill  ·  esc close",
@@ -395,7 +395,7 @@ pub fn render_hooks_config_menu(
     };
     Paragraph::new(Line::from(vec![Span::styled(
         footer,
-        Style::default().fg(CLAURST_MUTED).add_modifier(Modifier::ITALIC),
+        Style::default().fg(COVEN_CODE_MUTED).add_modifier(Modifier::ITALIC),
     )]))
     .render(layout.footer_area, buf);
 }
@@ -517,16 +517,16 @@ fn render_hook_detail(state: &HooksConfigMenuState) -> (&'static str, Vec<Line<'
 // ---- Line helpers ----------------------------------------------------------
 
 fn push_list_row(lines: &mut Vec<Line<'static>>, label: &str, badge: &str, selected: bool) {
-    let bg = if selected { CLAURST_ACCENT } else { CLAURST_PANEL_BG };
+    let bg = if selected { COVEN_CODE_ACCENT } else { COVEN_CODE_PANEL_BG };
     let row_style = if selected {
         Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(CLAURST_TEXT).bg(bg)
+        Style::default().fg(COVEN_CODE_TEXT).bg(bg)
     };
     let badge_style = if selected {
         Style::default().fg(Color::Rgb(248, 220, 236)).bg(bg)
     } else {
-        Style::default().fg(CLAURST_MUTED).bg(bg)
+        Style::default().fg(COVEN_CODE_MUTED).bg(bg)
     };
     lines.push(Line::from(vec![
         Span::styled(" ", Style::default().bg(bg)),

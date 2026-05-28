@@ -9,8 +9,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::overlays::{
-    begin_modal_frame, modal_header_line_area, render_modal_title_frame, CLAURST_ACCENT, CLAURST_MUTED,
-    CLAURST_PANEL_BG, CLAURST_TEXT,
+    begin_modal_frame, modal_header_line_area, render_modal_title_frame, COVEN_CODE_ACCENT, COVEN_CODE_MUTED,
+    COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT,
 };
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ pub fn render_export_dialog(frame: &mut Frame, state: &ExportDialogState, area: 
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 " Choose a format to export this session.",
-                Style::default().fg(CLAURST_MUTED),
+                Style::default().fg(COVEN_CODE_MUTED),
             )])),
             subtitle_area,
         );
@@ -93,20 +93,20 @@ pub fn render_export_dialog(frame: &mut Frame, state: &ExportDialogState, area: 
         Line::from(""),
         Line::from(vec![Span::styled(
             " Saved to ./claude-export-<timestamp>.<ext>",
-            Style::default().fg(CLAURST_MUTED),
+            Style::default().fg(COVEN_CODE_MUTED),
         )]),
     ];
 
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .style(Style::default().bg(CLAURST_PANEL_BG)),
+            .style(Style::default().bg(COVEN_CODE_PANEL_BG)),
         layout.body_area,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " tab/←/→ switch  ·  enter export  ·  1/2 choose",
-            Style::default().fg(CLAURST_MUTED).add_modifier(Modifier::ITALIC),
+            Style::default().fg(COVEN_CODE_MUTED).add_modifier(Modifier::ITALIC),
         )])),
         layout.footer_area,
     );
@@ -119,9 +119,9 @@ fn export_option_row(
     selected: bool,
     width: u16,
 ) -> Line<'static> {
-    let bg = if selected { CLAURST_ACCENT } else { CLAURST_PANEL_BG };
-    let fg = if selected { Color::White } else { CLAURST_TEXT };
-    let desc_fg = if selected { Color::Rgb(245, 220, 232) } else { CLAURST_MUTED };
+    let bg = if selected { COVEN_CODE_ACCENT } else { COVEN_CODE_PANEL_BG };
+    let fg = if selected { Color::White } else { COVEN_CODE_TEXT };
+    let desc_fg = if selected { Color::Rgb(245, 220, 232) } else { COVEN_CODE_MUTED };
     let mut spans = vec![
         Span::styled(format!(" [{}] ", key), Style::default().fg(desc_fg).bg(bg)),
         Span::styled(label.to_string(), Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)),

@@ -12,7 +12,7 @@
 // Used by `cc-commands::ShareCommand`, which uploads the resulting file as a
 // secret GitHub gist via the `gh` CLI and constructs a viewer URL of the form
 // `https://claurst.kuber.studio/session/#<gist-id>` (overridable via
-// `CLAURST_SHARE_VIEWER_URL`).
+// `COVEN_CODE_SHARE_VIEWER_URL`).
 
 use std::path::Path;
 
@@ -26,11 +26,11 @@ const TEMPLATE_HTML: &str = include_str!("template.html");
 const TEMPLATE_CSS: &str = include_str!("template.css");
 const TEMPLATE_JS: &str = include_str!("template.js");
 
-/// Default viewer base URL used when `CLAURST_SHARE_VIEWER_URL` is unset.
+/// Default viewer base URL used when `COVEN_CODE_SHARE_VIEWER_URL` is unset.
 pub const DEFAULT_SHARE_VIEWER_URL: &str = "https://claurst.kuber.studio/session/";
 
 /// Environment variable that overrides the share viewer base URL.
-pub const ENV_SHARE_VIEWER_URL: &str = "CLAURST_SHARE_VIEWER_URL";
+pub const ENV_SHARE_VIEWER_URL: &str = "COVEN_CODE_SHARE_VIEWER_URL";
 
 /// Metadata recorded alongside the message stream.
 #[derive(Debug, Clone, Serialize)]
@@ -79,7 +79,7 @@ pub fn write_session_html(
     std::fs::write(path, html)
 }
 
-/// Build the viewer URL for a given gist id, honoring `CLAURST_SHARE_VIEWER_URL`.
+/// Build the viewer URL for a given gist id, honoring `COVEN_CODE_SHARE_VIEWER_URL`.
 pub fn share_viewer_url(gist_id: &str) -> String {
     let base = std::env::var(ENV_SHARE_VIEWER_URL)
         .unwrap_or_else(|_| DEFAULT_SHARE_VIEWER_URL.to_string());

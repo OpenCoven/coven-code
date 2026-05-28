@@ -332,10 +332,10 @@ async fn flush_entries(entries: Vec<LogEntry>) {
 /// Append `entry` to `~/.claurst/history.jsonl`.
 ///
 /// The call is fire-and-forget: it spawns a background Tokio task and returns
-/// immediately.  If `CLAURST_SKIP_PROMPT_HISTORY` is truthy the call is
+/// immediately.  If `COVEN_CODE_SKIP_PROMPT_HISTORY` is truthy the call is
 /// a no-op.
 pub fn add_to_history(entry: HistoryEntry) {
-    if std::env::var("CLAURST_SKIP_PROMPT_HISTORY")
+    if std::env::var("COVEN_CODE_SKIP_PROMPT_HISTORY")
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
     {

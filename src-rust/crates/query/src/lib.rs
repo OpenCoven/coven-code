@@ -994,7 +994,7 @@ pub async fn run_query_loop(
                     temp_reg = {
                         let mut r = claurst_api::ModelRegistry::new();
                         if let Some(cache_dir) = dirs::cache_dir() {
-                            let cache_path = cache_dir.join("claurst").join("models_dev.json");
+                            let cache_path = cache_dir.join("coven-code").join("models_dev.json");
                             r.load_cache(&cache_path);
                         }
                         r
@@ -1619,7 +1619,7 @@ pub async fn run_query_loop(
         // compact / context-collapse instead. This fires on every streaming turn
         // so it can act before a prompt-too-long error is returned by the API.
         //
-        // Feature gate check: CLAURST_FEATURE_REACTIVE_COMPACT=1
+        // Feature gate check: COVEN_CODE_FEATURE_REACTIVE_COMPACT=1
         let reactive_compact_enabled =
             claurst_core::feature_gates::is_feature_enabled("reactive_compact");
 

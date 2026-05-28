@@ -93,7 +93,7 @@ pub struct AgentTool;
 fn build_model_registry() -> ModelRegistry {
     let mut registry = ModelRegistry::new();
     if let Some(cache_dir) = dirs::cache_dir() {
-        let cache_path = cache_dir.join("claurst").join("models_dev.json");
+        let cache_path = cache_dir.join("coven-code").join("models_dev.json");
         registry.load_cache(&cache_path);
     }
     registry

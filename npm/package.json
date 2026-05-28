@@ -1,28 +1,29 @@
 {
-  "name": "claurst",
+  "name": "@opencoven/coven-code",
   "version": "0.1.4",
-  "description": "Open-source, multi-provider terminal coding agent built in Rust",
+  "description": "Open-source, multi-provider agentic coding TUI for the terminal — OpenCoven fork of Claurst",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Kuberwastaken/claurst.git"
+    "url": "git+https://github.com/OpenCoven/coven-codes.git"
   },
-  "homepage": "https://claurst.kuber.studio",
+  "homepage": "https://opencoven.ai",
   "bugs": {
-    "url": "https://github.com/kuberwastaken/claurst/issues"
+    "url": "https://github.com/OpenCoven/coven-codes/issues"
   },
   "keywords": [
     "ai",
     "coding-agent",
-    "claude",
-    "anthropic",
-    "terminal",
     "tui",
-    "rust"
+    "rust",
+    "coven",
+    "opencoven",
+    "terminal",
+    "agentic"
   ],
-  "author": "Kuber Mehta",
+  "author": "OpenCoven (based on Claurst by Kuber Mehta)",
   "bin": {
-    "claurst": "bin/claurst"
+    "coven-code": "bin/claurst"
   },
   "scripts": {
     "postinstall": "node install.js"
@@ -30,7 +31,8 @@
   "files": [
     "bin/",
     "install.js",
-    "README.md"
+    "README.md",
+    "ATTRIBUTION.md"
   ],
   "engines": {
     "node": ">=16"

@@ -8,8 +8,8 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
 use crate::overlays::{
-    begin_modal_frame, modal_header_line_area, render_modal_title_frame, CLAURST_ACCENT,
-    CLAURST_MUTED, CLAURST_PANEL_BG,
+    begin_modal_frame, modal_header_line_area, render_modal_title_frame, COVEN_CODE_ACCENT,
+    COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ pub fn render_context_viz(
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 " Token window, rate limits, and session cost.",
-                Style::default().fg(CLAURST_MUTED),
+                Style::default().fg(COVEN_CODE_MUTED),
             )])),
             subtitle_area,
         );
@@ -91,15 +91,15 @@ pub fn render_context_viz(
     // -- Context window ----------------------------------------------------------
     lines.push(Line::from(vec![Span::styled(
         " Context window",
-        Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+        Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD),
     )]));
 
     let filled = ((ctx_pct * bar_width as f32) as usize).min(bar_width);
     let empty = bar_width - filled;
     lines.push(Line::from(vec![
-        Span::styled(" [", Style::default().fg(CLAURST_MUTED)),
+        Span::styled(" [", Style::default().fg(COVEN_CODE_MUTED)),
         Span::styled("\u{2588}".repeat(filled), Style::default().fg(ctx_color)),
-        Span::styled("\u{2591}".repeat(empty), Style::default().fg(CLAURST_MUTED)),
+        Span::styled("\u{2591}".repeat(empty), Style::default().fg(COVEN_CODE_MUTED)),
         Span::styled(
             format!("]  {:.0}%  ({} / {})",
                 ctx_pct * 100.0,
@@ -115,7 +115,7 @@ pub fn render_context_viz(
     // -- Rate limits -------------------------------------------------------------
     lines.push(Line::from(vec![Span::styled(
         " Rate limits",
-        Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+        Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD),
     )]));
 
     for (label, pct_opt) in &[(" 5-hour ", rate_5h), (" 7-day  ", rate_7d)] {
@@ -133,9 +133,9 @@ pub fn render_context_viz(
                 let e = bar_width - f;
                 lines.push(Line::from(vec![
                     Span::styled(label.to_string(), Style::default().fg(Color::White)),
-                    Span::styled("  [", Style::default().fg(CLAURST_MUTED)),
+                    Span::styled("  [", Style::default().fg(COVEN_CODE_MUTED)),
                     Span::styled("\u{2588}".repeat(f), Style::default().fg(color)),
-                    Span::styled("\u{2591}".repeat(e), Style::default().fg(CLAURST_MUTED)),
+                    Span::styled("\u{2591}".repeat(e), Style::default().fg(COVEN_CODE_MUTED)),
                     Span::styled(
                         format!("]  {:.0}%", p * 100.0),
                         Style::default().fg(color),
@@ -145,7 +145,7 @@ pub fn render_context_viz(
             None => {
                 lines.push(Line::from(vec![
                     Span::styled(label.to_string(), Style::default().fg(Color::White)),
-                    Span::styled("  no data", Style::default().fg(CLAURST_MUTED)),
+                    Span::styled("  no data", Style::default().fg(COVEN_CODE_MUTED)),
                 ]));
             }
         }
@@ -158,18 +158,18 @@ pub fn render_context_viz(
         Span::styled(" Session cost:  ", Style::default().fg(Color::White)),
         Span::styled(
             format!("${:.4}", cost_usd),
-            Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD),
         ),
     ]));
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .style(Style::default().bg(CLAURST_PANEL_BG))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG))
         .render(inner, frame.buffer_mut());
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " enter/esc close",
-            Style::default().fg(CLAURST_MUTED).add_modifier(Modifier::ITALIC),
+            Style::default().fg(COVEN_CODE_MUTED).add_modifier(Modifier::ITALIC),
         )])),
         layout.footer_area,
     );

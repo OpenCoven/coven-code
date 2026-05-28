@@ -10,8 +10,8 @@ use ratatui::{
 };
 
 use crate::overlays::{
-    centered_rect, render_dark_overlay_buf, render_dialog_bg_buf, CLAURST_ACCENT, CLAURST_MUTED,
-    CLAURST_PANEL_BG, CLAURST_PANEL_BORDER, CLAURST_TEXT,
+    centered_rect, render_dark_overlay_buf, render_dialog_bg_buf, COVEN_CODE_ACCENT, COVEN_CODE_MUTED,
+    COVEN_CODE_PANEL_BG, COVEN_CODE_PANEL_BORDER, COVEN_CODE_TEXT,
 };
 
 // ---------------------------------------------------------------------------
@@ -245,18 +245,18 @@ pub fn render_mcp_view(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         .split(inner);
 
     let title = Line::from(vec![
-        Span::styled(" MCP", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" MCP", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(" — {} servers · {} tools", state.servers.len(), state.filtered_tools().len()),
-            Style::default().fg(CLAURST_MUTED),
+            Style::default().fg(COVEN_CODE_MUTED),
         ),
         Span::styled(
             format!("{:>width$}", "Esc close", width = inner.width.saturating_sub(26) as usize),
-            Style::default().fg(CLAURST_MUTED),
+            Style::default().fg(COVEN_CODE_MUTED),
         ),
     ]);
     Paragraph::new(title)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
         .render(layout[0], buf);
 
     // Split: servers (left 35%) | tools (right 65%)
@@ -277,39 +277,39 @@ pub fn render_mcp_view(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     render_tool_detail(state, right_panes[1], buf);
 
     let footer = Line::from(vec![
-        Span::styled(" Tab ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" Tab ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw("switch pane  "),
-        Span::styled(" / ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" / ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw("filter tools  "),
-        Span::styled(" e ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" e ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw("error detail  "),
-        Span::styled(" a ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" a ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw("auth  "),
-        Span::styled(" r ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" r ", Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw("reconnect"),
     ]);
     Paragraph::new(footer)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_MUTED))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_MUTED))
         .render(layout[2], buf);
 }
 
 fn render_server_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     let focused = state.active_pane == McpViewPane::ServerList;
     let border_style = if focused {
-        Style::default().fg(CLAURST_ACCENT)
+        Style::default().fg(COVEN_CODE_ACCENT)
     } else {
-        Style::default().fg(CLAURST_PANEL_BORDER)
+        Style::default().fg(COVEN_CODE_PANEL_BORDER)
     };
     Block::default()
         .title(Span::styled(
             " Servers ",
             Style::default()
-                .fg(if focused { CLAURST_ACCENT } else { CLAURST_MUTED })
+                .fg(if focused { COVEN_CODE_ACCENT } else { COVEN_CODE_MUTED })
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(border_style)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
         .render(area, buf);
 
     let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
@@ -346,9 +346,9 @@ fn render_server_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
             let line = Line::from(vec![Span::styled(
                 row_text,
                 if sel {
-                    Style::default().fg(Color::Black).bg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Black).bg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(CLAURST_TEXT)
+                    Style::default().fg(COVEN_CODE_TEXT)
                 },
             )]);
             Paragraph::new(line).render(Rect { x: area.x, y: area.y + *row, width: area.width, height: 1 }, buf);
@@ -372,30 +372,30 @@ fn render_server_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
 fn render_tool_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     let focused = state.active_pane == McpViewPane::ToolList || state.active_pane == McpViewPane::ToolDetail;
     let border_style = if focused {
-        Style::default().fg(CLAURST_ACCENT)
+        Style::default().fg(COVEN_CODE_ACCENT)
     } else {
-        Style::default().fg(CLAURST_PANEL_BORDER)
+        Style::default().fg(COVEN_CODE_PANEL_BORDER)
     };
     Block::default()
         .title(Span::styled(
             " Tools ",
             Style::default()
-                .fg(if focused { CLAURST_ACCENT } else { CLAURST_MUTED })
+                .fg(if focused { COVEN_CODE_ACCENT } else { COVEN_CODE_MUTED })
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(border_style)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
         .render(area, buf);
 
     let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
 
     // Search bar
     let search_line = Line::from(vec![
-        Span::styled("/ ", Style::default().fg(CLAURST_ACCENT)),
+        Span::styled("/ ", Style::default().fg(COVEN_CODE_ACCENT)),
         Span::styled(
             if state.tool_search.is_empty() { "filter tools".to_string() } else { state.tool_search.clone() },
-            Style::default().fg(if state.tool_search.is_empty() { CLAURST_MUTED } else { CLAURST_TEXT }),
+            Style::default().fg(if state.tool_search.is_empty() { COVEN_CODE_MUTED } else { COVEN_CODE_TEXT }),
         ),
     ]);
     Paragraph::new(search_line).render(Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 }, buf);
@@ -416,9 +416,9 @@ fn render_tool_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         let line = Line::from(vec![Span::styled(
             row,
             if sel {
-                Style::default().fg(Color::Black).bg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).bg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(CLAURST_TEXT)
+                Style::default().fg(COVEN_CODE_TEXT)
             },
         )]);
         Paragraph::new(line).render(
@@ -431,9 +431,9 @@ fn render_tool_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
 fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     let focused = state.active_pane == McpViewPane::ToolDetail;
     let border_style = if focused {
-        Style::default().fg(CLAURST_ACCENT)
+        Style::default().fg(COVEN_CODE_ACCENT)
     } else {
-        Style::default().fg(CLAURST_PANEL_BORDER)
+        Style::default().fg(COVEN_CODE_PANEL_BORDER)
     };
 
     // If error is expanded, show full error text in this pane
@@ -444,7 +444,7 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
                     .title(" Error Detail [e: close] ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Red))
-                    .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+                    .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
                     .render(area, buf);
                 let inner = Rect {
                     x: area.x + 1,
@@ -468,12 +468,12 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         .title(Span::styled(
             " Tool Detail ",
             Style::default()
-                .fg(if focused { CLAURST_ACCENT } else { CLAURST_MUTED })
+                .fg(if focused { COVEN_CODE_ACCENT } else { COVEN_CODE_MUTED })
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(border_style)
-        .style(Style::default().bg(CLAURST_PANEL_BG).fg(CLAURST_TEXT))
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
         .render(area, buf);
 
     let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
@@ -490,7 +490,7 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     lines.push(Line::from(vec![
         Span::styled(
             format!("{}:{}", tool.server, tool.name),
-            Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::default());
@@ -521,7 +521,7 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         if !server.resources.is_empty() {
             lines.push(Line::from(vec![Span::styled(
                 "Resources:",
-                Style::default().fg(CLAURST_MUTED),
+                Style::default().fg(COVEN_CODE_MUTED),
             )]));
             for resource in server.resources.iter().take(3) {
                 lines.push(Line::from(vec![Span::styled(
@@ -534,7 +534,7 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         if !server.prompts.is_empty() {
             lines.push(Line::from(vec![Span::styled(
                 "Prompts:",
-                Style::default().fg(CLAURST_MUTED),
+                Style::default().fg(COVEN_CODE_MUTED),
             )]));
             for prompt in server.prompts.iter().take(3) {
                 lines.push(Line::from(vec![Span::styled(

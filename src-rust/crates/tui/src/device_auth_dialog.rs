@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::overlays::{centered_rect, render_dark_overlay, render_dialog_bg, CLAURST_PANEL_BG};
+use crate::overlays::{centered_rect, render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
 // ---------------------------------------------------------------------------
 // Status enum
@@ -168,7 +168,7 @@ pub fn render_device_auth_dialog(
 
     let pink = Color::Rgb(233, 30, 99);
     let dim = Color::Rgb(90, 90, 90);
-    let dialog_bg = CLAURST_PANEL_BG;
+    let dialog_bg = COVEN_CODE_PANEL_BG;
     let green = Color::Rgb(80, 200, 120);
 
     // ── Darken the entire background ──

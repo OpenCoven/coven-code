@@ -84,7 +84,7 @@ fn install_stderr_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let _ = fmt()
         .with_env_filter(
-            EnvFilter::try_from_env("CLAURST_ACP_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
+            EnvFilter::try_from_env("COVEN_CODE_ACP_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .with_writer(std::io::stderr)
         .try_init();

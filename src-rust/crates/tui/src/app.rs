@@ -1315,7 +1315,7 @@ impl App {
                 // Try to load cached models.dev data from disk.
                 let cache_path = dirs::cache_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("claurst")
+                    .join("coven-code")
                     .join("models.json");
                 reg.load_cache(&cache_path);
                 reg
@@ -1363,8 +1363,8 @@ impl App {
             voice_recorder: {
                 // Check whether voice input has been enabled via the /voice command
                 // (stored in ~/.claurst/ui-settings.json).  We also accept
-                // CLAURST_VOICE_ENABLED=1 as an override for easier testing.
-                let voice_on = std::env::var("CLAURST_VOICE_ENABLED")
+                // COVEN_CODE_VOICE_ENABLED=1 as an override for easier testing.
+                let voice_on = std::env::var("COVEN_CODE_VOICE_ENABLED")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                     || {
@@ -1434,8 +1434,8 @@ impl App {
     /// Only enabled when the `token_budget` feature flag is active.
     #[cfg(feature = "token_budget")]
     fn load_token_budget() -> Option<u32> {
-        // First check CLAURST_TOKEN_BUDGET env var
-        if let Ok(budget_str) = std::env::var("CLAURST_TOKEN_BUDGET") {
+        // First check COVEN_CODE_TOKEN_BUDGET env var
+        if let Ok(budget_str) = std::env::var("COVEN_CODE_TOKEN_BUDGET") {
             if let Ok(budget) = budget_str.parse::<u32>() {
                 return Some(budget);
             }
@@ -1627,7 +1627,7 @@ impl App {
 
         let cache_path = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("claurst")
+            .join("coven-code")
             .join("models.json");
         if cache_path.exists() {
             self.model_registry.load_cache(&cache_path);
