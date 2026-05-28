@@ -285,6 +285,7 @@ pub struct SnapshotDiffCommand;
 pub struct ProvidersCommand;
 pub struct ConnectCommand;
 pub struct AgentCommand;
+pub struct FamiliarCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
 pub struct ManagedAgentsCommand;
@@ -8539,6 +8540,124 @@ impl SlashCommand for AgentCommand {
     }
 }
 
+// ---- /familiar -----------------------------------------------------------
+//
+// Sets the active familiar — updates settings.json AND live-swaps app.config
+// so the mascot changes immediately without restart.
+//
+// Usage:
+//   /familiar          — show current familiar + roster
+//   /familiar kitty    — switch to Kitty (persists to settings.json)
+//   /familiar reset    — clear setting (revert to default kitty)
+
+const FAMILIAR_ROSTER: &[(&str, &str)] = &[
+    ("kitty", "🐱 Cat familiar — ears, whiskers, square eyes (default)"),
+    ("nova",  "✦  Starry initiator — 4-point star with orbiting sparks"),
+    ("cody",  "🤖 Code familiar  — robot face, bracket [ ] eyes, antenna"),
+    ("charm", "💜 Social familiar — heart, sparkle dots, speech bubble"),
+    ("sage",  "🧙 Research familiar — wizard hat, star, open spellbook"),
+    ("astra", "🌙 Navigator familiar — crescent moon, compass star, orbit"),
+    ("echo",  "👻 Memory familiar — round ghost, mirror eyes, echo trail"),
+];
+
+/// Infer a familiar from the system username — maps known coven member names
+/// to their canonical familiar. Falls back to None (kitty default).
+fn infer_familiar_from_env() -> Option<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()?;
+    let user_lc = user.to_lowercase();
+    // Coven member → familiar mapping.
+    // Add entries here as the coven grows.
+    let mapping: &[(&str, &str)] = &[
+        ("buns",       "nova"),
+        ("valentina",  "nova"),
+        ("nova",       "nova"),
+        ("kitty",      "kitty"),
+        ("cody",       "cody"),
+        ("charm",      "charm"),
+        ("sage",       "sage"),
+        ("astra",      "astra"),
+        ("echo",       "echo"),
+    ];
+    mapping.iter()
+        .find(|(name, _)| user_lc.contains(name))
+        .map(|(_, fam)| fam.to_string())
+}
+
+#[async_trait]
+impl SlashCommand for FamiliarCommand {
+    fn name(&self) -> &str { "familiar" }
+    fn description(&self) -> &str { "Set your active familiar — changes the TUI mascot live" }
+    fn aliases(&self) -> Vec<&str> { vec!["familiars"] }
+    fn help(&self) -> &str {
+        "Usage: /familiar [name|reset|auto]\n\n\
+         Without arguments, shows the current familiar and roster.\n\
+         With a name (kitty, nova, cody, charm, sage, astra, echo),\n\
+         switches immediately and persists to settings.json.\n\n\
+         /familiar reset  — revert to default (kitty)\n\
+         /familiar auto   — infer from your system username\n\n\
+         Or set \"familiar\": \"nova\" directly in ~/.coven-code/settings.json."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let arg = args.trim().to_lowercase();
+
+        if arg.is_empty() {
+            // Show current + roster.
+            let current = ctx.config.familiar.as_deref().unwrap_or("kitty");
+            let auto_hint = infer_familiar_from_env()
+                .map(|f| format!(" (auto-detect suggests: {})", f))
+                .unwrap_or_default();
+            let mut out = format!("Current familiar: {}{}\n\nRoster:\n", current, auto_hint);
+            for (name, desc) in FAMILIAR_ROSTER {
+                let marker = if *name == current { " ◀" } else { "" };
+                out.push_str(&format!("  {:8} {}{}", name, desc, marker));
+                out.push('\n');
+            }
+            out.push_str("\nUsage: /familiar <name>  to switch");
+            return CommandResult::Message(out);
+        }
+
+        // Resolve name.
+        let target = if arg == "reset" {
+            None
+        } else if arg == "auto" {
+            infer_familiar_from_env()
+        } else if FAMILIAR_ROSTER.iter().any(|(n, _)| *n == arg) {
+            Some(arg.clone())
+        } else {
+            let names: Vec<&str> = FAMILIAR_ROSTER.iter().map(|(n, _)| *n).collect();
+            return CommandResult::Error(format!(
+                "Unknown familiar '{}'. Choose from: {}",
+                arg,
+                names.join(", ")
+            ));
+        };
+
+        // Persist to settings.json.
+        let target_clone = target.clone();
+        if let Err(e) = save_settings_mutation(|s| s.config.familiar = target_clone) {
+            return CommandResult::Error(format!("Failed to save familiar: {}", e));
+        }
+
+        // Live-swap config so render picks it up immediately.
+        let mut new_config = ctx.config.clone();
+        new_config.familiar = target.clone();
+
+        let msg = match &target {
+            Some(name) => format!(
+                "Familiar set to {}. {} ",
+                name,
+                FAMILIAR_ROSTER.iter().find(|(n, _)| n == name).map(|(_, d)| *d).unwrap_or("")
+            ),
+            None => "Familiar reset to default (kitty).".to_string(),
+        };
+
+        CommandResult::ConfigChangeMessage(new_config, msg)
+    }
+}
+
 // ---- /managed-agents -----------------------------------------------------
 
 #[async_trait]
@@ -9015,6 +9134,7 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
         Box::new(ConnectCommand),
         // Named agent system
         Box::new(AgentCommand),
+        Box::new(FamiliarCommand),
         // Session search (SQLite)
         Box::new(SearchCommand),
         // Managed agent (manager-executor) architecture

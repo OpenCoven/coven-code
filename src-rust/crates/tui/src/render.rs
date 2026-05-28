@@ -1522,10 +1522,16 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         "Welcome back!".to_string()
     };
     let rustle = rustle_lines_for(app.config.familiar.as_deref(), &app.rustle_current_pose);
+    let familiar_name = app.config.familiar.as_deref().unwrap_or("kitty");
+    let familiar_label = format!("familiar: {}", familiar_name);
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
         welcome_msg,
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )));
+    left_lines.push(Line::from(Span::styled(
+        familiar_label,
+        Style::default().fg(Color::Rgb(196, 181, 253)), // violet-300, muted
     )));
     left_lines.push(Line::from(""));
     // Center mascot in left column

@@ -44,6 +44,7 @@ use tracing::debug;
 
 const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("advisor", "Set or unset the server-side advisor model"),
+    ("familiar", "Set your active familiar — changes the TUI mascot live"),
     ("agent", "List available familiars or show familiar details"),
     ("agents", "Browse familiar definitions and active familiars"),
     ("changes", "Inspect changes from the current session"),
@@ -1196,7 +1197,13 @@ fn format_turn_time_label() -> String {
 
 impl App {
     pub fn new(config: Config, cost_tracker: Arc<CostTracker>) -> Self {
-        let config = config;
+        // Auto-detect familiar from system username when none is configured.
+        let mut config = config;
+        if config.familiar.is_none() {
+            if let Some(inferred) = Self::infer_familiar_from_env() {
+                config.familiar = Some(inferred);
+            }
+        }
         let model_name = config.effective_model().to_string();
         let user_keybindings = UserKeybindings::load(&Settings::config_dir());
         Self {
@@ -1761,6 +1768,30 @@ impl App {
     }
 
     /// Update the Rune pose for this frame — handles temporary poses, random blinks,
+    /// Infer a familiar from the system username.
+    /// Maps known coven member names to their familiar. Falls back to None.
+    pub fn infer_familiar_from_env() -> Option<String> {
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .ok()?;
+        let user_lc = user.to_lowercase();
+        // Extend this list as the coven grows.
+        const MAPPING: &[(&str, &str)] = &[
+            ("buns",      "nova"),
+            ("valentina", "nova"),
+            ("nova",      "nova"),
+            ("kitty",     "kitty"),
+            ("cody",      "cody"),
+            ("charm",     "charm"),
+            ("sage",      "sage"),
+            ("astra",     "astra"),
+            ("echo",      "echo"),
+        ];
+        MAPPING.iter()
+            .find(|(name, _)| user_lc.contains(name))
+            .map(|(_, fam)| fam.to_string())
+    }
+
     /// and the loading spinner on stalls/errors.
     /// Call once per frame before rendering.
     pub fn tick_rustle_pose(&mut self) {
