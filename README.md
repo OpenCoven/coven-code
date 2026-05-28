@@ -94,11 +94,25 @@ cargo build --release --package claurst   # binary outputs as coven-code
 
 ## Configuration
 
-Settings live in `~/.coven-code/settings.json`. Provider API keys can be set in the environment or via `/config`:
+Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own API key for whichever provider you use. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
+
+Settings live in `~/.coven-code/settings.json`. Set your provider key in the environment or via `/config`:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_API_KEY=<your-key>
 coven-code
+```
+
+Or log in via OAuth (Anthropic accounts):
+
+```bash
+coven-code auth login
+```
+
+Or use a local model with no key at all:
+
+```bash
+coven-code --provider ollama
 ```
 
 Environment variable prefix: `COVEN_CODE_*` (e.g. `COVEN_CODE_SKIP_PROMPT_HISTORY=1`).
