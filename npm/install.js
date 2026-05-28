@@ -10,7 +10,7 @@ const { execFileSync } = require('child_process');
 
 const pkg = require('./package.json');
 const VERSION = pkg.version;
-const REPO = 'kuberwastaken/claurst';
+const REPO = 'OpenCoven/coven-codes';
 const BASE_URL = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const NATIVE_DIR = path.join(__dirname, 'native');
 
@@ -19,19 +19,19 @@ function getPlatform() {
   const arch = process.arch;
 
   if (platform === 'win32' && arch === 'x64') {
-    return { artifact: 'claurst-windows-x86_64', ext: '.exe', archive: '.zip' };
+    return { artifact: 'coven-code-windows-x86_64', ext: '.exe', archive: '.zip' };
   }
   if (platform === 'linux' && arch === 'x64') {
-    return { artifact: 'claurst-linux-x86_64', ext: '', archive: '.tar.gz' };
+    return { artifact: 'coven-code-linux-x86_64', ext: '', archive: '.tar.gz' };
   }
   if (platform === 'linux' && arch === 'arm64') {
-    return { artifact: 'claurst-linux-aarch64', ext: '', archive: '.tar.gz' };
+    return { artifact: 'coven-code-linux-aarch64', ext: '', archive: '.tar.gz' };
   }
   if (platform === 'darwin' && arch === 'x64') {
-    return { artifact: 'claurst-macos-x86_64', ext: '', archive: '.tar.gz' };
+    return { artifact: 'coven-code-macos-x86_64', ext: '', archive: '.tar.gz' };
   }
   if (platform === 'darwin' && arch === 'arm64') {
-    return { artifact: 'claurst-macos-aarch64', ext: '', archive: '.tar.gz' };
+    return { artifact: 'coven-code-macos-aarch64', ext: '', archive: '.tar.gz' };
   }
   throw new Error(
     `Unsupported platform: ${platform}/${arch}.\n` +
@@ -73,21 +73,21 @@ async function main() {
   const { artifact, ext, archive } = getPlatform();
   const archiveName = `${artifact}${archive}`;
   const url = `${BASE_URL}/${archiveName}`;
-  const tmpPath = path.join(os.tmpdir(), `claurst-install-${process.pid}${archive}`);
-  const binaryDest = path.join(NATIVE_DIR, `claurst${ext}`);
+  const tmpPath = path.join(os.tmpdir(), `coven-code-install-${process.pid}${archive}`);
+  const binaryDest = path.join(NATIVE_DIR, `coven-code${ext}`);
 
   if (fs.existsSync(binaryDest)) {
-    console.log('claurst: native binary already present, skipping download.');
+    console.log('coven-code: native binary already present, skipping download.');
     return;
   }
 
   fs.mkdirSync(NATIVE_DIR, { recursive: true });
 
-  console.log(`claurst: downloading v${VERSION} for ${process.platform}/${process.arch}`);
-  console.log(`         ${url}`);
+  console.log(`coven-code: downloading v${VERSION} for ${process.platform}/${process.arch}`);
+  console.log(`            ${url}`);
   await download(url, tmpPath);
 
-  console.log('claurst: extracting...');
+  console.log('coven-code: extracting...');
   if (archive === '.zip') {
     execFileSync('powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
@@ -107,11 +107,11 @@ async function main() {
     fs.chmodSync(binaryDest, 0o755);
   }
 
-  console.log(`claurst: ready — run \`claurst\` to start.`);
+  console.log(`coven-code: ready — run \`coven-code\` to start.`);
 }
 
 main().catch((err) => {
-  console.error(`\nclaurst install failed: ${err.message}`);
+  console.error(`\ncoven-code install failed: ${err.message}`);
   console.error(`Manual install: https://github.com/${REPO}/releases/tag/v${VERSION}\n`);
   process.exit(1);
 });

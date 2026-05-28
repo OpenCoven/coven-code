@@ -171,9 +171,9 @@ $ARGUMENTS
 ## Settings Reference
 
 Settings files are in:
-- User:    ~/.claurst/settings.json
-- Project: .claurst/settings.json
-- Local:   .claurst/settings.local.json
+- User:    ~/.coven-code/settings.json
+- Project: .coven-code/settings.json
+- Local:   .coven-code/settings.local.json
 
 Read the relevant files before making any changes."#,
         allowed_tools: Some(&["Read", "Grep", "Glob"]),
@@ -276,21 +276,21 @@ a status table. When all agents have reported, print a final summary."#,
     // -----------------------------------------------------------------------
     BundledSkill {
         name: "update-config",
-        description: "Configure Claurst settings (hooks, permissions, env vars, behaviours) via settings.json.",
+        description: "Configure Coven Code settings (hooks, permissions, env vars, behaviours) via settings.json.",
         aliases: &["config-update", "settings"],
         when_to_use: Some("When the user wants to configure automated behaviours, permissions, or settings."),
         argument_hint: Some("<what to configure>"),
         prompt_template: r#"# Update Config Skill
 
-Modify Claurst configuration by updating settings.json files.
+Modify Coven Code configuration by updating settings.json files.
 
 ## Settings File Locations
 
 | File | Scope | Use For |
 |------|-------|---------|
-| `~/.claurst/settings.json` | Global | Personal preferences for all projects |
-| `.claurst/settings.json` | Project | Team-wide hooks, permissions, plugins |
-| `.claurst/settings.local.json` | Project (local) | Personal overrides for this project |
+| `~/.coven-code/settings.json` | Global | Personal preferences for all projects |
+| `.coven-code/settings.json` | Project | Team-wide hooks, permissions, plugins |
+| `.coven-code/settings.local.json` | Project (local) | Personal overrides for this project |
 
 Settings load in order: user → project → local (later overrides earlier).
 

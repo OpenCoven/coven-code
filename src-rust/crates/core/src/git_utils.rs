@@ -1,4 +1,4 @@
-//! Git utilities for Claurst.
+//! Git utilities for Coven Code.
 //! Mirrors src/utils/git.ts (926 lines) and src/utils/git/ subdirectory.
 
 use std::path::{Path, PathBuf};

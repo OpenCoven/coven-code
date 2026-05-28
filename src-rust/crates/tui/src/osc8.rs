@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn handles_share_url_with_hash_fragment() {
-        let url = "https://claurst.kuber.studio/session/#c2cc4dd0ae0d3fa6dc7ab21f2a79d7a1";
+        let url = "https://opencoven.github.io/coven-codes/session/#c2cc4dd0ae0d3fa6dc7ab21f2a79d7a1";
         let line = format!("Share URL: {url}");
         let buf = buffer_with(&[&line]);
         let hits = scan_buffer_for_urls(&buf);

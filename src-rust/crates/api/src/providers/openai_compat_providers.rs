@@ -294,7 +294,7 @@ pub fn openrouter() -> OpenAiCompatProvider {
     )
     .with_api_key(key)
     .with_header("HTTP-Referer", "https://claurst.ai/")
-    .with_header("X-Title", "Claurst")
+    .with_header("X-Title", "Coven Code")
     .with_quirks(ProviderQuirks {
         include_usage_in_stream: true,
         ..Default::default()

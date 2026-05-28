@@ -1,4 +1,4 @@
-// claurst-api: Anthropic API client with streaming SSE support for Claurst
+// claurst-api: Anthropic API client with streaming SSE support for Coven Code
 // Rust port.
 //
 // Handles:
@@ -480,7 +480,7 @@ pub mod client {
         ///
         /// 1. Prepend the required `"You are Claude Code, …"` system block.
         ///    Existing system content is preserved as a second block so the
-        ///    rest of Claurst's prompt assembly still reaches the model.
+        ///    rest of Coven Code's prompt assembly still reaches the model.
         ///
         /// No-op when `use_bearer_auth` is false (API-key flow).
         fn apply_oauth_stealth(&self, request: &mut CreateMessageRequest) {
@@ -592,7 +592,7 @@ pub mod client {
                         model
                     )
                 } else {
-                    "Set ANTHROPIC_API_KEY, run `claurst auth login`, \
+                    "Set ANTHROPIC_API_KEY, run `coven-code auth login`, \
                      or use --provider to select a different provider (e.g. --provider openai).".to_string()
                 };
                 return Err(ClaudeError::Auth(
@@ -696,7 +696,7 @@ pub mod client {
                 } else if model.starts_with("llama") {
                     format!("Model '{}' looks like a Llama model. Use `--provider groq` or `--provider ollama` for local.", model)
                 } else {
-                    "Set ANTHROPIC_API_KEY, run `claurst auth login`, \
+                    "Set ANTHROPIC_API_KEY, run `coven-code auth login`, \
                      or use --provider to select a different provider (e.g. --provider openai).".to_string()
                 };
                 return Err(ClaudeError::Auth(

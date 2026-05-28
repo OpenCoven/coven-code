@@ -4,7 +4,7 @@
 //   https://chatgpt.com/backend-api/codex/responses
 //
 // Auth: Bearer token obtained via the Codex OAuth flow stored in
-//   ~/.claurst/codex_tokens.json (`CodexTokens` struct).
+//   ~/.coven-code/codex_tokens.json (`CodexTokens` struct).
 //
 // Token refresh: if `expires_at` is in the past we POST to the OpenAI token
 //   endpoint with `grant_type=refresh_token` before making the request.

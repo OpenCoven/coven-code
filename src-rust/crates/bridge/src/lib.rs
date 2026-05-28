@@ -1,6 +1,6 @@
 // cc-bridge: Remote control bridge implementation.
 //
-// The bridge connects the local Claurst CLI to the claude.ai web UI,
+// The bridge connects the local Coven Code CLI to the claude.ai web UI,
 // enabling mobile/web-initiated sessions. This module implements:
 //
 // - Bridge configuration management (env-var and defaults)

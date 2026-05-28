@@ -46,7 +46,9 @@ impl ColorPalette {
         }
     }
 
-    /// Default Claurst theme
+    /// Default Coven Code theme
+    /// OpenCoven seam: replace palette here with violet/coven brand colors.
+    /// Target: primary=#8B5CF6 (violet-500), accent=#EC4899 (pink-500)
     fn default_theme() -> Self {
         Self {
             error: Color::Rgb(255, 87, 51),        // Bright red-orange

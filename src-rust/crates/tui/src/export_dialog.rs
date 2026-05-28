@@ -151,12 +151,12 @@ pub fn export_as_markdown(
     if let Some(title) = session_title {
         out.push_str(&format!("# {}\n\n", title));
     } else {
-        out.push_str("# Claurst Conversation Export\n\n");
+        out.push_str("# Coven Code Conversation Export\n\n");
     }
     for msg in messages {
         let label = match msg.role {
             Role::User => "**User**",
-            Role::Assistant => "**Claurst**",
+            Role::Assistant => "**Coven Code**",
         };
         let text = msg.get_all_text();
         out.push_str(&format!("{}\n\n{}\n\n---\n\n", label, text));

@@ -11,7 +11,7 @@
 // EffortLevel enum
 // ---------------------------------------------------------------------------
 
-/// The four named effort levels supported by Claurst.
+/// The four named effort levels supported by Coven Code.
 ///
 /// Matches the `EffortLevel` type from `src/entrypoints/sdk/runtimeTypes.ts`
 /// / `src/utils/effort.ts`.

@@ -23,7 +23,7 @@
   ],
   "author": "OpenCoven (based on Claurst by Kuber Mehta)",
   "bin": {
-    "coven-code": "bin/claurst"
+    "coven-code": "bin/coven-code"
   },
   "scripts": {
     "postinstall": "node install.js"

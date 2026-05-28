@@ -2,7 +2,7 @@
 """Prepend a patch bullet to a GitHub release's body, idempotent across runs.
 
 Required env vars:
-  REPO          owner/name (e.g. kuberwastaken/claurst)
+  REPO          owner/name (e.g. OpenCoven/coven-codes)
   TAG           release tag to amend (e.g. v0.1.1)
   PATCH_BULLET  the markdown line to insert, e.g.
                   - fix(tui): scroll regression ([`abc1234`](https://github.com/.../commit/abc1234567))

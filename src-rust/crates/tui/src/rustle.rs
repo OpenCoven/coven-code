@@ -1,6 +1,11 @@
-//! Rustle mascot rendering for ratatui.
+//! Companion mascot rendering for ratatui.
 //!
-//! A 5-row Unicode block-art crab-like creature. Call `rustle_lines()` to get
+//! Originally "Rustle" in upstream Claurst; retained as-is for merge-friendliness.
+//! OpenCoven seam: rename `RustlePose` → `CompanionPose` and update mascot art
+//! to match the Coven Code companion (e.g. a familiar/cat/familiar-unicorn)
+//! when the brand asset is ready. Update call-sites in `render.rs` and `app.rs`.
+//!
+//! A 5-row Unicode block-art creature. Call `rustle_lines()` to get
 //! 5 `Line` values (4 body rows + 1 blank spacing row) ready for embedding in
 //! a Paragraph.
 //!

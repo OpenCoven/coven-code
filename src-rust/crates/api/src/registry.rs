@@ -442,7 +442,7 @@ impl ProviderRegistry {
     }
 
     /// Register [`CodexProvider`] if stored Codex OAuth tokens are available in
-    /// `~/.claurst/codex_tokens.json`.  Returns `&mut self` for builder chaining.
+    /// `~/.coven-code/codex_tokens.json`.  Returns `&mut self` for builder chaining.
     pub fn with_codex_if_configured(&mut self) -> &mut Self {
         if let Some(p) = CodexProvider::from_stored() {
             self.register(Arc::new(p));
@@ -478,9 +478,9 @@ impl ProviderRegistry {
     }
 
     /// Build a registry that checks **both** environment variables and the
-    /// persistent [`AuthStore`] (`~/.claurst/auth.json`) for credentials.
+    /// persistent [`AuthStore`] (`~/.coven-code/auth.json`) for credentials.
     ///
-    /// This ensures that API keys stored via `/connect` or `claurst auth` are
+    /// This ensures that API keys stored via `/connect` or `coven-code auth` are
     /// picked up at startup, not just env vars.  Falls back to
     /// `from_environment` for providers that only support env-var config, and
     /// adds any extra providers that have keys in the auth store.

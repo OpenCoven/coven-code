@@ -15,7 +15,7 @@ use tracing::debug;
 pub fn todos_path(session_id: &str) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".claurst")
+        .join(".coven-code")
         .join("todos")
         .join(format!("{}.json", session_id))
 }
@@ -30,7 +30,7 @@ pub fn load_todos(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// Persist `todos` to `~/.claurst/todos/<session_id>.json`.
+/// Persist `todos` to `~/.coven-code/todos/<session_id>.json`.
 pub fn save_todos(session_id: &str, todos: &[Value]) {
     let path = todos_path(session_id);
     if let Some(parent) = path.parent() {
@@ -350,8 +350,8 @@ mod tests {
             "todos_path should embed the session id"
         );
         assert!(
-            path_str.contains(".claurst"),
-            "todos_path should be under ~/.claurst"
+            path_str.contains(".coven-code"),
+            "todos_path should be under ~/.coven-code"
         );
         assert!(
             path_str.ends_with(".json"),

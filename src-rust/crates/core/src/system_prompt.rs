@@ -122,7 +122,7 @@ impl OutputStyle {
 // System prompt prefix variants
 // ---------------------------------------------------------------------------
 
-/// Which entrypoint context Claurst is running in.
+/// Which entrypoint context Coven Code is running in.
 /// Determines the opening attribution line of the system prompt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SystemPromptPrefix {
@@ -144,7 +144,7 @@ pub enum SystemPromptPrefix {
 impl SystemPromptPrefix {
     /// Detect from environment variables, mirroring `getCLISyspromptPrefix`.
     pub fn detect(is_non_interactive: bool, has_append_system_prompt: bool) -> Self {
-        // Vertex: always uses the default "Claurst" prefix.
+        // Vertex: always uses the default prefix.
         if std::env::var("ANTHROPIC_VERTEX_PROJECT_ID").is_ok()
             || std::env::var("CLOUD_ML_PROJECT_ID").is_ok()
         {

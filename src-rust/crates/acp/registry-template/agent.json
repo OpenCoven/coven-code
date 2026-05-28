@@ -1,40 +1,56 @@
 {
-  "id": "claurst",
-  "name": "Claurst",
+  "id": "coven-code",
+  "name": "Coven Code",
   "version": "0.1.4",
-  "description": "Open-source, multi-provider terminal coding agent built in Rust. Multi-provider routing (Anthropic, OpenAI, Google, Groq, Ollama, OpenAI-compatible, …), full MCP support, plugin system, Rustle companion, chat forking, memory consolidation. No telemetry.",
-  "repository": "https://github.com/kuberwastaken/claurst",
-  "website": "https://claurst.kuber.studio",
+  "description": "Open-source, multi-provider agentic coding TUI built in Rust (OpenCoven fork of Coven Code). Multi-provider routing (Anthropic, OpenAI, Google, Groq, Ollama, OpenAI-compatible, \u2026), full MCP support, plugin system, companion mascot, chat forking, memory consolidation. No telemetry.",
+  "repository": "https://github.com/OpenCoven/coven-codes",
+  "website": "https://opencoven.ai",
   "authors": [
-    "Kuber Mehta"
+    "OpenCoven",
+    "Kuber Mehta (upstream Claurst)"
   ],
   "license": "GPL-3.0",
+  "upstream": {
+    "project": "Claurst",
+    "repository": "https://github.com/Kuberwastaken/claurst",
+    "license": "GPL-3.0"
+  },
   "distribution": {
     "binary": {
       "darwin-aarch64": {
-        "archive": "https://github.com/kuberwastaken/claurst/releases/download/v0.1.4/claurst-macos-aarch64.tar.gz",
-        "cmd": "./claurst",
-        "args": ["acp"]
+        "archive": "https://github.com/OpenCoven/coven-codes/releases/download/v0.1.4/coven-code-macos-aarch64.tar.gz",
+        "cmd": "./coven-code",
+        "args": [
+          "acp"
+        ]
       },
       "darwin-x86_64": {
-        "archive": "https://github.com/kuberwastaken/claurst/releases/download/v0.1.4/claurst-macos-x86_64.tar.gz",
-        "cmd": "./claurst",
-        "args": ["acp"]
+        "archive": "https://github.com/OpenCoven/coven-codes/releases/download/v0.1.4/coven-code-macos-x86_64.tar.gz",
+        "cmd": "./coven-code",
+        "args": [
+          "acp"
+        ]
       },
       "linux-aarch64": {
-        "archive": "https://github.com/kuberwastaken/claurst/releases/download/v0.1.4/claurst-linux-aarch64.tar.gz",
-        "cmd": "./claurst",
-        "args": ["acp"]
+        "archive": "https://github.com/OpenCoven/coven-codes/releases/download/v0.1.4/coven-code-linux-aarch64.tar.gz",
+        "cmd": "./coven-code",
+        "args": [
+          "acp"
+        ]
       },
       "linux-x86_64": {
-        "archive": "https://github.com/kuberwastaken/claurst/releases/download/v0.1.4/claurst-linux-x86_64.tar.gz",
-        "cmd": "./claurst",
-        "args": ["acp"]
+        "archive": "https://github.com/OpenCoven/coven-codes/releases/download/v0.1.4/coven-code-linux-x86_64.tar.gz",
+        "cmd": "./coven-code",
+        "args": [
+          "acp"
+        ]
       },
       "windows-x86_64": {
-        "archive": "https://github.com/kuberwastaken/claurst/releases/download/v0.1.4/claurst-windows-x86_64.zip",
-        "cmd": "./claurst.exe",
-        "args": ["acp"]
+        "archive": "https://github.com/OpenCoven/coven-codes/releases/download/v0.1.4/coven-code-windows-x86_64.zip",
+        "cmd": "./coven-code.exe",
+        "args": [
+          "acp"
+        ]
       }
     }
   }

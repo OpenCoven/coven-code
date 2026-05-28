@@ -1,4 +1,4 @@
-// auth_store.rs — JSON-based credential store at ~/.claurst/auth.json.
+// auth_store.rs — JSON-based credential store at ~/.coven-code/auth.json.
 //
 // Stores API keys and OAuth tokens for providers so users don't have to rely
 // solely on environment variables.
@@ -21,7 +21,7 @@ pub enum StoredCredential {
     },
 }
 
-/// Persistent credential store backed by `~/.claurst/auth.json`.
+/// Persistent credential store backed by `~/.coven-code/auth.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     pub credentials: HashMap<String, StoredCredential>,
@@ -32,7 +32,7 @@ impl AuthStore {
     pub fn path() -> PathBuf {
         let dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claurst");
+            .join(".coven-code");
         dir.join("auth.json")
     }
 

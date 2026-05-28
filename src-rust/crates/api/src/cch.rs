@@ -3,7 +3,7 @@
 //! Computes an xxHash64 fingerprint of the serialised request body and embeds
 //! it in the x-anthropic-billing-header.
 //! The server uses the hash to verify the request originated from a legitimate
-//! Claurst client and to gate features like fast-mode.
+//! Coven Code client and to gate features like fast-mode.
 
 use xxhash_rust::xxh64::xxh64;
 

@@ -1423,9 +1423,9 @@ mod tests {
     #[test]
     fn word_wrap_mixed_short_and_long_tokens() {
         use unicode_width::UnicodeWidthStr;
-        // The realistic shape that broke claurst dialogs: a normal command
+        // The realistic shape that broke coven-code dialogs: a normal command
         // followed by a path longer than the column budget.
-        let cmd = "git diff 'X:\\Bigger-Projects\\Claurst\\very\\deep\\nested\\path.rs'";
+        let cmd = "git diff 'X:\\Bigger-Projects\\Coven Code\\very\\deep\\nested\\path.rs'";
         let wrapped = word_wrap(cmd, 24);
         for line in &wrapped {
             assert!(

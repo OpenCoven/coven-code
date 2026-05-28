@@ -1,5 +1,5 @@
 // cc-core: Core types, error handling, configuration, settings, and constants
-// for Claurst.
+// for Coven Code.
 //
 // All sub-modules are defined inline below.
 
@@ -105,7 +105,7 @@ pub use permissions::{
 pub mod error {
     use thiserror::Error;
 
-    /// The unified error type for Claurst.
+    /// The unified error type for Coven Code.
     #[derive(Error, Debug)]
     pub enum ClaudeError {
         #[error("API error: {0}")]
@@ -1108,7 +1108,7 @@ pub mod config {
         /// When true, releasing a drag selection automatically copies it to
         /// the system clipboard. Defaults to `false` — users opt in by
         /// setting `"autoCopyOnHighlight": true` in
-        /// `~/.claurst/settings.json`.
+        /// `~/.coven-code/settings.json`.
         #[serde(default, rename = "autoCopyOnHighlight")]
         pub auto_copy_on_highlight: bool,
         /// Whether to show current working directory in footer. Defaults to true.
@@ -1303,7 +1303,7 @@ pub mod config {
         }
 
         /// Resolve the prompt text for the selected output style, including
-        /// user-defined styles loaded from `~/.claurst/output-styles/`.
+        /// user-defined styles loaded from `~/.coven-code/output-styles/`.
         pub fn resolve_output_style_prompt(&self) -> Option<String> {
             let style_name = self.output_style.as_deref().unwrap_or("default");
             let styles = crate::output_styles::all_styles(&Settings::config_dir());
@@ -1361,7 +1361,7 @@ pub mod config {
             self.resolve_provider_api_key(self.selected_provider_id())
         }
 
-        /// Async variant: also checks `~/.claurst/oauth_tokens.json`.
+        /// Async variant: also checks `~/.coven-code/oauth_tokens.json`.
         /// Returns `(credential, use_bearer_auth)`.
         /// - For Console OAuth flow: credential is the stored API key, bearer=false.
         /// - For Claude.ai OAuth flow: credential is the access token, bearer=true.
@@ -1465,11 +1465,11 @@ pub mod config {
     }
 
     impl Settings {
-        /// The per-user configuration directory (`~/.claurst`).
+        /// The per-user configuration directory (`~/.coven-code`).
         pub fn config_dir() -> PathBuf {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claurst")
+                .join(".coven-code")
         }
 
         /// Full path to the global settings JSON file.
@@ -1590,15 +1590,15 @@ pub mod config {
             merged
         }
 
-        /// Walk up from `cwd` looking for `.claurst/settings.json` or
-        /// `.claurst/settings.jsonc`.
+        /// Walk up from `cwd` looking for `.coven-code/settings.json` or
+        /// `.coven-code/settings.jsonc`.
         async fn find_project_settings(cwd: &std::path::Path) -> Option<Self> {
             let global_path = Self::global_settings_path();
             let mut dir = cwd;
             loop {
                 // Try .json first, then .jsonc.
                 for name in &["settings.json", "settings.jsonc"] {
-                    let candidate = dir.join(".claurst").join(name);
+                    let candidate = dir.join(".coven-code").join(name);
                     if candidate.exists() && candidate != global_path {
                         if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
                             let stripped = strip_jsonc_comments(&content);
@@ -1820,7 +1820,7 @@ pub mod constants {
     pub const CLAUDE_MD_FILENAME: &str = "AGENTS.md";
     pub const SETTINGS_FILENAME: &str = "settings.json";
     pub const HISTORY_FILENAME: &str = "conversations";
-    pub const CONFIG_DIR_NAME: &str = ".claurst";
+    pub const CONFIG_DIR_NAME: &str = ".coven-code";
 
     // Tool names
     pub const TOOL_NAME_BASH: &str = "Bash";
@@ -1965,10 +1965,10 @@ pub mod context {
         async fn find_and_read_claude_md(&self) -> Option<String> {
             let mut claude_mds = vec![];
 
-            // Global ~/.claurst/AGENTS.md
+            // Global ~/.coven-code/AGENTS.md
             if let Some(home) = dirs::home_dir() {
                 let global_claude_md =
-                    home.join(".claurst").join(crate::constants::CLAUDE_MD_FILENAME);
+                    home.join(".coven-code").join(crate::constants::CLAUDE_MD_FILENAME);
                 if global_claude_md.exists() {
                     if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
                         claude_mds.push(format!(
@@ -3060,7 +3060,7 @@ pub mod history {
         crate::config::Settings::config_dir().join("sessions")
     }
 
-    /// Save a session to `~/.claurst/sessions/<id>.json`.
+    /// Save a session to `~/.coven-code/sessions/<id>.json`.
     pub async fn save_session(session: &ConversationSession) -> anyhow::Result<()> {
         let dir = sessions_dir();
         tokio::fs::create_dir_all(&dir).await?;
@@ -3582,7 +3582,7 @@ pub mod oauth {
 
     // ---- Stored token struct ----
 
-    /// Persisted OAuth tokens (saved to `~/.claurst/oauth_tokens.json`).
+    /// Persisted OAuth tokens (saved to `~/.coven-code/oauth_tokens.json`).
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct OAuthTokens {
         pub access_token: String,
@@ -3639,12 +3639,12 @@ pub mod oauth {
         pub fn token_file_path() -> std::path::PathBuf {
             dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claurst")
+                .join(".coven-code")
                 .join("oauth_tokens.json")
         }
 
         /// Save tokens for a specific account profile under
-        /// `~/.claurst/accounts/anthropic/<profile_id>/oauth_tokens.json`.
+        /// `~/.coven-code/accounts/anthropic/<profile_id>/oauth_tokens.json`.
         pub async fn save_for_profile(&self, profile_id: &str) -> anyhow::Result<()> {
             let path = crate::accounts::anthropic_token_path(profile_id);
             if let Some(parent) = path.parent() {
@@ -3729,7 +3729,7 @@ pub mod oauth {
         }
 
         /// Load tokens for the active anthropic profile. Falls back to the
-        /// legacy `~/.claurst/oauth_tokens.json` (auto-migrating it into a
+        /// legacy `~/.coven-code/oauth_tokens.json` (auto-migrating it into a
         /// "default" profile on first read) if no registry exists.
         pub async fn load() -> Option<Self> {
             let mut registry = crate::accounts::AccountRegistry::load();

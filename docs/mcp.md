@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP)
 
-The Model Context Protocol is a JSON-RPC 2.0 based protocol for connecting Claurst to external tool, resource, and prompt servers. MCP servers extend what the agent can do without modifying Claurst itself — they can expose file systems, databases, APIs, browser automation, and anything else that can be wrapped in a tool.
+The Model Context Protocol is a JSON-RPC 2.0 based protocol for connecting Coven Code to external tool, resource, and prompt servers. MCP servers extend what the agent can do without modifying Coven Code itself — they can expose file systems, databases, APIs, browser automation, and anything else that can be wrapped in a tool.
 
 ---
 
@@ -12,7 +12,7 @@ MCP defines three primitives a server can offer:
 - **Resources** — URI-addressable data sources the model can read
 - **Prompts** — reusable prompt templates the server exposes
 
-Claurst discovers tools, resources, and prompts from connected MCP servers during the handshake phase and wraps them as native `Tool` instances (via `McpToolWrapper`), making them transparent to the query loop.
+Coven Code discovers tools, resources, and prompts from connected MCP servers during the handshake phase and wraps them as native `Tool` instances (via `McpToolWrapper`), making them transparent to the query loop.
 
 ---
 
@@ -22,7 +22,7 @@ MCP servers communicate over one of two transports:
 
 ### stdio (subprocess)
 
-The default transport. Claurst spawns the server as a child process and communicates over its stdin/stdout using newline-delimited JSON-RPC 2.0.
+The default transport. Coven Code spawns the server as a child process and communicates over its stdin/stdout using newline-delimited JSON-RPC 2.0.
 
 ```json
 {
@@ -94,7 +94,7 @@ If `MY_API_TOKEN` is not set, `"demo"` is passed as the token. If `HOME` is set,
 
 ## Configuring MCP Servers in settings.json
 
-Add servers to the `config.mcp_servers` array in `~/.claurst/settings.json`:
+Add servers to the `config.mcp_servers` array in `~/.coven-code/settings.json`:
 
 ```json
 {
@@ -125,7 +125,7 @@ Add servers to the `config.mcp_servers` array in `~/.claurst/settings.json`:
 }
 ```
 
-Project-level MCP servers can be added to a `.claurst/settings.json` in your project root. Project settings take precedence over global settings.
+Project-level MCP servers can be added to a `.coven-code/settings.json` in your project root. Project settings take precedence over global settings.
 
 ---
 
@@ -188,7 +188,7 @@ In addition to these, every tool that an MCP server exposes is automatically ava
 
 ## Reconnection with Exponential Backoff
 
-When an MCP server disconnects or fails to connect, Claurst starts a background reconnection loop automatically:
+When an MCP server disconnects or fails to connect, Coven Code starts a background reconnection loop automatically:
 
 - Initial retry delay: **1 second**
 - Backoff factor: **2x** after each failed attempt

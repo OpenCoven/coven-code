@@ -1,6 +1,6 @@
-# Claurst Tools Reference
+# Coven Code Tools Reference
 
-This document is the complete reference for every tool available to the Claurst agent. Tools are the mechanism by which the model interacts with the outside world — reading files, running commands, searching the web, and coordinating sub-agents.
+This document is the complete reference for every tool available to the Coven Code agent. Tools are the mechanism by which the model interacts with the outside world — reading files, running commands, searching the web, and coordinating sub-agents.
 
 ---
 
@@ -28,7 +28,7 @@ This document is the complete reference for every tool available to the Claurst 
 
 ## Tool System Overview
 
-Every tool in Claurst implements a common `Tool` interface. This interface defines:
+Every tool in Coven Code implements a common `Tool` interface. This interface defines:
 
 - **Identity** — name, aliases, MCP info
 - **Input schema** — a Zod schema validating the input the model must provide
@@ -73,7 +73,7 @@ The active permission mode controls how `checkPermissions()` behaves:
 
 ### Interactive vs. Auto Mode
 
-**Interactive mode** (default REPL): Claurst presents a confirmation prompt for any tool that lacks a pre-existing approval rule. The user can approve once, approve always (adding a permanent rule), or deny.
+**Interactive mode** (default REPL): Coven Code presents a confirmation prompt for any tool that lacks a pre-existing approval rule. The user can approve once, approve always (adding a permanent rule), or deny.
 
 **Auto mode** (`--dangerously-skip-permissions` or `bypassPermissions`): No prompts are shown. All tool calls execute immediately. Use only in trusted, sandboxed environments.
 
@@ -444,7 +444,7 @@ Status values: `pending`, `in_progress`, `completed`. Priority values: `low`, `m
 
 ## MCP Integration Tools
 
-Model Context Protocol (MCP) tools bridge Claurst to external MCP servers.
+Model Context Protocol (MCP) tools bridge Coven Code to external MCP servers.
 
 ### ListMcpResourcesTool
 
@@ -685,7 +685,7 @@ Maximum sleep duration is 60000 ms (60 seconds) per call.
 
 **Permission level:** Write
 
-Read or write Claurst configuration values programmatically. Used by commands and tools that need to persist settings.
+Read or write Coven Code configuration values programmatically. Used by commands and tools that need to persist settings.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -804,7 +804,7 @@ Control the desktop GUI — move the mouse, click, type, take screenshots, and i
 | `key` | string | no | Key name for key events (e.g., `Return`, `ctrl+c`) |
 | `duration` | integer | no | Hold duration in ms for mouse drags |
 
-This tool has the highest blast radius of any tool in Claurst. It requires explicit permission and should only be enabled in controlled environments. All actions are logged in detail.
+This tool has the highest blast radius of any tool in Coven Code. It requires explicit permission and should only be enabled in controlled environments. All actions are logged in detail.
 
 Requires a display server (X11, Wayland, or Windows Desktop). Not available in headless environments.
 

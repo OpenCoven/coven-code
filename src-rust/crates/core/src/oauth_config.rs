@@ -96,7 +96,7 @@ pub struct OAuthConfig {
 // ---------------------------------------------------------------------------
 
 // Claude Code OAuth client ID, used in stealth-impersonation mode so that
-// Anthropic's auth server accepts Claude Pro/Max tokens through Claurst.
+// Anthropic's auth server accepts Claude Pro/Max tokens through Coven Code.
 // The matching request-time impersonation (user-agent, x-app, anthropic-beta,
 // and the Claude Code system-prompt prefix) is wired up in
 // `claurst_api::client::AnthropicClient` and is required for these tokens to
@@ -320,7 +320,7 @@ pub fn build_auth_url(
 // Codex (OpenAI) OAuth Token Storage
 // ---------------------------------------------------------------------------
 
-/// OpenAI Codex OAuth tokens, persisted to ~/.claurst/codex_tokens.json
+/// OpenAI Codex OAuth tokens, persisted to ~/.coven-code/codex_tokens.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CodexTokens {
     pub access_token: String,
@@ -333,14 +333,14 @@ pub struct CodexTokens {
     pub expires_at: Option<u64>,
 }
 
-/// Legacy single-file path: `~/.claurst/codex_tokens.json`. Kept for
+/// Legacy single-file path: `~/.coven-code/codex_tokens.json`. Kept for
 /// backward-compat reads when no account registry exists.
 fn codex_tokens_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claurst").join("codex_tokens.json"))
+    dirs::home_dir().map(|h| h.join(".coven-code").join("codex_tokens.json"))
 }
 
 /// Save Codex OAuth tokens for a named profile under
-/// `~/.claurst/accounts/codex/<profile_id>/codex_tokens.json`.
+/// `~/.coven-code/accounts/codex/<profile_id>/codex_tokens.json`.
 pub fn save_codex_tokens_for_profile(
     tokens: &CodexTokens,
     profile_id: &str,

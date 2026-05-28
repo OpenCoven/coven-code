@@ -1,6 +1,6 @@
 # Advanced Features
 
-This document covers Claurst's advanced capabilities beyond basic coding assistance.
+This document covers Coven Code's advanced capabilities beyond basic coding assistance.
 
 ---
 
@@ -18,8 +18,8 @@ Extended thinking gives the model additional computation budget to reason throug
 ### CLI flags
 
 ```
-claurst --thinking <tokens>    Set a specific token budget for thinking
-claurst --effort <level>       Set the effort level (low/medium/high/max)
+coven-code --thinking <tokens>    Set a specific token budget for thinking
+coven-code --effort <level>       Set the effort level (low/medium/high/max)
 ```
 
 ### Effort levels
@@ -35,7 +35,7 @@ The `max` level is only supported by models that expose it in the API (currently
 
 Effort levels `low`, `medium`, and `high` persist to `~/.claude.json` across sessions. The `max` level is session-scoped for regular users. Numeric budget values (raw token counts) are always session-scoped.
 
-**Environment variable override:** `CLAUDE_CODE_EFFORT_LEVEL` overrides the persisted setting for the current process. If this variable is set and conflicts with a `/effort` command, Claurst displays a warning.
+**Environment variable override:** `CLAUDE_CODE_EFFORT_LEVEL` overrides the persisted setting for the current process. If this variable is set and conflicts with a `/effort` command, Coven Code displays a warning.
 
 ### How the API maps levels
 
@@ -49,7 +49,7 @@ The context window has a finite size. Auto-compaction automatically summarises t
 
 ### How it works
 
-Claurst tracks token usage after every model turn. When usage crosses the auto-compact threshold — which is the effective context window size minus a 13,000-token buffer — it runs `compactConversation` to summarise the history and replaces the messages with a compact summary plus any trailing context.
+Coven Code tracks token usage after every model turn. When usage crosses the auto-compact threshold — which is the effective context window size minus a 13,000-token buffer — it runs `compactConversation` to summarise the history and replaces the messages with a compact summary plus any trailing context.
 
 The `PreCompact` hook fires before compaction (exit code 2 blocks it). The `PostCompact` hook fires after.
 
@@ -58,7 +58,7 @@ The `PreCompact` hook fires before compaction (exit code 2 blocks it). The `Post
 **Disable for a process:**
 
 ```bash
-DISABLE_AUTO_COMPACT=1 claurst
+DISABLE_AUTO_COMPACT=1 coven-code
 ```
 
 This disables automatic compaction while keeping `/compact` available manually.
@@ -66,13 +66,13 @@ This disables automatic compaction while keeping `/compact` available manually.
 **Disable compaction entirely:**
 
 ```bash
-DISABLE_COMPACT=1 claurst
+DISABLE_COMPACT=1 coven-code
 ```
 
 **Override the threshold window (for testing):**
 
 ```bash
-CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80 claurst
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80 coven-code
 ```
 
 Sets the threshold to 80% of the effective context window instead of the default buffer-based calculation.
@@ -117,7 +117,7 @@ Opens an interactive visualisation of which parts of the context are consuming t
 
 ## Session management
 
-Sessions are stored as JSONL files under `~/.claurst/projects/<base64url(project-root)>/<session-id>.jsonl`. Each line in the file is a JSON object representing a message or event in the conversation. The per-session metadata index lives at `~/.claurst/sessions/<id>.json`.
+Sessions are stored as JSONL files under `~/.coven-code/projects/<base64url(project-root)>/<session-id>.jsonl`. Each line in the file is a JSON object representing a message or event in the conversation. The per-session metadata index lives at `~/.coven-code/sessions/<id>.json`.
 
 The transcript directory is derived from the working directory at session start. Worktrees and path sanitisation mean the per-project folder name is a normalised representation of the absolute path.
 
@@ -141,7 +141,7 @@ Every message in the transcript is a newline-delimited JSON object. The key fiel
 {"uuid":"<uuid>","parentUuid":"<parent-uuid>","type":"assistant","message":{...},"timestamp":1234567891}
 ```
 
-The `parentUuid` field forms a linked chain that allows Claurst to reconstruct the conversation tree. `/fork` rewrites all UUIDs while preserving the chain structure.
+The `parentUuid` field forms a linked chain that allows Coven Code to reconstruct the conversation tree. `/fork` rewrites all UUIDs while preserving the chain structure.
 
 Special entry types include `summary` (compaction summaries), `custom-title` (from `/rename`), and various ephemeral progress indicators that are filtered out when reading the transcript for display.
 
@@ -179,7 +179,7 @@ Plan mode restricts the model to read-only operations, allowing it to research a
 
 ```
 /plan [description]
-claurst --permission-mode plan
+coven-code --permission-mode plan
 ```
 
 When in plan mode:
@@ -193,7 +193,7 @@ The `EnterPlanModeTool` and `ExitPlanModeTool` internal tools manage transitions
 
 ## Goal system
 
-The goal system lets Claurst work autonomously across multiple turns toward a single, verifiable objective. Instead of prompting repeatedly, you set the goal once and Claurst iterates until the goal is complete, paused, or the built-in runaway guard fires.
+The goal system lets Coven Code work autonomously across multiple turns toward a single, verifiable objective. Instead of prompting repeatedly, you set the goal once and Coven Code iterates until the goal is complete, paused, or the built-in runaway guard fires.
 
 ### Setting a goal
 
@@ -202,7 +202,7 @@ The goal system lets Claurst work autonomously across multiple turns toward a si
 /goal --tokens 250K Refactor the auth module to use JWT tokens
 ```
 
-Once a goal is set, Claurst begins working immediately. It continues across turns without waiting for user input until one of these conditions is met:
+Once a goal is set, Coven Code begins working immediately. It continues across turns without waiting for user input until one of these conditions is met:
 
 - The model calls `GoalCompleteTool` with an audit summary and evidence
 - You run `/goal pause` or `/goal clear`
@@ -227,7 +227,7 @@ When the model believes the objective has been met, it calls `GoalCompleteTool` 
 - `audit_summary` — a concise description of what was accomplished
 - `evidence` — specific, verifiable evidence (files changed, tests passing, output produced)
 
-Claurst displays both to the user before marking the goal complete. The model is expected to genuinely audit the outcome before calling; calling without real evidence is rejected.
+Coven Code displays both to the user before marking the goal complete. The model is expected to genuinely audit the outcome before calling; calling without real evidence is rejected.
 
 ### Goal status lifecycle
 
@@ -241,10 +241,10 @@ Claurst displays both to the user before marking the goal complete. The model is
 ### Disabling the goal system
 
 ```bash
-CLAURST_GOALS=0 claurst
+COVEN_CODE_GOALS=0 coven-code
 ```
 
-Set `CLAURST_GOALS=0` in the environment to completely disable goal-related commands and the `GoalCompleteTool`. Useful in environments where autonomous multi-turn execution is undesirable.
+Set `COVEN_CODE_GOALS=0` in the environment to completely disable goal-related commands and the `GoalCompleteTool`. Useful in environments where autonomous multi-turn execution is undesirable.
 
 ---
 
@@ -308,7 +308,7 @@ Control how the total token/cost budget is divided between the manager and execu
 /managed-agents status
 ```
 
-Configuration persists to `~/.claurst/settings.json` under `managed_agents`.
+Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
 
 > **Preview feature.** The managed-agents API is under active development and may change in future releases.
 
@@ -361,13 +361,13 @@ Resets to the model's standard response style. Any active mode (caveman or rocky
 
 ## Headless mode
 
-Headless mode runs Claurst non-interactively, suitable for scripts, CI pipelines, and programmatic orchestration.
+Headless mode runs Coven Code non-interactively, suitable for scripts, CI pipelines, and programmatic orchestration.
 
 ### --print flag
 
 ```bash
-claurst --print "refactor this function to use async/await"
-claurst -p "summarise the changes in this PR"
+coven-code --print "refactor this function to use async/await"
+coven-code -p "summarise the changes in this PR"
 ```
 
 Processes the prompt and exits after printing the final response to stdout. No interactive UI is shown.
@@ -375,15 +375,15 @@ Processes the prompt and exits after printing the final response to stdout. No i
 Input can also be piped via stdin:
 
 ```bash
-cat my_prompt.txt | claurst --print
-echo "explain this code" | claurst -p
+cat my_prompt.txt | coven-code --print
+echo "explain this code" | coven-code -p
 ```
 
 ### --output-format
 
 ```bash
-claurst --print --output-format json "..."
-claurst --print --output-format stream-json --verbose "..."
+coven-code --print --output-format json "..."
+coven-code --print --output-format stream-json --verbose "..."
 ```
 
 | Format | Description |
@@ -401,12 +401,12 @@ claurst --print --output-format stream-json --verbose "..."
 Limit resource consumption per invocation using CLI flags:
 
 ```bash
-claurst --max-budget-usd 2.00 "..."   # Stop after spending $2.00
-claurst --max-turns 10 "..."          # Stop after 10 model turns
-claurst --max-tokens 50000 "..."      # Stop after 50,000 output tokens
+coven-code --max-budget-usd 2.00 "..."   # Stop after spending $2.00
+coven-code --max-turns 10 "..."          # Stop after 10 model turns
+coven-code --max-tokens 50000 "..."      # Stop after 50,000 output tokens
 ```
 
-When a limit is reached, Claurst exits with a corresponding error message:
+When a limit is reached, Coven Code exits with a corresponding error message:
 - `Error: Reached max turns (<n>)`
 - `Error: Exceeded USD budget (<amount>)`
 
@@ -416,7 +416,7 @@ These flags are intended for automated use where runaway sessions would be costl
 
 ## The Buddy companion system
 
-Every Claurst user gets a persistent companion derived deterministically from their user ID. The companion appears as a small sprite in the terminal UI and occasionally comments on activity.
+Every Coven Code user gets a persistent companion derived deterministically from their user ID. The companion appears as a small sprite in the terminal UI and occasionally comments on activity.
 
 ### How companions are generated
 
@@ -488,7 +488,7 @@ The setting persists to user settings. The `--vim` CLI flag enables vim mode for
 
 ## Bridge and remote sessions
 
-Claurst can be controlled remotely through a web interface at claude.ai. This "bridge" mode keeps a WebSocket connection open that allows a remote UI to send prompts and receive streaming responses.
+Coven Code can be controlled remotely through a web interface at claude.ai. This "bridge" mode keeps a WebSocket connection open that allows a remote UI to send prompts and receive streaming responses.
 
 ```
 /session
@@ -497,20 +497,20 @@ Claurst can be controlled remotely through a web interface at claude.ai. This "b
 Shows the current remote session URL and a QR code for scanning on mobile.
 
 The bridge operates in two topologies:
-- **In-process bridge** — the WebSocket lives inside the Claurst process. If the process dies, the connection is lost.
+- **In-process bridge** — the WebSocket lives inside the Coven Code process. If the process dies, the connection is lost.
 - **Daemon bridge** — the WebSocket lives in a parent daemon process. The agent can be respawned while the claude.ai session stays connected. This is the `connectRemoteControl` SDK primitive.
 
-SSH sessions work similarly: `claurst --ssh` enables a remote-accessible session that can be connected to from another machine.
+SSH sessions work similarly: `coven-code --ssh` enables a remote-accessible session that can be connected to from another machine.
 
 ---
 
 ## AGENTS.md hierarchical memory
 
-Claurst reads instruction files from the filesystem before every session and whenever a relevant file changes. The lookup order is:
+Coven Code reads instruction files from the filesystem before every session and whenever a relevant file changes. The lookup order is:
 
 1. **Managed** — `/etc/claude-code/AGENTS.md` and `/etc/claude-code/CLAUDE.md` (administrator-controlled, always loaded).
-2. **User** — `~/.claurst/AGENTS.md` then `~/.claurst/CLAUDE.md` (personal global instructions).
-3. **Project** — `AGENTS.md`, `CLAUDE.md`, `.claurst/AGENTS.md`, and `.claurst/CLAUDE.md` in each directory from the filesystem root down to the current working directory. Files are loaded from the root toward the CWD so that parent-directory rules are visible when processing child-directory rules.
+2. **User** — `~/.coven-code/AGENTS.md` then `~/.coven-code/CLAUDE.md` (personal global instructions).
+3. **Project** — `AGENTS.md`, `CLAUDE.md`, `.coven-code/AGENTS.md`, and `.coven-code/CLAUDE.md` in each directory from the filesystem root down to the current working directory. Files are loaded from the root toward the CWD so that parent-directory rules are visible when processing child-directory rules.
 
 `AGENTS.md` is preferred (universal cross-tool standard); `CLAUDE.md` is loaded next at every scope for compatibility with other Claude tooling. If both exist at the same scope, both are loaded.
 
@@ -561,7 +561,7 @@ The `PermissionRequest` hook can intercept any tool call before the user prompt 
 /output-style [style]
 ```
 
-Controls how Claurst formats its responses. Available styles vary by configuration; the command opens an interactive picker when called without arguments.
+Controls how Coven Code formats its responses. Available styles vary by configuration; the command opens an interactive picker when called without arguments.
 
 Output styles affect markdown rendering, code block formatting, and verbosity of tool call summaries in the terminal UI.
 
@@ -630,10 +630,10 @@ The hook exit code does not affect the tool call result; formatters should suppr
 ### --add-dir
 
 ```bash
-claurst --add-dir /path/to/additional/project "..."
+coven-code --add-dir /path/to/additional/project "..."
 ```
 
-Grants Claurst read access to an additional directory outside the working directory. Useful when a task spans multiple repositories or when config files live outside the project root.
+Grants Coven Code read access to an additional directory outside the working directory. Useful when a task spans multiple repositories or when config files live outside the project root.
 
 Multiple `--add-dir` flags can be combined.
 

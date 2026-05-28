@@ -35,7 +35,7 @@ jobs:
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    name: Publish claurst to npm
+    name: Publish coven-code to npm
 
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing claurst@$VERSION"
+          echo "Publishing coven-code@$VERSION"
 
       - name: Verify GitHub Release exists
         env:
@@ -121,7 +121,7 @@ jobs:
             pkg.version = '${VERSION}';
             fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          echo "Publishing claurst@${VERSION}"
+          echo "Publishing coven-code@${VERSION}"
 
       - name: Publish to npm
         working-directory: npm

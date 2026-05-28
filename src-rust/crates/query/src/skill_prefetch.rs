@@ -64,20 +64,20 @@ impl SkillIndex {
 /// Shared handle to the skill index (populated in the background).
 pub type SharedSkillIndex = Arc<RwLock<SkillIndex>>;
 
-/// Scan `project_root` for skill definitions in `.claurst/skills/` and the bundled
+/// Scan `project_root` for skill definitions in `.coven-code/skills/` and the bundled
 /// skill list, build the index, and store it in `index`.
 ///
 /// This runs as a `tokio::task::spawn` parallel to model streaming.
 pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
     let mut local = SkillIndex::default();
 
-    // 1. User-defined skills: ~/.claurst/skills/*.md + {project_root}/.claurst/skills/*.md
+    // 1. User-defined skills: ~/.coven-code/skills/*.md + {project_root}/.coven-code/skills/*.md
     let search_dirs: Vec<std::path::PathBuf> = {
         let mut dirs = Vec::new();
         if let Some(home) = dirs::home_dir() {
-            dirs.push(home.join(".claurst").join("skills"));
+            dirs.push(home.join(".coven-code").join("skills"));
         }
-        dirs.push(project_root.join(".claurst").join("skills"));
+        dirs.push(project_root.join(".coven-code").join("skills"));
         dirs
     };
 

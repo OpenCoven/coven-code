@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/kuberwastaken/claurst/releases/latest";
+    "https://api.github.com/repos/OpenCoven/coven-codes/releases/latest";
 const CHECK_INTERVAL_HOURS: u64 = 24;
 
 /// Information about an available update.
@@ -19,7 +19,7 @@ pub struct UpdateInfo {
     pub has_update: bool,
 }
 
-/// Check for a newer version of Claurst in the background.
+/// Check for a newer version of Coven Code in the background.
 ///
 /// Returns `Some(UpdateInfo)` when a newer release exists on GitHub.
 /// The result is cached for `CHECK_INTERVAL_HOURS` hours so repeated
@@ -46,7 +46,7 @@ pub async fn check_for_updates() -> Option<UpdateInfo> {
                                         current_version: current,
                                         latest_version: cached.clone(),
                                         release_url: format!(
-                                            "https://github.com/kuberwastaken/claurst/releases/tag/v{}",
+                                            "https://github.com/OpenCoven/coven-codes/releases/tag/v{}",
                                             cached
                                         ),
                                         has_update: true,
@@ -79,7 +79,7 @@ pub async fn check_for_updates() -> Option<UpdateInfo> {
     let html_url = json
         .get("html_url")
         .and_then(|v| v.as_str())
-        .unwrap_or("https://github.com/kuberwastaken/claurst/releases")
+        .unwrap_or("https://github.com/OpenCoven/coven-codes/releases")
         .to_string();
 
     // Cache the fetched version so we don't hit GitHub again for 24 h.

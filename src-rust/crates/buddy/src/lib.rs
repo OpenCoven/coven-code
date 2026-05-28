@@ -1,4 +1,4 @@
-/// claurst-buddy: Tamagotchi/Buddy companion system for Claurst.
+/// claurst-buddy: Tamagotchi/Buddy companion system for Coven Code.
 ///
 /// Ported from src/buddy/ (TypeScript). All bones (species, rarity, stats,
 /// eye, hat, shiny) are deterministically derived from the user-ID via a

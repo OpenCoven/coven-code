@@ -1,6 +1,6 @@
-// session_storage.rs — JSONL transcript persistence for Claurst.
+// session_storage.rs — JSONL transcript persistence for Coven Code.
 //
-// File layout:  ~/.claurst/projects/{base64url(project_root)}/{session_id}.jsonl
+// File layout:  ~/.coven-code/projects/{base64url(project_root)}/{session_id}.jsonl
 //
 // Each line is a JSON object ("entry") whose `type` field is the discriminant.
 // The schema is kept compatible with the TypeScript `Entry` union in
@@ -128,7 +128,7 @@ pub struct TranscriptMessage {
     #[serde(default = "default_user_type")]
     pub user_type: String,
 
-    /// Version of the Claurst binary, mirrors `MACRO.VERSION`.
+    /// Version of the Coven Code binary, mirrors `MACRO.VERSION`.
     #[serde(default)]
     pub version: String,
 
@@ -219,7 +219,7 @@ pub struct SessionSummary {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Returns the base projects directory: `~/.claurst/projects/`.
+/// Returns the base projects directory: `~/.coven-code/projects/`.
 pub fn projects_dir() -> PathBuf {
     crate::config::Settings::config_dir().join("projects")
 }

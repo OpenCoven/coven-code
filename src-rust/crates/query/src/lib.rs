@@ -1769,7 +1769,7 @@ pub async fn run_query_loop(
                                     {
                                         Ok(memories) if !memories.is_empty() => {
                                             let target = working_dir_clone
-                                                .join(".claurst")
+                                                .join(".coven-code")
                                                 .join("AGENTS.md");
                                             if let Err(e) =
                                                 session_memory::SessionMemoryExtractor::persist(
@@ -1803,9 +1803,9 @@ pub async fn run_query_loop(
                 // the spawn doesn't call run_query_loop recursively from within
                 // its own future (which would make the future !Send).
                 {
-                    let memory_dir = dirs::home_dir().map(|h| h.join(".claurst").join("memory"));
+                    let memory_dir = dirs::home_dir().map(|h| h.join(".coven-code").join("memory"));
                     let conversations_dir =
-                        dirs::home_dir().map(|h| h.join(".claurst").join("conversations"));
+                        dirs::home_dir().map(|h| h.join(".coven-code").join("conversations"));
                     if let (Some(mem), Some(conv)) = (memory_dir, conversations_dir) {
                         let dreamer = crate::auto_dream::AutoDream::new(mem, conv);
                         if let Ok(Some(task)) = dreamer.maybe_trigger().await {
@@ -2294,12 +2294,12 @@ mod tests {
     #[test]
     fn test_system_prompt_default_when_empty() {
         // The default prompt (no custom system prompt set) should include the
-        // Claurst attribution and standard sections.
+        // Coven Code attribution and standard sections.
         let cfg = make_config(None, None);
         let prompt = build_system_prompt(&cfg);
         if let SystemPrompt::Text(text) = prompt {
             assert!(
-                text.contains("Claurst") || text.contains("Claude agent"),
+                text.contains("Coven Code") || text.contains("Claude agent"),
                 "Default prompt should contain attribution: {}",
                 text
             );
@@ -2324,7 +2324,7 @@ mod tests {
                 "Custom prompt text should appear in the output"
             );
             assert!(
-                text.contains("Claurst") || text.contains("Claude agent"),
+                text.contains("Coven Code") || text.contains("Claude agent"),
                 "Default attribution should still be present"
             );
         } else {

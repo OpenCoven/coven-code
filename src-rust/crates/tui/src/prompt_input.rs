@@ -2870,7 +2870,7 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Render the prompt input widget in the same low-chrome style as Claurst:
+/// Render the prompt input widget in the same low-chrome style as Coven Code:
 /// multi-line input rows (one per logical line in the text) plus an accent
 /// underline. Suggestions are rendered by the footer, not as a boxed dropdown
 /// here.

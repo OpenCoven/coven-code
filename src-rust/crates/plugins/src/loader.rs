@@ -1,8 +1,8 @@
 /// Plugin discovery and loading — ported from `pluginLoader.ts` / `pluginDirectories.ts`.
 ///
 /// Scan order (matches TS precedence):
-/// 1. `~/.claurst/plugins/<name>/`  — user-global plugins
-/// 2. `<project>/.claurst/plugins/<name>/`  — project-local plugins
+/// 1. `~/.coven-code/plugins/<name>/`  — user-global plugins
+/// 2. `<project>/.coven-code/plugins/<name>/`  — project-local plugins
 /// 3. Extra paths from `settings.plugin_paths` (if the field exists)
 ///
 /// Each plugin directory must contain a `plugin.json` or `plugin.toml`
@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 // Public helpers
 // ---------------------------------------------------------------------------
 
-/// Return the default user-level plugins directory: `~/.claurst/plugins`.
+/// Return the default user-level plugins directory: `~/.coven-code/plugins`.
 pub fn default_user_plugins_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claurst").join("plugins"))
+    dirs::home_dir().map(|h| h.join(".coven-code").join("plugins"))
 }
 
-/// Return the project-level plugins directory: `<project>/.claurst/plugins`.
+/// Return the project-level plugins directory: `<project>/.coven-code/plugins`.
 pub fn project_plugins_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join(".claurst").join("plugins")
+    project_dir.join(".coven-code").join("plugins")
 }
 
 // ---------------------------------------------------------------------------

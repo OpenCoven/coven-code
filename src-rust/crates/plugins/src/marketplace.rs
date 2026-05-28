@@ -209,7 +209,7 @@ pub async fn marketplace_update(name: &str) -> Result<Option<String>, String> {
 /// List all installed plugins.
 pub fn list_installed() -> Vec<InstalledPlugin> {
     let plugins_dir = dirs::home_dir()
-        .map(|h| h.join(".claurst").join("plugins"))
+        .map(|h| h.join(".coven-code").join("plugins"))
         .unwrap_or_default();
 
     let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
@@ -270,7 +270,7 @@ pub fn marketplace_uninstall(name: &str) -> Result<(), String> {
 fn plugin_install_dir(name: &str) -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".claurst")
+        .join(".coven-code")
         .join("plugins")
         .join(name)
 }

@@ -1,6 +1,6 @@
 // goal.rs — Per-session durable objectives (the /goal feature).
 //
-// State is persisted to ~/.claurst/goals.sqlite so a goal survives
+// State is persisted to ~/.coven-code/goals.sqlite so a goal survives
 // process restarts and is queryable by session_id.
 //
 // Design mirrors Codex thread_goals (codex-rs/state/src/runtime/goals.rs).
@@ -161,9 +161,9 @@ impl GoalStore {
         Ok(Self { conn })
     }
 
-    /// Default path: `~/.claurst/goals.sqlite`.
+    /// Default path: `~/.coven-code/goals.sqlite`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".claurst").join("goals.sqlite"))
+        dirs::home_dir().map(|h| h.join(".coven-code").join("goals.sqlite"))
     }
 
     /// Open using the default path (best-effort; returns None on failure).

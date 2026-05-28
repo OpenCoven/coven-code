@@ -42,7 +42,7 @@ impl McpToken {
 fn token_path(server_name: &str) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".claurst/mcp-tokens")
+        .join(".coven-code/mcp-tokens")
         .join(format!("{}.json", server_name))
 }
 
@@ -130,7 +130,7 @@ fn build_mcp_auth_url(
 ) -> String {
     let challenge = pkce_challenge(verifier);
     format!(
-        "{}?client_id=claurst&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256",
+        "{}?client_id=coven-code&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256",
         authorization_endpoint,
         urlencoding::encode(redirect_uri),
         challenge,
@@ -598,7 +598,7 @@ mod tests {
             redirect_uri,
             verifier,
         );
-        assert!(url.contains("client_id=claurst"));
+        assert!(url.contains("client_id=coven-code"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcallback"));

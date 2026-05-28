@@ -1,5 +1,5 @@
 //! Session analytics: read persisted JSONL transcripts under
-//! `~/.claurst/projects/<base64url(cwd)>/<session>.jsonl` and produce
+//! `~/.coven-code/projects/<base64url(cwd)>/<session>.jsonl` and produce
 //! token / cost / tool-usage summaries.
 //!
 //! This is the persisted complement to the in-memory `/stats` slash command
@@ -137,7 +137,7 @@ fn parse_args(raw: &[&str]) -> Result<Args, String> {
 fn help_text() -> &'static str {
     "Usage: claurst stats [subcommand] [flags]\n\
      \n\
-     Reads persisted JSONL transcripts under ~/.claurst/projects/ and produces\n\
+     Reads persisted JSONL transcripts under ~/.coven-code/projects/ and produces\n\
      token, cost, and tool-usage summaries.\n\
      \n\
      Subcommands:\n  \
@@ -218,7 +218,7 @@ const MAX_PARSE_BYTES: u64 = 50 * 1024 * 1024;
 const TAIL_WINDOW: u64 = 64 * 1024;
 
 fn projects_dir() -> PathBuf {
-    // Same convention as core: ~/.claurst/projects/
+    // Same convention as core: ~/.coven-code/projects/
     claurst_core::config::Settings::config_dir().join("projects")
 }
 
@@ -684,7 +684,7 @@ fn render_summary(agg: &Aggregated, ctx: &CommandContext) -> String {
         return format!(
             "{}\n\n{}\n\nNo sessions found.\n\nLooked under {}.\n\
              Try `claurst stats --all-projects` to widen the scope.",
-            header("Claurst Session Stats"),
+            header("Coven Code Session Stats"),
             render_scope_line(agg, ctx),
             projects_dir().display(),
         );
@@ -692,7 +692,7 @@ fn render_summary(agg: &Aggregated, ctx: &CommandContext) -> String {
 
     let totals = agg.totals();
     let mut out = String::new();
-    out.push_str(&header("Claurst Session Stats"));
+    out.push_str(&header("Coven Code Session Stats"));
     out.push('\n');
     out.push_str(&render_scope_line(agg, ctx));
     out.push_str("\n\n");

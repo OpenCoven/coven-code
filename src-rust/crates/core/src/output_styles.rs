@@ -3,8 +3,8 @@
 //! Styles are applied by injecting `OutputStyleDef::prompt` into the system
 //! prompt.  Built-in styles are defined in code; users can add their own by
 //! placing `.md` or `.json` files in:
-//!   - Global: `~/.claurst/output-styles/`
-//!   - Project: `.claurst/output-styles/`
+//!   - Global: `~/.coven-code/output-styles/`
+//!   - Project: `.coven-code/output-styles/`
 //!
 //! Markdown style files have a simple structure:
 //!   Line 1: `# <Label>` (heading becomes the label)
@@ -41,7 +41,7 @@ impl OutputStyleDef {
         Self {
             name: "default".to_string(),
             label: "Default".to_string(),
-            description: "Standard Claurst responses.".to_string(),
+            description: "Standard Coven Code responses.".to_string(),
             prompt: String::new(),
         }
     }
@@ -180,7 +180,7 @@ fn load_style_file(path: &Path) -> Option<OutputStyleDef> {
 /// Return all styles available for `config_dir`:
 /// built-ins first, then styles from `<config_dir>/output-styles/`.
 ///
-/// `config_dir` is typically `~/.claurst`.
+/// `config_dir` is typically `~/.coven-code`.
 pub fn all_styles(config_dir: &Path) -> Vec<OutputStyleDef> {
     let mut styles = builtin_styles();
     let user_dir = config_dir.join("output-styles");

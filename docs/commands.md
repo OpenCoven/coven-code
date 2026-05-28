@@ -1,6 +1,6 @@
-# Claurst Slash Commands Reference
+# Coven Code Slash Commands Reference
 
-This document is the complete reference for every slash command available in Claurst, the Rust reimplementation of Claude Code CLI. Commands are invoked by typing `/command-name` at the REPL prompt.
+This document is the complete reference for every slash command available in Coven Code, the Rust reimplementation of Claude Code CLI. Commands are invoked by typing `/command-name` at the REPL prompt.
 
 ---
 
@@ -27,7 +27,7 @@ This document is the complete reference for every slash command available in Cla
 
 ## Command System Overview
 
-Commands are registered in a priority-ordered registry. When you type a command name, Claurst resolves it through this chain:
+Commands are registered in a priority-ordered registry. When you type a command name, Coven Code resolves it through this chain:
 
 ```
 bundledSkills -> builtinPluginSkills -> skillDirCommands ->
@@ -83,7 +83,7 @@ Clear the current conversation history and start a fresh session. The session fi
 ### /exit
 **Aliases:** `quit`
 
-Exit the Claurst REPL. Equivalent to pressing `Ctrl+D`. Unsaved session state is flushed before exit.
+Exit the Coven Code REPL. Equivalent to pressing `Ctrl+D`. Unsaved session state is flushed before exit.
 
 ```
 /exit
@@ -243,14 +243,14 @@ Set or unset a secondary advisor model that provides supplementary suggestions a
 /advisor unset                    — disable the advisor
 ```
 
-The advisor model persists to `~/.claurst/settings.json` under `advisorModel`. Model IDs must start with `claude-` or contain a `/` (provider/model format).
+The advisor model persists to `~/.coven-code/settings.json` under `advisorModel`. Model IDs must start with `claude-` or contain a `/` (provider/model format).
 
 ---
 
 ### /fast
 **Aliases:** `speed`
 
-Toggle fast mode. In fast mode, Claurst switches to the active provider's smaller, faster model for quick responses. Useful when you want rapid answers and deep reasoning is not required.
+Toggle fast mode. In fast mode, Coven Code switches to the active provider's smaller, faster model for quick responses. Useful when you want rapid answers and deep reasoning is not required.
 
 ```
 /fast          — toggle fast mode on/off
@@ -258,7 +258,7 @@ Toggle fast mode. In fast mode, Claurst switches to the active provider's smalle
 /fast off      — disable fast mode
 ```
 
-Setting persists to `~/.claurst/ui-settings.json`.
+Setting persists to `~/.coven-code/ui-settings.json`.
 
 ---
 
@@ -267,7 +267,7 @@ Setting persists to `~/.claurst/ui-settings.json`.
 ### /config
 **Aliases:** `settings`
 
-View or modify Claurst configuration values. Without arguments, renders an interactive settings panel. With arguments, acts as a key-value accessor.
+View or modify Coven Code configuration values. Without arguments, renders an interactive settings panel. With arguments, acts as a key-value accessor.
 
 ```
 /config
@@ -290,7 +290,7 @@ Common keys:
 
 ### /keybindings
 
-Open the interactive keybinding configurator. Displays all bound actions with their current shortcuts. Select an action to rebind it. Changes are written to `~/.claurst/keybindings.json`.
+Open the interactive keybinding configurator. Displays all bound actions with their current shortcuts. Select an action to rebind it. Changes are written to `~/.coven-code/keybindings.json`.
 
 ```
 /keybindings
@@ -332,7 +332,7 @@ Available events: `pre-tool`, `post-tool`, `session-start`, `session-end`, `mess
 
 ### /privacy-settings
 
-Open Claurst privacy settings. Launches a browser to the Anthropic privacy portal where you can review data usage preferences, conversation retention, and account privacy options.
+Open Coven Code privacy settings. Launches a browser to the Anthropic privacy portal where you can review data usage preferences, conversation retention, and account privacy options.
 
 ```
 /privacy-settings
@@ -368,7 +368,7 @@ Select how the model's output is rendered in the terminal. Choices include `auto
 
 ### /theme
 
-Open the interactive theme picker. Preview and select a color theme for the Claurst TUI.
+Open the interactive theme picker. Preview and select a color theme for the Coven Code TUI.
 
 ```
 /theme
@@ -419,7 +419,7 @@ Configure voice input/output. Requires a supported audio backend. Subcommands co
 
 ### /terminal-setup
 
-Run the terminal capability detection and setup wizard. Checks for true-color support, font ligatures, Unicode rendering, and configures Claurst accordingly.
+Run the terminal capability detection and setup wizard. Checks for true-color support, font ligatures, Unicode rendering, and configures Coven Code accordingly.
 
 ```
 /terminal-setup
@@ -442,7 +442,7 @@ Stage and commit changes to the current git repository. The model drafts a commi
 
 ### /diff
 
-Show file diffs for changes made during the current session. Displays a unified diff of all files Claurst has written or edited since the session started.
+Show file diffs for changes made during the current session. Displays a unified diff of all files Coven Code has written or edited since the session started.
 
 ```
 /diff
@@ -453,7 +453,7 @@ Show file diffs for changes made during the current session. Displays a unified 
 
 ### /undo
 
-Undo file changes made during the current session. Restores files to their state before Claurst's last write operation. Can be called multiple times to step further back.
+Undo file changes made during the current session. Restores files to their state before Coven Code's last write operation. Can be called multiple times to step further back.
 
 ```
 /undo
@@ -487,7 +487,7 @@ Run a security-focused review pass. The model looks specifically for vulnerabili
 
 ### /init
 
-Initialize Claurst project configuration in the current directory. Creates a `CLAUDE.md` file that acts as persistent project-level context injected at the start of every session.
+Initialize Coven Code project configuration in the current directory. Creates a `CLAUDE.md` file that acts as persistent project-level context injected at the start of every session.
 
 ```
 /init
@@ -651,7 +651,7 @@ Manage tracked background tasks. Tasks are shell commands or model invocations r
 
 ### /goal
 
-Set a durable multi-turn autonomous goal. When a goal is active, Claurst continues working across turns until the goal is marked complete, paused, or a 200-turn runaway guard fires. Designed for complex, sustained tasks that would otherwise require repeated manual re-prompting.
+Set a durable multi-turn autonomous goal. When a goal is active, Coven Code continues working across turns until the goal is marked complete, paused, or a 200-turn runaway guard fires. Designed for complex, sustained tasks that would otherwise require repeated manual re-prompting.
 
 ```
 /goal <objective>                    — set a new goal and begin working autonomously
@@ -664,7 +664,7 @@ Set a durable multi-turn autonomous goal. When a goal is active, Claurst continu
 /goal complete                       — request a completion audit
 ```
 
-When the model believes the goal has been achieved, it calls the `GoalComplete` tool with an audit summary and evidence. Goals can be disabled globally by setting `CLAURST_GOALS=0` in your environment.
+When the model believes the goal has been achieved, it calls the `GoalComplete` tool with an audit summary and evidence. Goals can be disabled globally by setting `COVEN_CODE_GOALS=0` in your environment.
 
 See [Goal System](./advanced.md#goal-system) in the advanced guide.
 
@@ -694,7 +694,7 @@ Configure the manager-executor agent architecture, where a manager model delegat
 /managed-agents budget <amount>                       — set total budget in USD (0 to clear)
 ```
 
-Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`). Configuration persists to `~/.claurst/settings.json` under `managed_agents`.
+Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`). Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
 
 > **Preview feature.** Behaviour may change across releases.
 
@@ -711,7 +711,7 @@ List all available named agents, or show details for a specific agent. Named age
 /agent <name>      — show full details for a specific named agent
 ```
 
-To activate an agent, start Claurst with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents.
+To activate an agent, start Coven Code with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents.
 
 ---
 
@@ -770,7 +770,7 @@ Documented above under [Configuration & Settings](#configuration--settings).
 
 ### /skills
 
-List and manage skills. Skills are bundled prompt-commands that extend Claurst's capabilities without writing code. They appear alongside built-in commands in the registry.
+List and manage skills. Skills are bundled prompt-commands that extend Coven Code's capabilities without writing code. They appear alongside built-in commands in the registry.
 
 ```
 /skills
@@ -800,7 +800,7 @@ Manage plugins. Plugins are loadable modules that can register new commands, too
 
 ### /chrome
 
-Browser automation via Chrome DevTools Protocol (CDP). Connects to a running Chrome or Chromium instance and lets Claurst control it — navigate pages, click elements, fill forms, evaluate JavaScript, and take screenshots.
+Browser automation via Chrome DevTools Protocol (CDP). Connects to a running Chrome or Chromium instance and lets Coven Code control it — navigate pages, click elements, fill forms, evaluate JavaScript, and take screenshots.
 
 First, launch Chrome with remote debugging enabled:
 
@@ -826,7 +826,7 @@ Useful for testing web applications, scraping, or automating browser-based workf
 
 ## Authentication
 
-Claurst supports **multiple named accounts per provider** — Anthropic (Claude.ai or Console) and Codex (OpenAI ChatGPT subscription). Each login creates a profile under `~/.claurst/accounts/<provider>/<id>/` and the registry at `~/.claurst/accounts.json` tracks which one is active.
+Coven Code supports **multiple named accounts per provider** — Anthropic (Claude.ai or Console) and Codex (OpenAI ChatGPT subscription). Each login creates a profile under `~/.coven-code/accounts/<provider>/<id>/` and the registry at `~/.coven-code/accounts.json` tracks which one is active.
 
 See [Authentication Guide](./auth.md#multi-account-profiles) for the full story and on-disk layout.
 
@@ -974,7 +974,7 @@ Deactivate any active speech mode (caveman or rocky) and return the model to its
 
 ### /mobile
 
-Display a QR code and download links for the Claude mobile app. Supports a `session` subcommand that generates a QR code linking directly to an active remote Claurst session.
+Display a QR code and download links for the Claude mobile app. Supports a `session` subcommand that generates a QR code linking directly to an active remote Coven Code session.
 
 ```
 /mobile             — show QR code for claude.ai/mobile (works for both platforms)
@@ -1000,7 +1000,7 @@ Set the prompt bar color for the current session. Accepts standard color names o
 
 ### /stickers
 
-Opens the Claurst sticker page (`stickermule.com/claudecode`) in your default browser. Falls back to printing the URL if no browser can be launched.
+Opens the Coven Code sticker page (`stickermule.com/claudecode`) in your default browser. Falls back to printing the URL if no browser can be launched.
 
 ```
 /stickers
@@ -1012,7 +1012,7 @@ Opens the Claurst sticker page (`stickermule.com/claudecode`) in your default br
 
 ### /doctor
 
-Run the Claurst diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues.
+Run the Coven Code diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues.
 
 ```
 /doctor
@@ -1023,7 +1023,7 @@ Run the Claurst diagnostics suite. Checks configuration integrity, provider conn
 ### /version
 **Aliases:** `v`
 
-Display the current Claurst version string and build metadata.
+Display the current Coven Code version string and build metadata.
 
 ```
 /version
@@ -1151,7 +1151,7 @@ Display the extended-thinking traces from previous model responses in the curren
 /thinkback          — alias
 ```
 
-Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Claurst suggests enabling extended thinking.
+Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Coven Code suggests enabling extended thinking.
 
 ---
 

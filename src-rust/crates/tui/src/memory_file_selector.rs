@@ -53,9 +53,9 @@ impl MemoryFileSelectorState {
     /// Open the selector for the given project root.
     ///
     /// Populates the file list with:
-    /// - User:    `~/.claurst/AGENTS.md`
+    /// - User:    `~/.coven-code/AGENTS.md`
     /// - Project: `{project_root}/AGENTS.md`
-    /// - Local:   `{project_root}/.claurst/AGENTS.md`
+    /// - Local:   `{project_root}/.coven-code/AGENTS.md`
     ///
     /// Each entry is marked `exists = true/false` based on the filesystem.
     pub fn open(&mut self, project_root: &std::path::Path) {
@@ -63,7 +63,7 @@ impl MemoryFileSelectorState {
         self.selected = 0;
         self.files.clear();
 
-        // User-level: ~/.claurst/AGENTS.md
+        // User-level: ~/.coven-code/AGENTS.md
         let user_path = claurst_core::config::Settings::config_dir().join("AGENTS.md");
         let user_display = {
             let home = dirs::home_dir().unwrap_or_default();
@@ -89,8 +89,8 @@ impl MemoryFileSelectorState {
             file_type: MemoryFileType::Project,
         });
 
-        // Local-level: {project_root}/.claurst/AGENTS.md
-        let local_path = project_root.join(".claurst").join("AGENTS.md");
+        // Local-level: {project_root}/.coven-code/AGENTS.md
+        let local_path = project_root.join(".coven-code").join("AGENTS.md");
         let local_display = local_path.display().to_string();
         self.files.push(MemoryFile {
             exists: local_path.exists(),

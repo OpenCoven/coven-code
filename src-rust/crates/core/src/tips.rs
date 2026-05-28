@@ -1,15 +1,15 @@
-// tips.rs — Tip scheduling system for Claurst.
+// tips.rs — Tip scheduling system for Coven Code.
 //
 // Ported from:
 //   src/services/tips/tipScheduler.ts
 //   src/services/tips/tipRegistry.ts
 //   src/services/tips/tipHistory.ts
 //
-// Tips are shown during the spinner while Claurst is processing.  Each tip has
+// Tips are shown during the spinner while Coven Code is processing.  Each tip has
 // a `cooldown_sessions` field — the tip won't be shown again until that many
 // sessions have passed since the last display.
 //
-// History is persisted to `~/.claurst/tip_history.json`.
+// History is persisted to `~/.coven-code/tip_history.json`.
 
 use std::collections::HashMap;
 
@@ -38,7 +38,7 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
     vec![
         Tip {
             id: "new-user-warmup",
-            content: "Start with small features or bug fixes, tell Claurst to propose a plan, and verify its suggested edits",
+            content: "Start with small features or bug fixes, tell Coven Code to propose a plan, and verify its suggested edits",
             cooldown_sessions: 3,
         },
         Tip {
@@ -53,12 +53,12 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "git-worktrees",
-            content: "Use git worktrees to run multiple Claurst sessions in parallel.",
+            content: "Use git worktrees to run multiple Coven Code sessions in parallel.",
             cooldown_sessions: 10,
         },
         Tip {
             id: "color-when-multi-clauding",
-            content: "Running multiple Claurst sessions? Use /color and /rename to tell them apart at a glance.",
+            content: "Running multiple Coven Code sessions? Use /color and /rename to tell them apart at a glance.",
             cooldown_sessions: 10,
         },
         Tip {
@@ -68,7 +68,7 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "memory-command",
-            content: "Use /memory to view and manage Claurst memory",
+            content: "Use /memory to view and manage Coven Code memory",
             cooldown_sessions: 15,
         },
         Tip {
@@ -78,17 +78,17 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "prompt-queue",
-            content: "Hit Enter to queue up additional messages while Claurst is working.",
+            content: "Hit Enter to queue up additional messages while Coven Code is working.",
             cooldown_sessions: 5,
         },
         Tip {
             id: "enter-to-steer-in-realtime",
-            content: "Send messages to Claurst while it works to steer Claurst in real-time",
+            content: "Send messages to Coven Code while it works to steer Coven Code in real-time",
             cooldown_sessions: 20,
         },
         Tip {
             id: "todo-list",
-            content: "Ask Claurst to create a todo list when working on complex tasks to track progress and remain on track",
+            content: "Ask Coven Code to create a todo list when working on complex tasks to track progress and remain on track",
             cooldown_sessions: 20,
         },
         Tip {
@@ -113,7 +113,7 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "custom-commands",
-            content: "Create skills by adding .md files to .claurst/skills/ in your project or ~/.claurst/skills/ for skills that work in any project",
+            content: "Create skills by adding .md files to .coven-code/skills/ in your project or ~/.coven-code/skills/ for skills that work in any project",
             cooldown_sessions: 15,
         },
         Tip {
@@ -189,12 +189,12 @@ pub struct TipHistory {
 }
 
 impl TipHistory {
-    /// Path to the persisted history file: `~/.claurst/tip_history.json`.
+    /// Path to the persisted history file: `~/.coven-code/tip_history.json`.
     fn history_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|h| h.join(".claurst").join("tip_history.json"))
+        dirs::home_dir().map(|h| h.join(".coven-code").join("tip_history.json"))
     }
 
-    /// Load history from `~/.claurst/tip_history.json`.
+    /// Load history from `~/.coven-code/tip_history.json`.
     /// Returns an empty `TipHistory` if the file does not exist or cannot be
     /// parsed.
     pub fn load() -> Self {
@@ -208,7 +208,7 @@ impl TipHistory {
         }
     }
 
-    /// Persist history to `~/.claurst/tip_history.json`.
+    /// Persist history to `~/.coven-code/tip_history.json`.
     /// Silently ignores I/O errors (tips are non-critical).
     pub fn save(&self) {
         let path = match Self::history_path() {

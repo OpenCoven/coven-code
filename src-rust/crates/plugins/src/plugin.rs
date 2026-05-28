@@ -10,9 +10,9 @@ use std::path::PathBuf;
 /// Where a plugin came from (mirrors the TS `source` field on `LoadedPlugin`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PluginSource {
-    /// `~/.claurst/plugins/`
+    /// `~/.coven-code/plugins/`
     User,
-    /// `<project>/.claurst/plugins/`
+    /// `<project>/.coven-code/plugins/`
     Project,
     /// An extra path provided at runtime (e.g. `--plugin-dir` CLI flag).
     Extra(String),

@@ -1,40 +1,45 @@
-# claurst
+# @opencoven/coven-code
 
-**Open-source, multi-provider terminal coding agent built in Rust.**
+[![Version](https://img.shields.io/npm/v/@opencoven/coven-code?style=flat-square)](https://www.npmjs.com/package/@opencoven/coven-code)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/OpenCoven/coven-codes/blob/main/LICENSE.md)
 
-[![Version](https://img.shields.io/npm/v/claurst?style=flat-square)](https://www.npmjs.com/package/claurst)
-[![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/kuberwastaken/claurst/blob/main/LICENSE.md)
+**Coven Code** — open-source, multi-provider agentic coding TUI built in Rust.  
+OpenCoven fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta (GPL-3.0).
 
 ## Install
 
 ```bash
-npm install -g claurst
+npm install -g @opencoven/coven-code
+# or
+bun install -g @opencoven/coven-code
 ```
 
-```bash
-bun install -g claurst
-```
-
-On install, the correct pre-built native binary for your platform is automatically downloaded from [GitHub Releases](https://github.com/kuberwastaken/claurst/releases). No compilation required.
+On install, the correct pre-built native binary for your platform is automatically downloaded from [GitHub Releases](https://github.com/OpenCoven/coven-codes/releases). No compilation required.
 
 ## Usage
 
 ```bash
-claurst                    # interactive TUI
-claurst -p "fix this bug"  # headless one-shot
+coven-code                    # interactive TUI
+coven-code -p "fix this bug"  # headless one-shot
 ```
 
-## Supported platforms
+## Providers
 
-| Platform | Architecture |
-|----------|-------------|
-| macOS    | x64, arm64 (Apple Silicon) |
-| Linux    | x64, arm64 |
-| Windows  | x64 |
+Supports Anthropic (Claude), OpenAI, Google Gemini, Groq, Ollama, LM Studio, OpenRouter, Bedrock, Vertex, and any OpenAI-compatible endpoint.
+
+```bash
+coven-code --provider openai "refactor this"
+coven-code --provider ollama --model llama3.2 "explain this"
+```
+
+## Configuration
+
+Settings: `~/.coven-code/settings.json`  
+Env prefix: `COVEN_CODE_*`
 
 ## Links
 
-- [Homepage](https://claurst.kuber.studio)
-- [GitHub](https://github.com/kuberwastaken/claurst)
-- [Documentation](https://claurst.kuber.studio/docs)
-- [Issues](https://github.com/kuberwastaken/claurst/issues)
+- [OpenCoven](https://opencoven.ai)
+- [GitHub](https://github.com/OpenCoven/coven-codes)
+- [Issues](https://github.com/OpenCoven/coven-codes/issues)
+- [Upstream (Claurst)](https://github.com/Kuberwastaken/claurst)

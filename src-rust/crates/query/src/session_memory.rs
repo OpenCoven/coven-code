@@ -557,7 +557,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
     #[tokio::test]
     async fn test_persist_creates_file() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join(".claurst").join("AGENTS.md");
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
 
         let memories = vec![
             ExtractedMemory {

@@ -1,4 +1,4 @@
-//! `session/prompt` handler — drives the Claurst query loop and forwards
+//! `session/prompt` handler — drives the Coven Code query loop and forwards
 //! every meaningful event back to the ACP client as a `session/update`
 //! notification.
 
@@ -21,7 +21,7 @@ use crate::sessions::SessionState;
 
 /// Handle one `session/prompt` JSON-RPC call.
 ///
-/// Drives the full Claurst query loop with the runtime's tools, MCP servers,
+/// Drives the full Coven Code query loop with the runtime's tools, MCP servers,
 /// and provider registry, while streaming every text delta, thinking delta,
 /// and tool invocation back as `session/update` notifications. Returns the
 /// final `PromptResponse` with the appropriate `StopReason`.
@@ -31,7 +31,7 @@ pub async fn handle(
     session: Arc<SessionState>,
     params: acp::PromptRequest,
 ) -> Result<acp::PromptResponse, acp::Error> {
-    // Convert prompt content blocks → a single user message in Claurst's
+    // Convert prompt content blocks → a single user message in Coven Code's
     // internal format.
     let user_text = render_prompt_blocks(&params.prompt);
     if user_text.trim().is_empty() {

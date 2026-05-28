@@ -2,7 +2,7 @@
 name = "claurst-acp"
 version.workspace = true
 edition.workspace = true
-description = "Agent Client Protocol (ACP) server for Claurst — JSON-RPC 2.0 over stdio"
+description = "Agent Client Protocol (ACP) server for Coven Code — JSON-RPC 2.0 over stdio"
 
 [dependencies]
 claurst-core = { workspace = true }

@@ -546,7 +546,7 @@ pub struct HistoryEntry {
     pub timestamp: Option<u64>,
     /// Whether this entry has been pinned by the user.  Pinned entries always
     /// appear at the top of the history overlay list and are persisted to
-    /// `~/.claurst/history_pins.json`.
+    /// `~/.coven-code/history_pins.json`.
     pub pinned: bool,
 }
 
@@ -582,17 +582,17 @@ impl HistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned-entry persistence  (~/.claurst/history_pins.json)
+// Pinned-entry persistence  (~/.coven-code/history_pins.json)
 // ---------------------------------------------------------------------------
 
 fn pins_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".claurst")
+        .join(".coven-code")
         .join("history_pins.json")
 }
 
-/// Load the set of pinned entry texts from `~/.claurst/history_pins.json`.
+/// Load the set of pinned entry texts from `~/.coven-code/history_pins.json`.
 /// Returns an empty set if the file does not exist or cannot be parsed.
 pub fn load_pinned_texts() -> std::collections::HashSet<String> {
     let path = pins_path();
@@ -604,7 +604,7 @@ pub fn load_pinned_texts() -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Persist `pinned_texts` to `~/.claurst/history_pins.json`.
+/// Persist `pinned_texts` to `~/.coven-code/history_pins.json`.
 /// Failures are silently ignored (best-effort).
 pub fn save_pinned_texts(pinned_texts: &std::collections::HashSet<String>) {
     let path = pins_path();
@@ -769,7 +769,7 @@ impl HistorySearchOverlay {
 
     /// Open with a pre-built `Vec<HistoryEntry>` (timestamp-aware callers).
     ///
-    /// Pinned state is loaded from `~/.claurst/history_pins.json` and applied
+    /// Pinned state is loaded from `~/.coven-code/history_pins.json` and applied
     /// to any matching entries.
     pub fn open_with_entries(entries: Vec<HistoryEntry>) -> Self {
         let pinned_texts = load_pinned_texts();
@@ -795,7 +795,7 @@ impl HistorySearchOverlay {
 
     /// Toggle the pinned state of the currently selected entry.
     ///
-    /// Persists the updated pin set to `~/.claurst/history_pins.json` and
+    /// Persists the updated pin set to `~/.coven-code/history_pins.json` and
     /// recomputes the match list so the entry moves to/from the pinned section.
     pub fn toggle_pin(&mut self) {
         let Some(m) = self.matches.get(self.selected_idx) else { return };

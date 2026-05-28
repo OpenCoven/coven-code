@@ -1,4 +1,4 @@
-// Bash security classifier for Claurst.
+// Bash security classifier for Coven Code.
 //
 // Classifies shell commands by risk level and determines whether they can be
 // auto-approved given the current permission mode.  Used by BashTool's

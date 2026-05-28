@@ -860,7 +860,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let claude_dir = home.join(".claude");
-        let claurst_dir = home.join(".claurst");
+        let claurst_dir = home.join(".coven-code");
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::create_dir_all(&claurst_dir).unwrap();
         std::fs::write(claude_dir.join("CLAUDE.md"), "hello\nworld").unwrap();

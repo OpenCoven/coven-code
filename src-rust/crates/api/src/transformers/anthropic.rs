@@ -1,7 +1,7 @@
 // transformers/anthropic.rs — Identity transformer for the Anthropic wire
 // format (ProviderRequest → Anthropic JSON body and back).
 //
-// The Anthropic provider is the native/internal format for Claurst, so
+// The Anthropic provider is the native/internal format for Coven Code, so
 // `to_provider` serialises the request fields directly to the Anthropic v1
 // messages schema and `from_provider` parses the standard Anthropic response.
 

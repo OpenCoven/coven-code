@@ -1,6 +1,6 @@
-# Claurst Keybindings Reference
+# Coven Code Keybindings Reference
 
-This document covers all keyboard shortcuts in Claurst, how to customize them, vim mode, and special input behaviors.
+This document covers all keyboard shortcuts in Coven Code, how to customize them, vim mode, and special input behaviors.
 
 ---
 
@@ -34,7 +34,7 @@ These bindings are active in all contexts.
 | Key | Action | Description |
 |-----|--------|-------------|
 | `Ctrl+C` | interrupt | Interrupt the current operation (non-rebindable) |
-| `Ctrl+D` | exit | Exit Claurst (non-rebindable) |
+| `Ctrl+D` | exit | Exit Coven Code (non-rebindable) |
 | `Ctrl+L` | redraw | Redraw the terminal screen |
 | `Ctrl+R` | historySearch | Open interactive history search |
 | `Ctrl+B` | createBranch | Create a new git branch |
@@ -80,7 +80,7 @@ These bindings are active when focus is in the chat input field.
 
 ### Confirmation Context
 
-These bindings are active when Claurst is displaying a yes/no confirmation prompt (e.g., tool permission requests).
+These bindings are active when Coven Code is displaying a yes/no confirmation prompt (e.g., tool permission requests).
 
 | Key | Action | Description |
 |-----|--------|-------------|
@@ -94,7 +94,7 @@ These bindings are active when Claurst is displaying a yes/no confirmation promp
 
 ## Keybinding Contexts
 
-Claurst uses a context system so that the same key can have different effects depending on where focus is. A binding in a more specific context takes precedence over a binding in a broader context.
+Coven Code uses a context system so that the same key can have different effects depending on where focus is. A binding in a more specific context takes precedence over a binding in a broader context.
 
 | Context | Description |
 |---------|-------------|
@@ -120,11 +120,11 @@ The `/keybindings` command opens an interactive TUI keybinding editor:
 /keybindings
 ```
 
-The editor lists all bindable actions grouped by context. Use arrow keys to navigate, press `Enter` on an action to enter rebind mode, then press the desired key combination. Press `Escape` to cancel a rebind. Changes are saved immediately to `~/.claurst/keybindings.json`.
+The editor lists all bindable actions grouped by context. Use arrow keys to navigate, press `Enter` on an action to enter rebind mode, then press the desired key combination. Press `Escape` to cancel a rebind. Changes are saved immediately to `~/.coven-code/keybindings.json`.
 
 ### Via keybindings.json
 
-For batch edits or scripted configuration, edit `~/.claurst/keybindings.json` directly. The file format is:
+For batch edits or scripted configuration, edit `~/.coven-code/keybindings.json` directly. The file format is:
 
 ```json
 {
@@ -154,10 +154,10 @@ Each binding object has:
 
 ### Schema Versioning and Smart Merge
 
-`keybindings.json` carries a top-level `schema_version` field (currently `1`). When Claurst's defaults change in a release, the file is auto-migrated on next launch:
+`keybindings.json` carries a top-level `schema_version` field (currently `1`). When Coven Code's defaults change in a release, the file is auto-migrated on next launch:
 
-1. Claurst reads the file and compares `schema_version` against the bundled `KEYBINDINGS_SCHEMA_VERSION`.
-2. If the file is older, Claurst runs a **smart merge**:
+1. Coven Code reads the file and compares `schema_version` against the bundled `KEYBINDINGS_SCHEMA_VERSION`.
+2. If the file is older, Coven Code runs a **smart merge**:
    - Your customizations (any binding whose `chord` you set explicitly) are preserved.
    - Stale bindings that match an *old* default that has since changed are dropped — for example, the previous `ctrl+a → openModelPicker` binding is removed because `ctrl+a` is now reserved for select-all in the input.
    - Any new bindings present in the current defaults but not in your file are added.
@@ -178,11 +178,11 @@ Key notation uses lowercase letters, with modifier prefixes separated by `+`:
 
 Special key names: `enter`, `escape`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` through `f12`.
 
-After editing the file, run `/keybindings` and then exit to trigger a reload, or restart Claurst.
+After editing the file, run `/keybindings` and then exit to trigger a reload, or restart Coven Code.
 
 ### Chord Bindings
 
-Claurst supports chord bindings — multi-key sequences where you press a leader key and then a follow-up key. Chord bindings are defined with a `chord` array instead of a single `key`:
+Coven Code supports chord bindings — multi-key sequences where you press a leader key and then a follow-up key. Chord bindings are defined with a `chord` array instead of a single `key`:
 
 ```json
 {
@@ -192,7 +192,7 @@ Claurst supports chord bindings — multi-key sequences where you press a leader
 }
 ```
 
-The first key in the chord acts as the leader. After pressing the leader key, Claurst enters a brief chord-wait state (500 ms by default). If the follow-up key arrives within that window, the chord fires. If the timeout expires or a different key is pressed, the leader key's default action (if any) fires instead.
+The first key in the chord acts as the leader. After pressing the leader key, Coven Code enters a brief chord-wait state (500 ms by default). If the follow-up key arrives within that window, the chord fires. If the timeout expires or a different key is pressed, the leader key's default action (if any) fires instead.
 
 Chords can be up to two keys deep. Three-key chords are not supported.
 
@@ -215,10 +215,10 @@ The following keys have fixed behavior and cannot be rebound:
 | Key | Fixed behavior |
 |-----|---------------|
 | `Ctrl+C` | Interrupt current operation / send SIGINT to foreground process |
-| `Ctrl+D` | Exit Claurst when input is empty; signal EOF when input has content |
+| `Ctrl+D` | Exit Coven Code when input is empty; signal EOF when input has content |
 | `Ctrl+M` | Identical to `Enter` at the terminal level (terminals emit `CR` for both) |
 
-These keys are handled at the terminal input layer before the keybinding system processes events. If any of them appear as a `chord` in `keybindings.json`, Claurst:
+These keys are handled at the terminal input layer before the keybinding system processes events. If any of them appear as a `chord` in `keybindings.json`, Coven Code:
 
 1. Logs a warning at startup (`Cannot rebind protected key '<chord>' in keybindings.json`).
 2. **Filters the binding out** of the loaded set before resolving any keystrokes.
@@ -307,13 +307,13 @@ This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` a
 
 ### @file Injection with Typeahead
 
-Type `@` followed by a path in the prompt to inject a file's contents into your message. The `@` token only triggers when it is at a word boundary (start of input or preceded by whitespace). As you type after the `@`, Claurst opens a typeahead completion overlay scanning the current working directory.
+Type `@` followed by a path in the prompt to inject a file's contents into your message. The `@` token only triggers when it is at a word boundary (start of input or preceded by whitespace). As you type after the `@`, Coven Code opens a typeahead completion overlay scanning the current working directory.
 
 ```
 explain @src/main.rs and compare to @tests/integration.rs
 ```
 
-When you press `Enter`, Claurst:
+When you press `Enter`, Coven Code:
 
 1. Scans the message for `@<path>` tokens at word boundaries.
 2. Resolves each path relative to the working directory; `~/` expands to your home directory.
@@ -328,7 +328,7 @@ The `@` reference works with:
 
 An `@` that is *not* at a word boundary (e.g. inside an email `me@example.com`) is left alone — neither the typeahead nor the file injection triggers.
 
-**Limits and warnings.** If a referenced path is too large, binary, a directory, or unreadable, Claurst opens a confirmation dialog before sending:
+**Limits and warnings.** If a referenced path is too large, binary, a directory, or unreadable, Coven Code opens a confirmation dialog before sending:
 
 | Issue | Behavior |
 |-------|----------|
@@ -339,7 +339,7 @@ An `@` that is *not* at a word boundary (e.g. inside an email `me@example.com`) 
 
 Files that pass all checks are injected silently — no dialog is shown.
 
-**Configuration.** Two settings in `~/.claurst/settings.json`:
+**Configuration.** Two settings in `~/.coven-code/settings.json`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -364,11 +364,11 @@ These can also be edited in the in-app settings screen.
 
 Terminal key events for `Ctrl+<key>` combinations are reported as raw control codes (`0x01` through `0x1A` for `Ctrl+A` through `Ctrl+Z`). These codes map to the physical QWERTY key position, not the character printed on the key.
 
-On non-English keyboard layouts (Cyrillic, Arabic, Greek, CJK, etc.), the Latin letters used in Claurst's shortcuts may not appear on the keycaps, and some input methods send layout-translated scan codes for Ctrl combinations — causing Claurst to miss the shortcut entirely.
+On non-English keyboard layouts (Cyrillic, Arabic, Greek, CJK, etc.), the Latin letters used in Coven Code's shortcuts may not appear on the keycaps, and some input methods send layout-translated scan codes for Ctrl combinations — causing Coven Code to miss the shortcut entirely.
 
 ### The Fix
 
-Claurst resolves this by mapping `Ctrl+<scancode>` events to their QWERTY positional equivalents before keybinding lookup. Concretely:
+Coven Code resolves this by mapping `Ctrl+<scancode>` events to their QWERTY positional equivalents before keybinding lookup. Concretely:
 
 1. When a `Ctrl+<key>` event arrives, the physical scan position is extracted.
 2. That position is mapped to the corresponding QWERTY letter (e.g., physical position of the Cyrillic `Ф` key = QWERTY `A` position).
@@ -394,6 +394,6 @@ Layout-aware bindings are not recommended for the standard workflow bindings bec
 
 ### Alt Key on macOS
 
-On macOS, `Alt` (Option) key combinations produce special Unicode characters at the OS level before they reach the terminal. Claurst intercepts these at the terminal input layer and re-emits them as `alt+<key>` events using the same positional mapping described above.
+On macOS, `Alt` (Option) key combinations produce special Unicode characters at the OS level before they reach the terminal. Coven Code intercepts these at the terminal input layer and re-emits them as `alt+<key>` events using the same positional mapping described above.
 
 If an `alt+<key>` binding does not fire on macOS, check whether your terminal emulator is configured to send `Escape + key` sequences for Option key combinations (the iTerm2 and Alacritty option is "Use Option as Meta Key" or equivalent).

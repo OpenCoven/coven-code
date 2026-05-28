@@ -65,7 +65,7 @@ static TOOL_CATALOG: &[ToolEntry] = &[
     ToolEntry { name: "ReadMcpResource", description: "Read an MCP resource", keywords: &["mcp", "resource", "read", "server"] },
     ToolEntry { name: "Agent", description: "Launch a sub-agent for complex tasks", keywords: &["agent", "subagent", "task", "parallel", "delegate"] },
     ToolEntry { name: "Brief", description: "Send a formatted message to the user", keywords: &["brief", "message", "notify", "proactive", "status", "update"] },
-    ToolEntry { name: "Config", description: "Get or set Claurst configuration", keywords: &["config", "settings", "model", "verbose", "permission", "configure"] },
+    ToolEntry { name: "Config", description: "Get or set Coven Code configuration", keywords: &["config", "settings", "model", "verbose", "permission", "configure"] },
     ToolEntry { name: "SendMessage", description: "Send a message to another agent", keywords: &["send", "message", "agent", "broadcast", "communicate", "inbox"] },
     ToolEntry { name: "Skill", description: "Execute a skill prompt template", keywords: &["skill", "command", "template", "prompt", "slash", "custom"] },
 ];

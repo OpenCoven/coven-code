@@ -70,7 +70,7 @@ pub fn get_dynamic_config<T: DeserializeOwned>(name: &str, default: T) -> T {
 // Bare / simple mode
 // ---------------------------------------------------------------------------
 
-/// Return `true` when Claurst should run in "bare" (minimal) mode.
+/// Return `true` when Coven Code should run in "bare" (minimal) mode.
 ///
 /// Bare mode skips LSP, plugin, and MCP startup for a faster, lighter
 /// experience.  It is enabled by either:

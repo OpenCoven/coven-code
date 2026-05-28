@@ -1,4 +1,4 @@
-//! Build script for Claurst CLI
+//! Build script for Coven Code CLI
 //!
 //! Embeds build-time metadata (version, timestamp, git info) into the binary
 //! for display and debugging purposes.

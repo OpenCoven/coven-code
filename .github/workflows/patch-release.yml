@@ -93,24 +93,24 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: claurst-windows-x86_64
+            artifact: coven-code-windows-x86_64
             ext: .exe
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: claurst-linux-x86_64
+            artifact: coven-code-linux-x86_64
             ext: ""
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: claurst-linux-aarch64
+            artifact: coven-code-linux-aarch64
             ext: ""
             cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: claurst-macos-x86_64
+            artifact: coven-code-macos-x86_64
             ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: claurst-macos-aarch64
+            artifact: coven-code-macos-aarch64
             ext: ""
 
     runs-on: ${{ matrix.os }}
@@ -170,7 +170,7 @@ jobs:
       - name: Verify binary exists
         shell: bash
         run: |
-          BINARY="src-rust/target/${{ matrix.target }}/release/claurst${{ matrix.ext }}"
+          BINARY="src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}"
           if [[ ! -f "$BINARY" ]]; then
             echo "::error::Binary not found at $BINARY"
             exit 1
@@ -181,14 +181,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p "stage/${{ matrix.artifact }}"
-          cp "src-rust/target/${{ matrix.target }}/release/claurst${{ matrix.ext }}" \
-             "stage/${{ matrix.artifact }}/claurst${{ matrix.ext }}"
+          cp "src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}" \
+             "stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: stage/${{ matrix.artifact }}/claurst${{ matrix.ext }}
+          path: stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}
 
   # ── Re-upload assets to the existing release ────────────────────────
   patch:
@@ -208,11 +208,11 @@ jobs:
       - name: Verify all expected assets exist
         run: |
           EXPECTED=(
-            claurst-windows-x86_64
-            claurst-linux-x86_64
-            claurst-linux-aarch64
-            claurst-macos-x86_64
-            claurst-macos-aarch64
+            coven-code-windows-x86_64
+            coven-code-linux-x86_64
+            coven-code-linux-aarch64
+            coven-code-macos-x86_64
+            coven-code-macos-aarch64
           )
           MISSING=()
           for name in "${EXPECTED[@]}"; do
@@ -311,5 +311,5 @@ jobs:
             fi
             echo
             echo "Anyone who installs fresh from \`releases/latest/download/…\` will pick up the patched build."
-            echo "Existing installs are **not** auto-updated — users must reinstall or run \`claurst upgrade --force\`."
+            echo "Existing installs are **not** auto-updated — users must reinstall or run \`coven-code upgrade --force\`."
           } >> "$GITHUB_STEP_SUMMARY"

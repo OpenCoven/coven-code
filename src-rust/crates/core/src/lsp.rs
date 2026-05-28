@@ -363,7 +363,7 @@ impl LspClient {
     pub async fn initialize(&mut self, root_uri: &str) -> anyhow::Result<()> {
         let params = json!({
             "processId": std::process::id(),
-            "clientInfo": { "name": "claurst", "version": "1.0" },
+            "clientInfo": { "name": "coven-code", "version": "1.0" },
             "rootUri": root_uri,
             "capabilities": {
                 "textDocument": {

@@ -1,33 +1,33 @@
 <div align="center">
 
-# Claurst
+# Coven Code
 
-<img src="../public/Ship.png" alt="Rustle on the ship" width="350" />
+<img src="../public/Ship.png" alt="Rune on the ship" width="350" />
 
-Claurst is a high-performance Rust reimplementation of Claude Code — a terminal-native AI coding agent with streaming responses, 40+ built-in tools, 15+ LLM provider integrations, a full ratatui TUI, and an extensible plugin system.
+Coven Code is a high-performance Rust reimplementation of Claude Code — a terminal-native AI coding agent with streaming responses, 40+ built-in tools, 15+ LLM provider integrations, a full ratatui TUI, and an extensible plugin system.
 
-**Version:** 0.1.4 (Beta) · **License:** GPL-3.0 · [GitHub](https://github.com/Kuberwastaken/claurst)
+**Version:** 0.1.4 (Beta) · **License:** GPL-3.0 · [GitHub](https://github.com/OpenCoven/coven-codes)
 
 </div>
 
 ---
 
-## What Claurst does
+## What Coven Code does
 
-You give Claurst a task in natural language. It plans, reads and writes files, runs shell commands, searches the web, and iterates — all inside your terminal, with every step visible in real time.
+You give Coven Code a task in natural language. It plans, reads and writes files, runs shell commands, searches the web, and iterates — all inside your terminal, with every step visible in real time.
 
 ```
-$ claurst "add input validation to the signup form"
+$ coven-code "add input validation to the signup form"
 ```
 
-Claurst reads your codebase, implements the change across multiple files, runs your tests, and reports back — without you leaving the terminal.
+Coven Code reads your codebase, implements the change across multiple files, runs your tests, and reports back — without you leaving the terminal.
 
 ---
 
 ## Key capabilities
 
 ### Agentic loop
-Claurst runs a multi-turn loop: it streams a response from the model, executes any tool calls (file read, bash, web search, …), feeds the results back, and continues until the task is done or the turn limit is reached.
+Coven Code runs a multi-turn loop: it streams a response from the model, executes any tool calls (file read, bash, web search, …), feeds the results back, and continues until the task is done or the turn limit is reached.
 
 ### 40+ built-in tools
 - **File operations** — read, write, edit, patch, batch-edit
@@ -45,19 +45,19 @@ Anthropic Claude (default), OpenAI, Google Gemini, AWS Bedrock, Azure OpenAI, Ol
 A ratatui-based TUI with real-time streaming, syntax-highlighted code blocks, diff viewer, permission dialogs, slash command autocomplete, session browser, and a full keybinding system.
 
 ### Multi-account credentials
-Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with `/switch` or `claurst auth switch <id>`. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent. See [Authentication](auth#multi-account-profiles).
+Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with `/switch` or `coven-code auth switch <id>`. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent. See [Authentication](auth#multi-account-profiles).
 
 ### @file injection
 Type `@path/to/file` anywhere in a prompt to inject the file's contents inline. Typeahead autocomplete suggests paths as you type, with size/binary safety checks before submit. See [@file Injection](keybindings#file-injection-with-typeahead).
 
 ### Plugin system
-Extend Claurst with TOML-manifest plugins that add custom slash commands, MCP servers, hooks, output styles, and tool overlays.
+Extend Coven Code with TOML-manifest plugins that add custom slash commands, MCP servers, hooks, output styles, and tool overlays.
 
 ### Multi-agent orchestration
 Run named agents (`build`, `plan`, `explore`) or spawn parallel sub-agents in coordinator mode. Agents communicate via a shared task registry and message channels.
 
 ### Goal system
-Set a durable objective with `/goal` and Claurst works autonomously across turns until the goal is verified complete — using the `GoalCompleteTool` for audited completion rather than just stopping.
+Set a durable objective with `/goal` and Coven Code works autonomously across turns until the goal is verified complete — using the `GoalCompleteTool` for audited completion rather than just stopping.
 
 ### Managed agents (preview)
 Configure a manager-executor architecture with `/managed-agents` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
@@ -73,16 +73,16 @@ Activate `/caveman` or `/rocky` to compress model responses by 40–85%, saving 
 
 ```bash
 # Linux / macOS
-curl -fsSL https://github.com/Kuberwastaken/claurst/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/OpenCoven/coven-codes/releases/latest/download/install.sh | bash
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://github.com/Kuberwastaken/claurst/releases/latest/download/install.ps1 | iex
+irm https://github.com/OpenCoven/coven-codes/releases/latest/download/install.ps1 | iex
 ```
 
-The installer auto-detects your platform/arch, drops `claurst` into
-`~/.claurst/bin/`, and adds it to your `PATH`. See
+The installer auto-detects your platform/arch, drops `coven-code` into
+`~/.coven-code/bin/`, and adds it to your `PATH`. See
 [Installation](installation) for flags, manual download, and uninstall steps.
 
 **2. Set your API key**
@@ -94,20 +94,20 @@ export ANTHROPIC_API_KEY=sk-ant-...
 **3. Run interactively**
 
 ```bash
-claurst
+coven-code
 ```
 
 Or send a single prompt and exit:
 
 ```bash
-claurst --print "explain the auth module"
+coven-code --print "explain the auth module"
 ```
 
 ---
 
 ## Configuration
 
-Claurst reads `~/.claurst/settings.json` at startup. The most common settings:
+Coven Code reads `~/.coven-code/settings.json` at startup. The most common settings:
 
 ```json
 {
@@ -128,10 +128,10 @@ See [Configuration](configuration) for the full reference.
 
 ```bash
 # Use Ollama with a local model
-claurst --provider ollama --model llama3.2
+coven-code --provider ollama --model llama3.2
 
 # Use OpenAI
-OPENAI_API_KEY=sk-... claurst --provider openai --model gpt-4o
+OPENAI_API_KEY=sk-... coven-code --provider openai --model gpt-4o
 ```
 
 See [Providers](providers) for setup instructions for every supported provider.
@@ -142,11 +142,11 @@ See [Providers](providers) for setup instructions for every supported provider.
 
 | Mode | Command | Use case |
 |------|---------|----------|
-| Interactive TUI | `claurst` | Day-to-day coding |
-| Single prompt | `claurst "task"` | Quick one-shot tasks |
-| Headless print | `claurst --print "task"` | Scripts, CI |
-| JSON output | `claurst --output-format json "task"` | Machine consumption |
-| Stream JSON | `claurst --output-format stream-json "task"` | Real-time piping |
+| Interactive TUI | `coven-code` | Day-to-day coding |
+| Single prompt | `coven-code "task"` | Quick one-shot tasks |
+| Headless print | `coven-code --print "task"` | Scripts, CI |
+| JSON output | `coven-code --output-format json "task"` | Machine consumption |
+| Stream JSON | `coven-code --output-format stream-json "task"` | Real-time piping |
 
 ---
 

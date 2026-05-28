@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-const DEVICE_FLOW_USER_AGENT: &str = concat!("claurst/", env!("CARGO_PKG_VERSION"));
+const DEVICE_FLOW_USER_AGENT: &str = concat!("coven-code/", env!("CARGO_PKG_VERSION"));
 
 /// Response from the device authorization endpoint.
 #[derive(Debug, Deserialize)]

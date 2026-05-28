@@ -1,6 +1,6 @@
-// claurst CLI entry point
+// coven-code CLI entry point
 //
-// This is the main binary for Claurst. It:
+// This is the main binary for Coven Code. It:
 // 1. Parses CLI arguments with clap (mirrors cli.tsx + main.tsx flags)
 // 2. Loads configuration from settings.json + env vars
 // 3. Builds system/user context (git status, AGENTS.md)
@@ -113,9 +113,9 @@ impl Tool for McpToolWrapper {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "claurst",
+    name = "coven-code",
     version = APP_VERSION,
-    about = "Claurst - AI-powered coding assistant",
+    about = "Coven Code - AI-powered coding assistant",
     long_about = None,
 )]
 struct Cli {
@@ -194,7 +194,7 @@ struct Cli {
     #[arg(long = "auto-commits", action = ArgAction::SetTrue)]
     auto_commits: bool,
 
-    /// Grant Claurst access to an additional directory (can be repeated)
+    /// Grant Coven Code access to an additional directory (can be repeated)
     #[arg(long = "add-dir", value_name = "DIR", action = ArgAction::Append)]
     add_dir: Vec<PathBuf>,
 
@@ -368,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
     // Fast-path: handle --version before parsing everything
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("claurst {}", APP_VERSION);
+        println!("coven-code {}", APP_VERSION);
         return Ok(());
     }
 
@@ -377,19 +377,19 @@ async fn main() -> anyhow::Result<()> {
         return handle_auth_command(&raw_args[2..]).await;
     }
 
-    // Fast-path: `claurst codex <login|logout|list|switch|remove>` — manage
-    // OpenAI Codex (ChatGPT) accounts. Mirrors `claurst auth` for symmetry.
+    // Fast-path: `coven-code codex <login|logout|list|switch|remove>` — manage
+    // OpenAI Codex (ChatGPT) accounts. Mirrors `coven-code auth` for symmetry.
     if raw_args.get(1).map(|s| s.as_str()) == Some("codex") {
         return handle_codex_account_command(&raw_args[2..]).await;
     }
 
-    // Fast-path: `claurst accounts` — list all stored accounts across providers.
+    // Fast-path: `coven-code accounts` — list all stored accounts across providers.
     if raw_args.get(1).map(|s| s.as_str()) == Some("accounts") {
         handle_accounts_command(&raw_args[2..]);
         return Ok(());
     }
 
-    // Fast-path: `claurst upgrade [--version <v>] [--force]` — self-update.
+    // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
     if raw_args.get(1).map(|s| s.as_str()) == Some("upgrade") {
         return upgrade::run_upgrade(&raw_args[2..]).await;
     }
@@ -399,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
         return claurst_acp::run_acp_server().await;
     }
 
-    // Fast-path: `claurst models [provider] [--refresh] [--verbose] [--json]`
+    // Fast-path: `coven-code models [provider] [--refresh] [--verbose] [--json]`
     //   — list all available providers and models from the bundled snapshot
     //     plus any disk-cached overlay from models.dev.
     if raw_args.get(1).map(|s| s.as_str()) == Some("models") {
@@ -473,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    debug!(cwd = %cwd.display(), "Starting Claurst");
+    debug!(cwd = %cwd.display(), "Starting Coven Code");
 
     // Load settings from disk (hierarchical: global < project)
     let settings = Settings::load_hierarchical(&cwd).await;
@@ -583,8 +583,8 @@ async fn main() -> anyhow::Result<()> {
                          - Set OPENAI_API_KEY for OpenAI\n\
                          - Set GOOGLE_API_KEY for Google Gemini\n\
                          - Set GROQ_API_KEY for Groq (fast, free tier available)\n\
-                         - Run `claurst --provider ollama` for local models (no key needed)\n\
-                         - Run `claurst auth login` for Anthropic OAuth"
+                         - Run `coven-code --provider ollama` for local models (no key needed)\n\
+                         - Run `coven-code auth login` for Anthropic OAuth"
                     );
                 } else {
                     (String::new(), false)
@@ -607,7 +607,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build provider registry: auto-registers all env-configured providers
-    // AND providers with keys stored in ~/.claurst/auth.json (from /connect).
+    // AND providers with keys stored in ~/.coven-code/auth.json (from /connect).
     // Anthropic is always the default; additional providers (OpenAI, Google,
     // Bedrock, Azure, Copilot, Cohere, local providers) are registered when
     // their respective environment variables or auth store entries are found.
@@ -905,7 +905,7 @@ fn models_dev_cache_path() -> PathBuf {
     model_cache_dir().join("models_dev.json")
 }
 
-/// Implementation of the `claurst models` subcommand.
+/// Implementation of the `coven-code models` subcommand.
 ///
 /// Flags:
 ///   * `--refresh`   — force-fetch from models.dev (ignoring the 5-minute
@@ -915,7 +915,7 @@ fn models_dev_cache_path() -> PathBuf {
 ///   * `--json`      — emit the registry as a JSON object keyed by
 ///                     `provider/model` (suitable for piping into `jq`).
 ///   * `<provider>`  — first non-flag arg filters by provider id
-///                     (e.g. `claurst models openai`).
+///                     (e.g. `coven-code models openai`).
 async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
     let mut refresh = false;
     let mut verbose = false;
@@ -928,13 +928,13 @@ async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
             "--verbose" | "-v" => verbose = true,
             "--json" => as_json = true,
             s if s.starts_with("--") => {
-                eprintln!("claurst models: unknown flag: {}", s);
-                eprintln!("Usage: claurst models [<provider>] [--refresh] [--verbose] [--json]");
+                eprintln!("coven-code models: unknown flag: {}", s);
+                eprintln!("Usage: coven-code models [<provider>] [--refresh] [--verbose] [--json]");
                 std::process::exit(2);
             }
             s => {
                 if provider_filter.is_some() {
-                    eprintln!("claurst models: only one provider id may be supplied");
+                    eprintln!("coven-code models: only one provider id may be supplied");
                     std::process::exit(2);
                 }
                 provider_filter = Some(s.to_string());
@@ -995,7 +995,7 @@ async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
             eprintln!("Try: claurst models                # list all providers");
             eprintln!("     claurst models --refresh      # pull latest from models.dev");
         } else {
-            eprintln!("No models in registry.  Try `claurst models --refresh`.");
+            eprintln!("No models in registry.  Try `coven-code models --refresh`.");
         }
         return Ok(());
     }
@@ -1074,7 +1074,7 @@ async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
 
     if provider_filter.is_none() {
         eprintln!(
-            "\n{} models across {} providers.  Use `claurst models <provider>` to filter.",
+            "\n{} models across {} providers.  Use `coven-code models <provider>` to filter.",
             total,
             registry.provider_count()
         );
@@ -3466,7 +3466,7 @@ async fn run_interactive(
                 "anthropic" => {
                     let tx2 = device_auth_tx.clone();
                     // Anthropic OAuth requires a registered application.
-                    // Claurst does not have its own registered OAuth app with Anthropic.
+                    // Coven Code does not have its own registered OAuth app with Anthropic.
                     // Users should use an API key from console.anthropic.com instead.
                     tokio::spawn(async move {
                         let _ = tx2.send(DeviceAuthEvent::Error(
@@ -3897,7 +3897,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 
         Some("remove") | Some("rm") => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: claurst auth remove <profile-id>");
+                eprintln!("Usage: coven-code auth remove <profile-id>");
                 std::process::exit(1);
             });
             remove_account(claurst_core::accounts::PROVIDER_ANTHROPIC, "Anthropic", id);
@@ -3920,7 +3920,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn print_auth_usage() {
-    eprintln!("Usage: claurst auth <subcommand>");
+    eprintln!("Usage: coven-code auth <subcommand>");
     eprintln!("  login [--console] [--label <name>]   Authenticate (claude.ai by default)");
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
@@ -3948,7 +3948,7 @@ fn print_account_list(provider: &str, display_name: &str) {
     let active = registry.active(provider).map(String::from);
     if profiles.is_empty() {
         println!("No {} accounts stored.", display_name);
-        println!("Use `claurst {} login` to add one.",
+        println!("Use `coven-code {} login` to add one.",
             if provider == "anthropic" { "auth" } else { provider });
         return;
     }
@@ -3982,7 +3982,7 @@ fn switch_account(provider: &str, display_name: &str, id: Option<&str>) -> ! {
                 std::process::exit(1);
             }
             // No id: print the picker and exit with usage.
-            eprintln!("Usage: claurst {} switch <profile-id>",
+            eprintln!("Usage: coven-code {} switch <profile-id>",
                 if provider == "anthropic" { "auth" } else { provider });
             eprintln!();
             print_account_list(provider, display_name);
@@ -4005,7 +4005,7 @@ fn switch_account(provider: &str, display_name: &str, id: Option<&str>) -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// `claurst codex` subcommand handler (account-level CLI)
+// `coven-code codex` subcommand handler (account-level CLI)
 // ---------------------------------------------------------------------------
 
 async fn handle_codex_account_command(args: &[String]) -> anyhow::Result<()> {
@@ -4070,7 +4070,7 @@ async fn handle_codex_account_command(args: &[String]) -> anyhow::Result<()> {
         }
         Some("remove") | Some("rm") => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: claurst codex remove <profile-id>");
+                eprintln!("Usage: coven-code codex remove <profile-id>");
                 std::process::exit(1);
             });
             remove_account(claurst_core::accounts::PROVIDER_CODEX, "Codex", id);
@@ -4106,7 +4106,7 @@ async fn handle_codex_account_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn print_codex_usage() {
-    eprintln!("Usage: claurst codex <subcommand>");
+    eprintln!("Usage: coven-code codex <subcommand>");
     eprintln!("  login [--label <name>]   Authenticate with ChatGPT/Codex");
     eprintln!("  logout                   Remove the active Codex credentials");
     eprintln!("  status                   Show Codex auth status");
@@ -4116,7 +4116,7 @@ fn print_codex_usage() {
 }
 
 // ---------------------------------------------------------------------------
-// `claurst accounts` — unified read-only list across providers
+// `coven-code accounts` — unified read-only list across providers
 // ---------------------------------------------------------------------------
 
 fn handle_accounts_command(args: &[String]) {
@@ -4260,7 +4260,7 @@ async fn auth_status(json_output: bool) {
         .or_else(|| {
             oauth_tokens.as_ref().map(|tokens| {
                 if tokens.uses_bearer_auth() {
-                    "Claurst Account".to_string()
+                    "Coven Code Account".to_string()
                 } else {
                     "Console Account".to_string()
                 }
@@ -4325,7 +4325,7 @@ async fn auth_status(json_output: bool) {
     } else {
         if !logged_in {
             let hint = if active_provider == "anthropic" {
-                "Run `claurst auth login` or set ANTHROPIC_API_KEY.".to_string()
+                "Run `coven-code auth login` or set ANTHROPIC_API_KEY.".to_string()
             } else if let Some(env_var) =
                 claurst_core::config::primary_api_key_env_var_for_provider(active_provider)
             {

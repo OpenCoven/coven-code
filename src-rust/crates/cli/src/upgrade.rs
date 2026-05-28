@@ -1,8 +1,8 @@
-// upgrade.rs — `claurst upgrade` subcommand.
+// upgrade.rs — `coven-code upgrade` subcommand.
 //
 // Downloads the latest release from GitHub, extracts it, and atomically
 // replaces the running binary.  Mirrors the logic in install.sh / install.ps1
-// so that an `upgrade` from inside Claurst feels identical to a fresh install.
+// so that an `upgrade` from inside Coven Code feels identical to a fresh install.
 //
 // Extraction shells out to `tar` (Linux/macOS) or PowerShell `Expand-Archive`
 // (Windows) — both are present on every modern system and saves us pulling
@@ -12,8 +12,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const REPO: &str = "Kuberwastaken/claurst";
-const APP: &str = "claurst";
+const REPO: &str = "OpenCoven/coven-codes";
+const APP: &str = "coven-code";
 
 pub async fn run_upgrade(args: &[String]) -> Result<()> {
     // -------- arg parsing --------
@@ -85,9 +85,9 @@ pub async fn run_upgrade(args: &[String]) -> Result<()> {
 
     // -------- locate the new binary --------
     let bin_name = if cfg!(target_os = "windows") {
-        "claurst.exe"
+        "coven-code.exe"
     } else {
-        "claurst"
+        "coven-code"
     };
     let new_binary = extract_dir.join(bin_name);
     if !new_binary.exists() {
@@ -125,19 +125,19 @@ pub async fn run_upgrade(args: &[String]) -> Result<()> {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     println!("\nUpgraded to v{}.", target_version);
-    println!("Run `claurst --version` in a new shell to verify.");
+    println!("Run `coven-code --version` in a new shell to verify.");
     Ok(())
 }
 
 fn print_help() {
     println!(
-        "Usage: claurst upgrade [options]\n\n\
+        "Usage: coven-code upgrade [options]\n\n\
          Options:\n\
            -v, --version <v>   Install a specific version (default: latest)\n\
            -f, --force         Reinstall even if already up to date\n\
            -h, --help          Show this help\n\n\
-         Downloads the latest claurst release from GitHub and replaces this\n\
-         binary in place. Settings in ~/.claurst are preserved."
+         Downloads the latest coven-code release from GitHub and replaces this\n\
+         binary in place. Settings in ~/.coven-code are preserved."
     );
 }
 
@@ -183,7 +183,7 @@ async fn fetch_latest_version() -> Result<String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent(format!("claurst-upgrade/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("coven-code-upgrade/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
@@ -204,7 +204,7 @@ async fn fetch_latest_version() -> Result<String> {
 async fn download_to_file(url: &str, dest: &Path) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
-        .user_agent(format!("claurst-upgrade/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("coven-code-upgrade/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
@@ -304,7 +304,7 @@ fn swap_binary(current: &Path, new: &Path) -> Result<()> {
         std::fs::rename(current, &sidelined)
             .with_context(|| format!("failed to sideline current exe to {}", sidelined.display()))?;
         if let Err(e) = std::fs::copy(new, current) {
-            // Try to roll back the rename so the user isn't left without claurst.
+            // Try to roll back the rename so the user isn't left without coven-code.
             let _ = std::fs::rename(&sidelined, current);
             bail!("failed to install new binary: {}", e);
         }
@@ -340,7 +340,7 @@ fn tempdir_for_upgrade() -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dir = base.join(format!("claurst-upgrade-{}-{}", pid, now));
+    let dir = base.join(format!("coven-code-upgrade-{}-{}", pid, now));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }

@@ -14,7 +14,7 @@
 //! Layout:
 //!
 //! ```text
-//! ~/.claurst/
+//! ~/.coven-code/
 //!   accounts.json                              # registry (this module)
 //!   accounts/
 //!     anthropic/<profile-id>/oauth_tokens.json
@@ -84,7 +84,7 @@ pub struct ProviderAccounts {
     pub profiles: BTreeMap<String, AccountProfile>,
 }
 
-/// On-disk shape of `~/.claurst/accounts.json`.
+/// On-disk shape of `~/.coven-code/accounts.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountRegistry {
     /// Schema version (current: 1).
@@ -100,7 +100,7 @@ fn default_version() -> u32 {
 }
 
 impl AccountRegistry {
-    /// Path to `~/.claurst/accounts.json`.
+    /// Path to `~/.coven-code/accounts.json`.
     pub fn path() -> PathBuf {
         claurst_dir().join("accounts.json")
     }
@@ -249,12 +249,12 @@ pub fn ensure_unique_profile_id(
     }
 }
 
-/// `~/.claurst/`.
+/// `~/.coven-code/`.
 pub fn claurst_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claurst")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".coven-code")
 }
 
-/// `~/.claurst/accounts/<provider>/<id>/`.
+/// `~/.coven-code/accounts/<provider>/<id>/`.
 pub fn account_dir(provider: &str, id: &str) -> PathBuf {
     claurst_dir().join("accounts").join(provider).join(id)
 }

@@ -93,12 +93,12 @@ pub fn render_bypass_permissions_dialog(
 
     // Body text (matches TS dialog copy)
     lines.push(Line::from(vec![Span::styled(
-        "Claurst running in Bypass Permissions mode",
+        "Coven Code running in Bypass Permissions mode",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        "In Bypass Permissions mode, Claurst will NOT ask for your",
+        "In Bypass Permissions mode, Coven Code will NOT ask for your",
         Style::default().fg(Color::White),
     )]));
     lines.push(Line::from(vec![Span::styled(

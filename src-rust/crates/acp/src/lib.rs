@@ -1,17 +1,30 @@
-//! Agent Client Protocol (ACP) server for Claurst.
+//! Agent Client Protocol (ACP) server for Coven Code.
 //!
 //! ACP is the open protocol pioneered by Zed for standardizing communication
 //! between AI coding agents and editors (Zed, Neovim, JetBrains, VS Code, …).
 //! Spec: <https://agentclientprotocol.com>
 //!
-//! This crate turns the local `claurst` binary into a compliant ACP agent
-//! over newline-delimited JSON-RPC 2.0 on stdio. Editors launch `claurst acp`
+//! # OpenCoven integration seam
+//!
+//! This crate is the primary entry point for connecting Coven Code to the
+//! broader OpenCoven ecosystem. The ACP server exposes JSON-RPC 2.0 over stdio
+//! (`coven-code acp`), which Coven orchestration layers can attach to as an
+//! agent worker.
+//!
+//! To add OpenCoven-specific capabilities:
+//! - Extend `AcpServer` with additional RPC methods in this crate.
+//! - Implement new capabilities in the `capabilities` module.
+//! - Register provider-specific tool overrides in `claurst-tools`. (internal crate)
+//! - See `registry-template/agent.json` for the ACP registry entry.
+//!
+//! This crate turns the local `coven-code` binary into a compliant ACP agent
+//! over newline-delimited JSON-RPC 2.0 on stdio. Editors launch `coven-code acp`
 //! as a subprocess and drive it through the protocol's standard methods:
 //!
 //! | Method                       | Direction  | Notes                                       |
 //! |------------------------------|------------|---------------------------------------------|
 //! | `initialize`                 | C → A      | Capability negotiation                      |
-//! | `authenticate`               | C → A      | No-op (Claurst uses local credentials)      |
+//! | `authenticate`               | C → A      | No-op (Coven Code uses local credentials)      |
 //! | `session/new`                | C → A      | Create a session with cwd + MCP roster      |
 //! | `session/prompt`             | C → A      | Run a turn; streams `session/update` events |
 //! | `session/cancel`             | C → A (no resp) | Cancel an in-flight prompt             |

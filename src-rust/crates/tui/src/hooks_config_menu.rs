@@ -7,7 +7,7 @@
 //   Screen 4 ViewHook      — full detail for a single hook
 //
 // The menu is intentionally read-only; as in the TS original, users edit
-// ~/.claurst/settings.json directly or ask Claurst to change hooks.
+// ~/.coven-code/settings.json directly or ask Coven Code to change hooks.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
@@ -412,7 +412,7 @@ fn render_event_list(state: &HooksConfigMenuState) -> (&'static str, Vec<Line<'s
             Style::default().fg(Color::DarkGray),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "  Edit ~/.claurst/settings.json to add hooks.",
+            "  Edit ~/.coven-code/settings.json to add hooks.",
             Style::default().fg(Color::DarkGray),
         )]));
     } else {
@@ -508,7 +508,7 @@ fn render_hook_detail(state: &HooksConfigMenuState) -> (&'static str, Vec<Line<'
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        "  Edit ~/.claurst/settings.json to modify hooks.",
+        "  Edit ~/.coven-code/settings.json to modify hooks.",
         Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
     )]));
     (" Hook Detail ", lines)

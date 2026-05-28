@@ -1,4 +1,4 @@
-// PowerShell security classifier for Claurst.
+// PowerShell security classifier for Coven Code.
 //
 // Classifies PowerShell commands / scripts by risk level.  Mirrors the
 // structure of `bash_classifier.rs` so that PowerShellTool can gate

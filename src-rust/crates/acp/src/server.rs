@@ -67,7 +67,7 @@ impl AgentServer {
             }
             "authenticate" => {
                 let _req: acp::AuthenticateRequest = parse_params(params)?;
-                // Claurst uses local credentials; clients don't need to authenticate.
+                // Coven Code uses local credentials; clients don't need to authenticate.
                 serde_json::to_value(acp::AuthenticateResponse::default())
                     .map_err(|_| acp::Error::internal_error())
             }
@@ -137,7 +137,7 @@ impl AgentServer {
         *self.client_capabilities.write() = req.client_capabilities.clone();
 
         let agent_info = acp::Implementation::new("claurst", env!("CARGO_PKG_VERSION"))
-            .title(Some("Claurst".to_string()));
+            .title(Some("Coven Code".to_string()));
 
         let mut response = acp::InitializeResponse::new(acp::ProtocolVersion::V1)
             .agent_capabilities(

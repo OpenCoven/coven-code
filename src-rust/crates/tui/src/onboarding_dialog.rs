@@ -146,7 +146,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled("claurst auth login", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("coven-code auth login", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(Span::styled(sep, Style::default().fg(Color::Rgb(45, 45, 55)))),
         // ── 2. OpenAI ─────────────────────────────────────────
@@ -193,13 +193,13 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled("claurst --provider ollama", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("coven-code --provider ollama", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  + ", Style::default().fg(Color::Rgb(120, 120, 120))),
             Span::styled("20+ more providers: ", Style::default().fg(Color::Rgb(120, 120, 120))),
-            Span::styled("claurst --help", Style::default().fg(Color::Rgb(150, 150, 150))),
+            Span::styled("coven-code --help", Style::default().fg(Color::Rgb(150, 150, 150))),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -208,7 +208,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
             Span::styled("/providers", Style::default().fg(Color::Rgb(150, 150, 150))),
         ]),
         Line::from(vec![Span::styled(
-            "  → 20+ more providers: claurst --help",
+            "  → 20+ more providers: coven-code --help",
             Style::default().fg(Color::DarkGray),
         )]),
         Line::from(""),
@@ -256,7 +256,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
     let lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled(
-                " Welcome to Claurst",
+                " Welcome to Coven Code",
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -266,7 +266,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  Claurst is an AI-powered coding assistant in your terminal.",
+            "  Coven Code is an AI-powered coding assistant in your terminal.",
             Style::default().fg(text),
         )),
         Line::from(""),
@@ -275,8 +275,8 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
             Style::default().fg(pink).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled("  Type your request and press Enter to send it.", Style::default().fg(text))),
-        Line::from(Span::styled("  Claurst can read, edit, and create files in your project.", Style::default().fg(text))),
-        Line::from(Span::styled("  Claurst can run bash commands, search the web, and more.", Style::default().fg(text))),
+        Line::from(Span::styled("  Coven Code can read, edit, and create files in your project.", Style::default().fg(text))),
+        Line::from(Span::styled("  Coven Code can run bash commands, search the web, and more.", Style::default().fg(text))),
         Line::from(""),
         Line::from(Span::styled(
             "  Slash commands:",
@@ -429,7 +429,7 @@ mod tests {
         let content: String = terminal.backend().buffer().clone().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains("Welcome") || content.contains("Claurst"));
+        assert!(content.contains("Welcome") || content.contains("Coven Code"));
     }
 
     #[test]

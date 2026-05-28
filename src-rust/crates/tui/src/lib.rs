@@ -1,4 +1,4 @@
-// claurst-tui: Terminal UI using ratatui + crossterm for Claurst.
+// claurst-tui: Terminal UI using ratatui + crossterm for Coven Code.
 //
 // This crate provides the interactive terminal interface including:
 // - Message display with syntax highlighting
@@ -101,7 +101,7 @@ pub mod voice_mode_notice;
 pub mod message_copy;
 /// Desktop app upsell startup dialog (shown at startup on macOS/Windows x64).
 pub mod desktop_upsell_startup;
-/// Memory update notification banner (shown after Claurst updates a AGENTS.md file).
+/// Memory update notification banner (shown after Coven Code updates a AGENTS.md file).
 pub mod memory_update_notification;
 /// MCP elicitation dialog (form-based user input requested by MCP servers).
 pub mod elicitation_dialog;
@@ -268,7 +268,7 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         );
     }
 
-    set_terminal_title("\u{1f980} Claurst");
+    set_terminal_title("\u{1f980} Coven Code");
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -293,11 +293,11 @@ pub fn set_terminal_title(title: &str) {
 }
 
 /// Update the terminal title to reflect the current session context.
-/// Format: "🦀 | <topic>" or just "🦀 Claurst" when no topic is set.
+/// Format: "🦀 | <topic>" or just "🦀 Coven Code" when no topic is set.
 pub fn update_terminal_title(topic: Option<&str>) {
     match topic {
         Some(t) if !t.is_empty() => set_terminal_title(&format!("\u{1f980} | {}", t)),
-        _ => set_terminal_title("\u{1f980} Claurst"),
+        _ => set_terminal_title("\u{1f980} Coven Code"),
     }
 }
 
@@ -441,7 +441,7 @@ mod tests {
 
         app.handle_key_event(ctrl(KeyCode::Char('s')));
 
-        let saved = temp.path().join(".claurst").join("agents").join("planner.md");
+        let saved = temp.path().join(".coven-code").join("agents").join("planner.md");
         assert!(saved.exists());
         let content = std::fs::read_to_string(saved).unwrap();
         assert!(content.contains("name: Planner"));
@@ -754,7 +754,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
 
-        assert!(rendered.contains("Claurst"));
+        assert!(rendered.contains("Coven Code"));
         assert!(rendered.contains("hello"));
     }
 

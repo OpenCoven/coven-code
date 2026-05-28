@@ -1,4 +1,4 @@
-//! Bridge between Claurst's synchronous `PermissionHandler` trait and the
+//! Bridge between Coven Code's synchronous `PermissionHandler` trait and the
 //! asynchronous `session/request_permission` JSON-RPC round-trip used by ACP.
 //!
 //! The handler itself simply returns `Ask { reason }` for every permission
@@ -124,7 +124,7 @@ pub async fn forward_pending(
     let _ = decision_tx.send(decision);
 }
 
-/// Classify a Claurst tool name into an ACP `ToolKind` for client UI hints.
+/// Classify a Coven Code tool name into an ACP `ToolKind` for client UI hints.
 fn infer_tool_kind(request: &PermissionRequest) -> acp::ToolKind {
     if request.is_read_only {
         return acp::ToolKind::Read;

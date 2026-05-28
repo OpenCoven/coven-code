@@ -19,7 +19,7 @@ struct GitResult {
 
 /// A shadow git repository that stores worktree state as git tree objects
 /// (no commits, no branches).  Stored outside the user's repo at
-/// `~/.claurst/data/snapshot/<project_hash>/<worktree_hash>/`.
+/// `~/.coven-code/data/snapshot/<project_hash>/<worktree_hash>/`.
 pub struct ShadowSnapshot {
     /// Path to the shadow bare gitdir.
     gitdir: PathBuf,

@@ -1,4 +1,4 @@
-// claurst-commands: Slash command system for Claurst.
+// claurst-commands: Slash command system for Coven Code.
 //
 // This crate implements the /command framework that allows users to type
 // commands like /help, /compact, /clear, /model, /config, /cost, etc.
@@ -582,7 +582,7 @@ impl SlashCommand for HelpCommand {
                 .push(format!("  /{:<20} {}", format!("{}{}", cmd.name(), alias_str), cmd.description()));
         }
 
-        let mut output = String::from("Claurst — Slash Commands\n");
+        let mut output = String::from("Coven Code — Slash Commands\n");
         output.push_str("════════════════════════════\n");
 
         for cat in &category_order {
@@ -724,7 +724,7 @@ impl SlashCommand for CostCommand {
 impl SlashCommand for ExitCommand {
     fn name(&self) -> &str { "exit" }
     fn aliases(&self) -> Vec<&str> { vec!["quit", "q"] }
-    fn description(&self) -> &str { "Exit Claurst" }
+    fn description(&self) -> &str { "Exit Coven Code" }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         CommandResult::Exit
@@ -980,7 +980,7 @@ impl SlashCommand for ColorCommand {
          Named colors: red, green, blue, yellow, cyan, magenta, white, orange, purple\n\
          Hex codes:    #RGB or #RRGGBB\n\
          Reset:        /color default\n\n\
-         The color is persisted to ~/.claurst/ui-settings.json and\n\
+         The color is persisted to ~/.coven-code/ui-settings.json and\n\
          applied on the next REPL startup."
     }
 
@@ -1129,7 +1129,7 @@ impl SlashCommand for OutputStyleCommand {
 #[async_trait]
 impl SlashCommand for KeybindingsCommand {
     fn name(&self) -> &str { "keybindings" }
-    fn description(&self) -> &str { "Create or open ~/.claurst/keybindings.json" }
+    fn description(&self) -> &str { "Create or open ~/.coven-code/keybindings.json" }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         let config_dir = Settings::config_dir();
@@ -1195,7 +1195,7 @@ impl SlashCommand for KeybindingsCommand {
 #[async_trait]
 impl SlashCommand for PrivacySettingsCommand {
     fn name(&self) -> &str { "privacy-settings" }
-    fn description(&self) -> &str { "Open Claurst privacy settings" }
+    fn description(&self) -> &str { "Open Coven Code privacy settings" }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         let url = "https://claude.ai/settings/data-privacy-controls";
@@ -1217,7 +1217,7 @@ impl SlashCommand for VersionCommand {
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         CommandResult::Message(format!(
-            "Claurst v{}",
+            "Coven Code v{}",
             claurst_core::constants::APP_VERSION
         ))
     }
@@ -1307,7 +1307,7 @@ impl SlashCommand for StatusCommand {
             .unwrap_or_else(|_| "n/a".to_string());
 
         CommandResult::Message(format!(
-            "Claurst Status\n\
+            "Coven Code Status\n\
              ══════════════════\n\
              Auth:           {auth_status}\n\
              Model:          {model}\n\
@@ -1449,8 +1449,8 @@ impl SlashCommand for GoalCommand {
          /goal resume                   — resume a paused goal\n\
          /goal clear                    — delete the current goal\n\
          /goal complete                 — request a completion audit\n\n\
-         Goals let Claurst work autonomously across turns toward a single\n\
-         verifiable objective. Claurst will keep iterating until the goal is\n\
+         Goals let Coven Code work autonomously across turns toward a single\n\
+         verifiable objective. Coven Code will keep iterating until the goal is\n\
          complete, you pause it, or the 200-turn runaway guard fires.\n\n\
          Examples:\n\
          /goal Migrate the project from Express to Fastify, keeping all routes passing\n\
@@ -1512,7 +1512,7 @@ impl SlashCommand for GoalCommand {
                 if let Err(e) = store.set_status(session_id, claurst_core::GoalStatus::Active) {
                     return CommandResult::Error(format!("Failed to resume goal: {}", e));
                 }
-                return CommandResult::Message("Goal resumed. Claurst will continue on the next message.".to_string());
+                return CommandResult::Message("Goal resumed. Coven Code will continue on the next message.".to_string());
             }
             "clear" => {
                 let store = match open_goal_store() {
@@ -1641,33 +1641,33 @@ impl SlashCommand for MemoryCommand {
     fn description(&self) -> &str { "View, edit, or clear AGENTS.md memory files" }
     fn help(&self) -> &str {
         "Usage: /memory [edit|clear] [global]\n\n\
-         Shows the content of AGENTS.md files that provide project context to Claurst.\n\
-         Claurst reads these files automatically at session start.\n\n\
+         Shows the content of AGENTS.md files that provide project context to Coven Code.\n\
+         Coven Code reads these files automatically at session start.\n\n\
          Subcommands:\n\
            /memory              — show all AGENTS.md files\n\
            /memory edit         — open project AGENTS.md in your editor\n\
-           /memory edit global  — open global ~/.claurst/AGENTS.md in your editor\n\
+           /memory edit global  — open global ~/.coven-code/AGENTS.md in your editor\n\
            /memory clear        — clear the project AGENTS.md\n\
-           /memory clear global — clear the global ~/.claurst/AGENTS.md\n\n\
+           /memory clear global — clear the global ~/.coven-code/AGENTS.md\n\n\
          Locations checked (in priority order):\n\
-           1. <project>/.claurst/AGENTS.md\n\
+           1. <project>/.coven-code/AGENTS.md\n\
            2. <project>/AGENTS.md\n\
-           3. ~/.claurst/AGENTS.md  (global)\n\n\
+           3. ~/.coven-code/AGENTS.md  (global)\n\n\
          Use /init to create a new AGENTS.md from a template."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let project_claude_dir = ctx.working_dir.join(".claurst").join("AGENTS.md");
+        let project_claude_dir = ctx.working_dir.join(".coven-code").join("AGENTS.md");
         let project_root = ctx.working_dir.join("AGENTS.md");
         let global_path = dirs::home_dir()
             .unwrap_or_default()
-            .join(".claurst")
+            .join(".coven-code")
             .join("AGENTS.md");
 
         let locations = [
-            ("project (.claurst/AGENTS.md)", project_claude_dir.clone()),
+            ("project (.coven-code/AGENTS.md)", project_claude_dir.clone()),
             ("project (AGENTS.md)", project_root.clone()),
-            ("global (~/.claurst/AGENTS.md)", global_path.clone()),
+            ("global (~/.coven-code/AGENTS.md)", global_path.clone()),
         ];
 
         let cmd = args.trim();
@@ -1737,10 +1737,10 @@ impl SlashCommand for MemoryCommand {
         if cmd == "clear" || cmd.starts_with("clear ") {
             let target_hint = cmd.strip_prefix("clear").map(|s| s.trim()).unwrap_or("project");
             let (label, target) = match target_hint {
-                "global" => ("global (~/.claurst/AGENTS.md)", global_path.clone()),
+                "global" => ("global (~/.coven-code/AGENTS.md)", global_path.clone()),
                 _ => {
                     if project_claude_dir.exists() {
-                        ("project (.claurst/AGENTS.md)", project_claude_dir.clone())
+                        ("project (.coven-code/AGENTS.md)", project_claude_dir.clone())
                     } else {
                         ("project (AGENTS.md)", project_root.clone())
                     }
@@ -1755,7 +1755,7 @@ impl SlashCommand for MemoryCommand {
             return match tokio::fs::write(&target, "").await {
                 Ok(_) => CommandResult::Message(format!(
                     "Cleared {} memory file at {}.\n\
-                     Claurst will no longer see this content at session start.",
+                     Coven Code will no longer see this content at session start.",
                     label,
                     target.display()
                 )),
@@ -1809,7 +1809,7 @@ impl SlashCommand for MemoryCommand {
             output.push_str(
                 "\nSubcommands:\n\
                  /memory edit          — edit project AGENTS.md\n\
-                 /memory edit global   — edit global ~/.claurst/AGENTS.md\n\
+                 /memory edit global   — edit global ~/.coven-code/AGENTS.md\n\
                  /memory clear         — clear project AGENTS.md\n\
                  /memory clear global  — clear global AGENTS.md"
             );
@@ -1825,7 +1825,7 @@ impl SlashCommand for MemoryCommand {
 impl SlashCommand for BugCommand {
     fn name(&self) -> &str { "feedback" }
     fn aliases(&self) -> Vec<&str> { vec!["bug"] }
-    fn description(&self) -> &str { "Submit feedback about Claurst" }
+    fn description(&self) -> &str { "Submit feedback about Coven Code" }
     fn help(&self) -> &str { "Usage: /feedback [report]" }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -1915,7 +1915,7 @@ impl SlashCommand for PluginCommand {
     fn description(&self) -> &str { "Manage plugins" }
     fn help(&self) -> &str {
         "Usage: /plugin [list|info <name>|enable <name>|disable <name>|install <path>|reload]\n\
-         Manage Claurst plugins.\n\n\
+         Manage Coven Code plugins.\n\n\
          Subcommands:\n\
            /plugin              — list all installed plugins\n\
            /plugin list         — list all installed plugins\n\
@@ -2168,7 +2168,7 @@ impl SlashCommand for DoctorCommand {
          - Disk space\n\
          - Config file integrity\n\
          - Tool permission summary\n\
-         - Claurst version"
+         - Coven Code version"
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2176,7 +2176,7 @@ impl SlashCommand for DoctorCommand {
 
         // ── Header ─────────────────────────────────────────────────────────
         lines.push(format!(
-            "Claurst v{}  |  {}",
+            "Coven Code v{}  |  {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
         ));
@@ -2315,7 +2315,7 @@ impl SlashCommand for DoctorCommand {
             lines.push(format!("  ✗ Config dir missing: {}", config_dir.display()));
         }
 
-        // Settings validation — try loading ~/.claurst/settings.json
+        // Settings validation — try loading ~/.coven-code/settings.json
         let settings_path = config_dir.join("settings.json");
         if settings_path.exists() {
             match std::fs::read_to_string(&settings_path)
@@ -2976,7 +2976,7 @@ impl SlashCommand for ReviewCommand {
                 // Determine owner/repo from git remote
                 if let Some((owner, repo)) = detect_github_owner_repo(&repo_root) {
                     let comment_body = format!(
-                        "## Claurst Code Review\n\n{}\n\n---\n*Generated by [Claurst](https://claude.ai/claude-code)*",
+                        "## Coven Code Code Review\n\n{}\n\n---\n*Generated by [Coven Code](https://claude.ai/claude-code)*",
                         review_text
                     );
 
@@ -3163,7 +3163,7 @@ impl SlashCommand for HooksCommand {
             // so the user knows what to do.
             return CommandResult::Message(
                 "No hooks configured.\n\
-                 Add hooks to ~/.claurst/settings.json under the 'hooks' key.\n\
+                 Add hooks to ~/.coven-code/settings.json under the 'hooks' key.\n\
                  Example:\n\
                  \x20 \"hooks\": {\n\
                  \x20   \"PreToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"echo $STDIN\" }] }]\n\
@@ -3188,7 +3188,7 @@ impl SlashCommand for McpCommand {
     fn help(&self) -> &str {
         "Usage: /mcp [list|status|auth <server>|connect <server>|logs <server>|resources|prompts|get-prompt ...]\n\n\
          Manages Model Context Protocol (MCP) servers.\n\
-         MCP servers extend Claurst with external tools, resources, and prompt templates.\n\n\
+         MCP servers extend Coven Code with external tools, resources, and prompt templates.\n\n\
          Subcommands:\n\
            /mcp                        — list configured servers with live status\n\
            /mcp list                   — same as above\n\
@@ -3199,7 +3199,7 @@ impl SlashCommand for McpCommand {
            /mcp resources [server]     — list resources from connected servers\n\
            /mcp prompts [server]       — list prompt templates from connected servers\n\
            /mcp get-prompt <server> <prompt> [key=value ...]  — expand a prompt template\n\n\
-         To add/remove MCP servers, edit ~/.claurst/settings.json\n\
+         To add/remove MCP servers, edit ~/.coven-code/settings.json\n\
          under the 'mcpServers' key.\n\
          Docs: https://docs.anthropic.com/claude-code/mcp"
     }
@@ -3265,7 +3265,7 @@ impl SlashCommand for McpCommand {
         if ctx.config.mcp_servers.is_empty() {
             return CommandResult::Message(
                 "No MCP servers configured.\n\n\
-                 To add a MCP server, edit ~/.claurst/settings.json:\n\
+                 To add a MCP server, edit ~/.coven-code/settings.json:\n\
                  {\n\
                    \"mcpServers\": [\n\
                      {\n\
@@ -3314,7 +3314,7 @@ impl SlashCommand for McpCommand {
             if ctx.mcp_manager.is_none() {
                 output.push_str(
                     "\nNote: MCP manager is not active in this session.\n\
-                     Restart Claurst to connect to MCP servers.\n\
+                     Restart Coven Code to connect to MCP servers.\n\
                      Use /mcp connect <server> to retry a single server."
                 );
             }
@@ -3401,8 +3401,8 @@ impl McpCommand {
                 "MCP Server '{}' (stdio){}\n\
                  {}\n\n\
                  stdio servers authenticate via environment variables (API keys etc.).\n\
-                 Add required variables to the 'env' block in ~/.claurst/settings.json,\n\
-                 then restart Claurst or run /mcp connect {} to reconnect.",
+                 Add required variables to the 'env' block in ~/.coven-code/settings.json,\n\
+                 then restart Coven Code or run /mcp connect {} to reconnect.",
                 server_name, token_note, env_note, server_name
             ));
         }
@@ -3479,9 +3479,9 @@ impl McpCommand {
              Server URL: {}\n\n\
              To authenticate:\n\
              1. Open the server URL in your browser and complete OAuth\n\
-             2. The token is saved to ~/.claurst/mcp-tokens/{}.json\n\
-             3. Restart Claurst — the token will be used automatically\n\n\
-             Token storage: ~/.claurst/mcp-tokens/{}.json",
+             2. The token is saved to ~/.coven-code/mcp-tokens/{}.json\n\
+             3. Restart Coven Code — the token will be used automatically\n\n\
+             Token storage: ~/.coven-code/mcp-tokens/{}.json",
             server_name, token_note, server_url, server_name, server_name
         ))
     }
@@ -3492,7 +3492,7 @@ impl McpCommand {
             Some(m) => m,
             None => return CommandResult::Message(
                 "MCP manager is not active. No tool information available.\n\
-                 Restart Claurst to connect to MCP servers.".to_string()
+                 Restart Coven Code to connect to MCP servers.".to_string()
             ),
         };
 
@@ -3550,8 +3550,8 @@ impl McpCommand {
                 // No live manager — give useful instructions.
                 CommandResult::Message(format!(
                     "The MCP manager is not running in this session.\n\
-                     To connect '{}', restart Claurst — servers connect automatically\n\
-                     on startup using the configuration in ~/.claurst/settings.json.\n\
+                     To connect '{}', restart Coven Code — servers connect automatically\n\
+                     on startup using the configuration in ~/.coven-code/settings.json.\n\
                      \n\
                      If the server requires authentication, run /mcp auth {} first.",
                     server_name, server_name
@@ -3586,8 +3586,8 @@ impl McpCommand {
                              The runtime MCP manager reconnects servers automatically.\n\
                              If the server stays disconnected:\n\
                              1. Check authentication: /mcp auth {}\n\
-                             2. Verify the command/URL in ~/.claurst/settings.json\n\
-                             3. Restart Claurst to force a full reconnect",
+                             2. Verify the command/URL in ~/.coven-code/settings.json\n\
+                             3. Restart Coven Code to force a full reconnect",
                             server_name,
                             manager.server_status(server_name).display(),
                             server_name
@@ -3664,7 +3664,7 @@ impl McpCommand {
             }
         } else {
             lines.push("MCP manager is not active in this session.".to_string());
-            lines.push("Restart Claurst to start the MCP runtime.".to_string());
+            lines.push("Restart Coven Code to start the MCP runtime.".to_string());
         }
 
         // Hint about log files.
@@ -4118,7 +4118,7 @@ impl SlashCommand for ThinkingCommand {
         } else {
             CommandResult::Message(format!(
                 "Extended thinking is available with {}.\n\
-                 You can request thinking by asking Claurst to 'think step by step' or \
+                 You can request thinking by asking Coven Code to 'think step by step' or \
                  'think carefully before answering'.",
                 model
             ))
@@ -4656,15 +4656,15 @@ impl SlashCommand for LinksCommand {
 impl SlashCommand for SkillsCommand {
     fn name(&self) -> &str { "skills" }
     fn aliases(&self) -> Vec<&str> { vec!["skill"] }
-    fn description(&self) -> &str { "List available skills in .claurst/commands/" }
+    fn description(&self) -> &str { "List available skills in .coven-code/commands/" }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
         let mut found: Vec<String> = Vec::new();
         let dirs = [
-            ctx.working_dir.join(".claurst").join("commands"),
+            ctx.working_dir.join(".coven-code").join("commands"),
             dirs::home_dir()
                 .unwrap_or_default()
-                .join(".claurst")
+                .join(".coven-code")
                 .join("commands"),
         ];
 
@@ -4713,7 +4713,7 @@ impl SlashCommand for SkillsCommand {
             }
         }
 
-        // Include discovered skills from .claurst/skills/ and configured paths/URLs.
+        // Include discovered skills from .coven-code/skills/ and configured paths/URLs.
         let discovered = claurst_core::discover_skills(
             &ctx.working_dir,
             &ctx.config.skills,
@@ -4721,8 +4721,8 @@ impl SlashCommand for SkillsCommand {
 
         let mut output = if found.is_empty() && discovered.is_empty() {
             return CommandResult::Message(
-                "No skills found.\nCreate .md files in .claurst/commands/ to define skills.\n\
-                 Example: .claurst/commands/review.md".to_string(),
+                "No skills found.\nCreate .md files in .coven-code/commands/ to define skills.\n\
+                 Example: .coven-code/commands/review.md".to_string(),
             );
         } else if found.is_empty() {
             String::new()
@@ -5079,7 +5079,7 @@ impl SlashCommand for SummaryCommand {
 #[async_trait]
 impl SlashCommand for CommitCommand {
     fn name(&self) -> &str { "commit" }
-    fn description(&self) -> &str { "Ask Claurst to commit staged changes" }
+    fn description(&self) -> &str { "Ask Coven Code to commit staged changes" }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
         let extra = if args.trim().is_empty() {
@@ -5099,7 +5099,7 @@ impl SlashCommand for CommitCommand {
 }
 
 // ---------------------------------------------------------------------------
-// UI settings helpers (stored in ~/.claurst/ui-settings.json)
+// UI settings helpers (stored in ~/.coven-code/ui-settings.json)
 // These hold things not present in the core Config struct.
 // ---------------------------------------------------------------------------
 
@@ -5173,7 +5173,7 @@ impl SlashCommand for RemoteControlCommand {
     fn description(&self) -> &str { "Show or manage the remote control (Bridge) connection" }
     fn help(&self) -> &str {
         "Usage: /remote-control [start|stop|status]\n\n\
-         The Bridge feature lets you connect your local Claurst CLI to the\n\
+         The Bridge feature lets you connect your local Coven Code CLI to the\n\
          claude.ai web UI or mobile app.\n\n\
          Subcommands:\n\
          /remote-control          Show current bridge status and connection URL\n\
@@ -5217,7 +5217,7 @@ impl SlashCommand for RemoteControlCommand {
                          ──────────────\n\
                          Session URL:  {url}\n\
                          Share this URL or QR code with others to let them connect\n\
-                         to this Claurst session from the claude.ai web UI.\n",
+                         to this Coven Code session from the claude.ai web UI.\n",
                         url = url
                     )
                 } else {
@@ -5232,7 +5232,7 @@ impl SlashCommand for RemoteControlCommand {
                     "Remote Control (Bridge)\n\
                      ═══════════════════════\n\
                      What it does: lets you connect the claude.ai web UI or mobile app\n\
-                     to this running Claurst CLI session on your local machine.\n\
+                     to this running Coven Code CLI session on your local machine.\n\
                      All prompts and responses are relayed bidirectionally.\n\
                      \n\
                      Local Machine\n\
@@ -5251,7 +5251,7 @@ impl SlashCommand for RemoteControlCommand {
                      1. Obtain a session token from claude.ai (Settings → Remote Control)\n\
                      2. Set it:  export COVEN_CODE_BRIDGE_TOKEN=<your-token>\n\
                      3. Enable:  /remote-control start\n\
-                     4. Restart Claurst — the bridge will connect automatically\n\
+                     4. Restart Coven Code — the bridge will connect automatically\n\
                      5. Open {bridge_url}/claude-code in your browser\n\
                      \n\
                      Note: Full bridge polling requires server-side session infrastructure.\n\
@@ -5289,7 +5289,7 @@ impl SlashCommand for RemoteControlCommand {
                 };
                 CommandResult::Message(format!(
                     "Remote control bridge enabled at startup.\n\
-                     Restart Claurst to activate the bridge connection.\n\n\
+                     Restart Coven Code to activate the bridge connection.\n\n\
                      {token_note}",
                     token_note = token_note
                 ))
@@ -5320,7 +5320,7 @@ impl SlashCommand for RemoteEnvCommand {
     fn description(&self) -> &str { "Show and manage environment variables for remote sessions" }
     fn help(&self) -> &str {
         "Usage: /remote-env [set <KEY> <VALUE> | unset <KEY> | list]\n\n\
-         Manages env vars stored in config that are forwarded to remote Claurst sessions.\n\
+         Manages env vars stored in config that are forwarded to remote Coven Code sessions.\n\
          These are persisted to settings under the 'env' key."
     }
 
@@ -6065,7 +6065,7 @@ impl SlashCommand for VimCommand {
         "Usage: /vim [on|off]\n\n\
          Toggles vim keybinding mode in the REPL input.\n\
          When enabled, use Esc to switch between INSERT and NORMAL modes.\n\n\
-         The setting is persisted to ~/.claurst/ui-settings.json."
+         The setting is persisted to ~/.coven-code/ui-settings.json."
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -6113,7 +6113,7 @@ impl SlashCommand for VoiceCommand {
     fn help(&self) -> &str {
         "Usage: /voice [on|off|status]\n\n\
          Enables or disables voice input (push-to-talk).\n\
-         Setting is persisted to ~/.claurst/ui-settings.json.\n\n\
+         Setting is persisted to ~/.coven-code/ui-settings.json.\n\n\
          Transcription is performed via a Whisper-compatible API.\n\
          Set one of these env vars for the API key:\n\
            OPENAI_API_KEY   — OpenAI Whisper (default endpoint)\n\
@@ -6201,7 +6201,7 @@ impl SlashCommand for UpgradeCommand {
     fn description(&self) -> &str { "Check for updates and download the latest release" }
     fn help(&self) -> &str {
         "Usage: /update\n\n\
-         Checks GitHub releases for the latest version of Claurst.\n\
+         Checks GitHub releases for the latest version of Coven Code.\n\
          If a newer version is available, shows where to download it."
     }
 
@@ -6248,7 +6248,7 @@ impl SlashCommand for UpgradeCommand {
 
                 if tag == current || tag == "unknown" {
                     CommandResult::Message(format!(
-                        "Claurst v{current} - you are up to date.\n\
+                        "Coven Code v{current} - you are up to date.\n\
                          Release page: {url}"
                     ))
                 } else {
@@ -6314,7 +6314,7 @@ impl SlashCommand for ReleaseNotesCommand {
             Ok(c) => c,
             Err(_) => {
                 return CommandResult::Message(format!(
-                    "Claurst {tag} release notes:\n\
+                    "Coven Code {tag} release notes:\n\
                      Visit https://github.com/kuberwastaken/claurst/releases/tag/{tag}"
                 ))
             }
@@ -6346,7 +6346,7 @@ impl SlashCommand for ReleaseNotesCommand {
                     .unwrap_or("");
 
                 CommandResult::Message(format!(
-                    "Release Notes: Claurst {tag}\n\
+                    "Release Notes: Coven Code {tag}\n\
                      Published: {published}\n\
                      URL: {html_url}\n\
                      ─────────────────────────────────\n\
@@ -6380,7 +6380,7 @@ impl SlashCommand for RateLimitOptionsCommand {
     fn help(&self) -> &str {
         "Usage: /rate-limit-options\n\n\
          Displays available rate limit tiers and the current tier for your account.\n\
-         Rate limits depend on your Claurst plan (Free, Pro, Max, API)."
+         Rate limits depend on your Coven Code plan (Free, Pro, Max, API)."
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -6435,7 +6435,7 @@ impl SlashCommand for StatuslineCommand {
     fn help(&self) -> &str {
         "Usage: /statusline [show|hide] [cost|tokens|model|time|all]\n\n\
          Controls which items appear in the TUI status bar at the bottom.\n\
-         Settings are persisted to ~/.claurst/ui-settings.json.\n\n\
+         Settings are persisted to ~/.coven-code/ui-settings.json.\n\n\
          Examples:\n\
            /statusline               — show current configuration\n\
            /statusline show cost     — show cost in status line\n\
@@ -6529,7 +6529,7 @@ impl SlashCommand for SecurityReviewCommand {
     fn description(&self) -> &str { "Run a security review of the current project" }
     fn help(&self) -> &str {
         "Usage: /security-review [path]\n\n\
-         Asks Claurst to perform a security review of the codebase.\n\
+         Asks Coven Code to perform a security review of the codebase.\n\
          Analyzes for common vulnerabilities: injection attacks, auth issues,\n\
          secrets exposure, unsafe deserialization, path traversal, etc."
     }
@@ -6571,11 +6571,11 @@ impl SlashCommand for SecurityReviewCommand {
 #[async_trait]
 impl SlashCommand for TerminalSetupCommand {
     fn name(&self) -> &str { "terminal-setup" }
-    fn description(&self) -> &str { "Help configure your terminal for optimal Claurst use" }
+    fn description(&self) -> &str { "Help configure your terminal for optimal Coven Code use" }
     fn help(&self) -> &str {
         "Usage: /terminal-setup\n\n\
          Diagnoses your terminal environment and gives recommendations for\n\
-         optimal Claurst display (font, color support, Unicode, etc.)."
+         optimal Coven Code display (font, color support, Unicode, etc.)."
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -6639,7 +6639,7 @@ impl SlashCommand for TerminalSetupCommand {
             "Terminal Setup Diagnostic\n\
              ─────────────────────────\n\
              {checks}\n\n\
-             Recommendations for optimal Claurst experience:\n\
+             Recommendations for optimal Coven Code experience:\n\
              ─────────────────────────────────────────────────\n\
              1. Font: Use a Nerd Font for box-drawing characters and icons\n\
                 {nerd_hint}\n\
@@ -6817,24 +6817,24 @@ impl SlashCommand for AdvisorCommand {
 #[async_trait]
 impl SlashCommand for InstallSlackAppCommand {
     fn name(&self) -> &str { "install-slack-app" }
-    fn description(&self) -> &str { "Install the Claurst Slack integration" }
+    fn description(&self) -> &str { "Install the Coven Code Slack integration" }
     fn help(&self) -> &str {
         "Usage: /install-slack-app\n\n\
-         Opens instructions for installing the Claurst Slack app.\n\
-         Requires a Claurst for Enterprise subscription."
+         Opens instructions for installing the Coven Code Slack app.\n\
+         Requires a Coven Code for Enterprise subscription."
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         CommandResult::Message(
-            "Claurst Slack Integration\n\
+            "Coven Code Slack Integration\n\
              ─────────────────────────────\n\
-             To install Claurst in Slack:\n\n\
-             1. Ensure you have a Claurst for Enterprise subscription\n\
+             To install Coven Code in Slack:\n\n\
+             1. Ensure you have a Coven Code for Enterprise subscription\n\
              2. Visit your Anthropic Console → Integrations → Slack\n\
              3. Click \"Add to Slack\" and authorize the app\n\
-             4. Invite @Claurst to any channel with: /invite @Claurst\n\n\
+             4. Invite @Coven Code to any channel with: /invite @Coven Code\n\n\
              In Slack, you can then:\n\
-             • Mention @Claurst to ask questions in any channel\n\
+             • Mention @Coven Code to ask questions in any channel\n\
              • Use /claude for direct commands\n\
              • Share code snippets for review\n\n\
              See: https://docs.anthropic.com/claude-code/slack"
@@ -6854,7 +6854,7 @@ impl SlashCommand for FastCommand {
         "Usage: /fast [on|off]\n\n\
          Fast mode switches to the active provider's smaller, faster model\n\
          for quick responses. Toggle without argument to switch.\n\
-         The setting is persisted to ~/.claurst/ui-settings.json."
+         The setting is persisted to ~/.coven-code/ui-settings.json."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -6962,7 +6962,7 @@ impl SlashCommand for ThinkBackCommand {
             return CommandResult::Message(
                 "No thinking traces found in this session.\n\
                  Thinking traces appear when the model uses extended thinking mode.\n\
-                 Try asking Claurst to 'think step by step' or 'think carefully'."
+                 Try asking Coven Code to 'think step by step' or 'think carefully'."
                     .to_string(),
             );
         }
@@ -7153,7 +7153,7 @@ impl SlashCommand for SearchCommand {
     fn help(&self) -> &str {
         "Usage: /search <query>\n\n\
          Searches session titles and message content in the local SQLite\n\
-         session database (~/.claurst/sessions.db).  Returns the 50 best\n\
+         session database (~/.coven-code/sessions.db).  Returns the 50 best\n\
          matching sessions, ordered by most recently updated.\n\n\
          Example: /search refactor authentication"
     }
@@ -7283,7 +7283,7 @@ impl SlashCommand for TeleportCommand {
          \n\
          /teleport export [--output <file>]\n\
          \x20 Serialize the current session to a .teleport JSON bundle.\n\
-         \x20 Defaults to ~/.claurst/teleport_<session_id>.json\n\
+         \x20 Defaults to ~/.coven-code/teleport_<session_id>.json\n\
          \n\
          /teleport import <file>\n\
          \x20 Load a .teleport bundle and restore messages, working dir, and\n\
@@ -7326,10 +7326,10 @@ impl SlashCommand for TeleportCommand {
                     if let Some(p) = explicit {
                         p
                     } else {
-                        // Default: ~/.claurst/teleport_<session_id>.json
+                        // Default: ~/.coven-code/teleport_<session_id>.json
                         let base = dirs::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join(".claurst");
+                            .join(".coven-code");
                         let _ = std::fs::create_dir_all(&base);
                         base.join(format!("teleport_{}.json", ctx.session_id))
                     }
@@ -8470,7 +8470,7 @@ impl SlashCommand for AgentCommand {
     fn name(&self) -> &str { "agent" }
     fn description(&self) -> &str { "List available agents or get info about a specific agent" }
     fn help(&self) -> &str {
-        "Usage: /agent [name]\n\nWithout arguments, lists all available named agents.\nWith a name, shows details for that agent.\n\nTo use an agent, start Claurst with: --agent <name>"
+        "Usage: /agent [name]\n\nWithout arguments, lists all available named agents.\nWith a name, shows details for that agent.\n\nTo use an agent, start Coven Code with: --agent <name>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -8505,7 +8505,7 @@ impl SlashCommand for AgentCommand {
                         .unwrap_or_default(),
                 ));
             }
-            output.push_str("\nUse --agent <name> when starting Claurst to activate an agent.");
+            output.push_str("\nUse --agent <name> when starting Coven Code to activate an agent.");
             CommandResult::Message(output)
         } else if let Some(def) = all_agents.get(agent_name) {
             // Show details for the named agent.
@@ -8893,7 +8893,7 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
             slash_name: "add-dir",
             target_name: "add-dir",
             slash_aliases: &[],
-            slash_description: "Add a directory to Claurst's allowed workspace paths",
+            slash_description: "Add a directory to Coven Code's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
         }),
         Box::new(NamedCommandAdapter {
@@ -8921,7 +8921,7 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
             slash_name: "passes",
             target_name: "passes",
             slash_aliases: &[],
-            slash_description: "Share a free week of Claurst with friends",
+            slash_description: "Share a free week of Coven Code with friends",
             slash_help: "Usage: /passes",
         }),
         Box::new(NamedCommandAdapter {
@@ -8942,28 +8942,28 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
             slash_name: "desktop",
             target_name: "desktop",
             slash_aliases: &[],
-            slash_description: "Open the Claurst desktop app",
+            slash_description: "Open the Coven Code desktop app",
             slash_help: "Usage: /desktop",
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "mobile",
             target_name: "mobile",
             slash_aliases: &[],
-            slash_description: "Set up Claurst on mobile",
+            slash_description: "Set up Coven Code on mobile",
             slash_help: "Usage: /mobile",
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "install-github-app",
             target_name: "install-github-app",
             slash_aliases: &[],
-            slash_description: "Set up Claurst GitHub Actions for a repository",
+            slash_description: "Set up Coven Code GitHub Actions for a repository",
             slash_help: "Usage: /install-github-app",
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "web-setup",
             target_name: "remote-setup",
             slash_aliases: &["remote-setup"],
-            slash_description: "Configure a remote Claurst environment",
+            slash_description: "Configure a remote Coven Code environment",
             slash_help: "Usage: /web-setup",
         }),
         Box::new(NamedCommandAdapter {
@@ -9087,7 +9087,7 @@ pub fn commands_from_settings(settings: &claurst_core::Settings) -> Vec<Box<dyn 
 }
 
 // ---------------------------------------------------------------------------
-// Discovered skill commands (from .claurst/skills/ and git URLs)
+// Discovered skill commands (from .coven-code/skills/ and git URLs)
 // ---------------------------------------------------------------------------
 
 /// A slash command backed by a discovered skill markdown file.
@@ -9165,7 +9165,7 @@ pub async fn execute_command(
         return Some(tc.execute(args, ctx).await);
     }
 
-    // Check discovered skill commands (from .claurst/skills/, git URLs, etc.).
+    // Check discovered skill commands (from .coven-code/skills/, git URLs, etc.).
     {
         let discovered = claurst_core::discover_skills(&ctx.working_dir, &ctx.config.skills);
         if let Some(skill) = discovered.get(cmd_name) {
@@ -9336,7 +9336,7 @@ mod tests {
         assert!(matches!(result, CommandResult::Message(_)));
         if let CommandResult::Message(msg) = result {
             assert!(
-                msg.contains("claude") || msg.contains("Claurst") || msg.contains('.'),
+                msg.contains("claude") || msg.contains("Coven Code") || msg.contains('.'),
                 "Version message should contain version number, got: {}",
                 msg
             );
