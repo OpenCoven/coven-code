@@ -2,6 +2,8 @@
 
 Coven Code has a named-agent system that lets you select a pre-configured persona with its own tool permissions, model, system prompt, and turn budget. For larger tasks it also supports a coordinator mode where a top-level agent orchestrates a pool of parallel worker agents.
 
+> **Coven familiars as agents:** If the Coven daemon is installed, every familiar in `~/.coven/familiars.toml` is automatically available as a named agent in both the `/agents` overlay and the `coven-code agents` CLI. See [Coven Familiars](familiars) for the full reference.
+
 ---
 
 ## Built-in Named Agents

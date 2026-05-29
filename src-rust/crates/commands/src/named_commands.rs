@@ -47,41 +47,93 @@ pub struct AgentsCommand;
 
 impl NamedCommand for AgentsCommand {
     fn name(&self) -> &str { "agents" }
-    fn description(&self) -> &str { "Manage and configure sub-agents" }
-    fn usage(&self) -> &str { "coven-code agents [list|create|edit|delete] [name]" }
+    fn description(&self) -> &str { "Manage and configure sub-agents and Coven familiars" }
+    fn usage(&self) -> &str { "coven-code agents [list|create|edit|delete|familiars] [name]" }
 
     fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
         match args.first().copied().unwrap_or("list") {
             "list" => {
-                // Load agent definitions from .coven-code/agents/ in working dir
-                // (and home dir), using the same loader as the TUI agents view.
                 let defs = claurst_tui::agents_view::load_agent_definitions(&ctx.working_dir);
+
+                let (familiar_defs, user_defs): (Vec<_>, Vec<_>) = defs
+                    .iter()
+                    .partition(|d| d.source.starts_with("coven:familiar"));
 
                 if defs.is_empty() {
                     return CommandResult::Message(
                         "Available Agents (0)\n\n\
                          No custom agents defined. Create one with /new-agent\n\
-                         or run: coven-code agents create <name>"
+                         or run: coven-code agents create <name>\n\n\
+                         No Coven familiars found. Install the Coven daemon to\n\
+                         automatically surface familiars here."
                             .to_string(),
                     );
                 }
 
-                let mut out = format!("Available Agents ({})\n\n", defs.len());
-                for def in &defs {
-                    let model_str = def.model.as_deref().unwrap_or("default model");
-                    if def.description.is_empty() {
-                        out.push_str(&format!(
-                            "  \u{2022} {} ({})\n",
-                            def.name, model_str
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "  \u{2022} {}: {}\n    Model: {}\n",
-                            def.name, def.description, model_str
-                        ));
+                let mut out = format!("Available Agents ({})\n", defs.len());
+
+                if !user_defs.is_empty() {
+                    out.push_str(&format!("\nWorkspace Agents ({})\n", user_defs.len()));
+                    for def in &user_defs {
+                        let model_str = def.model.as_deref().unwrap_or("default");
+                        if def.description.is_empty() {
+                            out.push_str(&format!(
+                                "  \u{2022} {} (model: {})\n",
+                                def.name, model_str
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "  \u{2022} {}: {}\n    Model: {}\n",
+                                def.name, def.description, model_str
+                            ));
+                        }
                     }
                 }
-                out.push_str("\nUse 'coven-code agents create <name>' to add a new agent.");
+
+                if !familiar_defs.is_empty() {
+                    out.push_str(&format!("\n\u{2728} Coven Familiars ({})\n", familiar_defs.len()));
+                    for def in &familiar_defs {
+                        let id = def.source.trim_start_matches("coven:familiar:");
+                        let desc_short = def
+                            .description
+                            .split(" \u{2014} ")
+                            .nth(1)
+                            .unwrap_or(&def.description)
+                            .trim();
+                        out.push_str(&format!(
+                            "  \u{2605} {} (id: {})\n    {}\n",
+                            def.name, id, desc_short
+                        ));
+                    }
+                    out.push_str("\nSwitch active familiar: coven-code agent <name>");
+                }
+
+                if user_defs.is_empty() {
+                    out.push_str("\nUse 'coven-code agents create <name>' to add a workspace agent.");
+                }
+                CommandResult::Message(out)
+            }
+            "familiars" => {
+                // Shorthand: list only Coven familiars.
+                let defs = claurst_tui::agents_view::load_agent_definitions(&ctx.working_dir);
+                let familiar_defs: Vec<_> = defs
+                    .iter()
+                    .filter(|d| d.source.starts_with("coven:familiar"))
+                    .collect();
+                if familiar_defs.is_empty() {
+                    return CommandResult::Message(
+                        "No Coven familiars found.\n\n\
+                         Install the Coven daemon and define familiars in\n\
+                         ~/.coven/familiars.toml to have them appear here as agents."
+                            .to_string(),
+                    );
+                }
+                let mut out = format!("\u{2728} Coven Familiars ({})\n\n", familiar_defs.len());
+                for def in &familiar_defs {
+                    let id = def.source.trim_start_matches("coven:familiar:");
+                    out.push_str(&format!("  \u{2605} {} [{}]\n    {}\n\n", def.name, id, def.description));
+                }
+                out.push_str("Switch to a familiar: coven-code agent <name>");
                 CommandResult::Message(out)
             }
             "create" => {
@@ -119,7 +171,101 @@ impl NamedCommand for AgentsCommand {
                     "Delete .coven-code/agents/{name}.md to remove the agent."
                 ))
             }
-            sub => CommandResult::Error(format!("Unknown agents subcommand: '{sub}'")),
+            sub => CommandResult::Error(format!("Unknown agents subcommand: '{sub}'\
+                \nValid: list, familiars, create, edit, delete")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// agent  (switch active familiar / agent persona)
+// ---------------------------------------------------------------------------
+
+pub struct AgentCommand;
+
+impl NamedCommand for AgentCommand {
+    fn name(&self) -> &str { "agent" }
+    fn description(&self) -> &str { "Show or switch the active Coven familiar / agent persona" }
+    fn usage(&self) -> &str { "coven-code agent [name|--list]" }
+
+    fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
+        let defs = claurst_tui::agents_view::load_agent_definitions(&ctx.working_dir);
+
+        // --list flag: enumerate all available names.
+        if args.first().copied() == Some("--list") {
+            if defs.is_empty() {
+                return CommandResult::Message(
+                    "No agents or familiars found.\n\
+                     Install the Coven daemon or add agents to .coven-code/agents/"
+                        .to_string(),
+                );
+            }
+            let mut out = String::from("Available agents/familiars:\n");
+            for def in &defs {
+                let badge = if def.source.starts_with("coven:familiar") {
+                    "\u{2728}"
+                } else {
+                    "\u{2022}"
+                };
+                out.push_str(&format!("  {} {}\n", badge, def.name));
+            }
+            out.push_str("\nRun: coven-code agent <name>  to activate one.");
+            return CommandResult::Message(out);
+        }
+
+        match args.first().copied() {
+            None => {
+                // No arg: show current familiar from ~/.coven-code/settings.json if available.
+                CommandResult::Message(
+                    "Usage: coven-code agent <name>\n\
+                     Use --list to see all available agents and familiars."
+                        .to_string(),
+                )
+            }
+            Some(name) => {
+                // Find the agent/familiar by name (case-insensitive).
+                let needle = name.to_lowercase();
+                let matched = defs.iter().find(|d| {
+                    d.name.to_lowercase() == needle
+                        || d.source
+                            .trim_start_matches("coven:familiar:")
+                            .to_lowercase()
+                            == needle
+                });
+
+                match matched {
+                    Some(def) => {
+                        let is_familiar = def.source.starts_with("coven:familiar");
+                        let badge = if is_familiar { "\u{2728}" } else { "\u{2022}" };
+                        let kind = if is_familiar { "familiar" } else { "agent" };
+                        let instructions_preview: String = def
+                            .instructions
+                            .lines()
+                            .take(4)
+                            .map(|l| format!("  {}", l))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        CommandResult::Message(format!(
+                            "{badge} Activating {kind}: {}\n\
+                             Description: {}\n\
+                             Model: {}\n\
+                             \nPersona preview:\n{}\n\
+                             \nStart a session to apply this persona:\n\
+                             coven-code --agent \"{}\" [prompt]",
+                            def.name,
+                            def.description,
+                            def.model.as_deref().unwrap_or("default"),
+                            instructions_preview,
+                            def.name,
+                        ))
+                    }
+                    None => CommandResult::Error(format!(
+                        "No agent or familiar named '{}' found.\n\
+                         Run: coven-code agent --list",
+                        name
+                    )),
+                }
+            }
         }
     }
 }
@@ -1101,6 +1247,7 @@ impl NamedCommand for crate::StatsCommand {
 pub fn all_named_commands() -> Vec<Box<dyn NamedCommand>> {
     vec![
         Box::new(AgentsCommand),
+        Box::new(AgentCommand),
         Box::new(AddDirCommand),
         Box::new(BranchCommand),
         Box::new(TagCommand),

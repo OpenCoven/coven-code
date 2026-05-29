@@ -10,6 +10,8 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
+use claurst_core::coven_shared;
+
 use crate::overlays::{
     begin_modal_buf, modal_header_line_area, render_modal_title_buf, COVEN_CODE_ACCENT,
     COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT,
@@ -411,6 +413,30 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
         }
     }
 
+    // --- Coven daemon familiars as agent definitions ---
+    // Each familiar from ~/.coven/familiars.toml is surfaced as an agent
+    // that can be selected to give the session a named-familiar persona.
+    // Familiar-sourced agents are appended after user agents so user
+    // definitions always take precedence for the same name.
+    if let Some(familiars) = coven_shared::load_familiars() {
+        let familiar_names: std::collections::HashSet<String> = defs
+            .iter()
+            .map(|d| d.name.to_lowercase())
+            .collect();
+        for fam in &familiars {
+            let display = fam
+                .display_name
+                .as_deref()
+                .unwrap_or(&fam.id)
+                .to_string();
+            // Skip if user already defined an agent with the same display name.
+            if familiar_names.contains(&display.to_lowercase()) {
+                continue;
+            }
+            defs.push(familiar_as_agent_def(fam));
+        }
+    }
+
     defs
 }
 
@@ -451,6 +477,52 @@ fn parse_agent_def(path: &std::path::Path) -> Option<AgentDefinition> {
         shadowed_by: None,
         instructions,
     })
+}
+
+/// Build an `AgentDefinition` from a Coven daemon familiar record.
+///
+/// The resulting definition carries:
+/// - `source: "coven:familiar"` — identifies it as daemon-sourced
+/// - `file_path` pointing to `~/.coven/familiars.toml` (informational)
+/// - a synthesised system-prompt body describing the familiar's role
+pub fn familiar_as_agent_def(fam: &coven_shared::CovenFamiliar) -> AgentDefinition {
+    let display = fam
+        .display_name
+        .as_deref()
+        .unwrap_or(&fam.id)
+        .to_string();
+    let emoji = fam.emoji.as_deref().unwrap_or("✨");
+    let role = fam.role.as_deref().unwrap_or("Familiar");
+    let desc = fam
+        .description
+        .as_deref()
+        .unwrap_or("A Coven familiar available as an agent context.")
+        .to_string();
+    let pronouns = fam
+        .pronouns
+        .as_deref()
+        .map(|p| format!(" Pronouns: {p}."))
+        .unwrap_or_default();
+
+    let instructions = format!(
+        "You are {emoji} {display}, a Coven familiar with the role of {role}.{pronouns}\n\n{desc}\n\nOperate with the full context of the current workspace. Respond in character but remain focused on the developer's goals."
+    );
+
+    let familiar_toml = dirs::home_dir()
+        .map(|h| h.join(".coven").join("familiars.toml"))
+        .unwrap_or_else(|| PathBuf::from("~/.coven/familiars.toml"));
+
+    AgentDefinition {
+        file_path: familiar_toml,
+        name: display,
+        source: format!("coven:familiar:{}", fam.id),
+        model: None, // use session default; user can override
+        memory_scope: Some("workspace".to_string()),
+        description: format!("{emoji} {role} — {desc}"),
+        tools: Vec::new(),
+        shadowed_by: None,
+        instructions,
+    }
 }
 
 fn extract_yaml_str(front: &str, key: &str) -> Option<String> {
@@ -659,11 +731,25 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
         .list_scroll
         .min(state.definitions.len().saturating_sub(max_visible));
 
-    for (i, def) in state.definitions[start..].iter().enumerate() {
-        if i >= max_visible {
-            break;
-        }
-        let abs_idx = start + i;
+    // Separate user-defined and familiar-sourced definitions for display.
+    let (familiar_defs, user_defs): (Vec<_>, Vec<_>) = state.definitions[start..]
+        .iter()
+        .enumerate()
+        .partition(|(_, d)| d.source.starts_with("coven:familiar"));
+
+    // User / workspace agents first.
+    if !user_defs.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            " Workspace Agents",
+            Style::default()
+                .fg(COVEN_CODE_MUTED)
+                .add_modifier(Modifier::BOLD),
+        )]));
+    }
+    let mut rendered = 0;
+    for (abs_rel_idx, def) in &user_defs {
+        if rendered >= max_visible { break; }
+        let abs_idx = start + abs_rel_idx;
         let selected = state.selected_row == abs_idx + 1;
         let model_str = def.model.as_deref().unwrap_or("default");
         let shadow_suffix = if def.shadowed_by.is_some() { " ⚠" } else { "" };
@@ -673,6 +759,38 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
             selected,
             area.width,
         ));
+        rendered += 1;
+    }
+
+    // Coven familiars section.
+    if !familiar_defs.is_empty() {
+        if !user_defs.is_empty() { lines.push(Line::from("")); }
+        lines.push(Line::from(vec![Span::styled(
+            " Coven Familiars",
+            Style::default()
+                .fg(Color::Rgb(139, 92, 246)) // violet-500
+                .add_modifier(Modifier::BOLD),
+        )]));
+    }
+    for (abs_rel_idx, def) in &familiar_defs {
+        if rendered >= max_visible { break; }
+        let abs_idx = start + abs_rel_idx;
+        let selected = state.selected_row == abs_idx + 1;
+        // Extract emoji from description prefix if present.
+        let desc_short = def
+            .description
+            .split(" — ")
+            .next()
+            .unwrap_or(&def.description)
+            .trim()
+            .to_string();
+        lines.push(agent_list_row(
+            def.name.clone(),
+            desc_short,
+            selected,
+            area.width,
+        ));
+        rendered += 1;
     }
     Paragraph::new(lines)
         .style(Style::default().bg(COVEN_CODE_PANEL_BG))
@@ -681,6 +799,22 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
 
 fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
     let mut lines = Vec::new();
+    let is_familiar = def.source.starts_with("coven:familiar");
+
+    // Source badge — colour-coded for familiar vs user.
+    let source_style = if is_familiar {
+        Style::default().fg(Color::Rgb(139, 92, 246)).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(COVEN_CODE_MUTED)
+    };
+    let source_label = if is_familiar {
+        // e.g. "coven:familiar:nova" -> "Coven Familiar · nova"
+        let id = def.source.trim_start_matches("coven:familiar:");
+        format!("Coven Familiar · {}", id)
+    } else {
+        def.source.clone()
+    };
+
     lines.push(Line::from(vec![
         Span::styled(" Name       ", Style::default().fg(COVEN_CODE_MUTED)),
         Span::styled(
@@ -690,8 +824,8 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  ({})", def.source),
-            Style::default().fg(COVEN_CODE_MUTED),
+            format!("  ({})", source_label),
+            source_style,
         ),
     ]));
     lines.push(Line::from(vec![
@@ -724,8 +858,9 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         lines.push(Line::from(vec![Span::raw(format!(" {}", line))]));
     }
     lines.push(Line::default());
+    let prompt_label = if is_familiar { " Persona" } else { " Prompt" };
     lines.push(Line::from(vec![Span::styled(
-        " Prompt",
+        prompt_label,
         Style::default().fg(COVEN_CODE_ACCENT).add_modifier(Modifier::BOLD),
     )]));
     for line in def.instructions.lines().take(8) {

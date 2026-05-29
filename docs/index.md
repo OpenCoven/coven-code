@@ -184,6 +184,24 @@ See [Slash Commands](commands) for the complete reference.
 
 ---
 
+## Coven ecosystem integration
+
+Coven Code connects natively to the [Coven daemon](https://opencoven.ai/docs) when it is running on your machine. With the daemon active:
+
+- **Familiars appear as agents** — every familiar you have configured in `~/.coven/familiars.toml` is automatically surfaced in the `/agents` overlay and the `coven-code agents` command.
+- **Skills are visible** — daemon-registered skills are listed as awareness context so the model knows what capabilities are available.
+- **Familiar glyphs animate** in the welcome panel using the glyph that matches your configured `"familiar"` setting.
+
+Coven Code is fully standalone without the daemon — install it separately to unlock the Coven ecosystem features.
+
+```
+npm install -g @opencoven/coven
+```
+
+See [Coven Familiars](familiars) for the full integration reference.
+
+---
+
 ## Next steps
 
 - [Installation](installation) — download, build from source, system requirements
@@ -195,5 +213,6 @@ See [Slash Commands](commands) for the complete reference.
 - [MCP Integration](mcp) — Model Context Protocol servers
 - [Plugins](plugins) — building and using plugins
 - [Agents](agents) — multi-agent orchestration
+- [Familiars](familiars) — Coven daemon familiars as agent personas
 - [Hooks](hooks) — event-driven automation
 - [Advanced Features](advanced) — extended thinking, sessions, and more
