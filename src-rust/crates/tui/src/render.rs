@@ -1534,9 +1534,12 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::Rgb(196, 181, 253)), // violet-300, muted
     )));
     left_lines.push(Line::from(""));
-    // Center mascot in left column
-    let mascot_indent = left_w.saturating_sub(11) / 2;
-    let pad = " ".repeat(mascot_indent as usize);
+    // Walk mascot across the left column.
+    // Max walkable offset = available width minus mascot width (11), minus 1 margin.
+    let mascot_walk_max = (left_w as i32).saturating_sub(12).max(0);
+    app.rustle_walk_max.set(mascot_walk_max);
+    let walk_x = app.rustle_walk_x.clamp(0, mascot_walk_max) as usize;
+    let pad = " ".repeat(walk_x);
     for cl in &rustle {
         let mut spans = vec![Span::raw(pad.clone())];
         spans.extend(cl.spans.iter().cloned());
