@@ -87,6 +87,9 @@ pub use import_config::{ClaudeMdPreview, ImportExecutionResult, ImportPaths, Imp
 // Skill discovery: filesystem and git URL skill loading.
 pub mod skill_discovery;
 pub use skill_discovery::{DiscoveredSkill, discover_skills, parse_skill_file};
+
+// Coven daemon shared state — read-only bridge to ~/.coven/.
+pub mod coven_shared;
 pub use cost::CostTracker;
 pub use history::ConversationSession;
 pub use feature_flags::FeatureFlagManager;

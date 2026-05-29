@@ -88,6 +88,20 @@ impl Tool for SkillTool {
         let (skill_path, raw) = match find_and_read_skill(skill_name, &dirs).await {
             Some(found) => found,
             None => {
+                // Distinguish "registered with Coven daemon but unsupported"
+                // from "actually missing" so the user gets actionable feedback.
+                let is_daemon = claurst_core::coven_shared::list_daemon_skills()
+                    .iter()
+                    .any(|s| s.id == skill_name);
+                if is_daemon {
+                    return ToolResult::error(format!(
+                        "Skill '{}' is registered with the Coven daemon \
+                         (~/.coven/skills/{}/metadata.json) but cannot be \
+                         expanded from coven-code — daemon skills use a \
+                         manifest-only format. Invoke it via the daemon directly.",
+                        skill_name, skill_name
+                    ));
+                }
                 return ToolResult::error(format!(
                     "Skill '{}' not found. Use skill=\"list\" to see available skills.",
                     skill_name
@@ -177,7 +191,25 @@ async fn list_skills(dirs: &[PathBuf]) -> ToolResult {
         lines.push(format!("  {} — {}", name, desc));
     }
 
-    let total = bundled.len() + disk_skills.len();
+    // Surface Coven daemon skills as read-only awareness. They live at
+    // ~/.coven/skills/<id>/metadata.json and use a manifest-only format
+    // that this SkillTool can't expand (no prompt body) — so they are
+    // listed for visibility but flagged [daemon, not executable].
+    let daemon_skills = claurst_core::coven_shared::list_daemon_skills();
+    let daemon_count = daemon_skills.len();
+    for skill in &daemon_skills {
+        let desc = skill
+            .description
+            .as_deref()
+            .or(skill.name.as_deref())
+            .unwrap_or("(no description)");
+        lines.push(format!(
+            "  {} — {} [daemon, not executable from coven-code]",
+            skill.id, desc
+        ));
+    }
+
+    let total = bundled.len() + disk_skills.len() + daemon_count;
     if total == 0 {
         return ToolResult::success(
             "No skills found. Create .md files in .coven-code/commands/ to define skills.\n\

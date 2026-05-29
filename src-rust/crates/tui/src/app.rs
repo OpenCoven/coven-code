@@ -780,6 +780,12 @@ pub struct App {
     pub rustle_temp_pose: Option<crate::rustle::RustlePose>,
     /// Frame counter at which the next random eye-shift should fire.
     pub rustle_next_blink: u64,
+    /// Horizontal walk position of the mascot in the welcome panel (0-based column offset).
+    pub rustle_walk_x: i32,
+    /// Walk direction: +1 = right, -1 = left.
+    pub rustle_walk_dir: i32,
+    /// Maximum walk offset (in columns) — set each render frame based on available width.
+    pub rustle_walk_max: Cell<i32>,
     /// Instant the current turn's streaming began (reset each time streaming starts).
     pub turn_start: Option<std::time::Instant>,
     /// Elapsed time string for the last completed turn, e.g. "2m 5s".
@@ -1254,6 +1260,9 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos() as u64 % 300),
+            rustle_walk_x: 0,
+            rustle_walk_dir: 1,
+            rustle_walk_max: Cell::new(0),
             turn_start: None,
             last_turn_elapsed: None,
             last_turn_verb: None,
@@ -1833,6 +1842,27 @@ impl App {
         }
 
         self.rustle_current_pose = crate::rustle::RustlePose::Default;
+
+        // Advance walk position every 8 frames (slow pace).
+        if self.frame_count % 8 == 0 {
+            self.rustle_walk_x += self.rustle_walk_dir;
+            let walk_max = self.rustle_walk_max.get();
+            if self.rustle_walk_x >= walk_max {
+                self.rustle_walk_x = walk_max;
+                self.rustle_walk_dir = -1;
+                self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookLeft);
+                self.rustle_pose_until = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(300)
+                );
+            } else if self.rustle_walk_x <= 0 {
+                self.rustle_walk_x = 0;
+                self.rustle_walk_dir = 1;
+                self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookRight);
+                self.rustle_pose_until = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(300)
+                );
+            }
+        }
     }
 
     /// Trigger Rune looking down briefly (called on Tab / mode switch).

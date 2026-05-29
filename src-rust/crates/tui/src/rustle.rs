@@ -176,14 +176,14 @@ fn nova_lines(pose: &RustlePose) -> [Line<'static>; 5] {
         let spin = ['·', '✦', '*', '·'];
         let s = spin[(frame / 5) as usize % 4];
         Line::from(vec![
-            Span::styled(format!(" {}  █  {}  ", s, s), body_style()),
+            Span::styled(format!("  {}  █  {}  ", s, s), body_style()),
         ])
     } else {
         let eyes = match pose {
-            RustlePose::LookLeft  => "  ◄ █ ◄  ",
-            RustlePose::LookRight => "  ► █ ►  ",
-            RustlePose::LookDown  => "  ▼ █ ▼  ",
-            _                     => "  ▲ █ ▲  ",
+            RustlePose::LookLeft  => "  ◄  █  ◄  ",
+            RustlePose::LookRight => "  ►  █  ►  ",
+            RustlePose::LookDown  => "  ▼  █  ▼  ",
+            _                     => "  ▲  █  ▲  ",
         };
         Line::from(vec![Span::styled(eyes.to_string(), body_style())])
     };
@@ -203,13 +203,13 @@ fn cody_lines(pose: &RustlePose) -> [Line<'static>; 5] {
         RustlePose::Loading { frame } => {
             let anim = ['[', '(', '[', '<'];
             let ch = anim[(frame / 5) as usize % 4];
-            format!(" ▄{}  {}▄ ", ch, ch)
+            format!(" ▄ {}   {} ▄ ", ch, ch)  // 11 chars
         }
-        RustlePose::LookLeft  => " ▄[◄ ◄]▄ ".to_string(),
-        RustlePose::LookRight => " ▄[► ►]▄ ".to_string(),
-        RustlePose::LookDown  => " ▄[▼ ▼]▄ ".to_string(),
-        RustlePose::ArmsUp    => " ▄[▲ ▲]▄ ".to_string(),
-        RustlePose::Default   => " ▄[■ ■]▄ ".to_string(),
+        RustlePose::LookLeft  => " ▄ [◄ ◄] ▄ ".to_string(),
+        RustlePose::LookRight => " ▄ [► ►] ▄ ".to_string(),
+        RustlePose::LookDown  => " ▄ [▼ ▼] ▄ ".to_string(),
+        RustlePose::ArmsUp    => " ▄ [▲ ▲] ▄ ".to_string(),
+        RustlePose::Default   => " ▄ [■ ■] ▄ ".to_string(),
     };
     let row2 = Line::from(vec![Span::styled(r2, body_style())]);
     // Body with code glyphs
@@ -235,7 +235,7 @@ fn charm_lines(pose: &RustlePose) -> [Line<'static>; 5] {
     };
     let row3 = Line::from(vec![Span::styled("   █████   ".to_string(), body_style())]);
     let row4_left = match pose {
-        RustlePose::ArmsUp => " ✦  ▀█▀  ✦ ",
+        RustlePose::ArmsUp => "  ✦ ▀█▀ ✦  ",
         _                  => "    ▀█▀    ",
     };
     let row4 = Line::from(vec![Span::styled(row4_left.to_string(), body_style())]);
@@ -272,7 +272,7 @@ fn astra_lines(pose: &RustlePose) -> [Line<'static>; 5] {
     } else {
         Line::from(vec![Span::styled("  ██▀  ✦   ".to_string(), body_style())])
     };
-    let row4 = Line::from(vec![Span::styled("   · ──── · ".to_string(), accent_style())]);
+    let row4 = Line::from(vec![Span::styled("  · ──── · ".to_string(), accent_style())]);
     [row1, row2, row3, row4, Line::from("")]
 }
 

@@ -8560,6 +8560,48 @@ const FAMILIAR_ROSTER: &[(&str, &str)] = &[
     ("echo",  "👻 Memory familiar — round ghost, mirror eyes, echo trail"),
 ];
 
+/// Merge daemon-declared familiars (`~/.coven/familiars.toml`) with the
+/// hardcoded TUI roster. Daemon entries take precedence; hardcoded entries
+/// for names not declared by the daemon remain selectable so the bundled
+/// mascot art keeps working when the daemon isn't installed.
+fn current_familiar_roster() -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+
+    if let Some(daemon) = claurst_core::coven_shared::load_familiars() {
+        for f in daemon {
+            let desc = format_daemon_familiar(&f);
+            seen.insert(f.id.clone());
+            out.push((f.id, desc));
+        }
+    }
+
+    for (name, desc) in FAMILIAR_ROSTER {
+        if !seen.contains(*name) {
+            out.push(((*name).to_string(), (*desc).to_string()));
+        }
+    }
+    out
+}
+
+fn format_daemon_familiar(f: &claurst_core::coven_shared::CovenFamiliar) -> String {
+    let emoji = f.emoji.as_deref().unwrap_or("").trim();
+    let role = f.role.as_deref().unwrap_or("").trim();
+    let desc = f.description.as_deref().unwrap_or("").trim();
+    let mut parts: Vec<String> = Vec::new();
+    if !emoji.is_empty() {
+        parts.push(emoji.to_string());
+    }
+    let tail = match (role.is_empty(), desc.is_empty()) {
+        (true, true) => f.display_name.clone().unwrap_or_else(|| f.id.clone()),
+        (false, true) => role.to_string(),
+        (true, false) => desc.to_string(),
+        (false, false) => format!("{} — {}", role, desc),
+    };
+    parts.push(tail);
+    parts.join(" ")
+}
+
 /// Infer a familiar from the system username — maps known coven member names
 /// to their canonical familiar. Falls back to None (kitty default).
 fn infer_familiar_from_env() -> Option<String> {
@@ -8602,6 +8644,9 @@ impl SlashCommand for FamiliarCommand {
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let arg = args.trim().to_lowercase();
+        let roster = current_familiar_roster();
+        let from_daemon = claurst_core::coven_shared::coven_home().is_some()
+            && claurst_core::coven_shared::load_familiars().is_some();
 
         if arg.is_empty() {
             // Show current + roster.
@@ -8609,9 +8654,17 @@ impl SlashCommand for FamiliarCommand {
             let auto_hint = infer_familiar_from_env()
                 .map(|f| format!(" (auto-detect suggests: {})", f))
                 .unwrap_or_default();
-            let mut out = format!("Current familiar: {}{}\n\nRoster:\n", current, auto_hint);
-            for (name, desc) in FAMILIAR_ROSTER {
-                let marker = if *name == current { " ◀" } else { "" };
+            let source = if from_daemon {
+                " (roster from ~/.coven/familiars.toml)"
+            } else {
+                ""
+            };
+            let mut out = format!(
+                "Current familiar: {}{}\n\nRoster{}:\n",
+                current, auto_hint, source
+            );
+            for (name, desc) in &roster {
+                let marker = if name == current { " ◀" } else { "" };
                 out.push_str(&format!("  {:8} {}{}", name, desc, marker));
                 out.push('\n');
             }
@@ -8624,10 +8677,10 @@ impl SlashCommand for FamiliarCommand {
             None
         } else if arg == "auto" {
             infer_familiar_from_env()
-        } else if FAMILIAR_ROSTER.iter().any(|(n, _)| *n == arg) {
+        } else if roster.iter().any(|(n, _)| n == &arg) {
             Some(arg.clone())
         } else {
-            let names: Vec<&str> = FAMILIAR_ROSTER.iter().map(|(n, _)| *n).collect();
+            let names: Vec<&str> = roster.iter().map(|(n, _)| n.as_str()).collect();
             return CommandResult::Error(format!(
                 "Unknown familiar '{}'. Choose from: {}",
                 arg,
@@ -8649,7 +8702,7 @@ impl SlashCommand for FamiliarCommand {
             Some(name) => format!(
                 "Familiar set to {}. {} ",
                 name,
-                FAMILIAR_ROSTER.iter().find(|(n, _)| n == name).map(|(_, d)| *d).unwrap_or("")
+                roster.iter().find(|(n, _)| n == name).map(|(_, d)| d.as_str()).unwrap_or("")
             ),
             None => "Familiar reset to default (kitty).".to_string(),
         };
