@@ -268,7 +268,7 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         );
     }
 
-    set_terminal_title("\u{1f980} Coven Code");
+    set_terminal_title("\u{2728} Coven Code");
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -293,11 +293,11 @@ pub fn set_terminal_title(title: &str) {
 }
 
 /// Update the terminal title to reflect the current session context.
-/// Format: "🦀 | <topic>" or just "🦀 Coven Code" when no topic is set.
+/// Format: "✨ | <topic>" or just "✨ Coven Code" when no topic is set.
 pub fn update_terminal_title(topic: Option<&str>) {
     match topic {
-        Some(t) if !t.is_empty() => set_terminal_title(&format!("\u{1f980} | {}", t)),
-        _ => set_terminal_title("\u{1f980} Coven Code"),
+        Some(t) if !t.is_empty() => set_terminal_title(&format!("\u{2728} | {}", t)),
+        _ => set_terminal_title("\u{2728} Coven Code"),
     }
 }
 
