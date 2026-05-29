@@ -6,19 +6,17 @@ Coven Code integrates natively with the Coven daemon's familiar roster. When the
 
 ## What is a familiar?
 
-A familiar is a named AI persona defined in the Coven ecosystem. Each familiar has an identity (display name, emoji, pronouns), a role description, and optional metadata used to shape how the model presents itself and reasons about tasks. Familiars live under `~/.coven/familiars.toml` and are managed by the Coven daemon.
+A familiar is a named AI persona defined in the Coven ecosystem. Each familiar has an identity (display name, emoji, pronouns), a role description, and optional metadata used to shape how the model presents itself and reasons about tasks. Familiars are user-defined and live in `~/.coven/familiars.toml`, managed by the Coven daemon.
 
-Examples from the default Coven roster:
+For example, a minimal Coven setup might have:
 
 | ID | Name | Role |
 |---|---|---|
-| `nova` | Nova ✨ | Orchestrator, personal AI companion |
-| `kitty` | Kitty 🐱 | General helper |
-| `cody` | Cody 🤖 | Code-first agent |
-| `sage` | Sage 🧙 | Research and reasoning |
-| `astra` | Astra 🌙 | Strategy and planning |
-| `echo` | Echo 👻 | Reflection and retrospection |
-| `charm` | Charm 💜 | Writing and communication |
+| `dev` | Dev 🤖 | Code-first implementation agent |
+| `research` | Research 🧙 | Research and reasoning |
+| `writer` | Writer ✍️ | Writing and communication |
+
+You define your own familiars — the names, roles, and roster are entirely yours.
 
 ---
 
@@ -64,19 +62,19 @@ coven-code agents list
 Output groups entries by type:
 
 ```
-Available Agents (5)
+Available Agents (4)
 
-Workspace Agents (2)
+Workspace Agents (1)
   • review: Senior code reviewer...
     Model: default
 
 ✨ Coven Familiars (3)
-  ★ Nova [nova]
-    Your personal AI companion and orchestrator.
-  ★ Sage [sage]
-    Research, reasoning, and synthesis.
-  ★ Cody [cody]
-    Code-first implementation agent.
+  ★ Dev [dev]
+    Fast, focused code implementation and review.
+  ★ Research [research]
+    Deep research, synthesis, and structured thinking.
+  ★ Writer [writer]
+    Clear writing, docs, and async communication.
 
 Switch active familiar: coven-code agent <name>
 ```
@@ -90,30 +88,30 @@ coven-code agents familiars
 ### Inspect a specific familiar
 
 ```
-coven-code agent nova
+coven-code agent dev
 ```
 
 Output:
 
 ```
-✨ Activating familiar: Nova
-Description: ✨ Orchestrator — Your personal AI companion and orchestrator.
+✨ Activating familiar: Dev
+Description: 🤖 Code Agent — Fast, focused code implementation and review.
 Model: default
 
 Persona preview:
-  You are ✨ Nova, a Coven familiar with the role of Orchestrator.
-  Your personal AI companion ...
+  You are 🤖 Dev, a Coven familiar with the role of Code Agent.
+  Fast, focused code implementation ...
 
 Start a session to apply this persona:
-coven-code --agent "Nova" [prompt]
+coven-code --agent "Dev" [prompt]
 ```
 
 ### Start a session as a specific familiar
 
 ```
-coven-code --agent "Nova" "refactor the auth module"
-coven-code --agent "Sage" "what are the tradeoffs in our current DB schema?"
-coven-code --agent "Cody" "add unit tests for packages/core"
+coven-code --agent "Dev" "refactor the auth module"
+coven-code --agent "Research" "what are the tradeoffs in our current DB schema?"
+coven-code --agent "Writer" "write release notes for v1.2"
 ```
 
 The familiar's persona is prepended to the system prompt. Everything else — tools, providers, turn budget — works as normal.
@@ -126,27 +124,27 @@ Familiars are defined in `~/.coven/familiars.toml`:
 
 ```toml
 [[familiar]]
-id = "nova"
-display_name = "Nova"
-emoji = "✨"
-role = "Orchestrator"
-description = "Your personal AI companion and trusted orchestrator."
-pronouns = "she/her"
+id = "dev"
+display_name = "Dev"
+emoji = "🤖"
+role = "Code Agent"
+description = "Fast, focused code implementation and review."
+pronounces = "they/them"
 
 [[familiar]]
-id = "sage"
-display_name = "Sage"
+id = "research"
+display_name = "Research"
 emoji = "🧙"
 role = "Research & Reasoning"
 description = "Deep research, synthesis, and structured thinking."
 
 [[familiar]]
-id = "cody"
-display_name = "Cody"
-emoji = "🤖"
-role = "Code Agent"
-description = "Fast, focused code implementation and review."
-pronouns = "he/him"
+id = "writer"
+display_name = "Writer"
+emoji = "✍️"
+role = "Writing & Communication"
+description = "Clear writing, docs, and async communication."
+pronounces = "she/her"
 ```
 
 ### Fields
@@ -164,18 +162,18 @@ pronouns = "he/him"
 
 ## Overriding a familiar with a workspace agent
 
-To customise a familiar's behaviour for a specific project, create a `.coven-code/agents/<name>.md` file that matches the familiar's display name. Workspace agents take precedence over familiar-sourced definitions with the same name:
+To customise a familiar's behaviour for a specific project, create a `.coven-code/agents/<id>.md` file that matches the familiar's display name. Workspace agents take precedence over familiar-sourced definitions with the same name:
 
 ```markdown
 ---
-name: Nova
-description: Nova customised for this monorepo
+name: Dev
+description: Dev customised for this monorepo
 model: anthropic/claude-sonnet-4-6
 ---
 
-You are Nova ✨, operating inside the OpenCoven monorepo.
-Prioritise TypeScript/Rust consistency and follow the OpenCoven
-design system for all UI-facing changes.
+You are 🤖 Dev, operating inside the my-monorepo project.
+Prioritise TypeScript consistency and follow the project's
+contributing guide for all code changes.
 ```
 
 The familiar-sourced entry will be suppressed; only the workspace definition appears.

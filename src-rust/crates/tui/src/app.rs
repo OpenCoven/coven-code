@@ -1778,27 +1778,43 @@ impl App {
 
     /// Update the Rune pose for this frame — handles temporary poses, random blinks,
     /// Infer a familiar from the system username.
-    /// Maps known coven member names to their familiar. Falls back to None.
+    /// Checks the Coven daemon's familiars.toml for an id or display_name
+    /// matching the current OS username. Falls back to None so the caller
+    /// can apply its own default.
     pub fn infer_familiar_from_env() -> Option<String> {
+        use claurst_core::coven_shared;
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .ok()?;
         let user_lc = user.to_lowercase();
-        // Extend this list as the coven grows.
-        const MAPPING: &[(&str, &str)] = &[
-            ("buns",      "nova"),
-            ("valentina", "nova"),
-            ("nova",      "nova"),
-            ("kitty",     "kitty"),
-            ("cody",      "cody"),
-            ("charm",     "charm"),
-            ("sage",      "sage"),
-            ("astra",     "astra"),
-            ("echo",      "echo"),
-        ];
-        MAPPING.iter()
-            .find(|(name, _)| user_lc.contains(name))
-            .map(|(_, fam)| fam.to_string())
+
+        // First: check if any configured familiar id or display_name
+        // matches (or contains) the system username.
+        if let Some(familiars) = coven_shared::load_familiars() {
+            for fam in &familiars {
+                if user_lc.contains(&fam.id.to_lowercase()) {
+                    return Some(fam.id.clone());
+                }
+                if let Some(dn) = &fam.display_name {
+                    if user_lc.contains(&dn.to_lowercase()) {
+                        return Some(fam.id.clone());
+                    }
+                }
+            }
+        }
+
+        // Second: if the username itself matches a built-in glyph id,
+        // use it — this works even without the daemon installed.
+        // Built-in glyph ids are the ones that rustle.rs has pixel art for;
+        // unknown ids fall back to the kitty default so any value is safe.
+        let builtin_ids = ["kitty", "nova", "cody", "charm", "sage", "astra", "echo"];
+        for id in &builtin_ids {
+            if user_lc.contains(id) {
+                return Some(id.to_string());
+            }
+        }
+
+        None
     }
 
     /// and the loading spinner on stalls/errors.
