@@ -298,7 +298,17 @@ impl AgentsMenuState {
                     }
                 }
             }
-            AgentsRoute::Detail(idx) => self.open_editor(Some(idx)),
+            AgentsRoute::Detail(idx) => {
+                // Coven familiars are read-only — do not open editor.
+                let is_familiar = self
+                    .definitions
+                    .get(idx)
+                    .map(|d| d.source.starts_with("coven:familiar"))
+                    .unwrap_or(false);
+                if !is_familiar {
+                    self.open_editor(Some(idx));
+                }
+            }
             AgentsRoute::Editor(_) => {}
         }
     }
@@ -645,17 +655,28 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
                 state.active_agents.len(),
                 state.definitions.len()
             ),
-            " enter open  ·  esc close".to_string(),
+            " j/k navigate  ·  enter open  ·  esc close".to_string(),
         ),
-        AgentsRoute::Detail(idx) => (
-            state
+        AgentsRoute::Detail(idx) => {
+            let is_familiar = state
                 .definitions
                 .get(*idx)
-                .map(|def| def.name.clone())
-                .unwrap_or_else(|| "Familiar".to_string()),
-            " Review configuration and prompt details.".to_string(),
-            " enter edit  ·  esc back".to_string(),
-        ),
+                .map(|def| def.source.starts_with("coven:familiar"))
+                .unwrap_or(false);
+            (
+                state
+                    .definitions
+                    .get(*idx)
+                    .map(|def| def.name.clone())
+                    .unwrap_or_else(|| "Familiar".to_string()),
+                " Review configuration and prompt details.".to_string(),
+                if is_familiar {
+                    " read-only  ·  create a workspace override to customise  ·  esc back".to_string()
+                } else {
+                    " enter edit  ·  esc back".to_string()
+                },
+            )
+        }
         AgentsRoute::Editor(Some(_)) => (
             "Edit familiar".to_string(),
             " Update metadata, tools, and prompt instructions.".to_string(),
@@ -875,6 +896,14 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         lines.push(Line::from(vec![Span::styled(
             format!("⚠ Shadowed by: {}", shadow),
             Style::default().fg(Color::Yellow),
+        )]));
+    }
+
+    if is_familiar {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![Span::styled(
+            " ✨ Coven Familiar — read-only. Create a workspace override to customise this familiar.",
+            Style::default().fg(Color::Rgb(139, 92, 246)),
         )]));
     }
 

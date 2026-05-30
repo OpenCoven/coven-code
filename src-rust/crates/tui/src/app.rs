@@ -4504,8 +4504,8 @@ impl App {
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.agents_menu.go_back(),
-            KeyCode::Up => self.agents_menu.select_prev(),
-            KeyCode::Down => self.agents_menu.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.agents_menu.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => self.agents_menu.select_next(),
             KeyCode::Enter | KeyCode::Right => self.agents_menu.confirm_selection(),
             KeyCode::Left => self.agents_menu.go_back(),
             _ => {}
