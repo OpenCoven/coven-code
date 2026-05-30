@@ -45,6 +45,7 @@ use tracing::debug;
 const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("advisor", "Set or unset the server-side advisor model"),
     ("familiar", "Set your active familiar — changes the TUI mascot live"),
+    ("handoff", "Hand off current session context to a Coven familiar"),
     ("agent", "List available familiars or show familiar details"),
     ("agents", "Browse familiar definitions and active familiars"),
     ("changes", "Inspect changes from the current session"),
@@ -2059,6 +2060,39 @@ impl App {
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
         if cmd == "mcp" && !args.trim().is_empty() {
             return false;
+        }
+        if cmd == "handoff" {
+            let familiar = args.trim().to_string();
+            if familiar.is_empty() {
+                self.push_notification(
+                    NotificationKind::Warning,
+                    "Usage: /handoff <familiar_name>".to_string(),
+                    Some(4),
+                );
+                return true;
+            }
+
+            let context = crate::handoff::build_handoff_context(&self.messages, &familiar);
+            let root = self.project_root().to_string_lossy().to_string();
+            match crate::handoff::send_handoff(&familiar, context, &root) {
+                Ok(session_id) => {
+                    self.push_notification(
+                        NotificationKind::Info,
+                        format!(
+                            "Handed off to {familiar}. Session created in Coven daemon. (id: {session_id})"
+                        ),
+                        Some(5),
+                    );
+                }
+                Err(err) => {
+                    self.push_notification(
+                        NotificationKind::Warning,
+                        format!("Handoff failed: {err}"),
+                        Some(5),
+                    );
+                }
+            }
+            return true;
         }
         self.intercept_slash_command(cmd)
     }

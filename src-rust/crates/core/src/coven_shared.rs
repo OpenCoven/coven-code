@@ -11,10 +11,10 @@
 //! `~/.coven/coven.sock`) lives in [`crate::coven_daemon`].
 
 // Re-export Tier B IPC types for convenience.
-pub use crate::coven_daemon::{DaemonClient, DaemonSession, FamiliarStatus};
+pub use crate::coven_daemon::{CreateSessionRequest, DaemonClient, DaemonSession, FamiliarStatus};
 
-use std::path::PathBuf;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// Locate `~/.coven/` if it exists.
 ///
@@ -120,7 +120,11 @@ pub fn list_daemon_skills() -> Vec<DaemonSkill> {
         if !path.is_dir() {
             continue;
         }
-        let Some(id) = path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()) else {
+        let Some(id) = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+        else {
             continue;
         };
         let manifest = path.join("metadata.json");
@@ -158,16 +162,23 @@ mod tests {
     }
 
     fn with_coven_home<F: FnOnce(&std::path::Path)>(setup: F) -> EnvGuard {
-        let lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
         setup(tmp.path());
         std::env::set_var("COVEN_HOME", tmp.path());
-        EnvGuard { _tmp: tmp, _lock: lock }
+        EnvGuard {
+            _tmp: tmp,
+            _lock: lock,
+        }
     }
 
     #[test]
     fn coven_home_returns_none_when_dir_missing() {
-        let _lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("COVEN_HOME", "/nonexistent/path/cc_test_xyz");
         assert!(coven_home().is_none());
         std::env::remove_var("COVEN_HOME");

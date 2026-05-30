@@ -83,6 +83,8 @@ pub mod messages;
 pub mod transcript_turn;
 /// Agent definitions list and coordinator progress view.
 pub mod agents_view;
+/// Coven familiar handoff command support.
+pub mod handoff;
 /// Stats dialog with token usage and cost charts.
 pub mod stats_dialog;
 /// MCP server management UI.
