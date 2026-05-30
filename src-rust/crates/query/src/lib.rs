@@ -689,6 +689,14 @@ const MAX_TOKENS_RECOVERY_MSG: &str =
      you were doing. Pick up mid-thought if that is where the cut happened. \
      Break remaining work into smaller pieces.";
 
+fn should_emit_turn_complete(stop: &str, max_tokens_recovery_count: u32) -> bool {
+    match stop {
+        "tool_use" => false,
+        "max_tokens" => max_tokens_recovery_count >= MAX_TOKENS_RECOVERY_LIMIT,
+        _ => true,
+    }
+}
+
 // Spinner verbs are imported from claurst_core::spinner
 
 /// Run the agentic query loop.
@@ -1700,12 +1708,14 @@ pub async fn run_query_loop(
             }
         }
 
-        if let Some(ref tx) = event_tx {
-            let _ = tx.send(QueryEvent::TurnComplete {
-                turn,
-                stop_reason: stop.to_string(),
-                usage: Some(usage.clone()),
-            });
+        if should_emit_turn_complete(stop, max_tokens_recovery_count) {
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(QueryEvent::TurnComplete {
+                    turn,
+                    stop_reason: stop.to_string(),
+                    usage: Some(usage.clone()),
+                });
+            }
         }
 
         // Helper closure for firing the Stop hook.
@@ -2458,6 +2468,30 @@ mod tests {
             options["reasoningConfig"]["budgetTokens"],
             serde_json::json!(10_000)
         );
+    }
+
+    #[test]
+    fn turn_complete_emission_skips_intermediate_tool_turns() {
+        assert!(!should_emit_turn_complete("tool_use", 0));
+    }
+
+    #[test]
+    fn turn_complete_emission_skips_recoverable_max_tokens_turns() {
+        assert!(!should_emit_turn_complete("max_tokens", 0));
+        assert!(!should_emit_turn_complete("max_tokens", 1));
+        assert!(!should_emit_turn_complete("max_tokens", 2));
+        assert!(should_emit_turn_complete(
+            "max_tokens",
+            MAX_TOKENS_RECOVERY_LIMIT
+        ));
+    }
+
+    #[test]
+    fn turn_complete_emission_keeps_terminal_stop_reasons() {
+        assert!(should_emit_turn_complete("end_turn", 0));
+        assert!(should_emit_turn_complete("stop_sequence", 0));
+        assert!(should_emit_turn_complete("content_filtered", 0));
+        assert!(should_emit_turn_complete("unknown_stop", 0));
     }
 }
 
