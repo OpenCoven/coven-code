@@ -28,6 +28,23 @@ static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 // ---------------------------------------------------------------------------
+// Diff palette — tuned to match Claude Code's terminal diff:
+//   • dim red/green tint across the entire row for removed/added lines
+//   • brighter highlight bg on inline word-level changes inside that row
+//   • soft red/green foreground for markers so they pop on the tint
+//   • subtle slate bg for hunk headers
+// ---------------------------------------------------------------------------
+const DIFF_BG_REMOVED:   Color = Color::Rgb( 52,  18,  24); // dim red row tint
+const DIFF_BG_ADDED:     Color = Color::Rgb( 14,  44,  22); // dim green row tint
+const DIFF_BG_WORD_DEL:  Color = Color::Rgb(150,  38,  52); // bright red — changed word
+const DIFF_BG_WORD_INS:  Color = Color::Rgb( 34, 120,  52); // bright green — changed word
+const DIFF_FG_REMOVED:   Color = Color::Rgb(255, 168, 178); // soft red text/marker
+const DIFF_FG_ADDED:     Color = Color::Rgb(168, 240, 184); // soft green text/marker
+const DIFF_FG_GUTTER:    Color = Color::Rgb(108, 108, 122); // dim line-number gutter
+const DIFF_FG_HEADER:    Color = Color::Rgb(167, 139, 250); // hunk header (@@ lines)
+const DIFF_BG_HEADER:    Color = Color::Rgb( 18,  18,  28); // subtle slate band
+
+// ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
@@ -744,18 +761,20 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    // Build lines for rendering
-    let lines = build_diff_lines(file, inner.width);
-    let total_lines = lines.len();
-    let scroll = (state.detail_scroll as usize).min(total_lines.saturating_sub(inner.height as usize));
-    let visible = &lines[scroll..];
-
-    // Shrink inner width by 1 to leave room for scrollbar
-    let text_width = if total_lines > inner.height as usize {
+    // The diff lines are width-padded so the bg tint extends across the panel,
+    // so pre-compute the rendered width and pass it in (avoids re-padding past
+    // the scrollbar column).
+    let raw_line_count: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+    let needs_scrollbar = raw_line_count > inner.height as usize;
+    let text_width = if needs_scrollbar {
         inner.width.saturating_sub(1)
     } else {
         inner.width
     };
+    let lines = build_diff_lines(file, text_width);
+    let total_lines = lines.len();
+    let scroll = (state.detail_scroll as usize).min(total_lines.saturating_sub(inner.height as usize));
+    let visible = &lines[scroll..];
 
     for (i, line) in visible.iter().enumerate() {
         if i as u16 >= inner.height { break; }
@@ -853,13 +872,19 @@ fn build_inline_diff_spans(old: &str, new: &str) -> (Vec<Span<'static>>, Vec<Spa
             ChangeTag::Delete => {
                 old_spans.push(Span::styled(
                     s,
-                    Style::default().fg(Color::White).bg(Color::Rgb(150, 30, 30)),
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(DIFF_BG_WORD_DEL)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             ChangeTag::Insert => {
                 new_spans.push(Span::styled(
                     s,
-                    Style::default().fg(Color::White).bg(Color::Rgb(30, 130, 30)),
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(DIFF_BG_WORD_INS)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
         }
@@ -933,7 +958,8 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
     // Gutter = 10 chars ("dddd dddd "), prefix marker = 3 chars ("+  " etc.)
     let gutter_width: usize = 10;
     let prefix_width: usize = 3;
-    let avail = (width as usize).saturating_sub(gutter_width + prefix_width);
+    let total_width = width as usize;
+    let avail = total_width.saturating_sub(gutter_width + prefix_width);
 
     for hunk in &file.hunks {
         let hunk_lines = &hunk.lines;
@@ -951,21 +977,43 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
                         let mut removed_row = vec![
                             Span::styled(
                                 format_gutter(diff_line.old_line_no, None),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(DIFF_FG_GUTTER).bg(DIFF_BG_REMOVED),
                             ),
-                            Span::styled("-  ", Style::default().fg(Color::Red)),
+                            Span::styled(
+                                "- ",
+                                Style::default()
+                                    .fg(DIFF_FG_REMOVED)
+                                    .bg(DIFF_BG_REMOVED)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" ", Style::default().bg(DIFF_BG_REMOVED)),
                         ];
-                        removed_row.extend(truncate_spans_to_width(old_spans, avail));
+                        let mut old_clipped = truncate_spans_to_width(old_spans, avail);
+                        recolor_equal_spans(&mut old_clipped, DIFF_FG_REMOVED);
+                        apply_row_bg(&mut old_clipped, DIFF_BG_REMOVED);
+                        removed_row.extend(old_clipped);
+                        pad_to_width(&mut removed_row, total_width, DIFF_BG_REMOVED);
                         lines.push(Line::from(removed_row));
 
                         let mut added_row = vec![
                             Span::styled(
                                 format_gutter(None, next_line.new_line_no),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(DIFF_FG_GUTTER).bg(DIFF_BG_ADDED),
                             ),
-                            Span::styled("+  ", Style::default().fg(Color::Green)),
+                            Span::styled(
+                                "+ ",
+                                Style::default()
+                                    .fg(DIFF_FG_ADDED)
+                                    .bg(DIFF_BG_ADDED)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" ", Style::default().bg(DIFF_BG_ADDED)),
                         ];
-                        added_row.extend(truncate_spans_to_width(new_spans, avail));
+                        let mut new_clipped = truncate_spans_to_width(new_spans, avail);
+                        recolor_equal_spans(&mut new_clipped, DIFF_FG_ADDED);
+                        apply_row_bg(&mut new_clipped, DIFF_BG_ADDED);
+                        added_row.extend(new_clipped);
+                        pad_to_width(&mut added_row, total_width, DIFF_BG_ADDED);
                         lines.push(Line::from(added_row));
 
                         i += 2;
@@ -974,42 +1022,64 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
                 }
             }
 
-            // Standard single-line rendering
-            let (marker, content_style) = match diff_line.kind {
-                DiffLineKind::Header => (
-                    Span::styled("@@ ", Style::default().fg(Color::Rgb(167, 139, 250))),
-                    Style::default().fg(Color::Rgb(167, 139, 250)),
-                ),
-                DiffLineKind::Added => (
-                    Span::styled("+  ", Style::default().fg(Color::Green)),
-                    Style::default().fg(Color::Green),
-                ),
-                DiffLineKind::Removed => (
-                    Span::styled("-  ", Style::default().fg(Color::Red)),
-                    Style::default().fg(Color::Red),
-                ),
-                DiffLineKind::Context => (
-                    Span::styled("   ", Style::default().fg(Color::DarkGray)),
-                    Style::default().fg(Color::White),
-                ),
+            // Hunk header: render the @@ line full-width on a slate band, no gutter/marker.
+            if diff_line.kind == DiffLineKind::Header {
+                let content: String = diff_line.content.chars().take(total_width).collect();
+                let mut row = vec![Span::styled(
+                    format!(" {} ", content),
+                    Style::default()
+                        .fg(DIFF_FG_HEADER)
+                        .bg(DIFF_BG_HEADER)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                pad_to_width(&mut row, total_width, DIFF_BG_HEADER);
+                lines.push(Line::from(row));
+                i += 1;
+                continue;
+            }
+
+            // Added / Removed / Context rows.
+            let (marker_text, marker_fg, row_bg, fallback_fg): (&str, Color, Option<Color>, Color) =
+                match diff_line.kind {
+                    DiffLineKind::Added => ("+ ", DIFF_FG_ADDED, Some(DIFF_BG_ADDED), DIFF_FG_ADDED),
+                    DiffLineKind::Removed => ("- ", DIFF_FG_REMOVED, Some(DIFF_BG_REMOVED), DIFF_FG_REMOVED),
+                    DiffLineKind::Context => ("  ", DIFF_FG_GUTTER, None, COVEN_CODE_TEXT),
+                    DiffLineKind::Header => unreachable!(),
+                };
+
+            let gutter_style = match row_bg {
+                Some(bg) => Style::default().fg(DIFF_FG_GUTTER).bg(bg),
+                None => Style::default().fg(DIFF_FG_GUTTER),
+            };
+            let marker_style = match row_bg {
+                Some(bg) => Style::default().fg(marker_fg).bg(bg).add_modifier(Modifier::BOLD),
+                None => Style::default().fg(marker_fg),
             };
 
             let ln_str = format_gutter(diff_line.old_line_no, diff_line.new_line_no);
             let content: String = diff_line.content.chars().take(avail).collect();
 
             let mut row = vec![
-                Span::styled(ln_str, Style::default().fg(Color::DarkGray)),
-                marker,
+                Span::styled(ln_str, gutter_style),
+                Span::styled(marker_text.to_string(), marker_style),
+                Span::styled(" ", row_bg.map(|bg| Style::default().bg(bg)).unwrap_or_default()),
             ];
 
-            // Apply syntax highlighting for code lines (not headers)
-            if diff_line.kind == DiffLineKind::Header {
-                row.push(Span::styled(content, content_style));
-            } else {
-                let highlighted = highlight_code_line(&content, &file.path, content_style);
-                row.extend(highlighted);
+            // Syntax-highlight the content. The fallback fg is used only for ranges
+            // where syntect returned a near-default color (so the diff tint reads cleanly).
+            let mut highlighted = highlight_code_line(
+                &content,
+                &file.path,
+                Style::default().fg(fallback_fg),
+            );
+            if let Some(bg) = row_bg {
+                apply_row_bg(&mut highlighted, bg);
             }
+            row.extend(highlighted);
 
+            if let Some(bg) = row_bg {
+                pad_to_width(&mut row, total_width, bg);
+            }
             lines.push(Line::from(row));
 
             i += 1;
@@ -1017,6 +1087,39 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Add `bg` to every span that doesn't already declare a background.
+/// Preserves word-level inline highlight bgs (which are already set).
+fn apply_row_bg(spans: &mut Vec<Span<'static>>, bg: Color) {
+    for span in spans.iter_mut() {
+        if span.style.bg.is_none() {
+            span.style = span.style.bg(bg);
+        }
+    }
+}
+
+/// Pad `spans` out to `width` characters by appending a single bg-only space span.
+fn pad_to_width(spans: &mut Vec<Span<'static>>, width: usize, bg: Color) {
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(bg),
+        ));
+    }
+}
+
+/// Inside an inline-diff row, the COVEN_CODE_TEXT fg used by `build_inline_diff_spans`
+/// for the unchanged-equal segments is too neutral against the dim red/green row tint.
+/// Recolor those plain-text spans with `fg` so the row reads as a single coherent
+/// removed/added block, while leaving the highlighted word spans alone.
+fn recolor_equal_spans(spans: &mut Vec<Span<'static>>, fg: Color) {
+    for span in spans.iter_mut() {
+        if span.style.bg.is_none() {
+            span.style = span.style.fg(fg);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
