@@ -129,7 +129,8 @@ display_name = "Dev"
 emoji = "🤖"
 role = "Code Agent"
 description = "Fast, focused code implementation and review."
-pronounces = "they/them"
+pronouns = "they/them"
+access = "full"
 
 [[familiar]]
 id = "research"
@@ -137,6 +138,7 @@ display_name = "Research"
 emoji = "🧙"
 role = "Research & Reasoning"
 description = "Deep research, synthesis, and structured thinking."
+# access omitted → defaults to "read-only"
 
 [[familiar]]
 id = "writer"
@@ -144,7 +146,8 @@ display_name = "Writer"
 emoji = "✍️"
 role = "Writing & Communication"
 description = "Clear writing, docs, and async communication."
-pronounces = "she/her"
+pronouns = "she/her"
+access = "read-only"
 ```
 
 ### Fields
@@ -157,6 +160,56 @@ pronounces = "she/her"
 | `role` | | Short role label — shown in the detail view and persona prefix. |
 | `description` | | Full description used to build the persona system prompt. |
 | `pronouns` | | Appended to the persona prompt if present. |
+| `access` | | Tool-access tier: `"full"`, `"read-only"`, or `"search-only"`. Defaults to `"read-only"` when omitted. See [Tool access tiers](#tool-access-tiers) below. |
+
+---
+
+## Tool access tiers
+
+The `access` field controls **which tools** a familiar may invoke once you select them as the active agent (via `--agent <id>` or the `/agents` picker). The same tool-filter pipeline used for the built-in `build` / `plan` / `explore` modes applies, so the rules are consistent across the product.
+
+| Tier | What the familiar can do | Typical role |
+|---|---|---|
+| `full` | Read, write, and execute — full tool set (Edit/Write/Bash/etc.) | Build-tier familiars: `cody`, `nova`, `kitty` |
+| `read-only` | Read & search the workspace, no writes or shell. **Default.** | Research/strategy familiars: `sage`, `astra`, `echo` |
+| `search-only` | Web/search lookups only — no filesystem access | Pure-research personas with no codebase context |
+
+### Why the default is restrictive
+
+`access` defaults to `read-only`. Granting write/exec power is **opt-in**: you must set `access = "full"` explicitly on a familiar to let it edit files or run shell commands. This avoids surprise when a freshly-defined familiar (perhaps written for a research role) accidentally gains the ability to mutate the workspace.
+
+### Recommended defaults per role
+
+| Role | Suggested `access` |
+|---|---|
+| Code / Build / Ship | `"full"` |
+| General Helper / Assistant | `"full"` (set if you want them to edit/run; otherwise leave to default) |
+| Orchestrator / Queen | `"full"` (they coordinate work that requires writes) |
+| Research / Synthesis | `"read-only"` (default — keep them honest) |
+| Strategy / Navigation | `"read-only"` (default) |
+| Memory / Reflection | `"read-only"` (default) |
+| Comms / Social | `"read-only"` (default) |
+
+### Example: minimal opt-in roster
+
+```toml
+# Build-tier — can edit and run.
+[[familiar]]
+id = "cody"
+display_name = "Cody"
+role = "Code"
+access = "full"
+
+# Research-tier — read-only by default (no `access` line needed).
+[[familiar]]
+id = "sage"
+display_name = "Sage"
+role = "Research"
+```
+
+### How `access` interacts with `settings.json` agents
+
+User-defined agents in `.coven-code/agents/*.md` or `settings.json` continue to win on id collisions. Familiars are merged after the built-in `build` / `plan` / `explore` agents, before any user-defined agents — so a workspace override of the same name shadows the familiar entirely (including its `access` value).
 
 ---
 

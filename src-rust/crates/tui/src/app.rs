@@ -4680,10 +4680,27 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.agents_menu.go_back(),
             KeyCode::Up | KeyCode::Char('k') => self.agents_menu.select_prev(),
             KeyCode::Down | KeyCode::Char('j') => self.agents_menu.select_next(),
-            KeyCode::Enter | KeyCode::Right => self.agents_menu.confirm_selection(),
+            KeyCode::Enter | KeyCode::Right => {
+                if let Some((id, display)) = self.agents_menu.confirm_selection() {
+                    self.activate_familiar_agent(id, display);
+                }
+            }
             KeyCode::Left => self.agents_menu.go_back(),
             _ => {}
         }
+    }
+
+    /// Activate a Coven familiar as the session's agent mode and close the picker.
+    ///
+    /// Sets `agent_mode_changed` so the main loop swaps `query_config.agent_definition`
+    /// and re-filters the tool list according to the familiar's access tier.
+    fn activate_familiar_agent(&mut self, id: String, display: String) {
+        self.agents_menu.close();
+        self.agent_mode = Some(id);
+        self.agent_mode_changed = true;
+        self.accent_color = accent_for_mode(self.agent_mode.as_deref());
+        self.plan_mode = false;
+        self.status_message = Some(format!("Switched to {} familiar.", display));
     }
 
     fn handle_diff_viewer_key(&mut self, key: KeyEvent) {

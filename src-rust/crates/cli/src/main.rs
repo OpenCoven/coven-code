@@ -766,10 +766,11 @@ async fn main() -> anyhow::Result<()> {
     query_config.provider_registry = Some(provider_registry.clone());
 
     // Wire in the named agent (--agent flag).
-    // Merge built-in default agents with user-defined agents (user wins on collision).
+    // Merge built-in default agents + Coven familiars with user-defined agents.
+    // Order: built-ins → familiars (built-ins win) → settings.json agents (user wins).
     let tools = if let Some(ref agent_name) = cli.agent {
         query_config.agent_name = Some(agent_name.clone());
-        let mut all_agents = claurst_core::default_agents();
+        let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
         all_agents.extend(config.agents.clone());
         if let Some(def) = all_agents.get(agent_name) {
             let access = def.access.clone();
@@ -2806,11 +2807,12 @@ async fn run_interactive(
                     if !app.model_name.is_empty() {
                         session.model = app.model_name.clone();
                     }
-                    // Handle agent mode change (Tab key cycles build→plan→explore)
+                    // Handle agent mode change (Tab key cycles build→plan→explore;
+                    // /agents picker can also select a Coven familiar).
                     if app.agent_mode_changed {
                         app.agent_mode_changed = false;
                         let mode = app.agent_mode.as_deref().unwrap_or("build");
-                        let mut all_agents = claurst_core::default_agents();
+                        let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
                         all_agents.extend(cmd_ctx.config.agents.clone());
                         if let Some(def) = all_agents.get(mode) {
                             base_query_config.agent_name = Some(mode.to_string());

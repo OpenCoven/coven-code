@@ -289,30 +289,38 @@ impl AgentsMenuState {
         self.selected_row = (self.selected_row + 1) % row_count;
     }
 
-    pub fn confirm_selection(&mut self) {
+    /// Confirm the current selection.
+    ///
+    /// Returns `Some((id, display))` when the user picked a Coven familiar so
+    /// the caller can activate it as the session's agent mode (familiars are
+    /// read-only, so we do not push them into the editor). `None` means the
+    /// menu navigated to a new route (Detail/Editor) or no-op'd.
+    pub fn confirm_selection(&mut self) -> Option<(String, String)> {
         match self.route {
             AgentsRoute::List => {
                 if self.selected_row == 0 {
                     self.open_editor(None);
-                } else {
-                    let idx = self.selected_row - 1;
-                    if idx < self.definitions.len() {
-                        self.route = AgentsRoute::Detail(idx);
-                    }
+                    return None;
                 }
+                let idx = self.selected_row - 1;
+                if let Some(def) = self.definitions.get(idx) {
+                    if let Some(id) = familiar_id_from_source(&def.source) {
+                        return Some((id, def.name.clone()));
+                    }
+                    self.route = AgentsRoute::Detail(idx);
+                }
+                None
             }
             AgentsRoute::Detail(idx) => {
-                // Coven familiars are read-only — do not open editor.
-                let is_familiar = self
-                    .definitions
-                    .get(idx)
-                    .map(|d| d.source.starts_with("coven:familiar"))
-                    .unwrap_or(false);
-                if !is_familiar {
+                if let Some(def) = self.definitions.get(idx) {
+                    if let Some(id) = familiar_id_from_source(&def.source) {
+                        return Some((id, def.name.clone()));
+                    }
                     self.open_editor(Some(idx));
                 }
+                None
             }
-            AgentsRoute::Editor(_) => {}
+            AgentsRoute::Editor(_) => None,
         }
     }
 
@@ -582,6 +590,15 @@ fn extract_yaml_list(front: &str, key: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Extract the familiar id slug from an `AgentDefinition::source` string.
+///
+/// `coven:familiar:<id>` → `Some("<id>")` (lowercased). Anything else → `None`.
+fn familiar_id_from_source(source: &str) -> Option<String> {
+    source
+        .strip_prefix("coven:familiar:")
+        .map(|s| s.to_lowercase())
+}
+
 fn slugify_agent_name(name: &str) -> String {
     let mut slug = String::new();
     for ch in name.chars() {
@@ -676,6 +693,81 @@ mod tests {
             familiar_live_badge(&status("offline", 2)),
             Some(" · active (2 sessions)".to_string())
         );
+    }
+
+    #[test]
+    fn familiar_id_from_source_parses_coven_familiar_prefix() {
+        assert_eq!(
+            familiar_id_from_source("coven:familiar:cody"),
+            Some("cody".to_string())
+        );
+        assert_eq!(
+            familiar_id_from_source("coven:familiar:Nova"),
+            Some("nova".to_string())
+        );
+        assert_eq!(familiar_id_from_source("user"), None);
+        assert_eq!(familiar_id_from_source("plugin:foo"), None);
+    }
+
+    fn familiar_def(id: &str, display: &str) -> AgentDefinition {
+        AgentDefinition {
+            file_path: std::path::PathBuf::from("/tmp/familiars.toml"),
+            name: display.to_string(),
+            source: format!("coven:familiar:{}", id),
+            model: None,
+            memory_scope: Some("workspace".to_string()),
+            description: format!("✨ Familiar — {}", display),
+            tools: Vec::new(),
+            shadowed_by: None,
+            instructions: format!("You are {}.", display),
+        }
+    }
+
+    fn user_def(name: &str) -> AgentDefinition {
+        AgentDefinition {
+            file_path: std::path::PathBuf::from(format!("/tmp/.coven-code/agents/{}.md", name)),
+            name: name.to_string(),
+            source: "user".to_string(),
+            model: None,
+            memory_scope: None,
+            description: "A workspace agent".to_string(),
+            tools: Vec::new(),
+            shadowed_by: None,
+            instructions: "You are a workspace agent.".to_string(),
+        }
+    }
+
+    #[test]
+    fn confirm_selection_returns_familiar_id_from_list_route() {
+        let mut state = AgentsMenuState::new();
+        state.definitions = vec![user_def("review"), familiar_def("cody", "Cody")];
+        state.route = AgentsRoute::List;
+        // selected_row 0 = "Create new"; row 1 = first def (user); row 2 = second def (familiar).
+        state.selected_row = 2;
+        let result = state.confirm_selection();
+        assert_eq!(result, Some(("cody".to_string(), "Cody".to_string())));
+        // List route is unchanged — caller is responsible for closing the menu.
+        assert!(matches!(state.route, AgentsRoute::List));
+    }
+
+    #[test]
+    fn confirm_selection_navigates_to_detail_for_user_agents() {
+        let mut state = AgentsMenuState::new();
+        state.definitions = vec![user_def("review")];
+        state.route = AgentsRoute::List;
+        state.selected_row = 1;
+        let result = state.confirm_selection();
+        assert_eq!(result, None);
+        assert!(matches!(state.route, AgentsRoute::Detail(0)));
+    }
+
+    #[test]
+    fn confirm_selection_returns_familiar_id_from_detail_route() {
+        let mut state = AgentsMenuState::new();
+        state.definitions = vec![familiar_def("nova", "Nova")];
+        state.route = AgentsRoute::Detail(0);
+        let result = state.confirm_selection();
+        assert_eq!(result, Some(("nova".to_string(), "Nova".to_string())));
     }
 }
 
