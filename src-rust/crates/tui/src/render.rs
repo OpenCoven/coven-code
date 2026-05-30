@@ -561,6 +561,11 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_global_search(&app.global_search, size, frame.buffer_mut());
     }
 
+    // Familiar switcher popup (F2)
+    if app.familiar_switcher_open {
+        render_familiar_switcher(frame, app, size);
+    }
+
     if app.feedback_survey.visible {
         render_feedback_survey(&app.feedback_survey, size, frame.buffer_mut());
     }
@@ -2026,6 +2031,36 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         let mut spans: Vec<Span> = Vec::new();
 
+        // Daemon online/offline indicator
+        {
+            let (label, color) = if app.daemon_online {
+                ("\u{2726} coven", Color::Rgb(139, 92, 246))
+            } else {
+                ("\u{25cb} coven", Color::DarkGray)
+            };
+            spans.push(Span::styled(label, Style::default().fg(color)));
+            spans.push(Span::raw("  "));
+        }
+
+        // Current familiar emoji + name
+        {
+            let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
+            let emoji = match familiar_id {
+                "nova"  => "\u{1f451}",
+                "kitty" => "\u{1f431}",
+                "cody"  => "\u{1f4bb}",
+                "charm" => "\u{2728}",
+                "sage"  => "\u{1f33f}",
+                "astra" => "\u{1f319}",
+                "echo"  => "\u{1f47b}",
+                _       => "\u{2b50}",
+            };
+            spans.push(Span::styled(
+                format!("{} {}  ", emoji, familiar_id),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
         // Agent type badge (shown when running as subagent / coordinator)
         if let Some(ref badge) = app.agent_type_badge {
             spans.push(Span::styled(
@@ -2960,4 +2995,70 @@ pub fn render_teammate_header(
     }
 
     Line::from(spans)
+}
+
+
+// ---------------------------------------------------------------------------
+// Familiar switcher popup (F2)
+// ---------------------------------------------------------------------------
+
+fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+
+    let list_len = app.familiar_switcher_list.len() as u16;
+    let popup_h = list_len.saturating_add(2).min(area.height.saturating_sub(4));
+    let popup_w = 26u16.min(area.width.saturating_sub(4));
+    let popup_x = area.x + area.width.saturating_sub(popup_w) / 2;
+    let popup_y = area.y + area.height.saturating_sub(popup_h) / 2;
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_w,
+        height: popup_h,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let builtin_emoji: &[(&str, &str)] = &[
+        ("nova",  "\u{1f451}"),
+        ("kitty", "\u{1f431}"),
+        ("cody",  "\u{1f4bb}"),
+        ("charm", "\u{2728}"),
+        ("sage",  "\u{1f33f}"),
+        ("astra", "\u{1f319}"),
+        ("echo",  "\u{1f47b}"),
+    ];
+
+    let items: Vec<ListItem> = app
+        .familiar_switcher_list
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let emoji = builtin_emoji
+                .iter()
+                .find(|(k, _)| *k == id.as_str())
+                .map(|(_, e)| *e)
+                .unwrap_or("\u{2b50}");
+            let label = format!(" {} {} ", emoji, id);
+            let style = if i == app.familiar_switcher_idx {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Rgb(139, 92, 246))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(" \u{2728} Familiar (F2) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(139, 92, 246)));
+
+    let list = List::new(items).block(block);
+    let mut state = ListState::default();
+    state.select(Some(app.familiar_switcher_idx));
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }

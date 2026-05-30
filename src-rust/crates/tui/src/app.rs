@@ -1090,6 +1090,15 @@ pub struct App {
     pub last_exit_key_warning: Option<std::time::Instant>,
     /// Which exit key ('c' or 'd') started the current confirmation sequence.
     pub exit_key_sequence_start: Option<char>,
+
+    // ---- Coven daemon integration ----------------------------------------
+    pub daemon_online: bool,
+    pub daemon_last_checked: u64,
+
+    // ---- Familiar switcher (F2) ------------------------------------------
+    pub familiar_switcher_open: bool,
+    pub familiar_switcher_list: Vec<String>,
+    pub familiar_switcher_idx: usize,
 }
 
 // Spinner verbs are now imported from claurst_core::spinner
@@ -1442,6 +1451,26 @@ impl App {
             managed_agents_active: false,
             last_exit_key_warning: None,
             exit_key_sequence_start: None,
+            daemon_online: dirs::home_dir()
+                .map(|h| h.join(".coven").join("coven.sock").exists())
+                .unwrap_or(false),
+            daemon_last_checked: 0,
+            familiar_switcher_open: false,
+            familiar_switcher_list: {
+                let mut ids: Vec<String> = vec![
+                    "nova".to_string(), "kitty".to_string(), "cody".to_string(),
+                    "charm".to_string(), "sage".to_string(), "astra".to_string(),
+                    "echo".to_string(),
+                ];
+                use claurst_core::coven_shared;
+                if let Some(familiars) = coven_shared::load_familiars() {
+                    for f in familiars {
+                        if !ids.contains(&f.id) { ids.push(f.id); }
+                    }
+                }
+                ids
+            },
+            familiar_switcher_idx: 0,
         }
     }
 
@@ -2949,6 +2978,34 @@ impl App {
             return false;
         }
 
+        // ---- Familiar switcher (F2) ----------------------------------------
+        if self.familiar_switcher_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::F(2) => { self.familiar_switcher_open = false; }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let len = self.familiar_switcher_list.len();
+                    if len > 0 { self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len; }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let len = self.familiar_switcher_list.len();
+                    if len > 0 { self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len; }
+                }
+                KeyCode::Enter => {
+                    if let Some(id) = self.familiar_switcher_list.get(self.familiar_switcher_idx).cloned() {
+                        self.config.familiar = Some(id.clone());
+                        self.push_notification(
+                            crate::notifications::NotificationKind::Info,
+                            format!("\u{2728} Familiar: {}", id),
+                            None,
+                        );
+                    }
+                    self.familiar_switcher_open = false;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
 
         if self.global_search.visible {
             return self.handle_global_search_key(key);
@@ -4122,6 +4179,19 @@ impl App {
             KeyCode::F(1) => {
                 self.show_help = !self.show_help;
                 self.help_overlay.toggle();
+            }
+            KeyCode::F(2) => {
+                if self.familiar_switcher_open {
+                    self.familiar_switcher_open = false;
+                } else {
+                    self.familiar_switcher_open = true;
+                    let current = self.config.familiar.as_deref().unwrap_or("kitty");
+                    if let Some(idx) = self.familiar_switcher_list.iter().position(|id| id == current) {
+                        self.familiar_switcher_idx = idx;
+                    } else {
+                        self.familiar_switcher_idx = 0;
+                    }
+                }
             }
             KeyCode::Char('?')
                 if !self.is_streaming
@@ -6137,6 +6207,14 @@ impl App {
     ) -> anyhow::Result<Option<String>> {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
+
+            // Re-check daemon socket ~every 30 seconds (300 frames at 10fps).
+            if self.frame_count.wrapping_sub(self.daemon_last_checked) >= 300 {
+                self.daemon_last_checked = self.frame_count;
+                self.daemon_online = dirs::home_dir()
+                    .map(|h| h.join(".coven").join("coven.sock").exists())
+                    .unwrap_or(false);
+            }
 
             // Drain background session-list results.
             if let Some(ref mut rx) = self.session_list_rx {
