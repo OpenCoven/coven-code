@@ -47,6 +47,8 @@ pub mod export_dialog;
 pub mod image_paste;
 /// Inline image rendering via the Kitty graphics protocol (with text fallback).
 pub mod kitty_image;
+/// Familiar card image lookup and terminal escape rendering.
+pub mod familiar_image;
 /// Application state and main event loop.
 pub mod app;
 /// Input helpers: slash command parsing.

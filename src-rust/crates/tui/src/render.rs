@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use crate::agents_view::render_agents_menu;
 use crate::context_viz::render_context_viz;
 use crate::export_dialog::render_export_dialog;
+use crate::familiar_image;
 use crate::app::{App, ContextMenuKind, SystemAnnotation, SystemMessageStyle, ToolStatus};
 use crate::rustle::rustle_lines_for;
 use crate::diff_viewer::render_diff_dialog;
@@ -1540,10 +1541,14 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     app.rustle_walk_max.set(mascot_walk_max);
     let walk_x = app.rustle_walk_x.clamp(0, mascot_walk_max) as usize;
     let pad = " ".repeat(walk_x);
-    for cl in &rustle {
-        let mut spans = vec![Span::raw(pad.clone())];
-        spans.extend(cl.spans.iter().cloned());
-        left_lines.push(Line::from(spans));
+    if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
+        left_lines.push(Line::from(vec![Span::raw(pad.clone()), Span::raw(seq)]));
+    } else {
+        for cl in &rustle {
+            let mut spans = vec![Span::raw(pad.clone())];
+            spans.extend(cl.spans.iter().cloned());
+            left_lines.push(Line::from(spans));
+        }
     }
     frame.render_widget(Paragraph::new(left_lines).wrap(Wrap { trim: false }), h_chunks[0]);
 
