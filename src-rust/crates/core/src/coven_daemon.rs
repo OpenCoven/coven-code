@@ -5,13 +5,18 @@
 //! is added; all calls are blocking and degrade gracefully when the
 //! daemon is absent.
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde::Deserialize;
 
+#[cfg(unix)]
 use crate::coven_shared::coven_home;
 
 // ---------------------------------------------------------------------------
@@ -81,6 +86,7 @@ struct RawSession {
 
 /// Blocking HTTP-over-Unix-socket client for the Coven daemon.
 pub struct DaemonClient {
+    #[cfg(unix)]
     sock_path: PathBuf,
 }
 
@@ -90,11 +96,18 @@ impl DaemonClient {
     /// Returns `None` when the socket file does not exist (daemon is not
     /// running / not installed).  Never panics.
     pub fn new() -> Option<Self> {
-        let home = coven_home()?;
-        let sock = home.join("coven.sock");
-        if sock.exists() {
-            Some(Self { sock_path: sock })
-        } else {
+        #[cfg(unix)]
+        {
+            let home = coven_home()?;
+            let sock = home.join("coven.sock");
+            if sock.exists() {
+                Some(Self { sock_path: sock })
+            } else {
+                None
+            }
+        }
+        #[cfg(not(unix))]
+        {
             None
         }
     }
@@ -102,9 +115,10 @@ impl DaemonClient {
     // -- internal helpers ---------------------------------------------------
 
     /// Open a fresh `UnixStream` connection with a short timeout.
+    #[cfg(unix)]
     fn connect(&self) -> std::io::Result<UnixStream> {
         let stream = UnixStream::connect(&self.sock_path)?;
-        let timeout = Duration::from_secs(3);
+        let timeout = Duration::from_millis(200);
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         Ok(stream)
@@ -115,29 +129,37 @@ impl DaemonClient {
     /// HTTP/1.0 is used so the server closes the connection after the
     /// response — no need to parse `Content-Length` or chunked encoding.
     fn get(&self, path: &str) -> Option<String> {
-        let mut stream = self.connect().ok()?;
-        let request = format!(
-            "GET {} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n",
-            path
-        );
-        stream.write_all(request.as_bytes()).ok()?;
-        stream.flush().ok()?;
+        #[cfg(unix)]
+        {
+            let mut stream = self.connect().ok()?;
+            let request = format!(
+                "GET {} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n",
+                path
+            );
+            stream.write_all(request.as_bytes()).ok()?;
+            stream.flush().ok()?;
 
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).ok()?;
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).ok()?;
 
-        let response = String::from_utf8_lossy(&raw);
+            let response = String::from_utf8_lossy(&raw);
 
-        // Split on the blank line that separates headers from body.
-        if let Some(idx) = response.find("\r\n\r\n") {
-            // Verify the response has a 2xx status code.
-            let status_line = response.lines().next().unwrap_or("");
-            let status_code = status_line.split_whitespace().nth(1)?.parse::<u16>().ok()?;
-            if !(200..300).contains(&status_code) {
-                return None;
+            // Split on the blank line that separates headers from body.
+            if let Some(idx) = response.find("\r\n\r\n") {
+                // Verify the response has a 2xx status code.
+                let status_line = response.lines().next().unwrap_or("");
+                let status_code = status_line.split_whitespace().nth(1)?.parse::<u16>().ok()?;
+                if !(200..300).contains(&status_code) {
+                    return None;
+                }
+                Some(response[idx + 4..].to_string())
+            } else {
+                None
             }
-            Some(response[idx + 4..].to_string())
-        } else {
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
             None
         }
     }
@@ -201,8 +223,8 @@ impl DaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coven_shared::COVEN_HOME_ENV_LOCK;
     use std::fs;
-    use std::sync::Mutex;
 
     /// Guard that temporarily sets `COVEN_HOME` and restores it on drop.
     struct EnvGuard {
@@ -225,12 +247,9 @@ mod tests {
         }
     }
 
-    // Serialize env mutations so parallel tests don't stomp each other.
-    static ENV_MX: Mutex<()> = Mutex::new(());
-
     #[test]
     fn new_returns_none_when_sock_absent() {
-        let _lock = ENV_MX.lock().unwrap();
+        let _lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let _g = EnvGuard::set("COVEN_HOME", dir.path().to_str().unwrap());
         // Directory exists but no coven.sock inside → should return None.
@@ -239,7 +258,7 @@ mod tests {
 
     #[test]
     fn new_returns_some_when_sock_present() {
-        let _lock = ENV_MX.lock().unwrap();
+        let _lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         // Create a placeholder file (not a real socket, just needs to exist).
         fs::write(dir.path().join("coven.sock"), b"").unwrap();
@@ -299,7 +318,7 @@ mod tests {
 
     #[test]
     fn familiar_statuses_returns_empty_on_bad_json() {
-        let _lock = ENV_MX.lock().unwrap();
+        let _lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         // Placeholder sock — not a real socket, so connect() will fail.
         fs::write(dir.path().join("coven.sock"), b"").unwrap();

@@ -32,6 +32,9 @@ pub fn coven_home() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
+#[cfg(test)]
+pub(crate) static COVEN_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // Familiars (~/.coven/familiars.toml)
 // ---------------------------------------------------------------------------
@@ -138,14 +141,11 @@ pub fn list_daemon_skills() -> Vec<DaemonSkill> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
     // coven_home() reads COVEN_HOME from process env, which is shared across
     // parallel tests in the same binary. Serialize the env-touching tests so
     // they don't clobber each other's overrides.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     struct EnvGuard {
         _tmp: TempDir,
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -158,7 +158,7 @@ mod tests {
     }
 
     fn with_coven_home<F: FnOnce(&std::path::Path)>(setup: F) -> EnvGuard {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
         setup(tmp.path());
         std::env::set_var("COVEN_HOME", tmp.path());
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn coven_home_returns_none_when_dir_missing() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("COVEN_HOME", "/nonexistent/path/cc_test_xyz");
         assert!(coven_home().is_none());
         std::env::remove_var("COVEN_HOME");

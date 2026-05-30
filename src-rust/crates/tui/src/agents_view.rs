@@ -8,7 +8,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use claurst_core::coven_shared;
 
@@ -435,15 +438,7 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
             .collect();
 
         // Tier B: fetch live status from the daemon (degrades gracefully).
-        let daemon_statuses: std::collections::HashMap<String, coven_shared::FamiliarStatus> =
-            coven_shared::DaemonClient::new()
-                .map(|c| {
-                    c.familiar_statuses()
-                        .into_iter()
-                        .map(|s| (s.id.clone(), s))
-                        .collect()
-                })
-                .unwrap_or_default();
+        let daemon_statuses = daemon_familiar_statuses();
 
         for fam in &familiars {
             let display = fam
@@ -458,14 +453,9 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
             let mut agent_def = familiar_as_agent_def(fam);
             // Annotate with live daemon status when available.
             if let Some(live) = daemon_statuses.get(&fam.id) {
-                let badge = if live.active_sessions > 0 {
-                    format!(" · active ({} sessions)", live.active_sessions)
-                } else if live.status == "online" || live.status == "active" {
-                    " · online".to_string()
-                } else {
-                    " · offline".to_string()
-                };
-                agent_def.description.push_str(&badge);
+                if let Some(badge) = familiar_live_badge(live) {
+                    agent_def.description.push_str(&badge);
+                }
             }
             defs.push(agent_def);
         }
@@ -602,6 +592,91 @@ fn slugify_agent_name(name: &str) -> String {
         }
     }
     slug.trim_matches('-').to_string()
+}
+
+const DAEMON_STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
+
+type DaemonStatusCache = Option<(Instant, HashMap<String, coven_shared::FamiliarStatus>)>;
+
+fn daemon_status_cache() -> &'static Mutex<DaemonStatusCache> {
+    static CACHE: OnceLock<Mutex<DaemonStatusCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn daemon_familiar_statuses() -> HashMap<String, coven_shared::FamiliarStatus> {
+    let cache = daemon_status_cache();
+    if let Ok(guard) = cache.lock() {
+        if let Some((loaded_at, statuses)) = &*guard {
+            if loaded_at.elapsed() < DAEMON_STATUS_CACHE_TTL {
+                return statuses.clone();
+            }
+        }
+    }
+
+    let statuses: HashMap<String, coven_shared::FamiliarStatus> = coven_shared::DaemonClient::new()
+        .map(|client| {
+            client
+                .familiar_statuses()
+                .into_iter()
+                .filter(|status| familiar_live_badge(status).is_some())
+                .map(|status| (status.id.clone(), status))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), statuses.clone()));
+    }
+    statuses
+}
+
+fn familiar_live_badge(live: &coven_shared::FamiliarStatus) -> Option<String> {
+    if live.active_sessions > 0 {
+        return Some(format!(" · active ({} sessions)", live.active_sessions));
+    }
+
+    match live.status.as_str() {
+        "active" | "online" => Some(" · online".to_string()),
+        "offline" | "unknown" | "" => None,
+        status => Some(format!(" · {status}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(status: &str, active_sessions: u32) -> coven_shared::FamiliarStatus {
+        coven_shared::FamiliarStatus {
+            id: "sage".to_string(),
+            display_name: "Sage".to_string(),
+            emoji: String::new(),
+            status: status.to_string(),
+            active_sessions,
+            memory_freshness: String::new(),
+        }
+    }
+
+    #[test]
+    fn familiar_live_badge_omits_static_offline_status() {
+        assert_eq!(familiar_live_badge(&status("offline", 0)), None);
+    }
+
+    #[test]
+    fn familiar_live_badge_preserves_idle_without_calling_it_offline() {
+        assert_eq!(
+            familiar_live_badge(&status("idle", 0)),
+            Some(" · idle".to_string())
+        );
+    }
+
+    #[test]
+    fn familiar_live_badge_prefers_active_session_count() {
+        assert_eq!(
+            familiar_live_badge(&status("offline", 2)),
+            Some(" · active (2 sessions)".to_string())
+        );
+    }
 }
 
 fn validate_editor(editor: &AgentEditorState) -> Result<(), String> {
