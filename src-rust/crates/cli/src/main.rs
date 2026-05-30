@@ -1715,6 +1715,8 @@ async fn run_interactive(
     app.provider_registry = base_query_config.provider_registry.clone();
     app.refresh_context_window_size();
     app.auto_compact_enabled = live_config.auto_compact;
+    app.completion_toast_enabled = settings.completion_toast_enabled();
+    app.bell_on_complete = settings.bell_on_complete;
 
     // Background: refresh the model registry from models.dev.
     // The fetched JSON is saved as a cache file; the App will reload it from
@@ -1911,6 +1913,10 @@ async fn run_interactive(
     // Current cancel token (replaced each turn)
     let mut cancel: Option<CancellationToken> = None;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
+    // Background bash tasks with notify_on_complete send their terminal-state
+    // info here, where the main loop fans-out to a TUI toast + optional bell.
+    let (bg_completion_tx, mut bg_completion_rx) =
+        mpsc::unbounded_channel::<claurst_tools::BgTaskCompletion>();
     type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
     let mut current_query: Option<(tokio::task::JoinHandle<QueryOutcome>, MessagesArc)> = None;
     // Active effort level (None = use model default / High).
@@ -2673,13 +2679,22 @@ async fn run_interactive(
                             qcfg.effort_level = Some(level);
                         }
                         // Wire completion_notifier if a command queue is available.
+                        // The closure fans-out the structured completion info to:
+                        //   1. The command queue (system-message injection for the agent)
+                        //   2. The TUI channel (toast + optional terminal bell)
                         if let Some(ref cq) = qcfg.command_queue {
                             let cq = cq.clone();
-                            ctx_clone.completion_notifier = Some(claurst_tools::CompletionNotifier::new(move |msg| {
+                            let aux_tx = bg_completion_tx.clone();
+                            ctx_clone.completion_notifier = Some(claurst_tools::CompletionNotifier::new(move |info: claurst_tools::BgTaskCompletion| {
+                                let msg = format!(
+                                    "[Monitor] Background task {} completed ({}).\nCommand: {}\nOutput (last 2000 chars):\n{}",
+                                    info.task_id, info.exit_info, info.command, info.output_tail
+                                );
                                 cq.push(
                                     claurst_query::QueuedCommand::InjectSystemMessage(msg),
                                     claurst_query::CommandPriority::Normal,
                                 );
+                                let _ = aux_tx.send(info);
                             }));
                         }
                         let tracker = cost_tracker.clone();
@@ -2971,6 +2986,17 @@ async fn run_interactive(
                 }
             }
             app.handle_query_event(evt);
+        }
+
+        // Drain background-task completion events: surface a toast and
+        // (optionally) ring the terminal bell so the user can leave their
+        // attention away from the chat and still notice long builds finishing.
+        while let Ok(info) = bg_completion_rx.try_recv() {
+            app.signal_bg_task_completion(
+                &info,
+                settings.completion_toast_enabled(),
+                settings.bell_on_complete,
+            );
         }
 
         // Auto-compact: when context usage hits 99% and no query is running,
@@ -3702,11 +3728,17 @@ async fn run_interactive(
                             }
                             if let Some(ref cq) = qcfg.command_queue {
                                 let cq = cq.clone();
-                                ctx_clone.completion_notifier = Some(claurst_tools::CompletionNotifier::new(move |msg| {
+                                let aux_tx = bg_completion_tx.clone();
+                                ctx_clone.completion_notifier = Some(claurst_tools::CompletionNotifier::new(move |info: claurst_tools::BgTaskCompletion| {
+                                    let msg = format!(
+                                        "[Monitor] Background task {} completed ({}).\nCommand: {}\nOutput (last 2000 chars):\n{}",
+                                        info.task_id, info.exit_info, info.command, info.output_tail
+                                    );
                                     cq.push(
                                         claurst_query::QueuedCommand::InjectSystemMessage(msg),
                                         claurst_query::CommandPriority::Normal,
                                     );
+                                    let _ = aux_tx.send(info);
                                 }));
                             }
                             let tracker = cost_tracker.clone();

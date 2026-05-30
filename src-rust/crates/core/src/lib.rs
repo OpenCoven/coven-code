@@ -1162,6 +1162,20 @@ pub mod config {
         /// Note: @include in CLAUDE.md/AGENTS.md always injects regardless of this limit.
         #[serde(default = "default_file_injection_max_size", rename = "fileInjectionMaxSize")]
         pub file_injection_max_size: usize,
+        /// Show a toast when a background bash task or assistant turn finishes.
+        /// `None` (default) → enabled. `Some(false)` → explicitly disabled.
+        #[serde(default, rename = "completionToast", skip_serializing_if = "Option::is_none")]
+        pub completion_toast: Option<bool>,
+        /// Ring the terminal bell (\x07) when a background bash task or assistant turn finishes. Defaults to false.
+        #[serde(default, rename = "bellOnComplete")]
+        pub bell_on_complete: bool,
+    }
+
+    impl Settings {
+        /// Whether to show completion toasts (default: enabled).
+        pub fn completion_toast_enabled(&self) -> bool {
+            self.completion_toast.unwrap_or(true)
+        }
     }
 
     /// A user-defined slash command template.
@@ -1729,6 +1743,8 @@ pub mod config {
                 file_autocomplete_show_hidden_files: over.file_autocomplete_show_hidden_files || base.file_autocomplete_show_hidden_files,
                 file_injection_enabled: over.file_injection_enabled || base.file_injection_enabled,
                 file_injection_max_size: if over.file_injection_max_size != 0 { over.file_injection_max_size } else { base.file_injection_max_size },
+                completion_toast: over.completion_toast.or(base.completion_toast),
+                bell_on_complete: over.bell_on_complete || base.bell_on_complete,
             }
         }
     }

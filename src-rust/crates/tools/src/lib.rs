@@ -231,17 +231,38 @@ pub fn clear_session_shadow(working_dir: &std::path::Path) {
 }
 
 
-/// A cloneable handle for injecting notification messages into the next agent turn.
-/// Used by background tasks with `notify_on_complete` to signal completion without polling.
+/// Structured payload describing a background task's terminal state.
+/// Carried by [`CompletionNotifier`] so consumers can build their own UI
+/// (system-message injection, TUI toasts, terminal bell, etc.) without
+/// re-parsing a string.
+#[derive(Debug, Clone)]
+pub struct BgTaskCompletion {
+    pub task_id: String,
+    pub command: String,
+    /// `true` if the task exited 0; `false` for non-zero, cancellation, or timeout.
+    pub success: bool,
+    /// Short human-readable status: `"exit 0"`, `"failed: ..."`, `"cancelled"`.
+    pub exit_info: String,
+    /// Last ~2000 characters of stdout/stderr (for system-message injection).
+    pub output_tail: String,
+    /// How long the task ran before reaching the terminal state.
+    pub duration_secs: u64,
+}
+
+/// A cloneable handle invoked when a background bash task reaches a terminal state.
+/// Used by `notify_on_complete` to signal completion without polling.
+///
+/// The closure receives a structured [`BgTaskCompletion`] so it can fan-out to
+/// multiple sinks (e.g., inject a system message AND show a TUI toast).
 #[derive(Clone)]
-pub struct CompletionNotifier(Arc<dyn Fn(String) + Send + Sync>);
+pub struct CompletionNotifier(Arc<dyn Fn(BgTaskCompletion) + Send + Sync>);
 
 impl CompletionNotifier {
-    pub fn new(f: impl Fn(String) + Send + Sync + 'static) -> Self {
+    pub fn new(f: impl Fn(BgTaskCompletion) + Send + Sync + 'static) -> Self {
         Self(Arc::new(f))
     }
-    pub fn notify(&self, msg: String) {
-        (self.0)(msg);
+    pub fn notify(&self, info: BgTaskCompletion) {
+        (self.0)(info);
     }
 }
 

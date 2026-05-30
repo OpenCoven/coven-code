@@ -1943,11 +1943,24 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         s.extend(shimmer_spans(&label, app.frame_count));
         s
     } else if let (Some(verb), Some(elapsed)) = (app.last_turn_verb, app.last_turn_elapsed.as_deref()) {
-        // "✽ Worked for 2m 5s" — mirrors TS TeammateSpinnerLine idle state
-        vec![Span::styled(
-            format!("{} {} for {}", figures::TEARDROP_ASTERISK, verb, elapsed),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        )]
+        // "✓ Worked for 2m 5s · done" — turn-complete idle marker. Used to be
+        // DIM DarkGray; bumped to a bright check mark + softer label so the
+        // user can tell at a glance that the model is finished and waiting.
+        let accent = Color::Rgb(80, 200, 120); // matches NotificationKind::Success
+        vec![
+            Span::styled(
+                "✓ ".to_string(),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} for {}", verb, elapsed),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                " · done".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]
     } else if let Some(status) = app.status_message.as_deref() {
         vec![Span::styled(status.to_string(), Style::default().fg(Color::DarkGray))]
     } else {

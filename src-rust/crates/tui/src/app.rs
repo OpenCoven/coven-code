@@ -978,6 +978,15 @@ pub struct App {
     /// Guard to prevent re-triggering auto-compact while one is in flight.
     pub auto_compact_running: bool,
 
+    /// Show a toast when an assistant turn or background task completes
+    /// (`Settings.completionToast`, default true).
+    pub completion_toast_enabled: bool,
+    /// Ring the terminal bell on completion (`Settings.bellOnComplete`, default false).
+    pub bell_on_complete: bool,
+    /// Minimum turn duration (seconds) before we surface a turn-complete toast.
+    /// Below this, the existing in-status "✽ Worked for Ns" line is enough.
+    pub completion_toast_min_secs: u64,
+
     // ---- Voice hold-to-talk ------------------------------------------------
 
     /// The global voice recorder, Some when voice is enabled in config.
@@ -1203,6 +1212,25 @@ fn format_elapsed_ms(ms: u128) -> String {
     }
 }
 
+pub(crate) fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Write a BEL byte (`\x07`) to stdout. Most terminals translate this into a
+/// visual flash or audible beep depending on user preference.
+pub(crate) fn ring_terminal_bell() {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x07");
+    let _ = out.flush();
+}
+
 fn format_turn_time_label() -> String {
     chrono::Local::now()
         .format("%I:%M %p")
@@ -1386,6 +1414,9 @@ impl App {
             auto_compact_enabled: false,
             auto_compact_threshold: 95,
             auto_compact_running: false,
+            completion_toast_enabled: true,
+            bell_on_complete: false,
+            completion_toast_min_secs: 8,
             voice_recorder: {
                 // Check whether voice input has been enabled via the /voice command
                 // (stored in ~/.coven-code/ui-settings.json).  We also accept
@@ -2669,6 +2700,45 @@ impl App {
             self.error_modal_scroll_offset = 0;
         }
         self.notifications.push(kind, msg, duration_secs);
+    }
+
+    /// Surface a completion signal for a long-running background bash task
+    /// (one launched with `run_in_background: true, notify_on_complete: true`).
+    ///
+    /// Renders a toast in the top-right and optionally rings the terminal
+    /// bell so the user notices builds/tests finishing while their attention
+    /// is elsewhere.
+    pub fn signal_bg_task_completion(
+        &mut self,
+        info: &claurst_tools::BgTaskCompletion,
+        toast_enabled: bool,
+        bell_enabled: bool,
+    ) {
+        if toast_enabled {
+            let cmd_preview: String = info.command.chars().take(48).collect();
+            let cmd_suffix = if info.command.chars().count() > 48 { "…" } else { "" };
+            let duration = format_duration_secs(info.duration_secs);
+            let (kind, msg) = if info.success {
+                (
+                    NotificationKind::Success,
+                    format!("Build done · {}{} · {}", cmd_preview, cmd_suffix, duration),
+                )
+            } else {
+                (
+                    NotificationKind::Error,
+                    format!(
+                        "Build failed · {}{} · {} · {}",
+                        cmd_preview, cmd_suffix, info.exit_info, duration
+                    ),
+                )
+            };
+            // Success toasts auto-dismiss after 8s; failures stay until acknowledged.
+            let duration_secs = if info.success { Some(8) } else { None };
+            self.push_notification(kind, msg, duration_secs);
+        }
+        if bell_enabled {
+            ring_terminal_bell();
+        }
     }
 
     pub fn push_system_message(&mut self, text: String, style: SystemMessageStyle) {
@@ -6167,17 +6237,37 @@ impl App {
                 }
                 // Record elapsed time and pick a completion verb
                 let seed = self.frame_count as usize ^ (self.messages.len() * 7);
+                let turn_elapsed_secs = self.turn_start
+                    .as_ref()
+                    .map(|s| s.elapsed().as_secs())
+                    .unwrap_or(0);
                 let elapsed = self.turn_start.take()
                     .map(|start| format_elapsed_ms(start.elapsed().as_millis()));
-                self.last_turn_elapsed = Some(
-                    elapsed.unwrap_or_else(|| "0s".to_string())
-                );
+                let elapsed_label = elapsed.unwrap_or_else(|| "0s".to_string());
+                self.last_turn_elapsed = Some(elapsed_label.clone());
                 self.last_turn_verb = Some(sample_completion_verb(seed));
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks.retain(|b| b.status != ToolStatus::Running);
-                self.complete_current_turn_snapshot(stop_reason.contains("abort") || stop_reason.contains("cancel"));
+                let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
+                self.complete_current_turn_snapshot(cancelled);
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
+
+                // Surface a clear "turn done" signal for long-running turns the
+                // user might have stepped away from. The faint "✽ Worked for Ns"
+                // status line is too quiet on its own.
+                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                    if self.completion_toast_enabled {
+                        self.push_notification(
+                            NotificationKind::Success,
+                            format!("Turn done · {}", elapsed_label),
+                            Some(6),
+                        );
+                    }
+                    if self.bell_on_complete {
+                        ring_terminal_bell();
+                    }
+                }
             }
 
             QueryEvent::Status(msg) => {
@@ -6596,6 +6686,58 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    // ---- signal_bg_task_completion tests ----
+
+    fn make_bg_completion(success: bool) -> claurst_tools::BgTaskCompletion {
+        claurst_tools::BgTaskCompletion {
+            task_id: "task-1".to_string(),
+            command: "cargo build --release".to_string(),
+            success,
+            exit_info: if success { "exit 0".to_string() } else { "failed: exit 1".to_string() },
+            output_tail: "compiling...".to_string(),
+            duration_secs: 42,
+        }
+    }
+
+    #[test]
+    fn bg_task_success_pushes_success_toast() {
+        let mut app = make_app();
+        let info = make_bg_completion(true);
+        app.signal_bg_task_completion(&info, true, false);
+        let n = app.notifications.current().expect("toast pushed");
+        assert_eq!(n.kind, NotificationKind::Success);
+        assert!(n.message.contains("cargo build --release"));
+        assert!(n.message.contains("42s"));
+    }
+
+    #[test]
+    fn bg_task_failure_pushes_error_toast_no_autoexpire() {
+        let mut app = make_app();
+        let info = make_bg_completion(false);
+        app.signal_bg_task_completion(&info, true, false);
+        let n = app.notifications.current().expect("toast pushed");
+        assert_eq!(n.kind, NotificationKind::Error);
+        assert!(n.message.contains("failed"));
+        assert!(n.expires_at.is_none(), "errors should stay until acknowledged");
+    }
+
+    #[test]
+    fn bg_task_toast_disabled_pushes_nothing() {
+        let mut app = make_app();
+        let info = make_bg_completion(true);
+        app.signal_bg_task_completion(&info, false, false);
+        assert!(app.notifications.current().is_none());
+    }
+
+    #[test]
+    fn format_duration_secs_buckets() {
+        assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(59), "59s");
+        assert_eq!(format_duration_secs(60), "1m 0s");
+        assert_eq!(format_duration_secs(125), "2m 5s");
+        assert_eq!(format_duration_secs(3661), "1h 1m");
     }
 
     // ---- normalize_char_with_shift tests ----

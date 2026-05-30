@@ -251,11 +251,13 @@ async fn run_in_background(
 
     // If notify_on_complete is requested and a notifier is available, spawn a
     // watcher task that polls the registry until the task reaches a terminal
-    // state, then injects a completion message into the agent's next turn.
+    // state, then dispatches a structured completion event. Consumers fan-out
+    // to system-message injection, TUI toasts, terminal bell, etc.
     if notify_on_complete {
         if let Some(notifier) = completion_notifier {
             let watcher_task_id = task_id.clone();
             let watcher_command = command.clone();
+            let started_at = std::time::Instant::now();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -267,27 +269,32 @@ async fn run_in_background(
                                 | claurst_core::tasks::TaskStatus::Failed(_)
                                 | claurst_core::tasks::TaskStatus::Cancelled
                         ) => {
-                            let exit_info = match &t.status {
-                                claurst_core::tasks::TaskStatus::Completed => "exit 0".to_string(),
+                            let (success, exit_info) = match &t.status {
+                                claurst_core::tasks::TaskStatus::Completed => {
+                                    (true, "exit 0".to_string())
+                                }
                                 claurst_core::tasks::TaskStatus::Failed(msg) => {
-                                    format!("failed: {}", msg)
+                                    (false, format!("failed: {}", msg))
                                 }
                                 claurst_core::tasks::TaskStatus::Cancelled => {
-                                    "cancelled".to_string()
+                                    (false, "cancelled".to_string())
                                 }
                                 _ => unreachable!(),
                             };
                             let output = t.output.join("\n");
                             let output_tail = if output.len() > 2000 {
-                                &output[output.len() - 2000..]
+                                output[output.len() - 2000..].to_string()
                             } else {
-                                &output
+                                output
                             };
-                            let msg = format!(
-                                "[Monitor] Background task {} completed ({}).\nCommand: {}\nOutput (last 2000 chars):\n{}",
-                                watcher_task_id, exit_info, watcher_command, output_tail
-                            );
-                            notifier.notify(msg);
+                            notifier.notify(crate::BgTaskCompletion {
+                                task_id: watcher_task_id.clone(),
+                                command: watcher_command.clone(),
+                                success,
+                                exit_info,
+                                output_tail,
+                                duration_secs: started_at.elapsed().as_secs(),
+                            });
                             break;
                         }
                         None => break, // Task disappeared from registry
