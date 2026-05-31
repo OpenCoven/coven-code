@@ -171,8 +171,10 @@ The `access` field controls **which tools** a familiar may invoke once you selec
 | Tier | What the familiar can do | Typical role |
 |---|---|---|
 | `full` | Read, write, and execute — full tool set (Edit/Write/Bash/etc.) | Build-tier familiars: `cody`, `nova`, `kitty` |
-| `read-only` | Read & search the workspace, no writes or shell. **Default.** | Research/strategy familiars: `sage`, `astra`, `echo` |
-| `search-only` | Web/search lookups only — no filesystem access | Pure-research personas with no codebase context |
+| `read-only` | Read & search the workspace plus `AskUserQuestion`, no writes or shell. **Default.** | Research/strategy familiars: `sage`, `astra`, `echo` |
+| `search-only` | Narrow read+search whitelist: `Grep`, `Glob`, `Read`, `WebSearch`, `WebFetch`. No writes or shell. | Pure-research personas with minimal codebase footprint |
+
+> **Unknown values fail closed.** Case and surrounding whitespace are normalized silently — `"READ-ONLY"`, `"Read-Only"`, and `" full "` all map to their canonical tier. Anything else (a typo like `"readonly"`, an invented tier like `"super-admin"`, an empty string) is treated as `"read-only"` and a warning is printed to stderr. Typos cannot silently grant write/exec power.
 
 ### Why the default is restrictive
 

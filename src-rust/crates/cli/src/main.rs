@@ -1268,39 +1268,60 @@ fn normalize_provider_from_model(config: &mut Config) {
 /// - "full"        → all tools allowed (no filtering)
 /// - "read-only"   → only ReadOnly/None permission tools and AskUserQuestion
 /// - "search-only" → only Grep, Glob, Read, WebSearch, WebFetch tools
+///
+/// The raw `access` string is normalized through
+/// [`claurst_core::coven_shared::resolve_access_tier`] before the match — that
+/// canonicalizes case/whitespace silently (so `"READ-ONLY"` and `" full "`
+/// round-trip cleanly) and fails **closed** to `"read-only"` with a stderr
+/// warning for anything genuinely unknown. This preserves the opt-in
+/// semantics of `DEFAULT_FAMILIAR_ACCESS` so that typos in
+/// `~/.coven/familiars.toml` or `settings.json` cannot silently grant
+/// write/exec privileges.
 fn filter_tools_for_agent(
     tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
     access: &str,
 ) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
-    use claurst_tools::PermissionLevel as PL;
-    match access {
-        "read-only" => {
-            // Collect names of tools that are read-only, then rebuild from all_tools
-            // (Box<dyn Tool> is not Clone so we can't directly filter-and-keep).
-            let allowed_names: Vec<String> = tools
-                .iter()
-                .filter(|t| {
-                    matches!(t.permission_level(), PL::ReadOnly | PL::None)
-                        || t.name() == "AskUserQuestion"
-                })
-                .map(|t| t.name().to_string())
-                .collect();
-            let filtered: Vec<Box<dyn claurst_tools::Tool>> = claurst_tools::all_tools()
-                .into_iter()
-                .filter(|t| allowed_names.iter().any(|n| n == t.name()))
-                .collect();
-            Arc::new(filtered)
-        }
-        "search-only" => {
-            const SEARCH_TOOLS: &[&str] = &["Grep", "Glob", "Read", "WebSearch", "WebFetch"];
-            let filtered: Vec<Box<dyn claurst_tools::Tool>> = claurst_tools::all_tools()
-                .into_iter()
-                .filter(|t| SEARCH_TOOLS.contains(&t.name()))
-                .collect();
-            Arc::new(filtered)
-        }
-        _ => tools, // "full" — allow all tools unchanged
+    match claurst_core::coven_shared::resolve_access_tier(access) {
+        "full" => tools,
+        "read-only" => filter_read_only_tools(&tools),
+        "search-only" => filter_search_only_tools(),
+        // `resolve_access_tier` is contracted to return one of the canonical
+        // tiers in `ACCESS_TIERS`, so anything else is a coven_shared bug.
+        other => unreachable!(
+            "resolve_access_tier returned non-canonical tier {other:?}; \
+             coven_shared::ACCESS_TIERS contract violated"
+        ),
     }
+}
+
+fn filter_read_only_tools(
+    tools: &[Box<dyn claurst_tools::Tool>],
+) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    use claurst_tools::PermissionLevel as PL;
+    // Collect names of tools that are read-only, then rebuild from all_tools
+    // (Box<dyn Tool> is not Clone so we can't directly filter-and-keep).
+    let allowed_names: Vec<String> = tools
+        .iter()
+        .filter(|t| {
+            matches!(t.permission_level(), PL::ReadOnly | PL::None)
+                || t.name() == "AskUserQuestion"
+        })
+        .map(|t| t.name().to_string())
+        .collect();
+    let filtered: Vec<Box<dyn claurst_tools::Tool>> = claurst_tools::all_tools()
+        .into_iter()
+        .filter(|t| allowed_names.iter().any(|n| n == t.name()))
+        .collect();
+    Arc::new(filtered)
+}
+
+fn filter_search_only_tools() -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    const SEARCH_TOOLS: &[&str] = &["Grep", "Glob", "Read", "WebSearch", "WebFetch"];
+    let filtered: Vec<Box<dyn claurst_tools::Tool>> = claurst_tools::all_tools()
+        .into_iter()
+        .filter(|t| SEARCH_TOOLS.contains(&t.name()))
+        .collect();
+    Arc::new(filtered)
 }
 
 // ---------------------------------------------------------------------------
@@ -4460,5 +4481,88 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
     match opt {
         Some(s) => serde_json::Value::String(s.clone()),
         None => serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_names(tools: &[Box<dyn claurst_tools::Tool>]) -> Vec<String> {
+        let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn filter_full_returns_input_unchanged() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let before = tool_names(&all);
+        let filtered = filter_tools_for_agent(all.clone(), "full");
+        assert_eq!(tool_names(&filtered), before);
+    }
+
+    #[test]
+    fn filter_read_only_excludes_write_and_exec_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let filtered = filter_tools_for_agent(all, "read-only");
+        let names = tool_names(&filtered);
+        // Write/exec tools must not appear.
+        for forbidden in ["Bash", "Edit", "Write", "NotebookEdit"] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "read-only must not include {forbidden}, got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_unknown_access_falls_back_to_read_only() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let read_only = tool_names(&filter_tools_for_agent(all.clone(), "read-only"));
+        // Genuinely unknown tiers must fail closed to read-only — they trip
+        // the warning path inside `resolve_access_tier`, not the silent
+        // case/whitespace canonicalization.
+        for unknown in ["readonly", "i-am-evil", "", "writeable", "full-access"] {
+            let got = tool_names(&filter_tools_for_agent(all.clone(), unknown));
+            assert_eq!(
+                got, read_only,
+                "unknown access {unknown:?} must fail closed to read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_case_and_whitespace_canonicalize_silently() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let full = tool_names(&filter_tools_for_agent(all.clone(), "full"));
+        let read_only = tool_names(&filter_tools_for_agent(all.clone(), "read-only"));
+        let search_only = tool_names(&filter_tools_for_agent(all.clone(), "search-only"));
+        // Common surface variants should match their canonical tier rather
+        // than fail closed — typos warn, case/whitespace do not.
+        for (variant, expected) in [
+            ("FULL", &full),
+            (" full ", &full),
+            ("READ-ONLY", &read_only),
+            ("Read-Only", &read_only),
+            ("  search-only\n", &search_only),
+        ] {
+            let got = tool_names(&filter_tools_for_agent(all.clone(), variant));
+            assert_eq!(&got, expected, "variant {variant:?} should canonicalize");
+        }
+    }
+
+    #[test]
+    fn filter_search_only_limits_to_known_search_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let names = tool_names(&filter_tools_for_agent(all, "search-only"));
+        // Must be a subset of the documented search-tool whitelist.
+        const ALLOWED: &[&str] = &["Grep", "Glob", "Read", "WebSearch", "WebFetch"];
+        for name in &names {
+            assert!(
+                ALLOWED.contains(&name.as_str()),
+                "search-only emitted disallowed tool {name}, expected subset of {ALLOWED:?}"
+            );
+        }
     }
 }
