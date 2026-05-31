@@ -45,6 +45,50 @@ pub(crate) static COVEN_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::
 /// `access = "full"` per familiar in `~/.coven/familiars.toml`.
 pub const DEFAULT_FAMILIAR_ACCESS: &str = "read-only";
 
+/// All recognized access tiers, in canonical form. Anything outside this set
+/// is treated as untrusted input by [`resolve_access_tier`] and fails closed
+/// to [`DEFAULT_FAMILIAR_ACCESS`].
+pub const ACCESS_TIERS: &[&str] = &["full", "read-only", "search-only"];
+
+/// Normalize an access string to a canonical tier without emitting any
+/// diagnostic. Trims whitespace and lowercases the input so common surface
+/// variants (`" Read-Only "`, `"READ-ONLY"`) round-trip cleanly. Returns
+/// `None` for anything that isn't a known tier — callers MUST treat that as
+/// untrusted input.
+///
+/// The returned `&'static str` is one of the canonical entries in
+/// [`ACCESS_TIERS`], never the caller's allocation.
+pub fn canonicalize_access_tier(input: &str) -> Option<&'static str> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "full" => Some("full"),
+        "read-only" => Some("read-only"),
+        "search-only" => Some("search-only"),
+        _ => None,
+    }
+}
+
+/// Resolve an access string to a canonical tier, failing closed for unknown
+/// values. On unknown input, prints a single warning to stderr (so a typo in
+/// `~/.coven/familiars.toml` or `settings.json` is visible at the moment the
+/// tool filter is applied) and returns [`DEFAULT_FAMILIAR_ACCESS`].
+///
+/// This is the single entry point the CLI tool-filter pipeline should use —
+/// the security model depends on unknown tiers collapsing to the most
+/// restrictive option rather than silently passing the full tool list
+/// through.
+pub fn resolve_access_tier(input: &str) -> &'static str {
+    match canonicalize_access_tier(input) {
+        Some(canonical) => canonical,
+        None => {
+            eprintln!(
+                "warning: unknown access tier {:?} — falling back to {:?}. Valid tiers: {:?}",
+                input, DEFAULT_FAMILIAR_ACCESS, ACCESS_TIERS,
+            );
+            DEFAULT_FAMILIAR_ACCESS
+        }
+    }
+}
+
 /// One entry in `~/.coven/familiars.toml`.
 ///
 /// Schema mirrors what the daemon serves at `GET /api/v1/familiars`.
@@ -68,9 +112,19 @@ pub struct CovenFamiliar {
 }
 
 impl CovenFamiliar {
-    /// Resolved access tier — the explicit value or [`DEFAULT_FAMILIAR_ACCESS`].
-    pub fn resolved_access(&self) -> &str {
-        self.access.as_deref().unwrap_or(DEFAULT_FAMILIAR_ACCESS)
+    /// Resolved access tier — canonicalized to one of [`ACCESS_TIERS`].
+    ///
+    /// Absent values use [`DEFAULT_FAMILIAR_ACCESS`]. Present-but-unknown
+    /// values are normalized silently here (case/whitespace) and otherwise
+    /// fall back to [`DEFAULT_FAMILIAR_ACCESS`]; the warning for a true typo
+    /// fires at the tool-filter chokepoint so it lands at the moment the
+    /// security decision is made instead of at parse time when nothing is
+    /// listening.
+    pub fn resolved_access(&self) -> &'static str {
+        match self.access.as_deref() {
+            None => DEFAULT_FAMILIAR_ACCESS,
+            Some(raw) => canonicalize_access_tier(raw).unwrap_or(DEFAULT_FAMILIAR_ACCESS),
+        }
     }
 }
 
@@ -403,6 +457,90 @@ access = "search-only"
         assert_eq!(merged.get("build").map(|d| d.access.as_str()), Some("full"));
         // Familiar `cody` was merged in with its declared access.
         assert_eq!(merged.get("cody").map(|d| d.access.as_str()), Some("full"));
+    }
+
+    #[test]
+    fn canonicalize_access_tier_accepts_canonical_lowercase() {
+        assert_eq!(canonicalize_access_tier("full"), Some("full"));
+        assert_eq!(canonicalize_access_tier("read-only"), Some("read-only"));
+        assert_eq!(canonicalize_access_tier("search-only"), Some("search-only"));
+    }
+
+    #[test]
+    fn canonicalize_access_tier_normalizes_case_and_whitespace() {
+        assert_eq!(canonicalize_access_tier("FULL"), Some("full"));
+        assert_eq!(canonicalize_access_tier("Read-Only"), Some("read-only"));
+        assert_eq!(canonicalize_access_tier("  search-only\n"), Some("search-only"));
+        assert_eq!(canonicalize_access_tier(" full "), Some("full"));
+    }
+
+    #[test]
+    fn canonicalize_access_tier_rejects_unknown_strings() {
+        // Typos and near-matches must NOT round-trip — callers depend on
+        // `None` to trigger fail-closed behavior.
+        for unknown in &["readonly", "Full Access", "writable", "", "rad-only", "search only"] {
+            assert!(
+                canonicalize_access_tier(unknown).is_none(),
+                "expected {unknown:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_access_tier_falls_back_to_default_on_unknown() {
+        assert_eq!(resolve_access_tier("readonly"), DEFAULT_FAMILIAR_ACCESS);
+        assert_eq!(resolve_access_tier(""), DEFAULT_FAMILIAR_ACCESS);
+        assert_eq!(resolve_access_tier("i-am-evil"), DEFAULT_FAMILIAR_ACCESS);
+    }
+
+    #[test]
+    fn resolve_access_tier_passes_canonical_through() {
+        assert_eq!(resolve_access_tier("full"), "full");
+        assert_eq!(resolve_access_tier("read-only"), "read-only");
+        assert_eq!(resolve_access_tier("search-only"), "search-only");
+        // Case + whitespace are part of the "canonicalize silently" contract.
+        assert_eq!(resolve_access_tier(" FULL "), "full");
+        assert_eq!(resolve_access_tier("READ-ONLY"), "read-only");
+    }
+
+    #[test]
+    fn familiar_resolved_access_normalizes_case_variants() {
+        // Typos and case mismatches in `~/.coven/familiars.toml` must NOT
+        // grant a familiar more power than the user intended. Case variants
+        // canonicalize silently; truly unknown values fail closed to the
+        // restrictive default.
+        let case_variant = CovenFamiliar {
+            id: "rogue".into(),
+            display_name: None,
+            emoji: None,
+            role: None,
+            description: None,
+            pronouns: None,
+            access: Some("READ-ONLY".into()),
+        };
+        assert_eq!(case_variant.resolved_access(), "read-only");
+
+        let typo = CovenFamiliar {
+            id: "rogue".into(),
+            display_name: None,
+            emoji: None,
+            role: None,
+            description: None,
+            pronouns: None,
+            access: Some("readonly".into()),
+        };
+        assert_eq!(typo.resolved_access(), DEFAULT_FAMILIAR_ACCESS);
+
+        let garbage = CovenFamiliar {
+            id: "rogue".into(),
+            display_name: None,
+            emoji: None,
+            role: None,
+            description: None,
+            pronouns: None,
+            access: Some("super-admin".into()),
+        };
+        assert_eq!(garbage.resolved_access(), DEFAULT_FAMILIAR_ACCESS);
     }
 
     #[test]
