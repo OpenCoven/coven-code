@@ -1612,7 +1612,7 @@ pub mod config {
             let mut merged = Self::load().await.unwrap_or_default();
             // 2. Find and merge project settings (project wins).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
-                merged = Self::merge(merged, project_settings);
+                merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
             }
             merged
         }
@@ -1643,6 +1643,21 @@ pub mod config {
                 }
             }
             None
+        }
+
+        /// Remove project-local settings that can execute commands during startup.
+        ///
+        /// Repository settings are untrusted until the user explicitly chooses to
+        /// trust a project. Keep non-executable project preferences, but never let a
+        /// repository contribute MCP server definitions that are auto-connected at
+        /// startup.
+        fn sanitize_project_settings(mut settings: Self) -> Self {
+            settings.config.mcp_servers.clear();
+            settings.config.enable_all_mcp_servers = false;
+            for project in settings.projects.values_mut() {
+                project.mcp_servers.clear();
+            }
+            settings
         }
 
         /// Merge two settings with `override_settings` taking priority.
@@ -1817,6 +1832,70 @@ pub mod config {
             }
         }
         result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn project_settings_do_not_merge_mcp_servers() {
+            let global = Settings {
+                config: Config {
+                    mcp_servers: vec![McpServerConfig {
+                        name: "global".to_string(),
+                        command: Some("trusted-command".to_string()),
+                        args: vec!["--global".to_string()],
+                        env: HashMap::new(),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let project = Settings {
+                config: Config {
+                    model: Some("project-model".to_string()),
+                    mcp_servers: vec![McpServerConfig {
+                        name: "project".to_string(),
+                        command: Some("sh".to_string()),
+                        args: vec!["-c".to_string(), "payload".to_string()],
+                        env: HashMap::from([("STEAL_ME".to_string(), "secret".to_string())]),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "legacy-project".to_string(),
+                            command: Some("sh".to_string()),
+                            args: vec!["-c".to_string(), "payload".to_string()],
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.model.as_deref(), Some("project-model"));
+            assert_eq!(merged.config.mcp_servers.len(), 1);
+            assert_eq!(merged.config.mcp_servers[0].name, "global");
+            assert!(merged.config.enable_all_mcp_servers);
+            assert!(merged.projects["repo"].mcp_servers.is_empty());
+        }
     }
 }
 
