@@ -1259,6 +1259,22 @@ pub mod config {
         !b
     }
 
+    fn is_project_api_base_allowed(provider_id: &str) -> bool {
+        matches!(
+            provider_id,
+            "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" | "llama-server"
+        )
+    }
+
+    fn is_default_provider_config(provider: &ProviderConfig) -> bool {
+        provider.api_key.is_none()
+            && provider.api_base.is_none()
+            && provider.enabled
+            && provider.models_whitelist.is_empty()
+            && provider.models_blacklist.is_empty()
+            && provider.options.is_empty()
+    }
+
     impl Config {
         pub fn selected_provider_id(&self) -> &str {
             self.provider
@@ -1619,7 +1635,7 @@ pub mod config {
 
         /// Walk up from `cwd` looking for `.coven-code/settings.json` or
         /// `.coven-code/settings.jsonc`.
-        async fn find_project_settings(cwd: &std::path::Path) -> Option<Self> {
+        pub(crate) async fn find_project_settings(cwd: &std::path::Path) -> Option<Self> {
             let global_path = Self::global_settings_path();
             let mut dir = cwd;
             loop {
@@ -1630,7 +1646,7 @@ pub mod config {
                         if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
                             let stripped = strip_jsonc_comments(&content);
                             if let Ok(s) = serde_json::from_str::<Self>(&stripped) {
-                                return Some(s);
+                                return Some(Self::sanitize_project_settings(s));
                             }
                         }
                         // Found a file but couldn't parse — stop here, don't go up.
@@ -1645,16 +1661,63 @@ pub mod config {
             None
         }
 
+        pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
+            settings.config.api_key = None;
+            Self::sanitize_project_provider_configs(&mut settings.config.provider_configs);
+            Self::sanitize_project_provider_configs(&mut settings.providers);
+            settings
+        }
+
+        fn sanitize_project_provider_configs(configs: &mut HashMap<String, ProviderConfig>) {
+            configs.retain(|provider_id, provider| {
+                Self::sanitize_project_provider_config(provider_id, provider);
+                !is_default_provider_config(provider)
+            });
+        }
+
+        fn sanitize_project_provider_config(provider_id: &str, provider: &mut ProviderConfig) {
+            provider.api_key = None;
+            if !is_project_api_base_allowed(provider_id) {
+                provider.api_base = None;
+            }
+        }
+
         /// Merge two settings with `override_settings` taking priority.
         /// Simple strategy: override wins for all scalar fields; Vecs are
         /// concatenated (deduped); HashMaps are merged (override wins on collision).
-        fn merge(base: Self, over: Self) -> Self {
+        pub(crate) fn merge(base: Self, over: Self) -> Self {
             // Helper to merge two HashMaps (over wins on key collision).
             fn merge_map<K: std::hash::Hash + Eq + Clone, V: Clone>(
                 mut base: HashMap<K, V>,
                 over: HashMap<K, V>,
             ) -> HashMap<K, V> {
                 for (k, v) in over { base.insert(k, v); }
+                base
+            }
+            fn merge_provider_configs(
+                mut base: HashMap<String, ProviderConfig>,
+                over: HashMap<String, ProviderConfig>,
+            ) -> HashMap<String, ProviderConfig> {
+                for (id, over_provider) in over {
+                    match base.remove(&id) {
+                        Some(mut base_provider) => {
+                            base_provider.api_key = over_provider.api_key.or(base_provider.api_key);
+                            base_provider.api_base = over_provider.api_base.or(base_provider.api_base);
+                            base_provider.enabled = over_provider.enabled;
+                            if !over_provider.models_whitelist.is_empty() {
+                                base_provider.models_whitelist = over_provider.models_whitelist;
+                            }
+                            if !over_provider.models_blacklist.is_empty() {
+                                base_provider.models_blacklist = over_provider.models_blacklist;
+                            }
+                            base_provider.options = merge_map(base_provider.options, over_provider.options);
+                            base.insert(id, base_provider);
+                        }
+                        None => {
+                            base.insert(id, over_provider);
+                        }
+                    }
+                }
                 base
             }
             // Merge the embedded Config structs.
@@ -1687,7 +1750,7 @@ pub mod config {
                 additional_dirs: { let mut v = base.config.additional_dirs; v.extend(over.config.additional_dirs); v },
                 hooks: merge_map(base.config.hooks, over.config.hooks),
                 provider: over.config.provider.or(base.config.provider),
-                provider_configs: merge_map(base.config.provider_configs, over.config.provider_configs),
+                provider_configs: merge_provider_configs(base.config.provider_configs, over.config.provider_configs),
                 formatter: merge_map(base.config.formatter, over.config.formatter),
                 commands: merge_map(base.config.commands, over.config.commands),
                 agents: merge_map(base.config.agents, over.config.agents),
@@ -1718,7 +1781,7 @@ pub mod config {
                 has_completed_onboarding: over.has_completed_onboarding || base.has_completed_onboarding,
                 last_seen_version: over.last_seen_version.or(base.last_seen_version),
                 provider: over.provider.or(base.provider),
-                providers: merge_map(base.providers, over.providers),
+                providers: merge_provider_configs(base.providers, over.providers),
                 commands: merge_map(base.commands, over.commands),
                 formatter: merge_map(base.formatter, over.formatter),
                 agents: merge_map(base.agents, over.agents),
@@ -4176,6 +4239,96 @@ mod tests {
         if let Some(k) = orig {
             std::env::set_var("ANTHROPIC_API_KEY", k);
         }
+    }
+
+    #[test]
+    fn test_project_settings_strip_remote_provider_credentials_and_api_base() {
+        let mut settings = crate::config::Settings::default();
+        settings.config.api_key = Some("sk-project-top-level".to_string());
+        settings.config.provider_configs.insert(
+            "groq".to_string(),
+            crate::config::ProviderConfig {
+                api_key: Some("sk-project-groq".to_string()),
+                api_base: Some("https://attacker.example/groq".to_string()),
+                ..Default::default()
+            },
+        );
+        settings.config.provider_configs.insert(
+            "ollama".to_string(),
+            crate::config::ProviderConfig {
+                api_base: Some("http://127.0.0.1:11434/v1".to_string()),
+                ..Default::default()
+            },
+        );
+        settings.providers.insert(
+            "openai".to_string(),
+            crate::config::ProviderConfig {
+                api_key: Some("sk-project-openai".to_string()),
+                api_base: Some("https://attacker.example/openai".to_string()),
+                ..Default::default()
+            },
+        );
+        settings.providers.insert(
+            "lmstudio".to_string(),
+            crate::config::ProviderConfig {
+                api_base: Some("http://127.0.0.1:1234/v1".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let settings = crate::config::Settings::sanitize_project_settings(settings);
+
+        assert!(settings.config.api_key.is_none());
+
+        assert!(!settings.config.provider_configs.contains_key("groq"));
+        assert!(!settings.providers.contains_key("openai"));
+
+        assert_eq!(
+            settings
+                .config
+                .provider_configs
+                .get("ollama")
+                .and_then(|provider| provider.api_base.as_deref()),
+            Some("http://127.0.0.1:11434/v1"),
+        );
+        assert_eq!(
+            settings
+                .providers
+                .get("lmstudio")
+                .and_then(|provider| provider.api_base.as_deref()),
+            Some("http://127.0.0.1:1234/v1"),
+        );
+    }
+
+    #[test]
+    fn test_project_provider_sanitization_preserves_global_api_base() {
+        let mut global = crate::config::Settings::default();
+        global.providers.insert(
+            "openai".to_string(),
+            crate::config::ProviderConfig {
+                api_key: Some("sk-global-openai".to_string()),
+                api_base: Some("https://trusted.example/openai".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let mut project = crate::config::Settings::default();
+        project.providers.insert(
+            "openai".to_string(),
+            crate::config::ProviderConfig {
+                api_base: Some("https://attacker.example/openai".to_string()),
+                models_whitelist: vec!["gpt-4o".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let project = crate::config::Settings::sanitize_project_settings(project);
+        let merged = crate::config::Settings::merge(global, project);
+        let provider = merged.providers.get("openai").unwrap();
+
+        assert_eq!(provider.api_key.as_deref(), Some("sk-global-openai"));
+        assert_eq!(provider.api_base.as_deref(), Some("https://trusted.example/openai"));
+        assert_eq!(provider.models_whitelist, vec!["gpt-4o".to_string()]);
     }
 
     // ---- OAuth token tests --------------------------------------------------
