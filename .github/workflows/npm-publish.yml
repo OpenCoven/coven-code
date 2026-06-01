@@ -30,7 +30,7 @@ concurrency:
 jobs:
   npm-publish:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
@@ -38,24 +38,33 @@ jobs:
     name: Publish coven-code to npm
 
     steps:
+      - name: Resolve requested version
+        id: requested_version
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+            VERSION="${VERSION#v}"
+
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid npm publish version: $VERSION"
+              exit 1
+            fi
+
+            echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: ${{ steps.requested_version.outputs.tag }}
+          fetch-depth: 0
 
       - uses: actions/checkout@v4
         if: github.event_name == 'workflow_run'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Set up npm
-        run: |
-          npm install -g npm@latest
-          npm --version
+          fetch-depth: 0
 
       - name: Resolve version
         id: version
@@ -77,10 +86,41 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing coven-code@$VERSION"
 
-      - name: Verify GitHub Release exists
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Set up npm
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Verify GitHub Release and source version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release view "${{ steps.version.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null
+
+          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [[ "$TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
+            echo "::error::Checked-out source ($HEAD_COMMIT) does not match $TAG ($TAG_COMMIT)."
+            exit 1
+          fi
+
+          CARGO_VERSION="$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [[ "$CARGO_VERSION" != "$VERSION" ]]; then
+            echo "::error::npm publish version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)."
+            exit 1
+          fi
+
+          echo "Release source verified for $TAG at $HEAD_COMMIT."
 
       - name: Verify trusted publisher identity
         working-directory: npm
