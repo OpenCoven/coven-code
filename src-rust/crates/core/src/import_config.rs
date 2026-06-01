@@ -199,9 +199,12 @@ pub fn summarize_import_result(result: &ImportExecutionResult, paths: &ImportPat
             result.skipped_fields.join(", ")
         ));
     }
-    lines.push(
-        "Reopen settings to review changes. Review CLAUDE.md changes in a new session.".to_string(),
-    );
+    if result.wrote_settings {
+        lines.push("Reopen settings to review changes.".to_string());
+    }
+    if result.wrote_claude_md {
+        lines.push("Review CLAUDE.md changes in a new session.".to_string());
+    }
     lines.join("\n")
 }
 
