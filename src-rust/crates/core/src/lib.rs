@@ -1853,6 +1853,21 @@ pub mod config {
                     enable_all_mcp_servers: true,
                     ..Default::default()
                 },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "trusted-project".to_string(),
+                            command: Some("trusted-project-command".to_string()),
+                            args: Vec::new(),
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
                 ..Default::default()
             };
 
