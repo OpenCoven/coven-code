@@ -52,10 +52,8 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Set up npm
-        run: |
-          npm install -g npm@latest
-          npm --version
+      - name: Verify npm
+        run: npm --version
 
       - name: Resolve version
         id: version
