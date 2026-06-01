@@ -6642,11 +6642,11 @@ impl App {
 }
 
 // Helper function to open a file in the user's external editor
-fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
     // Try to open with the system's default application
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("/usr/bin/open")
             .arg(path)
             .spawn()?;
         Ok(())
@@ -6662,10 +6662,19 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(&["/C", "start", ""])
+        let system_root = windows_system_root();
+        let mut command = std::process::Command::new(
+            std::path::Path::new(&system_root)
+                .join("System32")
+                .join("cmd.exe"),
+        );
+        command
+            .args(["/C", "start", ""])
             .arg(path)
-            .spawn()?;
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .env("WINDIR", &system_root);
+        command.spawn()?;
         Ok(())
     }
 
@@ -6681,8 +6690,18 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
                 Err(_) => continue,
             }
         }
-        Err("No suitable editor found".into())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No suitable editor found",
+        ))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_root() -> std::ffi::OsString {
+    std::env::var_os("SystemRoot")
+        .filter(|root| std::path::Path::new(root).is_absolute())
+        .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"))
 }
 
 #[cfg(test)]
