@@ -495,11 +495,6 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 
     // Overlays (rendered on top in Z-order)
 
-    // Permission dialog (highest priority)
-    if let Some(ref pr) = app.permission_request {
-        render_permission_dialog(frame, pr, size);
-    }
-
     // Rewind flow (takes over screen)
     if app.rewind_flow.visible {
         render_rewind_flow(frame, &app.rewind_flow, size);
@@ -732,7 +727,9 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_mcp_approval_dialog(&app.mcp_approval, size, frame.buffer_mut());
     }
 
-    // Always show error modals on top of everything (highest priority)
+    // Error modals sit above non-security overlays. If a permission request is
+    // also pending, render the permission dialog after the error modal so the
+    // security-sensitive prompt remains visible for the input it owns.
     if let Some(notif) = app.notifications.current() {
         if notif.kind == NotificationKind::Error {
             let is_welcome_screen = app.messages.is_empty()
@@ -740,6 +737,9 @@ pub fn render_app(frame: &mut Frame, app: &App) {
                 && app.streaming_thinking.is_empty()
                 && app.tool_use_blocks.is_empty();
             render_error_modal(frame, size, notif, app.error_modal_scroll_offset, app.footer_right_column_area.get(), is_welcome_screen);
+            if let Some(ref pr) = app.permission_request {
+                render_permission_dialog(frame, pr, size);
+            }
             return; // Don't render other overlays/notifications when error modal is showing
         }
     }
@@ -755,6 +755,12 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     apply_selection_highlight(frame, app);
     cache_selectable_row_text(frame, app);
     render_context_menu(frame, app);
+
+    // Permission dialog is rendered last so the visible security prompt matches
+    // the key handler priority in the interactive event loop.
+    if let Some(ref pr) = app.permission_request {
+        render_permission_dialog(frame, pr, size);
+    }
 }
 
 /// Snapshot the rendered text of every row inside the selectable area into
