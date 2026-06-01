@@ -1,7 +1,6 @@
-use crate::config::{HookEntry, HookEvent, McpServerConfig, Settings, Theme};
-use anyhow::{Context, Result, anyhow};
+use crate::config::{Settings, Theme};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,18 +176,32 @@ pub fn summarize_import_result(result: &ImportExecutionResult, paths: &ImportPat
     let mut lines = vec!["Config import completed.".to_string()];
 
     if result.wrote_claude_md {
-        lines.push(format!("- Wrote CLAUDE.md: {}", paths.target_claude_md.display()));
+        lines.push(format!(
+            "- Wrote CLAUDE.md: {}",
+            paths.target_claude_md.display()
+        ));
     }
     if result.wrote_settings {
-        lines.push(format!("- Wrote settings.json: {}", paths.target_settings_json.display()));
+        lines.push(format!(
+            "- Wrote settings.json: {}",
+            paths.target_settings_json.display()
+        ));
     }
     if !result.imported_fields.is_empty() {
-        lines.push(format!("- Imported fields: {}", result.imported_fields.join(", ")));
+        lines.push(format!(
+            "- Imported fields: {}",
+            result.imported_fields.join(", ")
+        ));
     }
     if !result.skipped_fields.is_empty() {
-        lines.push(format!("- Skipped fields: {}", result.skipped_fields.join(", ")));
+        lines.push(format!(
+            "- Skipped fields: {}",
+            result.skipped_fields.join(", ")
+        ));
     }
-    lines.push("Reopen settings to review changes. If mcpServers were imported, wait for this session to reconnect MCP automatically. Review CLAUDE.md changes in a new session.".to_string());
+    lines.push(
+        "Reopen settings to review changes. Review CLAUDE.md changes in a new session.".to_string(),
+    );
     lines.join("\n")
 }
 
@@ -206,7 +219,10 @@ fn prepare_import(selection: ImportSelection) -> Result<PreparedImport> {
 
     if selection.include_claude_md() {
         let content = std::fs::read_to_string(&paths.source_claude_md).with_context(|| {
-            format!("Failed to read source CLAUDE.md: {}", paths.source_claude_md.display())
+            format!(
+                "Failed to read source CLAUDE.md: {}",
+                paths.source_claude_md.display()
+            )
         })?;
         let excerpt = build_excerpt(&content, 8, 500);
         preview.claude_md = Some(ClaudeMdPreview {
@@ -225,12 +241,13 @@ fn prepare_import(selection: ImportSelection) -> Result<PreparedImport> {
     }
 
     if selection.include_settings() {
-        let source_text = std::fs::read_to_string(&paths.source_settings_json).with_context(|| {
-            format!(
-                "Failed to read source settings.json: {}",
-                paths.source_settings_json.display()
-            )
-        })?;
+        let source_text =
+            std::fs::read_to_string(&paths.source_settings_json).with_context(|| {
+                format!(
+                    "Failed to read source settings.json: {}",
+                    paths.source_settings_json.display()
+                )
+            })?;
         let source_value: Value = serde_json::from_str(&source_text).with_context(|| {
             format!(
                 "Failed to parse source settings.json: {}",
@@ -240,7 +257,8 @@ fn prepare_import(selection: ImportSelection) -> Result<PreparedImport> {
 
         let mut current_settings = Settings::load_sync().unwrap_or_default();
         let current_value = serde_json::to_value(&current_settings).unwrap_or(Value::Null);
-        let settings_outcome = map_settings_preview(&source_value, &current_value, &mut current_settings)?;
+        let settings_outcome =
+            map_settings_preview(&source_value, &current_value, &mut current_settings)?;
         imported_fields.extend(settings_outcome.imported_fields.iter().cloned());
         skipped_fields.extend(settings_outcome.skipped_fields.iter().cloned());
         preview.settings = Some(SettingsPreview {
@@ -300,7 +318,10 @@ fn map_settings_preview(
         preview_fields.push(PreviewField {
             name: "model".to_string(),
             action: PreviewAction::Skip,
-            reason: Some("model is not imported to keep the current session and default model unchanged".to_string()),
+            reason: Some(
+                "model is not imported to keep the current session and default model unchanged"
+                    .to_string(),
+            ),
         });
         skipped_fields.push("model".to_string());
         skipped_count += 1;
@@ -312,7 +333,6 @@ fn map_settings_preview(
         });
         kept_count += 1;
     }
-
 
     map_theme_field(
         source_obj.get("theme"),
@@ -344,28 +364,20 @@ fn map_settings_preview(
         },
     );
 
-    map_mcp_servers_field(
+    map_executable_config_field(
         source_obj.get("mcpServers"),
-        current.pointer("/config/mcp_servers"),
+        "mcpServers",
         &mut preview_fields,
-        &mut imported_fields,
-        &mut imported_count,
-        &mut replaced_count,
         &mut skipped_fields,
         &mut skipped_count,
-        target,
     );
 
-    map_hooks_field(
+    map_executable_config_field(
         source_obj.get("hooks"),
-        current.pointer("/config/hooks"),
+        "hooks",
         &mut preview_fields,
-        &mut imported_fields,
-        &mut imported_count,
-        &mut replaced_count,
         &mut skipped_fields,
         &mut skipped_count,
-        target,
     );
 
     for key in [
@@ -477,7 +489,9 @@ fn map_theme_field(
             };
             if let Some(theme) = parsed {
                 let action = match current_value.and_then(Value::as_str) {
-                    Some(current_text) if current_text.eq_ignore_ascii_case(raw) => PreviewAction::Import,
+                    Some(current_text) if current_text.eq_ignore_ascii_case(raw) => {
+                        PreviewAction::Import
+                    }
                     Some(_) => PreviewAction::Replace,
                     None => PreviewAction::Import,
                 };
@@ -511,239 +525,36 @@ fn map_theme_field(
     }
 }
 
-fn map_mcp_servers_field(
+fn map_executable_config_field(
     source_value: Option<&Value>,
-    current_value: Option<&Value>,
+    name: &str,
     preview_fields: &mut Vec<PreviewField>,
-    imported_fields: &mut Vec<String>,
-    imported_count: &mut usize,
-    replaced_count: &mut usize,
     skipped_fields: &mut Vec<String>,
     skipped_count: &mut usize,
-    target: &mut Settings,
 ) {
-    let Some(value) = source_value else {
+    if source_value.is_some() {
         preview_fields.push(PreviewField {
-            name: "mcpServers".to_string(),
+            name: name.to_string(),
+            action: PreviewAction::Skip,
+            reason: Some("executable configuration is not imported automatically; configure it manually after review".to_string()),
+        });
+        skipped_fields.push(name.to_string());
+        *skipped_count += 1;
+    } else {
+        preview_fields.push(PreviewField {
+            name: name.to_string(),
             action: PreviewAction::Keep,
             reason: Some("source file does not provide this field".to_string()),
         });
-        return;
-    };
-
-    let servers = match parse_mcp_servers(value) {
-        Ok(servers) => servers,
-        Err(_) => {
-            preview_fields.push(PreviewField {
-                name: "mcpServers".to_string(),
-                action: PreviewAction::Skip,
-                reason: Some("mcpServers structure is incompatible with the current program".to_string()),
-            });
-            skipped_fields.push("mcpServers".to_string());
-            *skipped_count += 1;
-            return;
-        }
-    };
-
-    let action = if current_value
-        .and_then(|v| v.as_array())
-        .is_some_and(|items| !items.is_empty())
-    {
-        PreviewAction::Replace
-    } else {
-        PreviewAction::Import
-    };
-    preview_fields.push(PreviewField {
-        name: format!("mcpServers ({})", servers.len()),
-        action,
-        reason: None,
-    });
-    target.config.mcp_servers = servers;
-    imported_fields.push("mcpServers".to_string());
-    if action == PreviewAction::Replace {
-        *replaced_count += 1;
-    } else {
-        *imported_count += 1;
-    }
-}
-
-fn map_hooks_field(
-    source_value: Option<&Value>,
-    current_value: Option<&Value>,
-    preview_fields: &mut Vec<PreviewField>,
-    imported_fields: &mut Vec<String>,
-    imported_count: &mut usize,
-    replaced_count: &mut usize,
-    skipped_fields: &mut Vec<String>,
-    skipped_count: &mut usize,
-    target: &mut Settings,
-) {
-    let Some(value) = source_value else {
-        preview_fields.push(PreviewField {
-            name: "hooks".to_string(),
-            action: PreviewAction::Keep,
-            reason: Some("source file does not provide this field".to_string()),
-        });
-        return;
-    };
-
-    let hooks = match parse_hooks(value) {
-        Ok(hooks) => hooks,
-        Err(_) => {
-            preview_fields.push(PreviewField {
-                name: "hooks".to_string(),
-                action: PreviewAction::Skip,
-                reason: Some("hooks structure is incompatible with the current program".to_string()),
-            });
-            skipped_fields.push("hooks".to_string());
-            *skipped_count += 1;
-            return;
-        }
-    };
-
-    let action = if current_value
-        .and_then(|v| v.as_object())
-        .is_some_and(|items| !items.is_empty())
-    {
-        PreviewAction::Replace
-    } else {
-        PreviewAction::Import
-    };
-    preview_fields.push(PreviewField {
-        name: format!("hooks ({})", hooks.len()),
-        action,
-        reason: None,
-    });
-    target.config.hooks = hooks;
-    imported_fields.push("hooks".to_string());
-    if action == PreviewAction::Replace {
-        *replaced_count += 1;
-    } else {
-        *imported_count += 1;
-    }
-}
-
-fn parse_mcp_servers(value: &Value) -> Result<Vec<McpServerConfig>> {
-    let Some(obj) = value.as_object() else {
-        return Err(anyhow!("mcpServers must be an object"));
-    };
-
-    let mut servers = Vec::new();
-    for (name, entry) in obj {
-        let entry_obj = entry
-            .as_object()
-            .ok_or_else(|| anyhow!("mcpServers.{name} must be an object"))?;
-        let command = entry_obj
-            .get("command")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-        let url = entry_obj
-            .get("url")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-        if command.is_none() && url.is_none() {
-            return Err(anyhow!("mcpServers.{name} is missing command/url"));
-        }
-        let args = entry_obj
-            .get("args")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let env = entry_obj
-            .get("env")
-            .and_then(Value::as_object)
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let server_type = entry_obj
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or(if url.is_some() { "http" } else { "stdio" })
-            .to_string();
-
-        servers.push(McpServerConfig {
-            name: name.clone(),
-            command,
-            args,
-            env,
-            url,
-            server_type,
-        });
-    }
-
-    Ok(servers)
-}
-
-fn parse_hooks(value: &Value) -> Result<HashMap<HookEvent, Vec<HookEntry>>> {
-    let Some(obj) = value.as_object() else {
-        return Err(anyhow!("hooks must be an object"));
-    };
-    let mut out = HashMap::new();
-    for (event_name, event_value) in obj {
-        let event = parse_hook_event(event_name)?;
-        let entries = event_value
-            .as_array()
-            .ok_or_else(|| anyhow!("hooks.{event_name} must be an array"))?;
-        let mut hook_entries = Vec::new();
-        for entry in entries {
-            let entry_obj = entry
-                .as_object()
-                .ok_or_else(|| anyhow!("hooks.{event_name}[] must be an object"))?;
-            let matcher = entry_obj
-                .get("matcher")
-                .and_then(Value::as_str)
-                .unwrap_or("*")
-                .to_string();
-            let hooks = entry_obj
-                .get("hooks")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("hooks.{event_name}[].hooks must be an array"))?;
-            for hook in hooks {
-                let hook_obj = hook
-                    .as_object()
-                    .ok_or_else(|| anyhow!("hooks.{event_name}[].hooks[] must be an object"))?;
-                let command = hook_obj
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("hooks.{event_name} hook is missing command"))?
-                    .to_string();
-                hook_entries.push(HookEntry {
-                    command,
-                    tool_filter: if matcher == "*" { None } else { Some(matcher.clone()) },
-                    blocking: false,
-                });
-            }
-        }
-        out.insert(event, hook_entries);
-    }
-    Ok(out)
-}
-
-fn parse_hook_event(name: &str) -> Result<HookEvent> {
-    match name {
-        "PreToolUse" => Ok(HookEvent::PreToolUse),
-        "PostToolUse" => Ok(HookEvent::PostToolUse),
-        "Stop" => Ok(HookEvent::Stop),
-        "PostModelTurn" => Ok(HookEvent::PostModelTurn),
-        "UserPromptSubmit" => Ok(HookEvent::UserPromptSubmit),
-        "Notification" => Ok(HookEvent::Notification),
-        _ => Err(anyhow!("unsupported hooks event: {name}")),
     }
 }
 
 fn skip_reason_for_key(key: &str) -> &'static str {
     match key {
         "env" => "contains sensitive environment variables and is not imported automatically",
-        "ANTHROPIC_AUTH_TOKEN" | "apiKey" | "providers" => "auth and provider credentials are not migrated automatically",
+        "ANTHROPIC_AUTH_TOKEN" | "apiKey" | "providers" => {
+            "auth and provider credentials are not migrated automatically"
+        }
         "enabledPlugins" => "plugin config structure differs from the current program",
         "disabledMcpServers" => "the current program has no matching field",
         "extraKnownMarketplaces" => "the current program has no matching field",
@@ -805,41 +616,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn parse_mcp_servers_object() {
-        let value = serde_json::json!({
-            "jetbrains": {
-                "type": "stdio",
-                "command": "java",
-                "args": ["-jar", "mcp.jar"],
-                "env": {"A": "1"}
-            }
-        });
-        let servers = parse_mcp_servers(&value).unwrap();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "jetbrains");
-        assert_eq!(servers[0].command.as_deref(), Some("java"));
-    }
-
-    #[test]
-    fn parse_hooks_ts_style() {
-        let value = serde_json::json!({
-            "PreToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [
-                        {"type": "command", "command": "echo hi"}
-                    ]
-                }
-            ]
-        });
-        let hooks = parse_hooks(&value).unwrap();
-        let entries = hooks.get(&HookEvent::PreToolUse).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].tool_filter.as_deref(), Some("Bash"));
-        assert_eq!(entries[0].command, "echo hi");
-    }
-
-    #[test]
     fn build_excerpt_truncates() {
         let excerpt = build_excerpt("a\nb\nc\nd", 2, 10);
         assert!(excerpt.contains("a\nb"));
@@ -889,11 +665,23 @@ mod tests {
         let preview = build_import_preview(ImportSelection::Both).unwrap();
         assert!(preview.claude_md.is_some());
         let settings = preview.settings.unwrap();
-        assert!(settings.fields.iter().any(|f| f.name == "model" && f.action == PreviewAction::Skip));
+        assert!(settings
+            .fields
+            .iter()
+            .any(|f| f.name == "model" && f.action == PreviewAction::Skip));
         assert!(settings.fields.iter().any(|f| f.name == "theme"));
-        assert!(settings.fields.iter().any(|f| f.name.starts_with("hooks")));
-        assert!(settings.fields.iter().any(|f| f.name.starts_with("mcpServers")));
-        assert!(settings.fields.iter().any(|f| f.name == "env" && f.action == PreviewAction::Skip));
+        assert!(settings
+            .fields
+            .iter()
+            .any(|f| f.name == "hooks" && f.action == PreviewAction::Skip));
+        assert!(settings
+            .fields
+            .iter()
+            .any(|f| f.name == "mcpServers" && f.action == PreviewAction::Skip));
+        assert!(settings
+            .fields
+            .iter()
+            .any(|f| f.name == "env" && f.action == PreviewAction::Skip));
 
         if let Some(old) = old_home {
             std::env::set_var("HOME", old);
