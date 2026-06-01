@@ -1909,7 +1909,8 @@ pub mod config {
             assert_eq!(merged.config.mcp_servers.len(), 1);
             assert_eq!(merged.config.mcp_servers[0].name, "global");
             assert!(merged.config.enable_all_mcp_servers);
-            assert!(merged.projects["repo"].mcp_servers.is_empty());
+            assert_eq!(merged.projects["repo"].mcp_servers.len(), 1);
+            assert_eq!(merged.projects["repo"].mcp_servers[0].name, "trusted-project");
         }
     }
 }
