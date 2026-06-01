@@ -386,6 +386,7 @@ jobs:
         run: |
           gh workflow run npm-publish.yml \
             --repo "${{ github.repository }}" \
-            --ref main \
-            -f version="${{ inputs.version }}"
+            --ref "${{ inputs.version }}" \
+            -f version="${{ inputs.version }}" \
+            -f release_sha="${{ github.sha }}"
           echo "Dispatched npm-publish.yml for ${{ inputs.version }}."

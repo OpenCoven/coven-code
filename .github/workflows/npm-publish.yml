@@ -7,6 +7,10 @@ on:
         description: 'Version to publish (e.g., v0.1.1). Must already exist as a GitHub Release.'
         required: true
         type: string
+      release_sha:
+        description: 'Release commit SHA to publish from. Defaults to the version tag for manual runs.'
+        required: false
+        type: string
   workflow_run:
     workflows: ['Release']
     types: [completed]
@@ -40,6 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: ${{ inputs.release_sha || inputs.version }}
 
       - uses: actions/checkout@v4
         if: github.event_name == 'workflow_run'
