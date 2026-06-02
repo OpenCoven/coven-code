@@ -5,9 +5,11 @@ use std::cell::RefCell;
 use crate::agents_view::render_agents_menu;
 use crate::context_viz::render_context_viz;
 use crate::export_dialog::render_export_dialog;
+use crate::familiar_card;
 use crate::familiar_image;
+use crate::familiar_theme;
 use crate::app::{App, ContextMenuKind, SystemAnnotation, SystemMessageStyle, ToolStatus};
-use crate::rustle::rustle_lines_for;
+use crate::rustle::RustlePose;
 use crate::diff_viewer::render_diff_dialog;
 use crate::model_picker::render_model_picker;
 use crate::session_browser::render_session_browser;
@@ -1527,33 +1529,25 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Welcome back!".to_string()
     };
-    let rustle = rustle_lines_for(app.config.familiar.as_deref(), &app.rustle_current_pose);
     let familiar_name = app.config.familiar.as_deref().unwrap_or("kitty");
-    let familiar_label = format!("familiar: {}", familiar_name);
+    let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
+    let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
+    let card_size = familiar_card::pick_size(left_w);
+    let loading_frame = match app.rustle_current_pose {
+        RustlePose::Loading { frame } => Some(frame),
+        RustlePose::Static => None,
+    };
+
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
         welcome_msg,
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
-    left_lines.push(Line::from(Span::styled(
-        familiar_label,
-        Style::default().fg(Color::Rgb(196, 181, 253)), // violet-300, muted
-    )));
     left_lines.push(Line::from(""));
-    // Walk mascot across the left column.
-    // Max walkable offset = available width minus mascot width (11), minus 1 margin.
-    let mascot_walk_max = (left_w as i32).saturating_sub(12).max(0);
-    app.rustle_walk_max.set(mascot_walk_max);
-    let walk_x = app.rustle_walk_x.clamp(0, mascot_walk_max) as usize;
-    let pad = " ".repeat(walk_x);
     if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
-        left_lines.push(Line::from(vec![Span::raw(pad.clone()), Span::raw(seq)]));
+        left_lines.push(Line::from(Span::raw(seq)));
     } else {
-        for cl in &rustle {
-            let mut spans = vec![Span::raw(pad.clone())];
-            spans.extend(cl.spans.iter().cloned());
-            left_lines.push(Line::from(spans));
-        }
+        left_lines.extend(familiar_card::render_card(&theme, card_size, loading_frame));
     }
     frame.render_widget(Paragraph::new(left_lines).wrap(Wrap { trim: false }), h_chunks[0]);
 
@@ -3025,7 +3019,7 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 
     let list_len = app.familiar_switcher_list.len() as u16;
     let popup_h = list_len.saturating_add(2).min(area.height.saturating_sub(4));
-    let popup_w = 26u16.min(area.width.saturating_sub(4));
+    let popup_w = 40u16.min(area.width.saturating_sub(4));
     let popup_x = area.x + area.width.saturating_sub(popup_w) / 2;
     let popup_y = area.y + area.height.saturating_sub(popup_h) / 2;
     let popup_area = Rect {
@@ -3037,36 +3031,27 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(Clear, popup_area);
 
-    let builtin_emoji: &[(&str, &str)] = &[
-        ("nova",  "\u{1f451}"),
-        ("kitty", "\u{1f431}"),
-        ("cody",  "\u{1f4bb}"),
-        ("charm", "\u{2728}"),
-        ("sage",  "\u{1f33f}"),
-        ("astra", "\u{1f319}"),
-        ("echo",  "\u{1f47b}"),
-    ];
+    let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
+    let interior_w = popup_w.saturating_sub(2);
 
     let items: Vec<ListItem> = app
         .familiar_switcher_list
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            let emoji = builtin_emoji
-                .iter()
-                .find(|(k, _)| *k == id.as_str())
-                .map(|(_, e)| *e)
-                .unwrap_or("\u{2b50}");
-            let label = format!(" {} {} ", emoji, id);
-            let style = if i == app.familiar_switcher_idx {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Rgb(139, 92, 246))
-                    .add_modifier(Modifier::BOLD)
+            let theme = familiar_theme::resolve(id, &daemon_familiars);
+            let row = familiar_card::render_mini_row(&theme, interior_w);
+            let item = ListItem::new(row);
+            if i == app.familiar_switcher_idx {
+                item.style(
+                    Style::default()
+                        .bg(theme.palette.primary)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(label).style(style)
+                item
+            }
         })
         .collect();
 

@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use claurst_core::coven_shared;
 
+use crate::familiar_card::{self, CardSize};
+use crate::familiar_theme;
 use crate::overlays::{
     begin_modal_buf, modal_header_line_area, render_modal_title_buf, COVEN_CODE_ACCENT,
     COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT,
@@ -1012,6 +1014,21 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
 fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
     let mut lines = Vec::new();
     let is_familiar = def.source.starts_with("coven:familiar");
+
+    // For familiar-sourced agents, render the themed card at the top of the
+    // detail panel so the user sees the same visual identity they pick from
+    // F2 or the welcome screen. We resolve from the daemon's familiar list
+    // so user-defined entries get a procedural card instead of a fallback.
+    if is_familiar {
+        if let Some(id) = def.source.strip_prefix("coven:familiar:") {
+            let daemon = coven_shared::load_familiars().unwrap_or_default();
+            let theme = familiar_theme::resolve(id, &daemon);
+            for line in familiar_card::render_card(&theme, CardSize::Standard, None) {
+                lines.push(line);
+            }
+            lines.push(Line::default());
+        }
+    }
 
     // Source badge — colour-coded for familiar vs user.
     let source_style = if is_familiar {
