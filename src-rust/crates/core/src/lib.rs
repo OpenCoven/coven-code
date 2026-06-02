@@ -1606,11 +1606,12 @@ pub mod config {
         }
 
         /// Load settings from all config levels and merge them.
-        /// Priority: project > global.
+        /// Priority: project > global, except project-local executable MCP
+        /// server definitions are ignored before merging.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
             // 1. Load global settings.
             let mut merged = Self::load().await.unwrap_or_default();
-            // 2. Find and merge project settings (project wins).
+            // 2. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
                 merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
             }
@@ -1672,6 +1673,28 @@ pub mod config {
                 for (k, v) in over { base.insert(k, v); }
                 base
             }
+            fn merge_project_settings(
+                mut base: HashMap<String, ProjectSettings>,
+                over: HashMap<String, ProjectSettings>,
+            ) -> HashMap<String, ProjectSettings> {
+                for (key, project) in over {
+                    match base.get_mut(&key) {
+                        Some(existing) => {
+                            existing.allowed_tools.extend(project.allowed_tools);
+                            existing.allowed_tools.dedup();
+                            existing.custom_system_prompt =
+                                project.custom_system_prompt.or(existing.custom_system_prompt.take());
+                            // Keep trusted global per-project MCP servers. Project settings are
+                            // sanitized before this merge, so repo-provided MCP servers are empty
+                            // and must not erase trusted global entries.
+                        }
+                        None => {
+                            base.insert(key, project);
+                        }
+                    }
+                }
+                base
+            }
             // Merge the embedded Config structs.
             let merged_config = Config {
                 api_key: over.config.api_key.or(base.config.api_key),
@@ -1725,7 +1748,7 @@ pub mod config {
             Self {
                 config: merged_config,
                 version: over.version.or(base.version),
-                projects: merge_map(base.projects, over.projects),
+                projects: merge_project_settings(base.projects, over.projects),
                 remote_control_at_startup: over.remote_control_at_startup || base.remote_control_at_startup,
                 permission_rules: { let mut v = base.permission_rules; v.extend(over.permission_rules); v },
                 enabled_plugins: { let mut s = base.enabled_plugins; s.extend(over.enabled_plugins); s },
