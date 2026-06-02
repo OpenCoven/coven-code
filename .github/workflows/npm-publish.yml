@@ -39,25 +39,26 @@ jobs:
 
     steps:
       - name: Resolve requested version
+        if: github.event_name == 'workflow_dispatch'
         id: requested_version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ inputs.version }}"
-            VERSION="${VERSION#v}"
+          VERSION="${REQUESTED_VERSION#v}"
 
-            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Invalid npm publish version: $VERSION"
-              exit 1
-            fi
-
-            echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid npm publish version: $VERSION"
+            exit 1
           fi
+
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=refs/tags/v$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: github.event_name == 'workflow_dispatch'
         with:
-          ref: ${{ steps.requested_version.outputs.tag }}
+          ref: ${{ steps.requested_version.outputs.tag_ref }}
           fetch-depth: 0
 
       - uses: actions/checkout@v4
@@ -68,11 +69,13 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ steps.requested_version.outputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ inputs.version }}"
-            VERSION="${VERSION#v}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="${REQUESTED_TAG#v}"
           else
             VERSION="$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           fi
@@ -100,14 +103,15 @@ jobs:
       - name: Verify GitHub Release and source version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
-          VERSION="${{ steps.version.outputs.version }}"
+          TAG_REF="refs/tags/$TAG"
 
           gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null
 
-          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+          TAG_COMMIT="$(git rev-list -n 1 "$TAG_REF")"
           HEAD_COMMIT="$(git rev-parse HEAD)"
           if [[ "$TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
             echo "::error::Checked-out source ($HEAD_COMMIT) does not match $TAG ($TAG_COMMIT)."
