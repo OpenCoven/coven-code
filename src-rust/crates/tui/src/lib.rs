@@ -49,6 +49,10 @@ pub mod image_paste;
 pub mod kitty_image;
 /// Familiar card image lookup and terminal escape rendering.
 pub mod familiar_image;
+/// Familiar theming: palettes + archetypes per familiar id.
+pub mod familiar_theme;
+/// Static themed familiar card composer (welcome panel, F2 switcher, /agents).
+pub mod familiar_card;
 /// Application state and main event loop.
 pub mod app;
 /// Input helpers: slash command parsing.
