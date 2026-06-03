@@ -6572,11 +6572,11 @@ impl App {
 }
 
 // Helper function to open a file in the user's external editor
-fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
     // Try to open with the system's default application
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("/usr/bin/open")
             .arg(path)
             .spawn()?;
         Ok(())
@@ -6592,10 +6592,20 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(&["/C", "start", ""])
-            .arg(path)
-            .spawn()?;
+        let system_root = windows_system_root();
+        let mut command = std::process::Command::new(
+            std::path::Path::new(&system_root)
+                .join("System32")
+                .join("cmd.exe"),
+        );
+        let quoted_path = quote_windows_cmd_path(path);
+        command
+            .args(["/C", "start", ""])
+            .arg(quoted_path)
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .env("WINDIR", &system_root);
+        command.spawn()?;
         Ok(())
     }
 
@@ -6611,8 +6621,36 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
                 Err(_) => continue,
             }
         }
-        Err("No suitable editor found".into())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No suitable editor found",
+        ))
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
+    let mut quoted = std::ffi::OsString::from("\"");
+    quoted.push(path.as_os_str());
+    quoted.push("\"");
+    quoted
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_system_root_from_env(
+    system_root: Option<std::ffi::OsString>,
+    windir: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
+    system_root
+        .into_iter()
+        .chain(windir)
+        .find(|root| std::path::Path::new(root).is_absolute())
+        .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_root() -> std::ffi::OsString {
+    windows_system_root_from_env(std::env::var_os("SystemRoot"), std::env::var_os("WINDIR"))
 }
 
 #[cfg(test)]
@@ -6633,6 +6671,46 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn windows_cmd_path_is_passed_as_quoted_argument() {
+        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
+
+        assert_eq!(
+            quote_windows_cmd_path(path).to_string_lossy(),
+            r#""C:\temp\safe & literal.txt""#
+        );
+    }
+
+    #[test]
+    fn windows_system_root_prefers_absolute_system_root() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("/windows")),
+            Some(std::ffi::OsString::from("/windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from("/windows"));
+    }
+
+    #[test]
+    fn windows_system_root_falls_back_to_absolute_windir() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("relative-system-root")),
+            Some(std::ffi::OsString::from("/windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from("/windir"));
+    }
+
+    #[test]
+    fn windows_system_root_ignores_relative_paths() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("relative-system-root")),
+            Some(std::ffi::OsString::from("relative-windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from(r"C:\Windows"));
     }
 
     // ---- signal_bg_task_completion tests ----
