@@ -291,52 +291,49 @@ You are performing a dream — a reflective pass over your memory files. Synthes
 
 Memory directory: `{memory_dir}`
 
-Session transcripts: `{conv_dir}` (large JSONL files — grep narrowly, do not read whole files)
+Session transcripts are intentionally unavailable to this automatic background task. Do not inspect historical conversation JSONL files or any other transcript store.
 
 ---
 
 ## Phase 1 — Orient
 
-- `ls` the memory directory to see what already exists
+- List the memory directory to see what already exists
 - Read `MEMORY.md` to understand the current index
 - Skim existing topic files so you improve them rather than creating duplicates
 
 ## Phase 2 — Gather recent signal
 
-Look for new information worth persisting:
+Look for new information worth persisting from existing memory files only:
 
 1. **Daily logs** (`logs/YYYY/MM/YYYY-MM-DD.md`) if present
 2. **Existing memories that drifted** — facts that contradict what you see now
-3. **Transcript search** — grep narrowly for specific terms:
-   `grep -rn "<narrow term>" {conv_dir}/ --include="*.jsonl" | tail -50`
 
-Do not exhaustively read transcripts. Look only for things you already suspect matter.
+Do not inspect session transcripts, conversation logs, repository files, web pages, or other external data sources.
 
 ## Phase 3 — Consolidate
 
-For each thing worth remembering, write or update a memory file. Focus on:
+For each thing worth remembering, draft the exact memory-file changes that should be applied later with foreground user approval. Focus on:
 - Merging new signal into existing topic files rather than creating near-duplicates
 - Converting relative dates to absolute dates
-- Deleting contradicted facts
+- Identifying contradicted facts
 
 ## Phase 4 — Prune and index
 
-Update `MEMORY.md` so it stays under 200 lines and ~25 KB. It is an **index**, not a dump.
+Review `MEMORY.md` for changes that would keep it under 200 lines and ~25 KB. It is an **index**, not a dump.
 Each entry: `- [Title](file.md) — one-line hook`
 
-- Remove pointers to stale, wrong, or superseded memories
-- Shorten verbose entries; move detail into topic files
-- Add pointers to newly important memories
-- Resolve contradictions
+- Identify pointers to stale, wrong, or superseded memories
+- Suggest shorter entries where entries are verbose
+- Suggest pointers to newly important memories
+- Identify contradictions
 
 ---
 
-Return a brief summary of what you consolidated, updated, or pruned. If nothing changed, say so.
+Return a brief summary and any suggested file changes. If nothing should change, say so.
 
-**Tool constraints for this run:** Use only read-only Bash commands (ls, find, grep, cat, stat, wc, head, tail). Anything that writes, redirects to a file, or modifies state will be denied.
+**Tool constraints for this run:** This automatic background task is read-only. Use only the provided read-only file discovery tools. Anything that writes, runs shell commands, accesses the network, or reads transcripts will be denied.
 "#,
             memory_dir = self.memory_dir.display(),
-            conv_dir = self.conversations_dir.display(),
         )
     }
 }
@@ -439,6 +436,17 @@ mod tests {
         assert!(prompt.contains("Memory Consolidation"));
         assert!(prompt.contains("Phase 1"));
         assert!(prompt.contains("Phase 4"));
+    }
+
+    #[test]
+    fn test_consolidation_prompt_excludes_transcript_access() {
+        let tmp = TempDir::new().unwrap();
+        let dream = make_dream(&tmp);
+        let prompt = dream.consolidation_prompt();
+        assert!(prompt.contains("Session transcripts are intentionally unavailable"));
+        assert!(!prompt.contains(dream.conversations_dir.to_string_lossy().as_ref()));
+        assert!(!prompt.contains("*.jsonl"));
+        assert!(!prompt.contains("grep -rn"));
     }
 
     // --- update_state / load_state round-trip ---
