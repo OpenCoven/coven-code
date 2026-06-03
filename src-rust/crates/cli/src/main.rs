@@ -1264,6 +1264,26 @@ fn normalize_provider_from_model(config: &mut Config) {
     }
 }
 
+/// Resolve an agent selected through the TUI mode switcher.
+///
+/// The Tab cycle shows reserved built-in modes (`build`, `plan`, `explore`)
+/// with security-significant labels, so those names must always resolve to
+/// the built-in definitions even if repository settings define agents with
+/// the same names. Non-reserved selections still use the normal familiar +
+/// project-agent namespace.
+fn resolve_tui_agent_mode(
+    mode: &str,
+    config_agents: &std::collections::HashMap<String, claurst_core::AgentDefinition>,
+) -> Option<claurst_core::AgentDefinition> {
+    if let Some(def) = claurst_core::default_agents().get(mode) {
+        return Some(def.clone());
+    }
+
+    let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
+    all_agents.extend(config_agents.clone());
+    all_agents.get(mode).cloned()
+}
+
 /// Filter the tool list based on the agent's access level.
 /// - "full"        → all tools allowed (no filtering)
 /// - "read-only"   → only ReadOnly/None permission tools and AskUserQuestion
@@ -2833,9 +2853,7 @@ async fn run_interactive(
                     if app.agent_mode_changed {
                         app.agent_mode_changed = false;
                         let mode = app.agent_mode.as_deref().unwrap_or("build");
-                        let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
-                        all_agents.extend(cmd_ctx.config.agents.clone());
-                        if let Some(def) = all_agents.get(mode) {
+                        if let Some(def) = resolve_tui_agent_mode(mode, &cmd_ctx.config.agents) {
                             base_query_config.agent_name = Some(mode.to_string());
                             base_query_config.agent_definition = Some(def.clone());
                             if let Some(turns) = def.max_turns {
@@ -4492,6 +4510,44 @@ mod tests {
         let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    fn test_agent(access: &str, prompt: &str) -> claurst_core::AgentDefinition {
+        claurst_core::AgentDefinition {
+            description: None,
+            model: None,
+            temperature: None,
+            prompt: Some(prompt.to_string()),
+            access: access.to_string(),
+            visible: true,
+            max_turns: None,
+            color: None,
+        }
+    }
+
+    #[test]
+    fn tui_reserved_modes_ignore_project_agent_overrides() {
+        let mut config_agents = std::collections::HashMap::new();
+        config_agents.insert(
+            "plan".to_string(),
+            test_agent("full", "malicious project plan prompt"),
+        );
+
+        let def = resolve_tui_agent_mode("plan", &config_agents)
+            .expect("built-in plan mode should resolve");
+        assert_eq!(def.access, "read-only");
+        assert_ne!(def.prompt.as_deref(), Some("malicious project plan prompt"));
+    }
+
+    #[test]
+    fn tui_non_reserved_modes_can_use_project_agents() {
+        let mut config_agents = std::collections::HashMap::new();
+        config_agents.insert("custom".to_string(), test_agent("full", "custom prompt"));
+
+        let def = resolve_tui_agent_mode("custom", &config_agents)
+            .expect("custom project agent should resolve");
+        assert_eq!(def.access, "full");
+        assert_eq!(def.prompt.as_deref(), Some("custom prompt"));
     }
 
     #[test]
