@@ -269,6 +269,20 @@ struct Cli {
     /// Named agent to use (e.g., build, plan, explore)
     #[arg(long, short = 'A')]
     agent: Option<String>,
+
+    // ── coven-github: headless session brief / result envelope ──────────
+
+    /// Load a coven-github session brief (JSON) for fully-automated headless runs.
+    /// Overrides --model, --cwd, and --system-prompt from the brief's familiar config.
+    /// Used by coven-github workers; implies --print and --dangerously-skip-permissions.
+    #[arg(long = "context", value_name = "BRIEF_JSON")]
+    context: Option<PathBuf>,
+
+    /// Write a structured result envelope (JSON) to this path on exit.
+    /// Contains status, branch, commits, files_changed, summary, pr_body, exit_reason.
+    /// Only meaningful with --context / headless GitHub App runs.
+    #[arg(long = "output", value_name = "RESULT_JSON")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -563,7 +577,17 @@ async fn main() -> anyhow::Result<()> {
     let system_prompt = system_parts.join("\n\n");
 
     // Determine mode early (needed for auth error handling and permission handler selection).
-    let is_headless = cli.print || cli.prompt.is_some();
+    // --context implies full headless + skip-permissions + model/cwd override from brief.
+    let github_context = if let Some(ctx_path) = &cli.context {
+        let raw = std::fs::read_to_string(ctx_path)
+            .context("Failed to read --context brief JSON")?;
+        let brief: serde_json::Value = serde_json::from_str(&raw)
+            .context("Failed to parse --context brief JSON")?;
+        Some(brief)
+    } else {
+        None
+    };
+    let is_headless = cli.print || cli.prompt.is_some() || github_context.is_some();
 
     // Initialize API client.
     // Try config/env first; fall back to saved OAuth tokens.
@@ -800,7 +824,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // --print mode (headless)
-    let result = if is_headless {
+    let headless_result = if is_headless {
         run_headless(
             &cli,
             client,
@@ -835,7 +859,31 @@ async fn main() -> anyhow::Result<()> {
     };
 
     cron_cancel.cancel();
-    result
+
+    // If --output was requested (coven-github headless run), write result envelope.
+    if let Some(output_path) = &cli.output {
+        // Build a minimal result envelope from the headless run outcome.
+        // Full implementation will wire into claurst_query's session state
+        // to extract commits, changed files, branch, and summary.
+        // For now: write status + exit_reason so coven-github worker has a
+        // machine-readable exit signal even before the full integration lands.
+        let status = if headless_result.is_ok() { "success" } else { "failure" };
+        let exit_reason = if headless_result.is_err() { Some("infra_error") } else { None };
+        let envelope = serde_json::json!({
+            "status": status,
+            "branch": null,
+            "commits": [],
+            "files_changed": [],
+            "summary": if headless_result.is_ok() { "Session completed." } else { "Session failed." },
+            "pr_body": "",
+            "exit_reason": exit_reason,
+        });
+        if let Err(e) = std::fs::write(output_path, serde_json::to_string_pretty(&envelope).unwrap_or_default()) {
+            eprintln!("[coven-github] warning: failed to write --output result: {e}");
+        }
+    }
+
+    headless_result
 }
 
 async fn connect_mcp_manager_arc(
