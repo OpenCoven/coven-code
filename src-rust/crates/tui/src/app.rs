@@ -3076,6 +3076,12 @@ impl App {
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // Permission requests render above other overlays, so they own input.
+        if self.permission_request.is_some() {
+            self.handle_permission_key(key);
+            return false;
+        }
+
         // Dismiss error modal with Esc
         if key.code == KeyCode::Esc && self.notifications.current_is_error() {
             self.dismiss_error_notifications();
@@ -3912,12 +3918,6 @@ impl App {
         // Legacy history-search mode intercepts most keys
         if self.history_search.is_some() {
             return self.handle_history_search_key(key);
-        }
-
-        // Permission dialog mode intercepts most keys
-        if self.permission_request.is_some() {
-            self.handle_permission_key(key);
-            return false;
         }
 
         // Notification dismiss
@@ -6942,6 +6942,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_permission_dialog_esc_takes_priority_over_error_modal() {
+        use crate::dialogs::PermissionRequest;
+
+        let mut app = make_app();
+        app.permission_request = Some(PermissionRequest::standard(
+            "tu-1".to_string(),
+            "Bash".to_string(),
+            "Run a shell command".to_string(),
+        ));
+        app.notifications.push(
+            crate::notifications::NotificationKind::Error,
+            "dangerous command failed".to_string(),
+            None,
+        );
+
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(app.permission_request.is_none());
+        assert!(app.notifications.current_is_error());
+    }
+
+    #[test]
+    fn test_permission_dialog_navigation_takes_priority_over_context_menu() {
+        use crate::dialogs::PermissionRequest;
+
+        let mut app = make_app();
+        app.permission_request = Some(PermissionRequest::standard(
+            "tu-1".to_string(),
+            "Bash".to_string(),
+            "Run a shell command".to_string(),
+        ));
+        app.context_menu_state = Some(ContextMenuState {
+            x: 1,
+            y: 1,
+            selected_index: 0,
+            kind: ContextMenuKind::Selection,
+        });
+
+        app.handle_key_event(press_key(KeyCode::Down, KeyModifiers::empty()));
+
+        assert_eq!(
+            app.permission_request
+                .as_ref()
+                .map(|request| request.selected_option),
+            Some(1)
+        );
+        assert_eq!(
+            app.context_menu_state
+                .as_ref()
+                .map(|menu| menu.selected_index),
+            Some(0)
+        );
     }
 
     // ---- Help overlay -------------------------------------------------------
