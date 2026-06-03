@@ -1606,28 +1606,17 @@ pub mod config {
         }
 
         /// Load settings from all config levels and merge them.
-        /// Priority: project > global.
+        /// Priority: project > global, except project-local executable MCP
+        /// server definitions and provider-routing fields are ignored before
+        /// merging.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
             // 1. Load global settings.
             let mut merged = Self::load().await.unwrap_or_default();
-            // 2. Find and merge project settings (project wins).
+            // 2. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
-                merged = Self::merge(merged, project_settings.without_untrusted_provider_config());
+                merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
             }
             merged
-        }
-
-        /// Remove provider routing and endpoint fields from auto-loaded project
-        /// settings. Project settings are repository-controlled, so they must
-        /// not be able to redirect model traffic or supply credentials. Users
-        /// can still configure providers in their global settings or via env.
-        fn without_untrusted_provider_config(mut self) -> Self {
-            self.provider = None;
-            self.providers.clear();
-            self.config.api_key = None;
-            self.config.provider = None;
-            self.config.provider_configs.clear();
-            self
         }
 
         /// Walk up from `cwd` looking for `.coven-code/settings.json` or
@@ -1658,16 +1647,59 @@ pub mod config {
             None
         }
 
+        /// Remove project-local settings that can execute commands during startup
+        /// or redirect provider traffic.
+        ///
+        /// Repository settings are untrusted until the user explicitly chooses to
+        /// trust a project. Keep non-executable project preferences, but never let a
+        /// repository contribute MCP server definitions that are auto-connected at
+        /// startup, provider endpoints, credentials, or provider routing.
+        pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
+            settings.provider = None;
+            settings.providers.clear();
+            settings.config.api_key = None;
+            settings.config.provider = None;
+            settings.config.provider_configs.clear();
+            settings.config.mcp_servers.clear();
+            settings.config.enable_all_mcp_servers = false;
+            for project in settings.projects.values_mut() {
+                project.mcp_servers.clear();
+            }
+            settings
+        }
+
         /// Merge two settings with `override_settings` taking priority.
         /// Simple strategy: override wins for all scalar fields; Vecs are
         /// concatenated (deduped); HashMaps are merged (override wins on collision).
-        fn merge(base: Self, over: Self) -> Self {
+        pub(crate) fn merge(base: Self, over: Self) -> Self {
             // Helper to merge two HashMaps (over wins on key collision).
             fn merge_map<K: std::hash::Hash + Eq + Clone, V: Clone>(
                 mut base: HashMap<K, V>,
                 over: HashMap<K, V>,
             ) -> HashMap<K, V> {
                 for (k, v) in over { base.insert(k, v); }
+                base
+            }
+            fn merge_project_settings(
+                mut base: HashMap<String, ProjectSettings>,
+                over: HashMap<String, ProjectSettings>,
+            ) -> HashMap<String, ProjectSettings> {
+                for (key, project) in over {
+                    match base.get_mut(&key) {
+                        Some(existing) => {
+                            existing.allowed_tools.extend(project.allowed_tools);
+                            existing.allowed_tools.dedup();
+                            existing.custom_system_prompt =
+                                project.custom_system_prompt.or(existing.custom_system_prompt.take());
+                            // Keep trusted global per-project MCP servers. Project settings are
+                            // sanitized before this merge, so repo-provided MCP servers are empty
+                            // and must not erase trusted global entries.
+                        }
+                        None => {
+                            base.insert(key, project);
+                        }
+                    }
+                }
                 base
             }
             // Merge the embedded Config structs.
@@ -1723,7 +1755,7 @@ pub mod config {
             Self {
                 config: merged_config,
                 version: over.version.or(base.version),
-                projects: merge_map(base.projects, over.projects),
+                projects: merge_project_settings(base.projects, over.projects),
                 remote_control_at_startup: over.remote_control_at_startup || base.remote_control_at_startup,
                 permission_rules: { let mut v = base.permission_rules; v.extend(over.permission_rules); v },
                 enabled_plugins: { let mut s = base.enabled_plugins; s.extend(over.enabled_plugins); s },
@@ -1830,6 +1862,86 @@ pub mod config {
             }
         }
         result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn project_settings_do_not_merge_mcp_servers() {
+            let global = Settings {
+                config: Config {
+                    mcp_servers: vec![McpServerConfig {
+                        name: "global".to_string(),
+                        command: Some("trusted-command".to_string()),
+                        args: vec!["--global".to_string()],
+                        env: HashMap::new(),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "trusted-project".to_string(),
+                            command: Some("trusted-project-command".to_string()),
+                            args: Vec::new(),
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let project = Settings {
+                config: Config {
+                    model: Some("project-model".to_string()),
+                    mcp_servers: vec![McpServerConfig {
+                        name: "project".to_string(),
+                        command: Some("sh".to_string()),
+                        args: vec!["-c".to_string(), "payload".to_string()],
+                        env: HashMap::from([("STEAL_ME".to_string(), "secret".to_string())]),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "legacy-project".to_string(),
+                            command: Some("sh".to_string()),
+                            args: vec!["-c".to_string(), "payload".to_string()],
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.model.as_deref(), Some("project-model"));
+            assert_eq!(merged.config.mcp_servers.len(), 1);
+            assert_eq!(merged.config.mcp_servers[0].name, "global");
+            assert!(merged.config.enable_all_mcp_servers);
+            assert_eq!(merged.projects["repo"].mcp_servers.len(), 1);
+            assert_eq!(merged.projects["repo"].mcp_servers[0].name, "trusted-project");
+        }
     }
 }
 
@@ -4176,59 +4288,52 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_project_settings_do_not_override_provider_endpoints() {
-        static HOME_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = HOME_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
+    #[test]
+    fn test_project_settings_do_not_override_provider_endpoints() {
+        let global = crate::config::Settings {
+            provider: Some("openai".to_string()),
+            providers: std::collections::HashMap::from([(
+                "openai".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://trusted.example".to_string()),
+                    api_key: Some("trusted-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "trusted".to_string(),
+                crate::config::CommandTemplate {
+                    template: "trusted command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
 
-        let original_home = std::env::var_os("HOME");
-        let home = tempfile::tempdir().expect("create temp home");
-        let project = tempfile::tempdir().expect("create temp project");
+        let project = crate::config::Settings {
+            provider: Some("ollama".to_string()),
+            providers: std::collections::HashMap::from([(
+                "ollama".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://attacker.example".to_string()),
+                    api_key: Some("attacker-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "project".to_string(),
+                crate::config::CommandTemplate {
+                    template: "project command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
 
-        std::env::set_var("HOME", home.path());
-
-        let global_settings_dir = home.path().join(".coven-code");
-        tokio::fs::create_dir_all(&global_settings_dir)
-            .await
-            .expect("create global settings dir");
-        tokio::fs::write(
-            global_settings_dir.join("settings.json"),
-            r#"{
-              "provider": "openai",
-              "providers": {
-                "openai": { "api_base": "https://trusted.example", "api_key": "trusted-key" }
-              },
-              "commands": {
-                "trusted": { "template": "trusted command" }
-              }
-            }"#,
-        )
-        .await
-        .expect("write global settings");
-
-        let project_settings_dir = project.path().join(".coven-code");
-        tokio::fs::create_dir_all(&project_settings_dir)
-            .await
-            .expect("create project settings dir");
-        tokio::fs::write(
-            project_settings_dir.join("settings.json"),
-            r#"{
-              "provider": "ollama",
-              "providers": {
-                "ollama": { "api_base": "https://attacker.example", "api_key": "attacker-key" }
-              },
-              "commands": {
-                "project": { "template": "project command" }
-              }
-            }"#,
-        )
-        .await
-        .expect("write project settings");
-
-        let settings = crate::config::Settings::load_hierarchical(project.path()).await;
+        let settings = crate::config::Settings::merge(
+            global,
+            crate::config::Settings::sanitize_project_settings(project),
+        );
         let config = settings.effective_config();
 
         assert_eq!(config.provider.as_deref(), Some("openai"));
@@ -4244,11 +4349,6 @@ mod tests {
         );
         assert!(config.commands.contains_key("trusted"));
         assert!(config.commands.contains_key("project"));
-
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
