@@ -7,7 +7,7 @@ pub enum AtFileIssue {
     TooLarge(usize), // size in KB that exceeds limit
     Binary,
     Unreadable(String), // error message
-    IsDirectory, // Path points to a directory, not a file
+    IsDirectory,        // Path points to a directory, not a file
 }
 
 /// A parsed file reference from the user's input (e.g., "@src/main.rs").
@@ -28,9 +28,18 @@ pub struct AtFileRef {
 /// Parse word-boundary @ tokens from text.
 /// Returns (within_limit, oversized).
 /// If max_size_kb == 0, oversized is always empty (accept all).
-pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileRef>, Vec<AtFileRef>) {
+pub fn parse_at_refs(
+    text: &str,
+    cwd: &Path,
+    max_size_kb: usize,
+) -> (Vec<AtFileRef>, Vec<AtFileRef>) {
     let mut within_limit = Vec::new();
     let mut oversized = Vec::new();
+
+    let canonical_cwd = match cwd.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return (within_limit, oversized),
+    };
 
     let words: Vec<&str> = text.split_whitespace().collect();
 
@@ -45,7 +54,10 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
         let mut token = word.to_string();
 
         // Remove trailing punctuation, but never strip the leading '@' itself.
-        while token.len() > 1 && token.ends_with(|c: char| c.is_ascii_punctuation()) && !token.ends_with('/') {
+        while token.len() > 1
+            && token.ends_with(|c: char| c.is_ascii_punctuation())
+            && !token.ends_with('/')
+        {
             token.pop();
         }
 
@@ -67,15 +79,19 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
             cwd.join(path_part)
         };
 
-        // Check if path exists and is a file (not a directory)
-        if !expanded_path.exists() {
-            continue; // Skip non-existent paths
+        let canonical_path = match expanded_path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue, // Skip paths that cannot be resolved safely
+        };
+
+        if !canonical_path.starts_with(&canonical_cwd) {
+            continue;
         }
 
-        if expanded_path.is_dir() {
+        if canonical_path.is_dir() {
             oversized.push(AtFileRef {
                 token: token.clone(),
-                path: expanded_path,
+                path: canonical_path,
                 size_kb: 0,
                 contents: None,
                 issue: Some(AtFileIssue::IsDirectory),
@@ -83,12 +99,12 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
             continue;
         }
 
-        let size_kb = match fs::metadata(&expanded_path) {
+        let size_kb = match fs::metadata(&canonical_path) {
             Ok(meta) => (meta.len() as usize + 1023) / 1024, // Round up to KB
             Err(e) => {
                 oversized.push(AtFileRef {
                     token: token.clone(),
-                    path: expanded_path,
+                    path: canonical_path,
                     size_kb: 0,
                     contents: None,
                     issue: Some(AtFileIssue::Unreadable(e.to_string())),
@@ -98,12 +114,12 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
         };
 
         // Check if file is binary
-        let contents = match fs::read_to_string(&expanded_path) {
+        let contents = match fs::read_to_string(&canonical_path) {
             Ok(contents) => contents,
             Err(_) => {
                 oversized.push(AtFileRef {
                     token: token.clone(),
-                    path: expanded_path,
+                    path: canonical_path,
                     size_kb,
                     contents: None,
                     issue: Some(AtFileIssue::Binary),
@@ -116,7 +132,7 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
         if max_size_kb > 0 && size_kb > max_size_kb {
             oversized.push(AtFileRef {
                 token,
-                path: expanded_path,
+                path: canonical_path,
                 size_kb,
                 contents: None,
                 issue: Some(AtFileIssue::TooLarge(size_kb)),
@@ -124,7 +140,7 @@ pub fn parse_at_refs(text: &str, cwd: &Path, max_size_kb: usize) -> (Vec<AtFileR
         } else {
             within_limit.push(AtFileRef {
                 token,
-                path: expanded_path,
+                path: canonical_path,
                 size_kb,
                 contents: Some(contents),
                 issue: None,
@@ -185,9 +201,47 @@ mod tests {
     #[test]
     fn test_parse_at_refs_nonexistent() {
         let temp = TempDir::new().unwrap();
-        let input = format!("Please check @{}", temp.path().join("nonexistent.txt").display());
+        let input = format!(
+            "Please check @{}",
+            temp.path().join("nonexistent.txt").display()
+        );
 
         let (within, oversized) = parse_at_refs(&input, temp.path(), 1024);
+        assert_eq!(within.len(), 0);
+        assert_eq!(oversized.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_at_refs_rejects_absolute_path_outside_cwd() {
+        let cwd = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret_path = outside.path().join("secret.txt");
+        fs::write(&secret_path, "secret content").unwrap();
+
+        let input = format!("Please check @{}", secret_path.display());
+        let (within, oversized) = parse_at_refs(&input, cwd.path(), 1024);
+
+        assert_eq!(within.len(), 0);
+        assert_eq!(oversized.len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_at_refs_rejects_symlink_to_file_outside_cwd() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret_path = outside.path().join("secret.txt");
+        fs::write(&secret_path, "secret content").unwrap();
+
+        let docs_dir = cwd.path().join("docs");
+        fs::create_dir(&docs_dir).unwrap();
+        let symlink_path = docs_dir.join("review.md");
+        symlink(&secret_path, &symlink_path).unwrap();
+
+        let (within, oversized) = parse_at_refs("Please check @docs/review.md", cwd.path(), 1024);
+
         assert_eq!(within.len(), 0);
         assert_eq!(oversized.len(), 0);
     }
