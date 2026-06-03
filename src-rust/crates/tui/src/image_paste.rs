@@ -10,8 +10,34 @@
 //   Linux  : xclip / wl-paste
 //   Windows: PowerShell Get-Clipboard
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(not(target_os = "windows"))]
+fn trusted_command_path(paths: &[&'static str]) -> Option<&'static str> {
+    paths.iter().copied().find(|path| Path::new(path).is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_command(relative_path: &[&str]) -> Option<PathBuf> {
+    for var in ["SystemRoot", "WINDIR"] {
+        if let Ok(root) = std::env::var(var) {
+            let mut path = PathBuf::from(root);
+            for component in relative_path {
+                path.push(component);
+            }
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_powershell() -> Option<PathBuf> {
+    trusted_windows_command(&["System32", "WindowsPowerShell", "v1.0", "powershell.exe"])
+}
 
 // ---------------------------------------------------------------------------
 // Image attachment state
@@ -325,7 +351,10 @@ pub fn write_clipboard_text(text: &str) -> bool {
 fn write_text_macos_w(text: &str) -> bool {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = match Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+    let mut child = match Command::new(match trusted_command_path(&["/usr/bin/pbcopy"]) {
+        Some(path) => path,
+        None => return false,
+    }).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -341,7 +370,11 @@ fn write_text_windows_w(text: &str) -> bool {
     use std::process::Stdio;
     // PowerShell Set-Clipboard reads from stdin via pipe
     let script = format!("[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard");
-    let mut child = match Command::new("powershell")
+    let powershell = match trusted_windows_powershell() {
+        Some(path) => path,
+        None => return false,
+    };
+    let mut child = match Command::new(powershell)
         .args(["-NoProfile", "-Command", &script])
         .stdin(Stdio::piped())
         .spawn()
@@ -367,21 +400,24 @@ fn write_text_linux_selection(text: &str, primary: bool) -> bool {
     use std::io::Write;
     use std::process::Stdio;
 
-    let commands: &[(&str, &[&str])] = if primary {
+    let commands: &[(&[&str], &[&str])] = if primary {
         &[
-            ("wl-copy", &["--primary"]),
-            ("xclip", &["-selection", "primary"]),
-            ("xsel", &["--primary", "--input"]),
+            (&["/usr/bin/wl-copy", "/usr/local/bin/wl-copy"], &["--primary"]),
+            (&["/usr/bin/xclip", "/usr/local/bin/xclip"], &["-selection", "primary"]),
+            (&["/usr/bin/xsel", "/usr/local/bin/xsel"], &["--primary", "--input"]),
         ]
     } else {
         &[
-            ("wl-copy", &[]),
-            ("xclip", &["-selection", "clipboard"]),
-            ("xsel", &["--clipboard", "--input"]),
+            (&["/usr/bin/wl-copy", "/usr/local/bin/wl-copy"], &[]),
+            (&["/usr/bin/xclip", "/usr/local/bin/xclip"], &["-selection", "clipboard"]),
+            (&["/usr/bin/xsel", "/usr/local/bin/xsel"], &["--clipboard", "--input"]),
         ]
     };
 
-    for (prog, args) in commands {
+    for (paths, args) in commands {
+        let Some(prog) = trusted_command_path(paths) else {
+            continue;
+        };
         if let Ok(mut child) = Command::new(prog).args(*args).stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
