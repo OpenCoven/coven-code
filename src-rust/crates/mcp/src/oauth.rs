@@ -21,6 +21,7 @@ pub struct McpToken {
     pub scope: Option<String>,
     pub server_name: String,
     /// Normalized MCP server URL this token was minted for.
+    /// `None` means a legacy stored token is unbound and must re-authenticate.
     #[serde(default)]
     pub server_url: Option<String>,
 }
@@ -41,8 +42,10 @@ impl McpToken {
     }
 
     pub fn is_bound_to_server_url(&self, server_url: &str) -> bool {
-        self.server_url.as_deref().map(normalize_server_url_owned)
-            == Some(normalize_server_url_owned(server_url))
+        self.server_url
+            .as_deref()
+            .map(normalized_server_url)
+            == Some(normalized_server_url(server_url))
     }
 }
 
@@ -529,9 +532,16 @@ pub async fn refresh_mcp_token(
     let existing = get_mcp_token(server_name)
         .ok_or_else(|| anyhow::anyhow!("No stored token for {}", server_name))?;
     if !existing.is_bound_to_server_url(server_url) {
+        let stored_binding = existing
+            .server_url
+            .as_deref()
+            .map(normalized_server_url)
+            .unwrap_or("<unbound legacy token>");
         anyhow::bail!(
-            "Stored token for '{}' is bound to a different MCP server URL",
-            server_name
+            "Stored token for '{}' is not bound to requested MCP server URL (expected: {}, stored: {})",
+            server_name,
+            normalized_server_url(server_url),
+            stored_binding
         );
     }
 
@@ -637,6 +647,34 @@ mod tests {
             server_url: None,
         };
         assert!(!t.is_bound_to_server_url("https://example.com/mcp"));
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_unbound_legacy_token_binding() {
+        let server_name = format!("legacy-unbound-{}", std::process::id());
+        let _ = remove_mcp_token(&server_name);
+        let token = McpToken {
+            access_token: "tok".to_string(),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: None,
+            scope: None,
+            server_name: server_name.clone(),
+            server_url: None,
+        };
+        store_mcp_token(&token).expect("store legacy token");
+
+        let err = refresh_mcp_token(
+            &server_name,
+            "https://example.com/mcp/",
+            "https://example.com/oauth/token",
+        )
+        .await
+        .expect_err("unbound token should not refresh");
+        let message = err.to_string();
+
+        assert!(message.contains("expected: https://example.com/mcp"));
+        assert!(message.contains("stored: <unbound legacy token>"));
+        let _ = remove_mcp_token(&server_name);
     }
 
     #[test]
