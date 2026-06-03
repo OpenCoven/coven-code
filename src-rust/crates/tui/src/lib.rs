@@ -844,6 +844,40 @@ mod tests {
     }
 
     #[test]
+    fn test_render_app_keeps_permission_dialog_above_error_modal() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = make_app();
+        app.permission_request = Some(PermissionRequest::standard(
+            "tu1".to_string(),
+            "Bash".to_string(),
+            "Run a shell command".to_string(),
+        ));
+        app.notifications.push(
+            NotificationKind::Error,
+            "dangerous command failed with a long error message".to_string(),
+            None,
+        );
+
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(rendered.contains("Permission Required"));
+        assert!(rendered.contains("Yes, allow once"));
+        assert!(rendered.contains("No, deny"));
+    }
+
+    #[test]
     fn test_render_app_hides_shortcuts_hint_when_prompt_has_text() {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
