@@ -1607,7 +1607,8 @@ pub mod config {
 
         /// Load settings from all config levels and merge them.
         /// Priority: project > global, except project-local executable MCP
-        /// server definitions are ignored before merging.
+        /// server definitions and provider-routing fields are ignored before
+        /// merging.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
             // 1. Load global settings.
             let mut merged = Self::load().await.unwrap_or_default();
@@ -1646,13 +1647,19 @@ pub mod config {
             None
         }
 
-        /// Remove project-local settings that can execute commands during startup.
+        /// Remove project-local settings that can execute commands during startup
+        /// or redirect provider traffic.
         ///
         /// Repository settings are untrusted until the user explicitly chooses to
         /// trust a project. Keep non-executable project preferences, but never let a
         /// repository contribute MCP server definitions that are auto-connected at
-        /// startup.
-        fn sanitize_project_settings(mut settings: Self) -> Self {
+        /// startup, provider endpoints, credentials, or provider routing.
+        pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
+            settings.provider = None;
+            settings.providers.clear();
+            settings.config.api_key = None;
+            settings.config.provider = None;
+            settings.config.provider_configs.clear();
             settings.config.mcp_servers.clear();
             settings.config.enable_all_mcp_servers = false;
             for project in settings.projects.values_mut() {
@@ -1664,7 +1671,7 @@ pub mod config {
         /// Merge two settings with `override_settings` taking priority.
         /// Simple strategy: override wins for all scalar fields; Vecs are
         /// concatenated (deduped); HashMaps are merged (override wins on collision).
-        fn merge(base: Self, over: Self) -> Self {
+        pub(crate) fn merge(base: Self, over: Self) -> Self {
             // Helper to merge two HashMaps (over wins on key collision).
             fn merge_map<K: std::hash::Hash + Eq + Clone, V: Clone>(
                 mut base: HashMap<K, V>,
@@ -4279,6 +4286,69 @@ mod tests {
         if let Some(k) = orig {
             std::env::set_var("ANTHROPIC_API_KEY", k);
         }
+    }
+
+    #[test]
+    fn test_project_settings_do_not_override_provider_endpoints() {
+        let global = crate::config::Settings {
+            provider: Some("openai".to_string()),
+            providers: std::collections::HashMap::from([(
+                "openai".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://trusted.example".to_string()),
+                    api_key: Some("trusted-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "trusted".to_string(),
+                crate::config::CommandTemplate {
+                    template: "trusted command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let project = crate::config::Settings {
+            provider: Some("ollama".to_string()),
+            providers: std::collections::HashMap::from([(
+                "ollama".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://attacker.example".to_string()),
+                    api_key: Some("attacker-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "project".to_string(),
+                crate::config::CommandTemplate {
+                    template: "project command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let settings = crate::config::Settings::merge(
+            global,
+            crate::config::Settings::sanitize_project_settings(project),
+        );
+        let config = settings.effective_config();
+
+        assert_eq!(config.provider.as_deref(), Some("openai"));
+        assert_eq!(settings.provider.as_deref(), Some("openai"));
+        assert_eq!(config.api_key, None);
+        assert_eq!(
+            config.resolve_provider_api_base("openai").as_deref(),
+            Some("https://trusted.example")
+        );
+        assert_eq!(
+            config.resolve_provider_api_base("ollama").as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert!(config.commands.contains_key("trusted"));
+        assert!(config.commands.contains_key("project"));
     }
 
     #[test]
