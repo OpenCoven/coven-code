@@ -238,7 +238,7 @@ fn import_config_picker_items() -> Vec<SelectItem> {
             title: "Both".into(),
             description: "Import both CLAUDE.md and settings.json".into(),
             category: "Import".into(),
-            badge: Some("SAFE".into()),
+            badge: None,
         },
     ]
 }
