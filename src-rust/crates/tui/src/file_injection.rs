@@ -81,7 +81,7 @@ pub fn parse_at_refs(
 
         let canonical_path = match expanded_path.canonicalize() {
             Ok(path) => path,
-            Err(_) => continue, // Skip non-existent paths
+            Err(_) => continue, // Skip paths that cannot be resolved safely
         };
 
         if !canonical_path.starts_with(&canonical_cwd) {
