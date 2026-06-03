@@ -1390,9 +1390,8 @@ pub mod config {
 
         /// Async variant: also checks `~/.coven-code/oauth_tokens.json`.
         /// Returns `(credential, use_bearer_auth)`.
-        /// - For Console OAuth flow: credential is the stored API key, bearer=false.
-        /// - For Claude.ai OAuth flow: credential is the access token, bearer=true.
-        /// Silently attempts token refresh when the access token is expired.
+        /// Stored Bearer tokens are ignored because Anthropic OAuth login is
+        /// disabled until Coven Code has its own OAuth client identity.
         pub async fn resolve_auth_async(&self) -> Option<(String, bool)> {
             if self.selected_provider_id() != "anthropic" {
                 return self.resolve_api_key().map(|key| (key, false));
@@ -1407,59 +1406,13 @@ pub mod config {
             }
 
             let tokens = crate::oauth::OAuthTokens::load().await?;
-
-            // If expired and we have a refresh token, attempt silent refresh.
-            // Clone the refresh token up-front so we don't borrow `tokens` during the async call.
-            let refresh_token_owned = tokens.refresh_token.clone();
-            let tokens = if tokens.is_expired() {
-                if let Some(rt) = refresh_token_owned {
-                    // Inline the refresh HTTP call (cc_core can't depend on cc_cli::oauth_flow).
-                    let body = serde_json::json!({
-                        "grant_type": "refresh_token",
-                        "refresh_token": rt,
-                        "client_id": crate::oauth::CLIENT_ID,
-                        "scope": crate::oauth::ALL_SCOPES.join(" "),
-                    });
-                    let refreshed = 'refresh: {
-                        let Ok(client) = reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(30))
-                            .build() else { break 'refresh None; };
-                        let Ok(resp) = client
-                            .post(crate::oauth::TOKEN_URL)
-                            .header("content-type", "application/json")
-                            .json(&body)
-                            .send()
-                            .await else { break 'refresh None; };
-                        if !resp.status().is_success() { break 'refresh None; }
-                        let Ok(data) = resp.json::<serde_json::Value>().await else { break 'refresh None; };
-                        let new_at = data["access_token"].as_str().unwrap_or("").to_string();
-                        if new_at.is_empty() { break 'refresh None; }
-                        let new_rt = data["refresh_token"].as_str().map(String::from);
-                        let exp_in = data["expires_in"].as_u64().unwrap_or(3600);
-                        let exp_ms = chrono::Utc::now().timestamp_millis() + (exp_in as i64 * 1000);
-                        let scopes: Vec<String> = data["scope"]
-                            .as_str().unwrap_or("").split_whitespace().map(String::from).collect();
-                        let mut r = tokens.clone();
-                        r.access_token = new_at;
-                        if let Some(nrt) = new_rt { r.refresh_token = Some(nrt); }
-                        r.expires_at_ms = Some(exp_ms);
-                        r.scopes = scopes;
-                        let _ = r.save().await;
-                        Some(r)
-                    };
-                    refreshed.unwrap_or(tokens)
-                } else {
-                    tokens // expired, no refresh token → can't fix
-                }
-            } else {
-                tokens
-            };
-
-            if let Some(cred) = tokens.effective_credential() {
-                Some((cred.to_string(), tokens.uses_bearer_auth()))
-            } else {
-                None
+            if tokens.uses_bearer_auth() {
+                return None;
             }
+
+            tokens
+                .effective_credential()
+                .map(|cred| (cred.to_string(), false))
         }
 
         pub fn resolve_provider_api_base(&self, provider_id: &str) -> Option<String> {
@@ -3582,10 +3535,10 @@ pub mod oauth {
 
     // ---- Production OAuth endpoints & constants ----
 
-    // Claude Code client ID, used in stealth-impersonation mode (see
-    // `claurst_core::oauth_config` for the matching request-time headers and
-    // system-prompt prefix wired into `claurst_api::AnthropicClient`).
-    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    // Anthropic OAuth login is disabled until Coven Code has an OAuth client
+    // identity issued for this application. Keep this empty so OAuth URL and
+    // token exchange helpers cannot impersonate another application's client.
+    pub const CLIENT_ID: &str = "";
     pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
