@@ -126,6 +126,9 @@ pub struct QueryConfig {
     pub model_registry: Option<std::sync::Arc<claurst_api::ModelRegistry>>,
     /// Managed agent (manager-executor) configuration.
     pub managed_agents: Option<claurst_core::ManagedAgentConfig>,
+    /// Preserve an explicit caller-selected model instead of allowing managed-agent
+    /// manager_model to replace it at query runtime.
+    pub preserve_selected_model: bool,
 }
 
 impl Default for QueryConfig {
@@ -152,6 +155,7 @@ impl Default for QueryConfig {
             agent_definition: None,
             model_registry: None,
             managed_agents: None,
+            preserve_selected_model: false,
         }
     }
 }
@@ -697,6 +701,26 @@ fn should_emit_turn_complete(stop: &str, max_tokens_recovery_count: u32) -> bool
     }
 }
 
+fn selected_model_for_query(config: &QueryConfig) -> String {
+    let selected_model = if let Some(ref agent) = config.agent_definition {
+        agent.model.clone().unwrap_or_else(|| config.model.clone())
+    } else {
+        config.model.clone()
+    };
+
+    if config.preserve_selected_model {
+        return selected_model;
+    }
+
+    if let Some(ref ma_config) = config.managed_agents {
+        if ma_config.enabled && !ma_config.manager_model.is_empty() {
+            return ma_config.manager_model.clone();
+        }
+    }
+
+    selected_model
+}
+
 // Spinner verbs are imported from claurst_core::spinner
 
 /// Run the agentic query loop.
@@ -726,18 +750,7 @@ pub async fn run_query_loop(
     let mut max_tokens_recovery_count: u32 = 0;
     // Active model — may switch to fallback on overloaded errors.
     // Agent model override takes priority over the session model when set.
-    let mut effective_model = if let Some(ref agent) = config.agent_definition {
-        agent.model.clone().unwrap_or_else(|| config.model.clone())
-    } else {
-        config.model.clone()
-    };
-
-    // If managed-agent mode is active, override the model to the manager model.
-    if let Some(ref ma_config) = config.managed_agents {
-        if ma_config.enabled && !ma_config.manager_model.is_empty() {
-            effective_model = ma_config.manager_model.clone();
-        }
-    }
+    let mut effective_model = selected_model_for_query(config);
 
     let mut used_fallback = false;
     // How many automatic retries remain when a stream stalls (no data for 45s).
@@ -2296,6 +2309,7 @@ mod tests {
             agent_definition: None,
             model_registry: None,
             managed_agents: None,
+            preserve_selected_model: false,
         }
     }
 
@@ -2409,6 +2423,43 @@ mod tests {
         assert_eq!(cloned.model, "claude-sonnet-4-6");
         assert_eq!(cloned.max_tokens, 4096);
         assert_eq!(cloned.system_prompt, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_managed_agent_manager_model_overrides_by_default() {
+        let mut cfg = make_config(None, None);
+        cfg.managed_agents = Some(claurst_core::ManagedAgentConfig {
+            enabled: true,
+            manager_model: "openai/gpt-4o".to_string(),
+            executor_model: "anthropic/claude-sonnet-4-6".to_string(),
+            executor_max_turns: 10,
+            max_concurrent_executors: 4,
+            budget_split: claurst_core::BudgetSplitPolicy::SharedPool,
+            total_budget_usd: None,
+            preset_name: None,
+            executor_isolation: false,
+        });
+
+        assert_eq!(selected_model_for_query(&cfg), "openai/gpt-4o");
+    }
+
+    #[test]
+    fn test_explicit_model_selection_blocks_managed_agent_override() {
+        let mut cfg = make_config(None, None);
+        cfg.preserve_selected_model = true;
+        cfg.managed_agents = Some(claurst_core::ManagedAgentConfig {
+            enabled: true,
+            manager_model: "openai/gpt-4o".to_string(),
+            executor_model: "anthropic/claude-sonnet-4-6".to_string(),
+            executor_max_turns: 10,
+            max_concurrent_executors: 4,
+            budget_split: claurst_core::BudgetSplitPolicy::SharedPool,
+            total_budget_usd: None,
+            preset_name: None,
+            executor_isolation: false,
+        });
+
+        assert_eq!(selected_model_for_query(&cfg), "claude-sonnet-4-6");
     }
 
     // ---- QueryOutcome variant tests -----------------------------------------

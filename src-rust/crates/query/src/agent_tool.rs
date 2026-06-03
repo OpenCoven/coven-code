@@ -367,6 +367,7 @@ impl Tool for AgentTool {
             agent_definition: None,
             model_registry: Some(model_registry),
             managed_agents: None,
+            preserve_selected_model: false,
         };
         // -----------------------------------------------------------------------
         // Background mode: spawn and return agent_id immediately.

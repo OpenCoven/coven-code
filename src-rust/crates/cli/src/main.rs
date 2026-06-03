@@ -740,6 +740,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build query config
     let mut query_config = claurst_query::QueryConfig::from_config_with_registry(&config, &model_registry);
+    query_config.preserve_selected_model = cli.model.is_some() || cli.provider.is_some();
     query_config.model_registry = Some(model_registry.clone());
     query_config.max_turns = cli.max_turns;
     query_config.system_prompt = Some(system_prompt);
