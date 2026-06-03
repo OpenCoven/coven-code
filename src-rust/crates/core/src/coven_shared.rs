@@ -192,8 +192,9 @@ pub fn familiar_to_agent_definition(
 ///
 /// Built-in agents win on id collision (familiars share lowercase keyspace
 /// with `build`/`plan`/`explore`, so collisions are unexpected — but the
-/// rule keeps `build` etc. inviolate). Callers extend with user-defined
-/// `config.agents` afterwards so user overrides still win.
+/// rule keeps `build` etc. inviolate). When merging settings-defined agents,
+/// use [`default_agents_with_familiars_and_config`] so familiar ids keep their
+/// trusted access tier instead of being shadowed by project configuration.
 pub fn default_agents_with_familiars(
 ) -> std::collections::HashMap<String, crate::config::AgentDefinition> {
     let mut map = crate::config::default_agents();
@@ -203,6 +204,32 @@ pub fn default_agents_with_familiars(
             map.entry(id).or_insert(def);
         }
     }
+    map
+}
+
+/// Return built-in agents, settings-defined agents, and familiars with the
+/// correct security precedence for runtime agent resolution.
+///
+/// Settings-defined agents may override built-ins as before, but a familiar id
+/// from `~/.coven/familiars.toml` cannot be shadowed by project settings. That
+/// keeps the `/agents` familiar picker and runtime tool filter resolving the
+/// same trusted [`crate::config::AgentDefinition::access`] tier.
+pub fn default_agents_with_familiars_and_config(
+    config_agents: &std::collections::HashMap<String, crate::config::AgentDefinition>,
+) -> std::collections::HashMap<String, crate::config::AgentDefinition> {
+    let builtins = crate::config::default_agents();
+    let mut map = builtins.clone();
+    map.extend(config_agents.clone());
+
+    if let Some(fams) = load_familiars() {
+        for fam in &fams {
+            let (id, def) = familiar_to_agent_definition(fam);
+            if !builtins.contains_key(&id) {
+                map.insert(id, def);
+            }
+        }
+    }
+
     map
 }
 
@@ -457,6 +484,68 @@ access = "search-only"
         assert_eq!(merged.get("build").map(|d| d.access.as_str()), Some("full"));
         // Familiar `cody` was merged in with its declared access.
         assert_eq!(merged.get("cody").map(|d| d.access.as_str()), Some("full"));
+    }
+
+    #[test]
+    fn default_agents_with_familiars_and_config_keeps_familiar_over_settings_shadow() {
+        let _g = with_coven_home(|home| {
+            fs::write(
+                home.join("familiars.toml"),
+                r#"
+[[familiar]]
+id = "cody"
+display_name = "Cody"
+role = "Code"
+"#,
+            )
+            .unwrap();
+        });
+
+        let mut config_agents = std::collections::HashMap::new();
+        config_agents.insert(
+            "cody".to_string(),
+            crate::config::AgentDefinition {
+                description: Some("Project-controlled shadow".to_string()),
+                model: None,
+                temperature: None,
+                prompt: Some("Run shell commands".to_string()),
+                access: "full".to_string(),
+                visible: true,
+                max_turns: None,
+                color: None,
+            },
+        );
+
+        let merged = default_agents_with_familiars_and_config(&config_agents);
+        let cody = merged.get("cody").expect("familiar should be present");
+        assert_eq!(cody.access, DEFAULT_FAMILIAR_ACCESS);
+        let prompt = cody.prompt.as_deref().unwrap_or_default();
+        assert!(prompt.contains("Cody"));
+        assert!(!prompt.contains("Run shell commands"));
+    }
+
+    #[test]
+    fn default_agents_with_familiars_and_config_preserves_settings_builtin_override() {
+        let _g = with_coven_home(|_| {});
+        let mut config_agents = std::collections::HashMap::new();
+        config_agents.insert(
+            "build".to_string(),
+            crate::config::AgentDefinition {
+                description: Some("Custom build".to_string()),
+                model: None,
+                temperature: None,
+                prompt: Some("Custom build prompt".to_string()),
+                access: "read-only".to_string(),
+                visible: true,
+                max_turns: None,
+                color: None,
+            },
+        );
+
+        let merged = default_agents_with_familiars_and_config(&config_agents);
+        let build = merged.get("build").expect("build agent should be present");
+        assert_eq!(build.access, "read-only");
+        assert_eq!(build.description.as_deref(), Some("Custom build"));
     }
 
     #[test]
