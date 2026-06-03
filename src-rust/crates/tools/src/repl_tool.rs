@@ -99,8 +99,8 @@ async fn get_or_spawn_session(
     }
 
     // Spawn a new interpreter
-    let (cmd, args) = interpreter_for(language)
-        .ok_or_else(|| format!("Unsupported language: {}", language))?;
+    let (cmd, args) =
+        interpreter_for(language).ok_or_else(|| format!("Unsupported language: {}", language))?;
 
     let mut child = tokio::process::Command::new(cmd)
         .args(&args)
@@ -232,17 +232,22 @@ impl Tool for ReplTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let language = params
-            .language
-            .as_deref()
-            .unwrap_or("bash")
-            .to_lowercase();
+        let language = params.language.as_deref().unwrap_or("bash").to_lowercase();
 
         debug!(
             session = %ctx.session_id,
             language = %language,
             "ReplTool execute"
         );
+
+        if interpreter_for(&language).is_none() {
+            return ToolResult::error(format!("Unsupported language: {}", language));
+        }
+
+        let reason = format!("Execute {} code in a persistent REPL session.", language);
+        if let Err(e) = ctx.check_permission(self.name(), &reason, false) {
+            return ToolResult::error(e.to_string());
+        }
 
         let session = match get_or_spawn_session(&ctx.session_id, &language).await {
             Ok(s) => s,
@@ -258,5 +263,71 @@ impl Tool for ReplTool {
                 ToolResult::error(format!("REPL error: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claurst_core::config::{Config, PermissionMode};
+    use claurst_core::cost::CostTracker;
+    use claurst_core::file_history::FileHistory;
+    use claurst_core::permissions::{PermissionDecision, PermissionHandler, PermissionRequest};
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+
+    struct DenyPermissionHandler;
+
+    impl PermissionHandler for DenyPermissionHandler {
+        fn check_permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+            PermissionDecision::Deny
+        }
+
+        fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.check_permission(request)
+        }
+    }
+
+    fn test_tool_context() -> ToolContext {
+        ToolContext {
+            working_dir: PathBuf::from("/workspace"),
+            permission_mode: PermissionMode::Default,
+            permission_handler: Arc::new(DenyPermissionHandler),
+            cost_tracker: CostTracker::new(),
+            session_id: "repl-permission-test".to_string(),
+            file_history: Arc::new(parking_lot::Mutex::new(FileHistory::new())),
+            current_turn: Arc::new(AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_denies_without_repl_session_when_permission_denied() {
+        let tool = ReplTool;
+        let ctx = test_tool_context();
+
+        let result = tool
+            .execute(
+                json!({
+                    "language": "bash",
+                    "code": "echo should-not-run"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Permission denied for tool 'REPL'"));
+        assert!(
+            !REPL_SESSIONS.contains_key(&(ctx.session_id.clone(), "bash".to_string())),
+            "permission denial must happen before spawning a REPL session"
+        );
     }
 }
