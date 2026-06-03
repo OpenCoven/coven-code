@@ -334,7 +334,6 @@ fn map_settings_preview(
             action: PreviewAction::Keep,
             reason: Some("source file does not provide this field".to_string()),
         });
-        kept_count += 1;
     }
 
     map_theme_field(
@@ -691,5 +690,32 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    fn map_settings_preview_counts_missing_model_once() {
+        let source = serde_json::json!({});
+        let current = serde_json::to_value(Settings::default()).unwrap();
+        let mut target = Settings::default();
+
+        let outcome = map_settings_preview(&source, &current, &mut target).unwrap();
+        let missing_field_keeps = outcome
+            .preview_fields
+            .iter()
+            .filter(|field| {
+                field.action == PreviewAction::Keep
+                    && field.reason.as_deref() == Some("source file does not provide this field")
+            })
+            .count();
+
+        assert_eq!(outcome.kept_count, missing_field_keeps);
+        assert_eq!(
+            outcome
+                .preview_fields
+                .iter()
+                .filter(|field| field.name == "model")
+                .count(),
+            1
+        );
     }
 }
