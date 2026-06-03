@@ -20,6 +20,10 @@ pub struct McpToken {
     pub expires_at: Option<u64>,
     pub scope: Option<String>,
     pub server_name: String,
+    /// Normalized MCP server URL this token was minted for.
+    /// `None` means a legacy stored token is unbound and must re-authenticate.
+    #[serde(default)]
+    pub server_url: Option<String>,
 }
 
 impl McpToken {
@@ -35,6 +39,13 @@ impl McpToken {
 
     pub fn expiry_datetime(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         token_expiry_datetime(self.expires_at)
+    }
+
+    pub fn is_bound_to_server_url(&self, server_url: &str) -> bool {
+        self.server_url
+            .as_deref()
+            .map(normalized_server_url)
+            == Some(normalized_server_url(server_url))
     }
 }
 
@@ -97,6 +108,7 @@ pub struct McpOAuthMetadata {
 #[derive(Debug, Clone)]
 pub struct McpAuthSession {
     pub server_name: String,
+    pub server_url: String,
     pub auth_url: String,
     pub redirect_uri: String,
     pub verifier: String,
@@ -113,6 +125,10 @@ pub struct McpAuthResult {
 
 fn normalized_server_url(server_url: &str) -> &str {
     server_url.trim_end_matches('/')
+}
+
+fn normalize_server_url_owned(server_url: &str) -> String {
+    normalized_server_url(server_url).to_string()
 }
 
 fn fallback_oauth_metadata(server_url: &str) -> McpOAuthMetadata {
@@ -186,6 +202,7 @@ pub async fn begin_mcp_auth(
 
     Ok(McpAuthSession {
         server_name: server_name.to_string(),
+        server_url: normalize_server_url_owned(server_url),
         auth_url,
         redirect_uri,
         verifier,
@@ -295,6 +312,7 @@ pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<Mcp
     )
     .await?;
     token.server_name = session.server_name.clone();
+    token.server_url = Some(session.server_url.clone());
     store_mcp_token(&token).map_err(|e| {
         anyhow::anyhow!(
             "Failed to store MCP token for '{}': {}",
@@ -327,6 +345,10 @@ pub async fn get_valid_mcp_token(
         return Ok(None);
     };
 
+    if !token.is_bound_to_server_url(server_url) {
+        return Ok(None);
+    }
+
     if !token.is_expired(60) {
         return Ok(Some(token));
     }
@@ -336,7 +358,7 @@ pub async fn get_valid_mcp_token(
     }
 
     let metadata = fetch_oauth_metadata(server_url).await?;
-    refresh_mcp_token(server_name, &metadata.token_endpoint)
+    refresh_mcp_token(server_name, server_url, &metadata.token_endpoint)
         .await
         .map(Some)
 }
@@ -497,13 +519,32 @@ pub async fn exchange_code(
         expires_at,
         scope: tr.scope,
         server_name: String::new(), // caller should set this
+        server_url: None, // caller should set this
     })
 }
 
 /// Refresh an existing MCP token using the stored refresh token.
-pub async fn refresh_mcp_token(server_name: &str, token_endpoint: &str) -> anyhow::Result<McpToken> {
+pub async fn refresh_mcp_token(
+    server_name: &str,
+    server_url: &str,
+    token_endpoint: &str,
+) -> anyhow::Result<McpToken> {
     let existing = get_mcp_token(server_name)
         .ok_or_else(|| anyhow::anyhow!("No stored token for {}", server_name))?;
+    if !existing.is_bound_to_server_url(server_url) {
+        let stored_binding = existing
+            .server_url
+            .as_deref()
+            .map(normalized_server_url)
+            .unwrap_or("<unbound legacy token>");
+        anyhow::bail!(
+            "Stored token for '{}' is not bound to requested MCP server URL (expected: {}, stored: {})",
+            server_name,
+            normalized_server_url(server_url),
+            stored_binding
+        );
+    }
+
     let refresh = existing
         .refresh_token
         .as_deref()
@@ -548,6 +589,7 @@ pub async fn refresh_mcp_token(server_name: &str, token_endpoint: &str) -> anyho
         expires_at,
         scope: existing.scope,
         server_name: server_name.to_string(),
+        server_url: Some(normalize_server_url_owned(server_url)),
     };
 
     store_mcp_token(&new_token)?;
@@ -575,8 +617,64 @@ mod tests {
             expires_at: Some(1), // expired long ago
             scope: None,
             server_name: "test".to_string(),
+            server_url: Some("https://example.com/mcp".to_string()),
         };
         assert!(t.is_expired(0));
+    }
+
+    #[test]
+    fn token_server_url_binding_matches_normalized_url() {
+        let t = McpToken {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            server_name: "test".to_string(),
+            server_url: Some("https://example.com/mcp".to_string()),
+        };
+        assert!(t.is_bound_to_server_url("https://example.com/mcp/"));
+        assert!(!t.is_bound_to_server_url("https://attacker.example/mcp"));
+    }
+
+    #[test]
+    fn token_without_server_url_is_not_bound() {
+        let t = McpToken {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            server_name: "test".to_string(),
+            server_url: None,
+        };
+        assert!(!t.is_bound_to_server_url("https://example.com/mcp"));
+    }
+
+    #[tokio::test]
+    async fn refresh_reports_unbound_legacy_token_binding() {
+        let server_name = format!("legacy-unbound-{}", std::process::id());
+        let _ = remove_mcp_token(&server_name);
+        let token = McpToken {
+            access_token: "tok".to_string(),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: None,
+            scope: None,
+            server_name: server_name.clone(),
+            server_url: None,
+        };
+        store_mcp_token(&token).expect("store legacy token");
+
+        let err = refresh_mcp_token(
+            &server_name,
+            "https://example.com/mcp/",
+            "https://example.com/oauth/token",
+        )
+        .await
+        .expect_err("unbound token should not refresh");
+        let message = err.to_string();
+
+        assert!(message.contains("expected: https://example.com/mcp"));
+        assert!(message.contains("stored: <unbound legacy token>"));
+        let _ = remove_mcp_token(&server_name);
     }
 
     #[test]
