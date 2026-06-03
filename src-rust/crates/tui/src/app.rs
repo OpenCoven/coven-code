@@ -5419,7 +5419,8 @@ impl App {
                 continue;
             }
 
-            if c == '\\' {
+            // In bash, backslash does not escape characters inside single quotes.
+            if c == '\\' && !in_single_quote {
                 escaped = true;
                 continue;
             }
@@ -5436,7 +5437,8 @@ impl App {
             }
         }
 
-        false
+        // Treat unterminated quotes / dangling escapes as unsafe.
+        escaped || in_single_quote || in_double_quote
     }
 
     fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
