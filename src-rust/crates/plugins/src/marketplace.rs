@@ -113,7 +113,7 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
         MarketplaceEntry {
             name: name_or_url
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("plugin")
                 .trim_end_matches(".zip")
                 .to_string(),
@@ -230,8 +230,8 @@ pub fn list_installed() -> Vec<InstalledPlugin> {
 
             let (version, description) = if yaml_path.exists() {
                 let content = std::fs::read_to_string(&yaml_path).unwrap_or_default();
-                let version = extract_yaml_str(&content, "version")
-                    .unwrap_or_else(|| "0.0.0".to_string());
+                let version =
+                    extract_yaml_str(&content, "version").unwrap_or_else(|| "0.0.0".to_string());
                 let description = extract_yaml_str(&content, "description").unwrap_or_default();
                 (version, description)
             } else if json_path.exists() {
@@ -278,12 +278,7 @@ fn plugin_install_dir(name: &str) -> std::path::PathBuf {
 fn extract_yaml_str(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
-            return Some(
-                rest.trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+            return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
         }
     }
     None

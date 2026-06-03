@@ -77,10 +77,7 @@ pub fn render_familiar_image(
 fn build_kitty_sequence(base64_data: &str) -> String {
     const CHUNK: usize = 4096;
 
-    let clean: String = base64_data
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let clean: String = base64_data.chars().filter(|c| !c.is_whitespace()).collect();
 
     let raw_len = clean.len();
     let total_chunks = (raw_len + CHUNK - 1).max(1) / CHUNK;

@@ -74,10 +74,7 @@ impl Tool for GlobTool {
         debug!(pattern = %params.pattern, dir = %base_dir.display(), "Running glob");
 
         if !base_dir.exists() || !base_dir.is_dir() {
-            return ToolResult::error(format!(
-                "Directory not found: {}",
-                base_dir.display()
-            ));
+            return ToolResult::error(format!("Directory not found: {}", base_dir.display()));
         }
 
         // Build the full glob pattern
@@ -127,7 +124,7 @@ impl Tool for GlobTool {
             })
             .collect();
 
-        entries_with_time.sort_by(|a, b| b.1.cmp(&a.1));
+        entries_with_time.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let total = entries_with_time.len();
         let max_results = 250;

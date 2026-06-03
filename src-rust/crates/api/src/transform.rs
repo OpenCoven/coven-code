@@ -5,9 +5,9 @@
 // in both directions (outbound request serialisation and inbound response
 // deserialisation).
 
+use crate::provider::ModelInfo;
 use crate::provider_error::ProviderError;
 use crate::provider_types::{ProviderRequest, ProviderResponse};
-use crate::provider::ModelInfo;
 
 // ---------------------------------------------------------------------------
 // MessageTransformer
@@ -32,7 +32,7 @@ pub trait MessageTransformer: Send + Sync {
 
     /// Deserialize a provider-specific JSON response body into a
     /// `ProviderResponse`.
-    fn from_provider(
+    fn parse_provider_response(
         &self,
         response: &serde_json::Value,
     ) -> Result<ProviderResponse, ProviderError>;

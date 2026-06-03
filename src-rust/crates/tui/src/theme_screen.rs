@@ -99,7 +99,12 @@ fn builtin_themes() -> Vec<ThemeOption> {
             name: "default".to_string(),
             label: "Default".to_string(),
             description: "Coven Code default — dark background, cyan accents".to_string(),
-            swatch: [Color::Black, Color::Rgb(167, 139, 250), Color::Green, Color::White],
+            swatch: [
+                Color::Black,
+                Color::Rgb(167, 139, 250),
+                Color::Green,
+                Color::White,
+            ],
         },
         ThemeOption {
             name: "dark".to_string(),
@@ -116,12 +121,7 @@ fn builtin_themes() -> Vec<ThemeOption> {
             name: "light".to_string(),
             label: "Light".to_string(),
             description: "Light background with dark text".to_string(),
-            swatch: [
-                Color::White,
-                Color::Blue,
-                Color::DarkGray,
-                Color::Black,
-            ],
+            swatch: [Color::White, Color::Blue, Color::DarkGray, Color::Black],
         },
         ThemeOption {
             name: "solarized".to_string(),
@@ -173,8 +173,8 @@ fn builtin_themes() -> Vec<ThemeOption> {
             description: "Red-green color blind friendly — blue/yellow/gray palette".to_string(),
             swatch: [
                 Color::Rgb(18, 18, 18),
-                Color::Rgb(0, 122, 204),  // Blue
-                Color::Rgb(255, 180, 0),  // Gold/Yellow
+                Color::Rgb(0, 122, 204),   // Blue
+                Color::Rgb(255, 180, 0),   // Gold/Yellow
                 Color::Rgb(200, 200, 200), // Light gray
             ],
         },
@@ -208,9 +208,21 @@ pub fn render_theme_screen(frame: &mut Frame, screen: &ThemeScreen, area: Rect) 
 
     for (i, theme) in screen.themes.iter().enumerate() {
         let is_selected = i == screen.selected_idx;
-        let bg = if is_selected { COVEN_CODE_ACCENT } else { COVEN_CODE_PANEL_BG };
-        let fg = if is_selected { Color::White } else { COVEN_CODE_TEXT };
-        let desc_fg = if is_selected { Color::Rgb(248, 220, 236) } else { COVEN_CODE_MUTED };
+        let bg = if is_selected {
+            COVEN_CODE_ACCENT
+        } else {
+            COVEN_CODE_PANEL_BG
+        };
+        let fg = if is_selected {
+            Color::White
+        } else {
+            COVEN_CODE_TEXT
+        };
+        let desc_fg = if is_selected {
+            Color::Rgb(248, 220, 236)
+        } else {
+            COVEN_CODE_MUTED
+        };
 
         // Build the swatch using block characters with background colour
         let swatch_spans: Vec<Span> = theme
@@ -247,7 +259,9 @@ pub fn render_theme_screen(frame: &mut Frame, screen: &ThemeScreen, area: Rect) 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " ↑↓ navigate  ·  enter apply  ·  esc cancel",
-            Style::default().fg(COVEN_CODE_MUTED).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(COVEN_CODE_MUTED)
+                .add_modifier(Modifier::ITALIC),
         )])),
         layout.footer_area,
     );

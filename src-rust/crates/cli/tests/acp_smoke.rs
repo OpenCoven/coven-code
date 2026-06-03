@@ -5,14 +5,14 @@
 //! This guards the wire-format and capability surface that registry-listed
 //! ACP clients (Zed, Neovim, JetBrains, …) rely on. Runs against the
 //! debug binary produced by `cargo build` — Cargo provides the path via
-//! `CARGO_BIN_EXE_claurst` (internal Cargo env for package "claurst").
+//! `CARGO_BIN_EXE_coven-code` (internal Cargo env for the binary target).
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn binary_path() -> String {
-    env!("CARGO_BIN_EXE_claurst").to_string()
+    env!("CARGO_BIN_EXE_coven-code").to_string()
 }
 
 fn run_with_input(stdin: &str, timeout: Duration) -> (String, String) {
@@ -26,7 +26,9 @@ fn run_with_input(stdin: &str, timeout: Duration) -> (String, String) {
 
     {
         let mut stdin_handle = child.stdin.take().expect("stdin");
-        stdin_handle.write_all(stdin.as_bytes()).expect("write stdin");
+        stdin_handle
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
         // Dropping stdin signals EOF — the agent will finish in-flight work
         // and then exit cleanly.
     }
@@ -101,7 +103,10 @@ fn session_new_returns_session_id() {
     let session_id = resp["result"]["sessionId"]
         .as_str()
         .expect("sessionId should be a string");
-    assert!(session_id.starts_with("acp-"), "sessionId not prefixed: {session_id}");
+    assert!(
+        session_id.starts_with("acp-"),
+        "sessionId not prefixed: {session_id}"
+    );
 }
 
 #[test]
@@ -130,5 +135,8 @@ fn cancel_notification_is_silent() {
         .filter(|l| !l.trim().is_empty())
         .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
         .count();
-    assert_eq!(response_count, 1, "unexpected extra responses in:\n{stdout}");
+    assert_eq!(
+        response_count, 1,
+        "unexpected extra responses in:\n{stdout}"
+    );
 }

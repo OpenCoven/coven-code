@@ -470,7 +470,10 @@ access = "search-only"
     fn canonicalize_access_tier_normalizes_case_and_whitespace() {
         assert_eq!(canonicalize_access_tier("FULL"), Some("full"));
         assert_eq!(canonicalize_access_tier("Read-Only"), Some("read-only"));
-        assert_eq!(canonicalize_access_tier("  search-only\n"), Some("search-only"));
+        assert_eq!(
+            canonicalize_access_tier("  search-only\n"),
+            Some("search-only")
+        );
         assert_eq!(canonicalize_access_tier(" full "), Some("full"));
     }
 
@@ -478,7 +481,14 @@ access = "search-only"
     fn canonicalize_access_tier_rejects_unknown_strings() {
         // Typos and near-matches must NOT round-trip — callers depend on
         // `None` to trigger fail-closed behavior.
-        for unknown in &["readonly", "Full Access", "writable", "", "rad-only", "search only"] {
+        for unknown in &[
+            "readonly",
+            "Full Access",
+            "writable",
+            "",
+            "rad-only",
+            "search only",
+        ] {
             assert!(
                 canonicalize_access_tier(unknown).is_none(),
                 "expected {unknown:?} to be rejected"

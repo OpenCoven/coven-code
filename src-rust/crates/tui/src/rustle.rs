@@ -50,11 +50,15 @@ pub enum RustlePose {
 // ── Style helpers ────────────────────────────────────────────────────────────
 
 fn body_style(palette: &FamiliarPalette) -> Style {
-    Style::default().fg(palette.primary).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(palette.primary)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn accent_style(palette: &FamiliarPalette) -> Style {
-    Style::default().fg(palette.accent).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(palette.accent)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn eye_bg_style(palette: &FamiliarPalette) -> Style {
@@ -78,11 +82,24 @@ fn eye_spans(palette: &FamiliarPalette, s: &'static str) -> Vec<Span<'static>> {
     let mut buf = String::new();
     let mut buf_is_eyeball = false;
     for ch in s.chars() {
-        let is_eyeball = matches!(ch, '\u{2598}' | '\u{259d}' | '\u{2580}' | '\u{2584}' | '\u{2596}' | '\u{258c}' | '\u{2590}');
+        let is_eyeball = matches!(
+            ch,
+            '\u{2598}'
+                | '\u{259d}'
+                | '\u{2580}'
+                | '\u{2584}'
+                | '\u{2596}'
+                | '\u{258c}'
+                | '\u{2590}'
+        );
         if is_eyeball != buf_is_eyeball && !buf.is_empty() {
             spans.push(Span::styled(
                 buf.clone(),
-                if buf_is_eyeball { eyeball_style(palette) } else { eye_bg_style(palette) },
+                if buf_is_eyeball {
+                    eyeball_style(palette)
+                } else {
+                    eye_bg_style(palette)
+                },
             ));
             buf.clear();
         }
@@ -92,7 +109,11 @@ fn eye_spans(palette: &FamiliarPalette, s: &'static str) -> Vec<Span<'static>> {
     if !buf.is_empty() {
         spans.push(Span::styled(
             buf,
-            if buf_is_eyeball { eyeball_style(palette) } else { eye_bg_style(palette) },
+            if buf_is_eyeball {
+                eyeball_style(palette)
+            } else {
+                eye_bg_style(palette)
+            },
         ));
     }
     spans
@@ -112,11 +133,23 @@ fn loading_eye_spans(palette: &FamiliarPalette, frame: u64) -> Vec<Span<'static>
     let bg = palette.eye_bg;
     let bold = Modifier::BOLD;
     vec![
-        Span::styled(QUARTERS[CW[prev]].to_string(), Style::default().fg(trail).bg(bg).add_modifier(bold)),
-        Span::styled(QUARTERS[CW[step]].to_string(), Style::default().fg(head).bg(bg).add_modifier(bold)),
+        Span::styled(
+            QUARTERS[CW[prev]].to_string(),
+            Style::default().fg(trail).bg(bg).add_modifier(bold),
+        ),
+        Span::styled(
+            QUARTERS[CW[step]].to_string(),
+            Style::default().fg(head).bg(bg).add_modifier(bold),
+        ),
         Span::styled("\u{2588}".to_string(), eye_bg_style(palette)),
-        Span::styled(QUARTERS[CCW[step]].to_string(), Style::default().fg(head).bg(bg).add_modifier(bold)),
-        Span::styled(QUARTERS[CCW[prev]].to_string(), Style::default().fg(trail).bg(bg).add_modifier(bold)),
+        Span::styled(
+            QUARTERS[CCW[step]].to_string(),
+            Style::default().fg(head).bg(bg).add_modifier(bold),
+        ),
+        Span::styled(
+            QUARTERS[CCW[prev]].to_string(),
+            Style::default().fg(trail).bg(bg).add_modifier(bold),
+        ),
     ]
 }
 
@@ -124,92 +157,171 @@ fn loading_eye_spans(palette: &FamiliarPalette, frame: u64) -> Vec<Span<'static>
 
 /// **Kitty** — cat head: pointy ears, square eyes, whisker nose.
 fn kitty_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled(" \u{2584}\u{2596}   \u{2597}\u{2584}\u{2596}  ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        " \u{2584}\u{2596}   \u{2597}\u{2584}\u{2596}  ".to_string(),
+        body_style(palette),
+    ));
     let row2 = match pose {
-        RustlePose::Static => Line::from(Span::styled(" \u{2590}\u{25c8}   \u{25c8}\u{2590}\u{258c} ".to_string(), body_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            " \u{2590}\u{25c8}   \u{25c8}\u{2590}\u{258c} ".to_string(),
+            body_style(palette),
+        )),
         RustlePose::Loading { frame } => {
             let mut spans = vec![Span::styled(" \u{2590}".to_string(), body_style(palette))];
             spans.extend(loading_eye_spans(palette, *frame));
-            spans.push(Span::styled("\u{2590}\u{258c}  ".to_string(), body_style(palette)));
+            spans.push(Span::styled(
+                "\u{2590}\u{258c}  ".to_string(),
+                body_style(palette),
+            ));
             Line::from(spans)
         }
     };
-    let row3 = Line::from(Span::styled(" \u{2590}\u{258c} \u{1d25} \u{2590}\u{258c}   ".to_string(), body_style(palette)));
-    let row4 = Line::from(Span::styled("  \u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}   ".to_string(), body_style(palette)));
+    let row3 = Line::from(Span::styled(
+        " \u{2590}\u{258c} \u{1d25} \u{2590}\u{258c}   ".to_string(),
+        body_style(palette),
+    ));
+    let row4 = Line::from(Span::styled(
+        "  \u{2580}\u{2580}\u{2580}\u{2580}\u{2580}\u{2580}   ".to_string(),
+        body_style(palette),
+    ));
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Nova** — crown, hooded face, gem clasp, sparkle accents.
 fn nova_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("   \u{00b7} \u{2726} \u{00b7}   ".to_string(), accent_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "   \u{00b7} \u{2726} \u{00b7}   ".to_string(),
+        accent_style(palette),
+    ));
     let row2 = match pose {
         RustlePose::Loading { frame } => {
             let spin = ['\u{00b7}', '\u{2726}', '*', '\u{00b7}'];
             let s = spin[(*frame / 5) as usize % 4];
-            Line::from(Span::styled(format!(" \u{2597}\u{2584}{}\u{2584}\u{2597}\u{2596}    ", s), body_style(palette)))
+            Line::from(Span::styled(
+                format!(" \u{2597}\u{2584}{}\u{2584}\u{2597}\u{2596}    ", s),
+                body_style(palette),
+            ))
         }
         RustlePose::Static => Line::from(Span::styled(
             " \u{2597}\u{2584}\u{265b}\u{2584}\u{2597}\u{2596}    ".to_string(),
             body_style(palette),
         )),
     };
-    let row3 = Line::from(Span::styled("  \u{2590}\u{258c}\u{2588}\u{2588}\u{2588}\u{2590}\u{258c}  ".to_string(), body_style(palette)));
-    let row4 = Line::from(Span::styled("   \u{25c6} \u{00b7} \u{25c6}   ".to_string(), accent_style(palette)));
+    let row3 = Line::from(Span::styled(
+        "  \u{2590}\u{258c}\u{2588}\u{2588}\u{2588}\u{2590}\u{258c}  ".to_string(),
+        body_style(palette),
+    ));
+    let row4 = Line::from(Span::styled(
+        "   \u{25c6} \u{00b7} \u{25c6}   ".to_string(),
+        accent_style(palette),
+    ));
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Cody** — robot programmer: antenna, bracket eyes, code body.
 fn cody_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("    \u{2500}\u{253c}\u{2500}    ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "    \u{2500}\u{253c}\u{2500}    ".to_string(),
+        body_style(palette),
+    ));
     let row2 = match pose {
         RustlePose::Loading { frame } => {
             let anim = ['[', '(', '[', '<'];
             let ch = anim[(*frame / 5) as usize % 4];
-            Line::from(Span::styled(format!(" \u{2584}\u{2584}[{ch} {ch}]\u{2584}  "), body_style(palette)))
+            Line::from(Span::styled(
+                format!(" \u{2584}\u{2584}[{ch} {ch}]\u{2584}  "),
+                body_style(palette),
+            ))
         }
-        RustlePose::Static => Line::from(Span::styled(" \u{2584}\u{2584}[\u{25c8} \u{25c8}]\u{2584}  ".to_string(), body_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            " \u{2584}\u{2584}[\u{25c8} \u{25c8}]\u{2584}  ".to_string(),
+            body_style(palette),
+        )),
     };
-    let row3 = Line::from(Span::styled("  \u{258c}</> \u{2590}   ".to_string(), body_style(palette)));
-    let row4 = Line::from(Span::styled("  \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584}   ".to_string(), body_style(palette)));
+    let row3 = Line::from(Span::styled(
+        "  \u{258c}</> \u{2590}   ".to_string(),
+        body_style(palette),
+    ));
+    let row4 = Line::from(Span::styled(
+        "  \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584}   ".to_string(),
+        body_style(palette),
+    ));
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Charm** — large pixel heart with sparkle dots.
 fn charm_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("  \u{2584}\u{2588}\u{2588}\u{2584}\u{2584}\u{2588}\u{2588}\u{2584} ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "  \u{2584}\u{2588}\u{2588}\u{2584}\u{2584}\u{2588}\u{2588}\u{2584} ".to_string(),
+        body_style(palette),
+    ));
     let row2 = match pose {
         RustlePose::Loading { frame } => {
             let sparkle = ['\u{2726}', '\u{00b7}', '*', '\u{00b7}'];
             let s = sparkle[(*frame / 5) as usize % 4];
-            Line::from(Span::styled(format!(" {s}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}{s}  "), body_style(palette)))
+            Line::from(Span::styled(
+                format!(" {s}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}{s}  "),
+                body_style(palette),
+            ))
         }
-        RustlePose::Static => Line::from(Span::styled(" \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588} ".to_string(), body_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588} "
+                .to_string(),
+            body_style(palette),
+        )),
     };
-    let row3 = Line::from(Span::styled("  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}  ".to_string(), body_style(palette)));
-    let row4 = Line::from(Span::styled("    \u{2580}\u{2588}\u{2580}    ".to_string(), body_style(palette)));
+    let row3 = Line::from(Span::styled(
+        "  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}  ".to_string(),
+        body_style(palette),
+    ));
+    let row4 = Line::from(Span::styled(
+        "    \u{2580}\u{2588}\u{2580}    ".to_string(),
+        body_style(palette),
+    ));
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Sage** — wizard hat with star above an open spellbook.
 fn sage_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("    \u{2597}\u{2584}\u{2596}    ".to_string(), body_style(palette)));
-    let row2 = Line::from(Span::styled("  \u{2597}\u{2588}\u{2726}\u{2588}\u{2588}\u{2596}   ".to_string(), body_style(palette)));
-    let row3 = Line::from(Span::styled(" \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584} ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "    \u{2597}\u{2584}\u{2596}    ".to_string(),
+        body_style(palette),
+    ));
+    let row2 = Line::from(Span::styled(
+        "  \u{2597}\u{2588}\u{2726}\u{2588}\u{2588}\u{2596}   ".to_string(),
+        body_style(palette),
+    ));
+    let row3 = Line::from(Span::styled(
+        " \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584} ".to_string(),
+        body_style(palette),
+    ));
     let row4 = match pose {
         RustlePose::Loading { frame } => {
             let page = ['\u{2500}', '~', '\u{2500}', '~'];
             let p = page[(*frame / 5) as usize % 4];
-            Line::from(Span::styled(format!(" \u{2590}{p}{p}\u{253c}{p}{p}\u{258c}   "), body_style(palette)))
+            Line::from(Span::styled(
+                format!(" \u{2590}{p}{p}\u{253c}{p}{p}\u{258c}   "),
+                body_style(palette),
+            ))
         }
-        RustlePose::Static => Line::from(Span::styled(" \u{2590}\u{2500}\u{2500}\u{253c}\u{2500}\u{2500}\u{258c}   ".to_string(), body_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            " \u{2590}\u{2500}\u{2500}\u{253c}\u{2500}\u{2500}\u{258c}   ".to_string(),
+            body_style(palette),
+        )),
     };
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Astra** — crescent moon with compass star and dotted orbit.
 fn astra_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("    \u{2726}  \u{00b7}   ".to_string(), accent_style(palette)));
-    let row2 = Line::from(Span::styled(" \u{2597}\u{2588}\u{2588}\u{2588}\u{2588}\u{2596}    ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "    \u{2726}  \u{00b7}   ".to_string(),
+        accent_style(palette),
+    ));
+    let row2 = Line::from(Span::styled(
+        " \u{2597}\u{2588}\u{2588}\u{2588}\u{2588}\u{2596}    ".to_string(),
+        body_style(palette),
+    ));
     let row3 = match pose {
         RustlePose::Loading { frame } => {
             let arcs = [
@@ -218,32 +330,53 @@ fn astra_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 
                 " \u{2588}    \u{2598}    ",
                 " \u{2588}     \u{00b7}   ",
             ];
-            Line::from(Span::styled(arcs[(*frame / 5) as usize % 4].to_string(), body_style(palette)))
+            Line::from(Span::styled(
+                arcs[(*frame / 5) as usize % 4].to_string(),
+                body_style(palette),
+            ))
         }
-        RustlePose::Static => Line::from(Span::styled(" \u{2588}    \u{2726}    ".to_string(), body_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            " \u{2588}    \u{2726}    ".to_string(),
+            body_style(palette),
+        )),
     };
-    let row4 = Line::from(Span::styled(" \u{2580}\u{2584}\u{2584}\u{00b7} \u{00b7}    ".to_string(), accent_style(palette)));
+    let row4 = Line::from(Span::styled(
+        " \u{2580}\u{2584}\u{2584}\u{00b7} \u{00b7}    ".to_string(),
+        accent_style(palette),
+    ));
     [row1, row2, row3, row4, Line::from("")]
 }
 
 /// **Echo** — round ghost with bracket eyes, blush smile, floaty dots.
 fn echo_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
-    let row1 = Line::from(Span::styled("  \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584}   ".to_string(), body_style(palette)));
+    let row1 = Line::from(Span::styled(
+        "  \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584}   ".to_string(),
+        body_style(palette),
+    ));
     let row2 = match pose {
         RustlePose::Loading { frame } => {
             let mut spans = vec![Span::styled("  \u{2588}[".to_string(), body_style(palette))];
             spans.extend(loading_eye_spans(palette, *frame));
-            spans.push(Span::styled("]\u{2588}   ".to_string(), body_style(palette)));
+            spans.push(Span::styled(
+                "]\u{2588}   ".to_string(),
+                body_style(palette),
+            ));
             Line::from(spans)
         }
         RustlePose::Static => {
             let mut spans = vec![Span::styled("  \u{2588}[".to_string(), body_style(palette))];
             spans.extend(eye_spans(palette, "\u{2580}\u{00b7}\u{2580}"));
-            spans.push(Span::styled("]\u{2588}   ".to_string(), body_style(palette)));
+            spans.push(Span::styled(
+                "]\u{2588}   ".to_string(),
+                body_style(palette),
+            ));
             Line::from(spans)
         }
     };
-    let row3 = Line::from(Span::styled("  \u{2588} \u{203f} \u{2588}    ".to_string(), body_style(palette)));
+    let row3 = Line::from(Span::styled(
+        "  \u{2588} \u{203f} \u{2588}    ".to_string(),
+        body_style(palette),
+    ));
     let row4 = match pose {
         RustlePose::Loading { frame } => {
             let dots = [
@@ -252,9 +385,15 @@ fn echo_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5
                 "  \u{2580}\u{2584}\u{2580}\u{2584}\u{2580} \u{00b7}  ",
                 "  \u{2580}\u{2584}\u{2580}\u{2584}\u{2580}    ",
             ];
-            Line::from(Span::styled(dots[(*frame / 8) as usize % 4].to_string(), accent_style(palette)))
+            Line::from(Span::styled(
+                dots[(*frame / 8) as usize % 4].to_string(),
+                accent_style(palette),
+            ))
         }
-        RustlePose::Static => Line::from(Span::styled("  \u{2580}\u{2584}\u{2580}\u{2584}\u{2580} \u{00b7}\u{00b7}\u{00b7}".to_string(), accent_style(palette))),
+        RustlePose::Static => Line::from(Span::styled(
+            "  \u{2580}\u{2584}\u{2580}\u{2584}\u{2580} \u{00b7}\u{00b7}\u{00b7}".to_string(),
+            accent_style(palette),
+        )),
     };
     [row1, row2, row3, row4, Line::from("")]
 }
@@ -266,7 +405,11 @@ fn echo_lines(palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5
 /// Sigil archetypes ([`Archetype::SigilCrystal`] etc.) are handled by
 /// [`crate::familiar_card`] directly, so they will hit `kitty_lines` here as
 /// a safe fallback if they ever route through this path by accident.
-pub fn archetype_lines(arch: Archetype, palette: &FamiliarPalette, pose: &RustlePose) -> [Line<'static>; 5] {
+pub fn archetype_lines(
+    arch: Archetype,
+    palette: &FamiliarPalette,
+    pose: &RustlePose,
+) -> [Line<'static>; 5] {
     match arch {
         Archetype::Cat => kitty_lines(palette, pose),
         Archetype::SorceressCrown => nova_lines(palette, pose),
@@ -297,7 +440,11 @@ mod tests {
     use crate::familiar_theme;
 
     fn line_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>().join("")
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     #[test]
@@ -307,7 +454,10 @@ mod tests {
             let lines = rustle_lines_for(Some(fam), &RustlePose::Static);
             assert_eq!(lines.len(), 5, "familiar {fam} should produce 5 rows");
             let row0 = line_text(&lines[0]);
-            assert!(!row0.trim().is_empty(), "familiar {fam} row 0 should not be blank: {row0:?}");
+            assert!(
+                !row0.trim().is_empty(),
+                "familiar {fam} row 0 should not be blank: {row0:?}"
+            );
         }
     }
 

@@ -14,7 +14,7 @@ pub mod plugin;
 pub mod registry;
 
 // Re-export the most commonly used items at the crate root.
-pub use hooks::{HookOutcome, HookRegistry, RegisteredHook, register_plugin_hooks};
+pub use hooks::{register_plugin_hooks, HookOutcome, HookRegistry, RegisteredHook};
 pub use loader::{default_user_plugins_dir, discover_plugins, project_plugins_dir};
 pub use manifest::{
     HookEventKind, PluginAuthor, PluginHookEntry, PluginHookMatcher, PluginHooksConfig,
@@ -66,40 +66,41 @@ pub fn check_plugin_capability(def: &PluginCommandDef) -> Result<(), String> {
     }
 }
 
+use once_cell::sync::Lazy;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Global hook registry (set once at startup, read during tool execution)
 // ---------------------------------------------------------------------------
 
-static GLOBAL_HOOK_REGISTRY: OnceLock<HookRegistry> = OnceLock::new();
+static GLOBAL_HOOK_REGISTRY: Lazy<parking_lot::RwLock<Option<Arc<HookRegistry>>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
 
 // ---------------------------------------------------------------------------
 // Global plugin registry (set once at startup, read by commands / tools)
 // ---------------------------------------------------------------------------
 
-static GLOBAL_PLUGIN_REGISTRY: OnceLock<PluginRegistry> = OnceLock::new();
+static GLOBAL_PLUGIN_REGISTRY: Lazy<parking_lot::RwLock<Option<Arc<PluginRegistry>>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
 
 /// Store the fully-loaded `PluginRegistry` into a process-global static so
 /// that slash commands and tools can query it without carrying the registry
 /// through every call frame.
 pub fn set_global_registry(registry: PluginRegistry) {
-    // OnceLock::set fails silently if already initialised (e.g. during tests).
-    let _ = GLOBAL_PLUGIN_REGISTRY.set(registry);
+    *GLOBAL_PLUGIN_REGISTRY.write() = Some(Arc::new(registry));
 }
 
 /// Access the global `PluginRegistry`, if it has been set.
-pub fn global_plugin_registry() -> Option<&'static PluginRegistry> {
-    GLOBAL_PLUGIN_REGISTRY.get()
+pub fn global_plugin_registry() -> Option<Arc<PluginRegistry>> {
+    GLOBAL_PLUGIN_REGISTRY.read().clone()
 }
 
 /// Store the hook registry built from loaded plugins into a process-global
 /// static so that `run_global_pre_tool_hook` / `run_global_post_tool_hook`
 /// can access it from anywhere without passing the registry around.
 pub fn set_global_hooks(registry: HookRegistry) {
-    // OnceLock::set fails silently if already initialised (e.g. during tests).
-    let _ = GLOBAL_HOOK_REGISTRY.set(registry);
+    *GLOBAL_HOOK_REGISTRY.write() = Some(Arc::new(registry));
 }
 
 /// Run all `PreToolUse` hooks registered by plugins for the given tool.
@@ -110,7 +111,7 @@ pub fn run_global_pre_tool_hook(
     tool_name: &str,
     tool_input: &serde_json::Value,
 ) -> hooks::HookOutcome {
-    let registry = match GLOBAL_HOOK_REGISTRY.get() {
+    let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
         None => return hooks::HookOutcome::Allow,
     };
@@ -152,7 +153,7 @@ pub fn run_global_post_tool_hook(
     tool_output: &str,
     is_error: bool,
 ) {
-    let registry = match GLOBAL_HOOK_REGISTRY.get() {
+    let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
         None => return,
     };
@@ -227,8 +228,11 @@ pub async fn load_plugins(
 
     // Extra paths.
     for path in extra_paths {
-        let (plugins, errors) =
-            discover_plugins(&[path.clone()], PluginSource::Extra(path.to_string_lossy().into_owned())).await;
+        let (plugins, errors) = discover_plugins(
+            std::slice::from_ref(path),
+            PluginSource::Extra(path.to_string_lossy().into_owned()),
+        )
+        .await;
         registry.extend(plugins, errors);
     }
 
@@ -281,18 +285,14 @@ pub fn parse_plugin_args(args: &str) -> PluginSubCommand {
     let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
     match parts.first().map(|s| s.to_lowercase()).as_deref() {
         Some("list") | Some("ls") => PluginSubCommand::List,
-        Some("enable") => PluginSubCommand::Enable(
-            parts.get(1).unwrap_or(&"").to_string(),
-        ),
-        Some("disable") => PluginSubCommand::Disable(
-            parts.get(1).unwrap_or(&"").to_string(),
-        ),
-        Some("info") | Some("show") => PluginSubCommand::Info(
-            parts.get(1).unwrap_or(&"").to_string(),
-        ),
-        Some("install") | Some("i") => PluginSubCommand::Install(
-            parts.get(1).unwrap_or(&"").to_string(),
-        ),
+        Some("enable") => PluginSubCommand::Enable(parts.get(1).unwrap_or(&"").to_string()),
+        Some("disable") => PluginSubCommand::Disable(parts.get(1).unwrap_or(&"").to_string()),
+        Some("info") | Some("show") => {
+            PluginSubCommand::Info(parts.get(1).unwrap_or(&"").to_string())
+        }
+        Some("install") | Some("i") => {
+            PluginSubCommand::Install(parts.get(1).unwrap_or(&"").to_string())
+        }
         Some("reload") | Some("refresh") => PluginSubCommand::Reload,
         Some("help") | Some("--help") | Some("-h") => PluginSubCommand::Help,
         _ => PluginSubCommand::Help,
@@ -338,10 +338,18 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
         }
         let mut extras: Vec<String> = Vec::new();
         if cmd_count > 0 {
-            extras.push(format!("{} cmd{}", cmd_count, if cmd_count == 1 { "" } else { "s" }));
+            extras.push(format!(
+                "{} cmd{}",
+                cmd_count,
+                if cmd_count == 1 { "" } else { "s" }
+            ));
         }
         if hook_count > 0 {
-            extras.push(format!("{} hook{}", hook_count, if hook_count == 1 { "" } else { "s" }));
+            extras.push(format!(
+                "{} hook{}",
+                hook_count,
+                if hook_count == 1 { "" } else { "s" }
+            ));
         }
         if !extras.is_empty() {
             out.push_str(&format!(" ({})", extras.join(", ")));
@@ -363,7 +371,10 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
 /// Build the text output for `/plugin info <name>`.
 pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
     match registry.get(name) {
-        None => format!("Plugin '{}' not found. Use `/plugin list` to see installed plugins.", name),
+        None => format!(
+            "Plugin '{}' not found. Use `/plugin list` to see installed plugins.",
+            name
+        ),
         Some(p) => {
             let mut out = String::new();
             out.push_str(&format!("Plugin: {}\n", p.name));
@@ -378,7 +389,11 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
             }
             out.push_str(&format!(
                 "Status: {}\n",
-                if registry.is_enabled(name) { "enabled" } else { "disabled" }
+                if registry.is_enabled(name) {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             ));
             out.push_str(&format!("Source: {}\n", p.source_id));
             out.push_str(&format!("Path: {}\n", p.path.display()));
@@ -401,7 +416,10 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
                         for matcher in matchers {
                             for hook in &matcher.hooks {
                                 let blocking = if hook.blocking { " [blocking]" } else { "" };
-                                out.push_str(&format!("  {} {}{}\n", event, hook.command, blocking));
+                                out.push_str(&format!(
+                                    "  {} {}{}\n",
+                                    event, hook.command, blocking
+                                ));
                             }
                         }
                     }
@@ -410,7 +428,10 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
 
             // MCP servers.
             if !p.manifest.mcp_servers.is_empty() {
-                out.push_str(&format!("\nMCP servers ({}):\n", p.manifest.mcp_servers.len()));
+                out.push_str(&format!(
+                    "\nMCP servers ({}):\n",
+                    p.manifest.mcp_servers.len()
+                ));
                 for srv in &p.manifest.mcp_servers {
                     out.push_str(&format!("  {}\n", srv.name));
                 }
@@ -418,7 +439,10 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
 
             // LSP servers.
             if !p.manifest.lsp_servers.is_empty() {
-                out.push_str(&format!("\nLSP servers ({}):\n", p.manifest.lsp_servers.len()));
+                out.push_str(&format!(
+                    "\nLSP servers ({}):\n",
+                    p.manifest.lsp_servers.len()
+                ));
                 for srv in &p.manifest.lsp_servers {
                     out.push_str(&format!("  {}\n", srv.name));
                 }
@@ -433,9 +457,7 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
 ///
 /// Copies the plugin directory into `~/.coven-code/plugins/` and returns the
 /// loaded plugin name on success.
-pub fn install_plugin_from_path(
-    source_path: &Path,
-) -> Result<String, PluginError> {
+pub fn install_plugin_from_path(source_path: &Path) -> Result<String, PluginError> {
     // Validate that the source looks like a plugin directory.
     if !source_path.exists() {
         return Err(PluginError::Io {
@@ -460,7 +482,11 @@ pub fn install_plugin_from_path(
         message: e.to_string(),
     })?;
 
-    let manifest = if manifest_path.extension().map(|e| e == "toml").unwrap_or(false) {
+    let manifest = if manifest_path
+        .extension()
+        .map(|e| e == "toml")
+        .unwrap_or(false)
+    {
         PluginManifest::from_toml(&bytes)
     } else {
         PluginManifest::from_json(&bytes)
@@ -520,10 +546,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Format the result of a plugin reload into a human-readable string,
 /// suitable for the `/reload-plugins` command output.
-pub fn format_reload_summary(
-    registry: &PluginRegistry,
-    diff: &ReloadDiff,
-) -> String {
+pub fn format_reload_summary(registry: &PluginRegistry, diff: &ReloadDiff) -> String {
     let enabled = registry.enabled_count();
     let total = registry.plugin_count();
 
@@ -542,7 +565,11 @@ pub fn format_reload_summary(
         if cmd_count == 1 { "" } else { "s" }
     ));
 
-    let hook_count: usize = registry.build_hook_registry().values().map(|v| v.len()).sum();
+    let hook_count: usize = registry
+        .build_hook_registry()
+        .values()
+        .map(|v| v.len())
+        .sum();
     parts.push(format!(
         "{} hook{}",
         hook_count,
@@ -632,7 +659,11 @@ mod tests {
     #[tokio::test]
     async fn load_plugins_finds_project_plugin() {
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".coven-code").join("plugins").join("test-plugin");
+        let plugin_dir = tmp
+            .path()
+            .join(".coven-code")
+            .join("plugins")
+            .join("test-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         write_manifest(
             &plugin_dir,

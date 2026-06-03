@@ -38,7 +38,11 @@ impl EffortPickerState {
     }
 
     pub fn select_prev(&mut self) {
-        self.selected = if self.selected == 0 { 3 } else { self.selected - 1 };
+        self.selected = if self.selected == 0 {
+            3
+        } else {
+            self.selected - 1
+        };
     }
 
     pub fn select_next(&mut self) {
@@ -76,16 +80,19 @@ pub fn render_effort_picker(frame: &mut Frame, state: &EffortPickerState, area: 
 
     let mut lines: Vec<Line> = Vec::new();
     let options: [(EffortLevel, &str); 4] = [
-        (EffortLevel::Low,    "low"),
+        (EffortLevel::Low, "low"),
         (EffortLevel::Normal, "normal"),
-        (EffortLevel::High,   "high"),
-        (EffortLevel::Max,    "max"),
+        (EffortLevel::High, "high"),
+        (EffortLevel::Max, "max"),
     ];
     for (i, (lvl, label)) in options.iter().enumerate() {
         let selected = i == state.selected;
         let prefix = if selected { "›" } else { " " };
         let style = if selected {
-            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };

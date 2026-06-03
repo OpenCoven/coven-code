@@ -38,7 +38,9 @@ impl IdeKind {
                 Some("code-insiders --install-extension coven-code.coven-code".to_string())
             }
             Self::Cursor => Some("cursor --install-extension coven-code.coven-code".to_string()),
-            Self::Windsurf => Some("windsurf --install-extension coven-code.coven-code".to_string()),
+            Self::Windsurf => {
+                Some("windsurf --install-extension coven-code.coven-code".to_string())
+            }
             Self::VSCodium => Some("codium --install-extension coven-code.coven-code".to_string()),
             _ => None,
         }

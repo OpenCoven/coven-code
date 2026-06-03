@@ -25,7 +25,11 @@ pub struct StatusNotice {
 }
 
 impl StatusNotice {
-    pub fn new(id: impl Into<String>, message: impl Into<String>, priority: NoticePriority) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        priority: NoticePriority,
+    ) -> Self {
         Self {
             id: id.into(),
             message: message.into(),
@@ -78,19 +82,25 @@ pub fn compact_warning_notice(fill_pct: f64) -> StatusNotice {
     if fill_pct >= 0.95 {
         StatusNotice::new(
             notice_ids::COMPACT_CRITICAL,
-            format!("Context {:.0}% full — run /compact now to avoid data loss", fill_pct * 100.0),
+            format!(
+                "Context {:.0}% full — run /compact now to avoid data loss",
+                fill_pct * 100.0
+            ),
             NoticePriority::Critical,
         )
     } else {
         StatusNotice::new(
             notice_ids::COMPACT_WARNING,
-            format!("Context {:.0}% full — consider running /compact", fill_pct * 100.0),
+            format!(
+                "Context {:.0}% full — consider running /compact",
+                fill_pct * 100.0
+            ),
             NoticePriority::High,
         )
     }
 }
 
 /// Sort notices by priority (highest first), then by ID for stability.
-pub fn sort_notices(notices: &mut Vec<StatusNotice>) {
+pub fn sort_notices(notices: &mut [StatusNotice]) {
     notices.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
 }

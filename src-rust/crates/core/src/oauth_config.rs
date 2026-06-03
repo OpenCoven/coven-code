@@ -116,7 +116,8 @@ pub const PROD_OAUTH: OAuthConfig = OAuthConfig {
     token_url: "https://platform.claude.com/v1/oauth/token",
     api_key_url: "https://api.anthropic.com/api/oauth/claude_cli/create_api_key",
     roles_url: "https://api.anthropic.com/api/oauth/claude_cli/roles",
-    console_success_url: "https://platform.claude.com/buy_credits?returnUrl=/oauth/code/success%3Fapp%3Dclaude-code",
+    console_success_url:
+        "https://platform.claude.com/buy_credits?returnUrl=/oauth/code/success%3Fapp%3Dclaude-code",
     claudeai_success_url: "https://platform.claude.com/oauth/code/success?app=claude-code",
     manual_redirect_url: "https://platform.claude.com/oauth/code/callback",
     client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e", // Claude Code client ID (stealth)
@@ -147,8 +148,7 @@ pub const STAGING_OAUTH: OAuthConfig = OAuthConfig {
 };
 
 /// Client-ID Metadata Document URL for MCP OAuth (CIMD / SEP-991).
-pub const MCP_CLIENT_METADATA_URL: &str =
-    "https://claude.ai/oauth/claude-code-client-metadata";
+pub const MCP_CLIENT_METADATA_URL: &str = "https://claude.ai/oauth/claude-code-client-metadata";
 
 // ---------------------------------------------------------------------------
 // Config selection
@@ -341,10 +341,7 @@ fn codex_tokens_path() -> Option<std::path::PathBuf> {
 
 /// Save Codex OAuth tokens for a named profile under
 /// `~/.coven-code/accounts/codex/<profile_id>/codex_tokens.json`.
-pub fn save_codex_tokens_for_profile(
-    tokens: &CodexTokens,
-    profile_id: &str,
-) -> anyhow::Result<()> {
+pub fn save_codex_tokens_for_profile(tokens: &CodexTokens, profile_id: &str) -> anyhow::Result<()> {
     let path = crate::accounts::codex_token_path(profile_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -384,8 +381,7 @@ pub fn save_codex_tokens_and_register(
         .find(|p| {
             (identity.email.is_some() && p.email == identity.email)
                 || (tokens.account_id.is_some() && p.account_id == tokens.account_id)
-                || (identity.account_id.is_some()
-                    && p.account_id == identity.account_id)
+                || (identity.account_id.is_some() && p.account_id == identity.account_id)
         })
         .map(|p| p.id);
 
@@ -410,10 +406,7 @@ pub fn save_codex_tokens_and_register(
         id: id.clone(),
         label: label.map(slugify_profile_id),
         email: identity.email,
-        account_id: tokens
-            .account_id
-            .clone()
-            .or(identity.account_id),
+        account_id: tokens.account_id.clone().or(identity.account_id),
         organization_uuid: None,
         subscription_tier: None,
         added_at: None,
@@ -529,7 +522,11 @@ mod tests {
             "verifier too short: {} chars",
             verifier.len()
         );
-        assert!(verifier.len() <= 128, "verifier too long: {} chars", verifier.len());
+        assert!(
+            verifier.len() <= 128,
+            "verifier too long: {} chars",
+            verifier.len()
+        );
     }
 
     #[test]

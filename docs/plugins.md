@@ -349,7 +349,7 @@ The `/plugin` slash command manages plugins from within an interactive session:
 /plugin reload               — reload all plugins from disk
 ```
 
-After enabling or disabling a plugin, run `/plugin reload` or use `/reload-plugins` to apply changes in the current session without restarting.
+After enabling or disabling a plugin, run `/plugin reload` or use `/reload-plugins` to refresh the session plugin registry without restarting.
 
 ### /reload-plugins
 
@@ -357,23 +357,17 @@ After enabling or disabling a plugin, run `/plugin reload` or use `/reload-plugi
 /reload-plugins
 ```
 
-Rescans `~/.coven-code/plugins/`, re-reads all manifests, and refreshes the active hook registry, commands, agents, skills, and MCP server definitions. Use this after making changes to a plugin directory or after installing a new plugin.
+Rescans `~/.coven-code/plugins/`, re-reads all manifests, and refreshes the active plugin registry, hook registry, plugin commands, agents, skills, and in-memory MCP server definitions. Use this after making changes to a plugin directory or after installing a new plugin.
+
+Plugin-provided MCP servers are merged before the initial MCP connection during startup, so their tools are available in the first session tool list. If a reload adds a new MCP server after startup, restart the session to expose that server's tools to the model tool list.
 
 ---
 
-## Plugin Marketplace Integration
+## Marketplace Metadata
 
-Plugins published to the Coven Code marketplace have a `marketplace_id` field in their manifest (e.g. `"author/plugin-name"`). The marketplace integration allows:
+Plugin manifests may include a `marketplace_id` field (e.g. `"author/plugin-name"`) for catalog metadata and future marketplace workflows.
 
-- Browsing available plugins
-- Installing plugins by ID
-- Updating installed plugins to newer versions
-
-```
-/plugin install author/plugin-name     — install from the marketplace
-```
-
-Locally installed plugins (via a file path) do not require a `marketplace_id`.
+The current `/plugin install` command installs from a local plugin path. It does not install marketplace IDs directly.
 
 ---
 
