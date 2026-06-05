@@ -584,7 +584,7 @@ async fn main() -> anyhow::Result<()> {
                          - Set GOOGLE_API_KEY for Google Gemini\n\
                          - Set GROQ_API_KEY for Groq (fast, free tier available)\n\
                          - Run `coven-code --provider ollama` for local models (no key needed)\n\
-                         - Run `coven-code auth login` for Anthropic OAuth"
+                         - Anthropic OAuth login is disabled until Coven Code has its own OAuth client"
                     );
                 } else {
                     (String::new(), false)
@@ -3889,7 +3889,7 @@ async fn run_interactive(
 // Called before Cli::parse() so it doesn't conflict with positional `prompt`.
 //
 // Usage:
-//   claude auth login [--console]   — OAuth PKCE login (claude.ai by default)
+//   claude auth login [--console]   — Anthropic OAuth is disabled until Coven Code has its own client
 //   claude auth logout              — Clear stored credentials
 //   claude auth status [--json]     — Show authentication status
 
@@ -4302,18 +4302,23 @@ async fn auth_status(json_output: bool) {
                 .filter(|tokens| !tokens.uses_bearer_auth() && tokens.api_key.is_some())
                 .map(|_| "/login managed key".to_string())
         });
-    let token_source = oauth_tokens.as_ref().map(|tokens| {
+    let usable_oauth_tokens = oauth_tokens
+        .as_ref()
+        .filter(|tokens| !tokens.uses_bearer_auth());
+    let disabled_bearer_token = oauth_tokens
+        .as_ref()
+        .is_some_and(|tokens| tokens.uses_bearer_auth());
+    let token_source = usable_oauth_tokens.map(|tokens| {
         if tokens.uses_bearer_auth() {
             "claude.ai".to_string()
         } else {
             "console_oauth".to_string()
         }
     });
-    let login_method = oauth_tokens
-        .as_ref()
+    let login_method = usable_oauth_tokens
         .and_then(|tokens| subscription_label(tokens.subscription_type.as_deref()))
         .or_else(|| {
-            oauth_tokens.as_ref().map(|tokens| {
+            usable_oauth_tokens.map(|tokens| {
                 if tokens.uses_bearer_auth() {
                     "Coven Code Account".to_string()
                 } else {
@@ -4322,7 +4327,7 @@ async fn auth_status(json_output: bool) {
             })
         })
         .or_else(|| api_key_source.as_ref().map(|_| "API Key".to_string()));
-    let billing_mode = oauth_tokens.as_ref().map_or_else(
+    let billing_mode = usable_oauth_tokens.map_or_else(
         || {
             if api_key_source.is_some() {
                 "API".to_string()
@@ -4339,7 +4344,7 @@ async fn auth_status(json_output: bool) {
         },
     );
 
-    let (auth_method, logged_in) = if let Some(ref tokens) = oauth_tokens {
+    let (auth_method, logged_in) = if let Some(tokens) = usable_oauth_tokens {
         let method = if tokens.uses_bearer_auth() {
             "claude.ai"
         } else {
@@ -4369,6 +4374,10 @@ async fn auth_status(json_output: bool) {
         if let Some(ref method) = login_method {
             obj["loginMethod"] = serde_json::Value::String(method.clone());
         }
+        if disabled_bearer_token {
+            obj["disabledTokenSource"] =
+                serde_json::Value::String("claude.ai OAuth token disabled".to_string());
+        }
 
         if let Some(ref tokens) = oauth_tokens {
             obj["email"] = json_null_or_string(&tokens.email);
@@ -4380,7 +4389,11 @@ async fn auth_status(json_output: bool) {
     } else {
         if !logged_in {
             let hint = if active_provider == "anthropic" {
-                "Run `coven-code auth login` or set ANTHROPIC_API_KEY.".to_string()
+                if disabled_bearer_token {
+                    "Stored claude.ai OAuth tokens are disabled; set ANTHROPIC_API_KEY.".to_string()
+                } else {
+                    "Set ANTHROPIC_API_KEY.".to_string()
+                }
             } else if let Some(env_var) =
                 claurst_core::config::primary_api_key_env_var_for_provider(active_provider)
             {

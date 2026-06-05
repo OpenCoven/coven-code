@@ -146,7 +146,8 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled("coven-code auth login", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("set ANTHROPIC_API_KEY=<key>", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("  then restart", Style::default().fg(dim)),
         ]),
         Line::from(Span::styled(sep, Style::default().fg(Color::Rgb(45, 45, 55)))),
         // ── 2. OpenAI ─────────────────────────────────────────
