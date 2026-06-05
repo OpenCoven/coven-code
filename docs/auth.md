@@ -94,16 +94,15 @@ coven-code --api-key "sk-ant-api03-..." "your prompt"
 Coven Code supports an OAuth 2.0 PKCE flow that authenticates through either
 the Anthropic Console or Claude.ai in your browser.
 
-> **Important:** The OAuth client IDs in Coven Code are registered to Anthropic's
-> official Claude Code CLI application. Anthropic's authorization server may
-> reject or misattribute OAuth requests originating from Coven Code. The API key
-> method is the recommended path for Coven Code users.
->
-> If OAuth login is attempted and fails, use Method 1 (API key) instead.
+> **Important:** Coven Code must not reuse Claude Code's OAuth client ID.
+> Anthropic OAuth requires a client ID registered for Coven Code and supplied
+> through `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`. Until that first-party client
+> is configured, use Method 1 (API key).
 
-### Claude.ai flow (default)
+### Claude.ai flow
 
 ```bash
+export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=<registered-client-id>
 coven-code auth login
 ```
 
@@ -125,6 +124,7 @@ API calls.
 ### Console flow (creates an API key)
 
 ```bash
+export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=<registered-client-id>
 coven-code auth login --console
 ```
 
@@ -204,8 +204,8 @@ providers:
 
 ```bash
 # Add accounts (each login becomes its own profile)
-coven-code auth login                       # Claude.ai (default)
-coven-code auth login --console             # Console / API-key flow
+coven-code auth login                       # Claude.ai, requires COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID
+coven-code auth login --console             # Console / API-key flow, requires COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID
 coven-code auth login --label work          # name the profile
 coven-code codex login                      # ChatGPT/Codex OAuth
 coven-code codex login --label personal

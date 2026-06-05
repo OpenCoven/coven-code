@@ -2671,10 +2671,11 @@ impl SlashCommand for LoginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /login [--console] [--codex] [--label <name>]\n\n\
-         Start an OAuth login. Anthropic OAuth is disabled until Coven Code has\n\
-         its own OAuth client identity; set ANTHROPIC_API_KEY instead. Pass\n\
-         `--codex` to add a ChatGPT/Codex account. `--label work` names the\n\
-         saved profile so you can `switch` to it later by that name."
+         Start an OAuth login. Anthropic OAuth requires a configured Coven Code\n\
+         client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
+         ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
+         add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
+         you can `switch` to it later by that name."
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {

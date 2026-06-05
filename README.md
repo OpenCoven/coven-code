@@ -103,9 +103,10 @@ export ANTHROPIC_API_KEY=<your-key>
 coven-code
 ```
 
-Or log in via OAuth (Anthropic accounts):
+Or log in via OAuth after configuring a Coven Code OAuth client:
 
 ```bash
+export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=<registered-client-id>
 coven-code auth login
 ```
 

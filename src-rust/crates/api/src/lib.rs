@@ -549,9 +549,9 @@ pub mod client {
                         model
                     )
                 } else {
-                    "Set ANTHROPIC_API_KEY, or use --provider to select a different provider \
-                     (e.g. --provider openai). Anthropic OAuth login is disabled until Coven Code \
-                     has its own OAuth client.".to_string()
+                    "Set ANTHROPIC_API_KEY, configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID \
+                     and run `coven-code auth login`, or use --provider to select a different \
+                     provider (e.g. --provider openai).".to_string()
                 };
                 return Err(ClaudeError::Auth(
                     format!("No API key for the selected model. {}", hint)
@@ -653,9 +653,9 @@ pub mod client {
                 } else if model.starts_with("llama") {
                     format!("Model '{}' looks like a Llama model. Use `--provider groq` or `--provider ollama` for local.", model)
                 } else {
-                    "Set ANTHROPIC_API_KEY, or use --provider to select a different provider \
-                     (e.g. --provider openai). Anthropic OAuth login is disabled until Coven Code \
-                     has its own OAuth client.".to_string()
+                    "Set ANTHROPIC_API_KEY, configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID \
+                     and run `coven-code auth login`, or use --provider to select a different \
+                     provider (e.g. --provider openai).".to_string()
                 };
                 return Err(ClaudeError::Auth(
                     format!("No API key for the selected model. {}", hint)
