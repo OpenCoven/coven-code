@@ -487,63 +487,10 @@ impl HistorySearch {
     }
 }
 
-/// Attempt to copy text to the system clipboard using platform CLI tools.
+/// Attempt to copy text to the system clipboard using trusted platform clipboard helpers.
 /// Returns true if successful.
 pub fn try_copy_to_clipboard(text: &str) -> bool {
-    // Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("clip")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-                drop(stdin);
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // macOS
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // Linux / Wayland / X11
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write;
-        for cmd in &["wl-copy", "xclip -selection clipboard", "xsel --clipboard --input"] {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if let Some((prog, args)) = parts.split_first() {
-                if let Ok(mut child) = std::process::Command::new(prog)
-                    .args(args)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    crate::image_paste::write_clipboard_text(text)
 }
 
 /// Map a character to its QWERTY Latin keyboard-position equivalent.
