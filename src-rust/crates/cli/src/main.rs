@@ -1589,11 +1589,19 @@ fn permission_request_from_core(
 
     match (tool_name.as_str(), pending.request.path.clone()) {
         ("Bash", Some(command)) => {
-            let suggested_prefix = command
-                .split_whitespace()
-                .next()
-                .filter(|prefix| !prefix.is_empty())
-                .map(|prefix| format!("{} ", prefix));
+            let suggested_prefix = if command
+                .chars()
+                .any(|c| matches!(c, ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`'))
+                || command.contains("$(")
+            {
+                None
+            } else {
+                let mut words = command.split_whitespace();
+                words.next().map(|first| match words.next() {
+                    Some(second) => format!("{} {}", first, second),
+                    None => first.to_string(),
+                })
+            };
             claurst_tui::dialogs::PermissionRequest::bash(
                 tool_use_id,
                 tool_name,
@@ -2761,9 +2769,12 @@ async fn run_interactive(
                                 .and_then(|p| p.request.path.clone());
                             let bash_prefix = if should_record_bash_prefix {
                                 match &pr.kind {
-                                    claurst_tui::dialogs::PermissionDialogKind::Bash { command, .. } => {
-                                        let first_word = command.split_whitespace().next().unwrap_or("").to_string();
-                                        if first_word.is_empty() { None } else { Some(first_word) }
+                                    claurst_tui::dialogs::PermissionDialogKind::Bash { suggested_prefix, .. } => {
+                                        suggested_prefix
+                                            .as_deref()
+                                            .map(str::trim)
+                                            .filter(|prefix| !prefix.is_empty())
+                                            .map(str::to_string)
                                     }
                                     _ => None,
                                 }
