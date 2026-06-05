@@ -89,7 +89,9 @@ pub fn read_primary_text() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn read_text_macos() -> Option<String> {
-    let out = Command::new("pbpaste").output().ok()?;
+    let out = Command::new(trusted_command_path(&["/usr/bin/pbpaste"])?)
+        .output()
+        .ok()?;
     if out.status.success() && !out.stdout.is_empty() {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -109,21 +111,42 @@ fn read_primary_text_linux() -> Option<String> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_text_linux_selection(primary: bool) -> Option<String> {
-    let commands: &[(&str, &[&str])] = if primary {
+    let commands: &[(&[&str], &[&str])] = if primary {
         &[
-            ("wl-paste", &["--primary", "--no-newline"]),
-            ("xclip", &["-selection", "primary", "-o"]),
-            ("xsel", &["--primary", "--output"]),
+            (
+                &["/usr/bin/wl-paste", "/usr/local/bin/wl-paste"],
+                &["--primary", "--no-newline"],
+            ),
+            (
+                &["/usr/bin/xclip", "/usr/local/bin/xclip"],
+                &["-selection", "primary", "-o"],
+            ),
+            (
+                &["/usr/bin/xsel", "/usr/local/bin/xsel"],
+                &["--primary", "--output"],
+            ),
         ]
     } else {
         &[
-            ("wl-paste", &["--no-newline"]),
-            ("xclip", &["-selection", "clipboard", "-o"]),
-            ("xsel", &["--clipboard", "--output"]),
+            (
+                &["/usr/bin/wl-paste", "/usr/local/bin/wl-paste"],
+                &["--no-newline"],
+            ),
+            (
+                &["/usr/bin/xclip", "/usr/local/bin/xclip"],
+                &["-selection", "clipboard", "-o"],
+            ),
+            (
+                &["/usr/bin/xsel", "/usr/local/bin/xsel"],
+                &["--clipboard", "--output"],
+            ),
         ]
     };
 
-    for (prog, args) in commands {
+    for (paths, args) in commands {
+        let Some(prog) = trusted_command_path(paths) else {
+            continue;
+        };
         if let Ok(out) = Command::new(prog).args(*args).output() {
             if out.status.success() && !out.stdout.is_empty() {
                 return Some(String::from_utf8_lossy(&out.stdout).into_owned());
@@ -135,12 +158,16 @@ fn read_text_linux_selection(primary: bool) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn read_text_windows() -> Option<String> {
-    let out = Command::new("powershell")
+    let out = Command::new(trusted_windows_powershell()?)
         .args(["-NoProfile", "-Command", "Get-Clipboard"])
         .output()
         .ok()?;
     if out.status.success() && !out.stdout.is_empty() {
-        Some(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
     } else {
         None
     }
@@ -171,8 +198,10 @@ pub fn read_clipboard_image() -> Option<PastedImage> {
 
 #[cfg(target_os = "macos")]
 fn read_image_macos() -> Option<PastedImage> {
+    let osascript = trusted_command_path(&["/usr/bin/osascript"])?;
+
     // Check whether the clipboard contains an image type
-    let check = Command::new("osascript")
+    let check = Command::new(osascript)
         .args(["-e", "the clipboard as «class PNGf»"])
         .output()
         .ok()?;
@@ -192,7 +221,10 @@ close access fp"#,
         tmp.display()
     );
 
-    let write_out = Command::new("osascript").args(["-e", &script]).output().ok()?;
+    let write_out = Command::new(osascript)
+        .args(["-e", &script])
+        .output()
+        .ok()?;
     if write_out.status.success() && tmp.exists() && tmp.metadata().ok()?.len() > 0 {
         let dims = png_dimensions(&tmp);
         Some(PastedImage {
@@ -236,23 +268,28 @@ fn read_image_linux() -> Option<PastedImage> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn check_linux_clipboard_has_image() -> bool {
     // xclip: list TARGETS and grep for image/
-    if let Ok(out) = Command::new("xclip")
-        .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
-        .output()
-    {
-        if out.status.success() {
-            let targets = String::from_utf8_lossy(&out.stdout);
-            if targets.contains("image/") {
-                return true;
+    if let Some(xclip) = trusted_command_path(&["/usr/bin/xclip", "/usr/local/bin/xclip"]) {
+        if let Ok(out) = Command::new(xclip)
+            .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+            .output()
+        {
+            if out.status.success() {
+                let targets = String::from_utf8_lossy(&out.stdout);
+                if targets.contains("image/") {
+                    return true;
+                }
             }
         }
     }
     // wl-paste: check available types
-    if let Ok(out) = Command::new("wl-paste").args(["--list-types"]).output() {
-        if out.status.success() {
-            let types = String::from_utf8_lossy(&out.stdout);
-            if types.contains("image/") {
-                return true;
+    if let Some(wl_paste) = trusted_command_path(&["/usr/bin/wl-paste", "/usr/local/bin/wl-paste"])
+    {
+        if let Ok(out) = Command::new(wl_paste).args(["--list-types"]).output() {
+            if out.status.success() {
+                let types = String::from_utf8_lossy(&out.stdout);
+                if types.contains("image/") {
+                    return true;
+                }
             }
         }
     }
@@ -262,21 +299,29 @@ fn check_linux_clipboard_has_image() -> bool {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn try_save_linux_image(path: &PathBuf) -> bool {
     // xclip
-    if let Ok(out) = Command::new("xclip")
-        .args(["-selection", "clipboard", "-t", "image/png", "-o"])
-        .output()
-    {
-        if out.status.success() && !out.stdout.is_empty() {
-            if std::fs::write(path, &out.stdout).is_ok() {
-                return true;
+    if let Some(xclip) = trusted_command_path(&["/usr/bin/xclip", "/usr/local/bin/xclip"]) {
+        if let Ok(out) = Command::new(xclip)
+            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                if std::fs::write(path, &out.stdout).is_ok() {
+                    return true;
+                }
             }
         }
     }
     // wl-paste
-    if let Ok(out) = Command::new("wl-paste").args(["--type", "image/png"]).output() {
-        if out.status.success() && !out.stdout.is_empty() {
-            if std::fs::write(path, &out.stdout).is_ok() {
-                return true;
+    if let Some(wl_paste) = trusted_command_path(&["/usr/bin/wl-paste", "/usr/local/bin/wl-paste"])
+    {
+        if let Ok(out) = Command::new(wl_paste)
+            .args(["--type", "image/png"])
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                if std::fs::write(path, &out.stdout).is_ok() {
+                    return true;
+                }
             }
         }
     }
@@ -287,8 +332,10 @@ fn try_save_linux_image(path: &PathBuf) -> bool {
 
 #[cfg(target_os = "windows")]
 fn read_image_windows() -> Option<PastedImage> {
+    let powershell = trusted_windows_powershell()?;
+
     // Check whether clipboard has an image
-    let check = Command::new("powershell")
+    let check = Command::new(&powershell)
         .args([
             "-NoProfile",
             "-Command",
@@ -311,7 +358,7 @@ fn read_image_windows() -> Option<PastedImage> {
         tmp_str.replace('\'', "''")
     );
 
-    let save = Command::new("powershell")
+    let save = Command::new(powershell)
         .args(["-NoProfile", "-Command", &script])
         .output()
         .ok()?;
@@ -340,11 +387,17 @@ fn read_image_windows() -> Option<PastedImage> {
 /// Write text to the system clipboard. Returns `true` on success.
 pub fn write_clipboard_text(text: &str) -> bool {
     #[cfg(target_os = "macos")]
-    { write_text_macos_w(text) }
+    {
+        write_text_macos_w(text)
+    }
     #[cfg(target_os = "windows")]
-    { write_text_windows_w(text) }
+    {
+        write_text_windows_w(text)
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    { write_text_linux_w(text) }
+    {
+        write_text_linux_w(text)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -354,7 +407,10 @@ fn write_text_macos_w(text: &str) -> bool {
     let mut child = match Command::new(match trusted_command_path(&["/usr/bin/pbcopy"]) {
         Some(path) => path,
         None => return false,
-    }).stdin(Stdio::piped()).spawn() {
+    })
+    .stdin(Stdio::piped())
+    .spawn()
+    {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -369,7 +425,8 @@ fn write_text_windows_w(text: &str) -> bool {
     use std::io::Write;
     use std::process::Stdio;
     // PowerShell Set-Clipboard reads from stdin via pipe
-    let script = format!("[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard");
+    let script =
+        format!("[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard");
     let powershell = match trusted_windows_powershell() {
         Some(path) => path,
         None => return false,
@@ -402,15 +459,30 @@ fn write_text_linux_selection(text: &str, primary: bool) -> bool {
 
     let commands: &[(&[&str], &[&str])] = if primary {
         &[
-            (&["/usr/bin/wl-copy", "/usr/local/bin/wl-copy"], &["--primary"]),
-            (&["/usr/bin/xclip", "/usr/local/bin/xclip"], &["-selection", "primary"]),
-            (&["/usr/bin/xsel", "/usr/local/bin/xsel"], &["--primary", "--input"]),
+            (
+                &["/usr/bin/wl-copy", "/usr/local/bin/wl-copy"],
+                &["--primary"],
+            ),
+            (
+                &["/usr/bin/xclip", "/usr/local/bin/xclip"],
+                &["-selection", "primary"],
+            ),
+            (
+                &["/usr/bin/xsel", "/usr/local/bin/xsel"],
+                &["--primary", "--input"],
+            ),
         ]
     } else {
         &[
             (&["/usr/bin/wl-copy", "/usr/local/bin/wl-copy"], &[]),
-            (&["/usr/bin/xclip", "/usr/local/bin/xclip"], &["-selection", "clipboard"]),
-            (&["/usr/bin/xsel", "/usr/local/bin/xsel"], &["--clipboard", "--input"]),
+            (
+                &["/usr/bin/xclip", "/usr/local/bin/xclip"],
+                &["-selection", "clipboard"],
+            ),
+            (
+                &["/usr/bin/xsel", "/usr/local/bin/xsel"],
+                &["--clipboard", "--input"],
+            ),
         ]
     };
 
@@ -532,10 +604,8 @@ mod tests {
         let tmp = make_temp_png().unwrap();
         std::fs::write(&tmp, b"hello world").unwrap();
         let b64 = encode_image_base64(&tmp).unwrap();
-        let decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &b64,
-        ).unwrap();
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64).unwrap();
         assert_eq!(decoded, b"hello world");
         let _ = std::fs::remove_file(&tmp);
     }
