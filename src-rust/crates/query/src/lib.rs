@@ -1840,8 +1840,9 @@ pub async fn run_query_loop(
                             let agent_input = serde_json::json!({
                                 "description": "memory consolidation",
                                 "prompt": task.prompt,
+                                "tools": ["Read", "Glob", "Grep"],
                                 "max_turns": 20,
-                                "system_prompt": "You are performing automatic memory consolidation. Complete the task and return a brief summary.",
+                                "system_prompt": "You are performing automatic read-only memory consolidation. Complete the task and return a brief summary with any suggested changes. Do not read transcripts, run commands, access the network, or modify files.",
                                 "run_in_background": true,
                                 "isolation": null
                             });
