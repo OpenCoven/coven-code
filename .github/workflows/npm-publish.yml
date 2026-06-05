@@ -123,6 +123,49 @@ jobs:
           "
           echo "Publishing coven-code@${VERSION}"
 
+      - name: Generate npm checksum manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          mkdir -p release-assets
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern 'coven-code-*.tar.gz' \
+            --pattern 'coven-code-*.zip' \
+            --dir release-assets
+
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+
+          const expectedArchives = [
+            'coven-code-windows-x86_64.zip',
+            'coven-code-linux-x86_64.tar.gz',
+            'coven-code-linux-aarch64.tar.gz',
+            'coven-code-macos-x86_64.tar.gz',
+            'coven-code-macos-aarch64.tar.gz',
+          ];
+
+          const manifest = {};
+          for (const archive of expectedArchives) {
+            const archivePath = path.join('release-assets', archive);
+            if (!fs.existsSync(archivePath)) {
+              console.error(`::error::Missing release archive ${archive}`);
+              process.exit(1);
+            }
+            const hash = crypto.createHash('sha256');
+            hash.update(fs.readFileSync(archivePath));
+            manifest[archive] = { sha256: hash.digest('hex') };
+          }
+
+          fs.writeFileSync('npm/checksums.json', JSON.stringify(manifest, null, 2) + '\n');
+          NODE
+
+          cat npm/checksums.json
+
       - name: Publish to npm
         working-directory: npm
         env:
