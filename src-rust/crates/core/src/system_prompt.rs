@@ -352,19 +352,20 @@ fn build_env_info_section(working_dir: Option<&str>) -> String {
     let os_version = {
         #[cfg(target_os = "windows")]
         {
-            // Read ProductName from the registry via `ver` or env vars.
-            // Also include architecture for clarity.
-            let ver = std::process::Command::new("cmd")
-                .args(["/c", "ver"])
-                .output()
+            // Avoid spawning command processors while constructing the prompt:
+            // the current working directory may be an untrusted repository.
+            let os_name = std::env::var("OS")
                 .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Windows".to_string());
+            let arch = std::env::var("PROCESSOR_ARCHITECTURE")
+                .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_default();
-            match ver {
-                Some(v) => format!("{} ({})", v, arch),
-                None => format!("Windows ({})", arch),
+            match arch {
+                Some(arch) => format!("{} ({})", os_name, arch),
+                None => os_name,
             }
         }
         #[cfg(not(target_os = "windows"))]
