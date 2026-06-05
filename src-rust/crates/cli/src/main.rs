@@ -3626,16 +3626,32 @@ async fn run_interactive(
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
                 // Get the outcome and handle errors
-                if let Ok(QueryOutcome::Error(err)) = handle.await {
-                    while app.notifications.current_is_error() {
-                        app.notifications.dismiss_current();
+                let query_outcome = handle.await;
+                match &query_outcome {
+                    Ok(QueryOutcome::Error(err)) => {
+                        while app.notifications.current_is_error() {
+                            app.notifications.dismiss_current();
+                        }
+                        app.notifications.push(
+                            claurst_tui::notifications::NotificationKind::Error,
+                            err.to_string(),
+                            None,
+                        );
                     }
-                    app.notifications.push(
-                        claurst_tui::notifications::NotificationKind::Error,
-                        err.to_string(),
-                        None,
-                    );
-                }
+                    Err(err) => {
+                        while app.notifications.current_is_error() {
+                            app.notifications.dismiss_current();
+                        }
+                        app.notifications.push(
+                            claurst_tui::notifications::NotificationKind::Error,
+                            format!("Query task failed: {}", err),
+                            None,
+                        );
+                    }
+                    _ => {}
+                };
+                let auto_compact_succeeded =
+                    matches!(query_outcome, Ok(QueryOutcome::EndTurn { .. }));
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -3653,9 +3669,16 @@ async fn run_interactive(
                 }
                 if app.auto_compact_running {
                     app.auto_compact_running = false;
-                    // After auto-compact the context was summarised — reset usage.
-                    app.context_used_tokens = 0;
-                    app.status_message = Some("Auto-compact complete.".to_string());
+                    if !auto_compact_succeeded {
+                        app.auto_compact_enabled = false;
+                        app.status_message = Some(
+                            "Auto-compact failed and was disabled for this session.".to_string(),
+                        );
+                    } else {
+                        // After auto-compact the context was summarised — reset usage.
+                        app.context_used_tokens = 0;
+                        app.status_message = Some("Auto-compact complete.".to_string());
+                    }
                 }
 
                 // Save session to JSONL (primary storage)
