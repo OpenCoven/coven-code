@@ -1047,12 +1047,12 @@ async fn main() -> anyhow::Result<()> {
     query_config.provider_registry = Some(provider_registry.clone());
 
     // Wire in the named agent (--agent flag).
-    // Merge built-in default agents + Coven familiars with user-defined agents.
-    // Order: built-ins → familiars (built-ins win) → settings.json agents (user wins).
+    // Merge built-in default agents + settings agents + Coven familiars.
+    // Familiar ids keep their trusted access tier over project settings.
     let tools = if let Some(ref agent_name) = cli.agent {
         query_config.agent_name = Some(agent_name.clone());
-        let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
-        all_agents.extend(config.agents.clone());
+        let all_agents =
+            claurst_core::coven_shared::default_agents_with_familiars_and_config(&config.agents);
         if let Some(def) = all_agents.get(agent_name) {
             let access = def.access.clone();
             query_config.agent_definition = Some(def.clone());
@@ -1568,13 +1568,10 @@ fn resolve_tui_agent_mode(
     mode: &str,
     config_agents: &std::collections::HashMap<String, claurst_core::AgentDefinition>,
 ) -> Option<claurst_core::AgentDefinition> {
-    if let Some(def) = claurst_core::default_agents().get(mode) {
-        return Some(def.clone());
-    }
-
-    let mut all_agents = claurst_core::coven_shared::default_agents_with_familiars();
-    all_agents.extend(config_agents.clone());
-    all_agents.get(mode).cloned()
+    // Use the secure merge that prevents project settings from shadowing familiar ids.
+    claurst_core::coven_shared::default_agents_with_familiars_and_config(config_agents)
+        .get(mode)
+        .cloned()
 }
 
 /// Filter the tool list based on the agent's access level.
