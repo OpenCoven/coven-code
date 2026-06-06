@@ -247,23 +247,43 @@ Or check the [Coven documentation](https://opencoven.ai/docs) for installation i
 
 ---
 
-## Familiar glyphs in the TUI
+## Familiar cards in the TUI
 
-Each familiar has a dedicated pixel-art glyph rendered in the welcome panel. The active familiar (set via `settings.json` → `"familiar"`) determines which glyph is shown. The glyph animates — it blinks, shifts pose when loading, and walks left/right across the panel.
+Every familiar — built-in or user-defined — renders as a **static themed card** in three places:
 
-Built-in glyphs:
+1. The **welcome panel** (top-left of the home screen): glyph, name, access tier dot, and on wider terminals the role and an accent rule.
+2. The **F2 switcher popup**: one row per familiar, each painted in that familiar's accent palette with a coloured tier dot.
+3. The **`/agents` detail view**: the card appears above the persona preview when you select a familiar-sourced agent.
 
-| ID | Concept |
-|---|---|
-| `kitty` | Cat head — ears, whiskers, square eyes (default) |
-| `nova` | 4-point star with orbiting sparks |
-| `cody` | Robot face — antenna, bracket eyes |
-| `charm` | Heart with sparkle dots |
-| `sage` | Wizard hat + star + open book |
-| `astra` | Crescent moon + compass star + orbit |
-| `echo` | Round ghost + mirror eyes + echo dots |
+The glyph itself does **not** animate. The only motion is a quarter-block eye spinner that kicks in when the assistant has gone quiet for ~3 seconds, so you still get a "thinking" signal without a walking mascot pulling attention from the work area.
 
-To change the displayed glyph, set `familiar` in your settings:
+Cards adapt to available room:
+
+- **Compact** (narrow terminals): glyph only, no border.
+- **Standard** (default): glyph + name + tier dot inside a rounded border.
+- **Large** (wide terminals): adds the role line and an accent rule under the glyph.
+
+### Built-in glyphs
+
+| ID | Concept | Accent |
+|---|---|---|
+| `kitty` | Cat head — ears, whiskers, square eyes (default) | violet |
+| `nova` | Crowned sorceress with star sparkles | gold |
+| `cody` | Robot face — antenna, bracket eyes, code body | cyan |
+| `charm` | Heart with sparkle dots | pink |
+| `sage` | Wizard hat + star + open book | emerald |
+| `astra` | Crescent moon + compass star + orbit | indigo |
+| `echo` | Round ghost + bracket eyes + echo dots | teal |
+
+### User-defined familiars
+
+Any familiar declared in `~/.coven/familiars.toml` automatically gets a procedurally-generated card. The accent palette and sigil frame (crystal, hexagon, rune, or seal) are picked deterministically from the familiar's `id`, so the same familiar looks the same across sessions and machines without storing extra config. The familiar's `emoji` is rendered inside the frame.
+
+If you want a hand-crafted image instead of the procedural sigil, drop a PNG/JPG/WebP at `~/.coven/assets/familiars/<id>.<ext>`. When the terminal supports Kitty or Sixel inline graphics, that image takes precedence over the card.
+
+### Changing the displayed glyph
+
+Set `familiar` in your settings:
 
 ```json
 {
@@ -276,6 +296,8 @@ Or run:
 ```
 coven-code config set familiar nova
 ```
+
+You can also press **F2** at any time to open the switcher popup and pick a familiar interactively.
 
 ---
 

@@ -238,7 +238,7 @@ fn import_config_picker_items() -> Vec<SelectItem> {
             title: "Both".into(),
             description: "Import both CLAUDE.md and settings.json".into(),
             category: "Import".into(),
-            badge: Some("SAFE".into()),
+            badge: None,
         },
     ]
 }
@@ -487,63 +487,10 @@ impl HistorySearch {
     }
 }
 
-/// Attempt to copy text to the system clipboard using platform CLI tools.
+/// Attempt to copy text to the system clipboard using trusted platform clipboard helpers.
 /// Returns true if successful.
 pub fn try_copy_to_clipboard(text: &str) -> bool {
-    // Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("clip")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-                drop(stdin);
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // macOS
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // Linux / Wayland / X11
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write;
-        for cmd in &["wl-copy", "xclip -selection clipboard", "xsel --clipboard --input"] {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if let Some((prog, args)) = parts.split_first() {
-                if let Ok(mut child) = std::process::Command::new(prog)
-                    .args(args)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    crate::image_paste::write_clipboard_text(text)
 }
 
 /// Map a character to its QWERTY Latin keyboard-position equivalent.
@@ -772,21 +719,10 @@ pub struct App {
 
     /// Instant the session started (used for elapsed-time in the status bar).
     pub session_start: std::time::Instant,
-    /// Current Rune pose for rendering (updated each frame).
+    /// Current familiar pose for rendering. `Static` when idle; `Loading {
+    /// frame }` while streaming has stalled long enough to surface a spinner.
+    /// The glyph itself never walks or blinks.
     pub rustle_current_pose: crate::rustle::RustlePose,
-    /// Temporary Rune pose override (e.g. look-down on Tab). Reverts to
-    /// default after this instant passes.
-    pub rustle_pose_until: Option<std::time::Instant>,
-    /// The temporary pose to show until `rustle_pose_until`.
-    pub rustle_temp_pose: Option<crate::rustle::RustlePose>,
-    /// Frame counter at which the next random eye-shift should fire.
-    pub rustle_next_blink: u64,
-    /// Horizontal walk position of the mascot in the welcome panel (0-based column offset).
-    pub rustle_walk_x: i32,
-    /// Walk direction: +1 = right, -1 = left.
-    pub rustle_walk_dir: i32,
-    /// Maximum walk offset (in columns) — set each render frame based on available width.
-    pub rustle_walk_max: Cell<i32>,
     /// Instant the current turn's streaming began (reset each time streaming starts).
     pub turn_start: Option<std::time::Instant>,
     /// Elapsed time string for the last completed turn, e.g. "2m 5s".
@@ -1291,16 +1227,7 @@ impl App {
             new_messages_while_scrolled: 0,
             token_warning_threshold_shown: 0,
             session_start: std::time::Instant::now(),
-            rustle_current_pose: crate::rustle::RustlePose::Default,
-            rustle_pose_until: None,
-            rustle_temp_pose: None,
-            rustle_next_blink: 200 + (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos() as u64 % 300),
-            rustle_walk_x: 0,
-            rustle_walk_dir: 1,
-            rustle_walk_max: Cell::new(0),
+            rustle_current_pose: crate::rustle::RustlePose::Static,
             turn_start: None,
             last_turn_elapsed: None,
             last_turn_verb: None,
@@ -1878,77 +1805,27 @@ impl App {
         None
     }
 
-    /// and the loading spinner on stalls/errors.
-    /// Call once per frame before rendering.
+    /// Update the familiar pose for this render frame.
+    ///
+    /// The glyph itself is static — this just toggles between `Static` and
+    /// `Loading { frame }` so the eye-spinner kicks in when the assistant has
+    /// gone quiet for 3+ seconds. Call once per frame before rendering.
     pub fn tick_rustle_pose(&mut self) {
-        // Loading spinner: shown when streaming has stalled (no data for 3s+).
-        if self.is_streaming {
-            if let Some(start) = self.stall_start {
-                if start.elapsed() > std::time::Duration::from_secs(3) {
-                    self.rustle_current_pose = crate::rustle::RustlePose::Loading {
-                        frame: self.frame_count,
-                    };
-                    return;
-                }
-            }
-        }
-
-        // Check if a temporary pose is active.
-        if let Some(until) = self.rustle_pose_until {
-            if std::time::Instant::now() < until {
-                self.rustle_current_pose = self.rustle_temp_pose.clone()
-                    .unwrap_or(crate::rustle::RustlePose::Default);
-                return;
-            }
-            // Expired — clear it.
-            self.rustle_pose_until = None;
-            self.rustle_temp_pose = None;
-        }
-
-        // Random eye-shift: every ~200-500 frames, briefly look right.
-        if self.frame_count >= self.rustle_next_blink {
-            self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookRight);
-            self.rustle_pose_until = Some(
-                std::time::Instant::now() + std::time::Duration::from_millis(800)
-            );
-            // Schedule next blink 200-500 frames from now (random-ish).
-            let jitter = (self.frame_count.wrapping_mul(7) % 300) + 200;
-            self.rustle_next_blink = self.frame_count + jitter;
-            self.rustle_current_pose = crate::rustle::RustlePose::LookRight;
-            return;
-        }
-
-        self.rustle_current_pose = crate::rustle::RustlePose::Default;
-
-        // Advance walk position every 8 frames (slow pace).
-        if self.frame_count % 8 == 0 {
-            self.rustle_walk_x += self.rustle_walk_dir;
-            let walk_max = self.rustle_walk_max.get();
-            if self.rustle_walk_x >= walk_max {
-                self.rustle_walk_x = walk_max;
-                self.rustle_walk_dir = -1;
-                self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookLeft);
-                self.rustle_pose_until = Some(
-                    std::time::Instant::now() + std::time::Duration::from_millis(300)
-                );
-            } else if self.rustle_walk_x <= 0 {
-                self.rustle_walk_x = 0;
-                self.rustle_walk_dir = 1;
-                self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookRight);
-                self.rustle_pose_until = Some(
-                    std::time::Instant::now() + std::time::Duration::from_millis(300)
-                );
-            }
-        }
+        let stalled = self.is_streaming
+            && self
+                .stall_start
+                .map(|s| s.elapsed() > std::time::Duration::from_secs(3))
+                .unwrap_or(false);
+        self.rustle_current_pose = if stalled {
+            crate::rustle::RustlePose::Loading { frame: self.frame_count }
+        } else {
+            crate::rustle::RustlePose::Static
+        };
     }
 
-    /// Trigger Rune looking down briefly (called on Tab / mode switch).
-    pub fn rustle_look_down(&mut self) {
-        self.rustle_temp_pose = Some(crate::rustle::RustlePose::LookDown);
-        self.rustle_pose_until = Some(
-            std::time::Instant::now() + std::time::Duration::from_secs(1)
-        );
-    }
+    /// No-op retained for callsites left over from the animated era (Tab /
+    /// mode-switch handlers). The static glyph has no look-down pose.
+    pub fn rustle_look_down(&mut self) {}
 
     /// Cycle to the next agent mode: build → plan → explore → build.
     /// Sets `agent_mode_changed` so the main loop can update the query config
@@ -3076,6 +2953,12 @@ impl App {
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // Permission requests render above other overlays, so they own input.
+        if self.permission_request.is_some() {
+            self.handle_permission_key(key);
+            return false;
+        }
+
         // Dismiss error modal with Esc
         if key.code == KeyCode::Esc && self.notifications.current_is_error() {
             self.dismiss_error_notifications();
@@ -3912,12 +3795,6 @@ impl App {
         // Legacy history-search mode intercepts most keys
         if self.history_search.is_some() {
             return self.handle_history_search_key(key);
-        }
-
-        // Permission dialog mode intercepts most keys
-        if self.permission_request.is_some() {
-            self.handle_permission_key(key);
-            return false;
         }
 
         // Notification dismiss
@@ -5394,23 +5271,78 @@ impl App {
         if selected_key != Some('P') {
             return;
         }
-        if let PermissionDialogKind::Bash { command, .. } = &pr.kind {
-            // Always normalize to the first whitespace-delimited word so
-            // that the allowlist check in `bash_command_allowed_by_prefix`
-            // (which also uses `split_whitespace().next()`) matches correctly.
-            let first_word = command.split_whitespace().next().unwrap_or("").to_string();
-            if !first_word.is_empty() {
-                self.bash_prefix_allowlist.insert(first_word);
+        if let PermissionDialogKind::Bash { suggested_prefix, .. } = &pr.kind {
+            if let Some(prefix) = suggested_prefix
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                if !Self::bash_command_has_shell_control(prefix) {
+                    self.bash_prefix_allowlist.insert(prefix.to_string());
+                }
             }
         }
     }
 
+    fn bash_command_has_shell_control(command: &str) -> bool {
+        let mut chars = command.chars().peekable();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escaped = false;
+
+        while let Some(c) = chars.next() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            // In bash, backslash does not escape characters inside single quotes.
+            if c == '\\' && !in_single_quote {
+                escaped = true;
+                continue;
+            }
+
+            match c {
+                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+                '"' if !in_single_quote => in_double_quote = !in_double_quote,
+                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
+                    return true;
+                }
+                '`' if !in_single_quote => return true,
+                '$' if !in_single_quote && chars.peek() == Some(&'(') => return true,
+                _ => {}
+            }
+        }
+
+        // Treat unterminated quotes / dangling escapes as unsafe.
+        escaped || in_single_quote || in_double_quote
+    }
+
+    fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
+        let prefix = prefix.trim();
+        let command = command.trim_start();
+        if prefix.is_empty() || !command.starts_with(prefix) {
+            return false;
+        }
+
+        let rest = &command[prefix.len()..];
+        rest.is_empty()
+            || rest
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_whitespace())
+                .unwrap_or(false)
+    }
+
     /// Returns `true` if the given bash `command` is covered by the session-local
-    /// prefix allowlist (i.e. its first word matches an entry in
-    /// `bash_prefix_allowlist`).  Used by callers to skip the permission dialog.
+    /// prefix allowlist.  Shell compound commands are never allowed by prefix;
+    /// they must go through the normal permission dialog.
     pub fn bash_command_allowed_by_prefix(&self, command: &str) -> bool {
-        let first_word = command.split_whitespace().next().unwrap_or("");
-        !first_word.is_empty() && self.bash_prefix_allowlist.contains(first_word)
+        !Self::bash_command_has_shell_control(command)
+            && self
+                .bash_prefix_allowlist
+                .iter()
+                .any(|prefix| Self::bash_prefix_matches_command(prefix, command))
     }
 
     // ---- Advanced mouse interaction helpers --------------------------------
@@ -6642,11 +6574,11 @@ impl App {
 }
 
 // Helper function to open a file in the user's external editor
-fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
     // Try to open with the system's default application
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("/usr/bin/open")
             .arg(path)
             .spawn()?;
         Ok(())
@@ -6662,10 +6594,20 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(&["/C", "start", ""])
-            .arg(path)
-            .spawn()?;
+        let system_root = windows_system_root();
+        let mut command = std::process::Command::new(
+            std::path::Path::new(&system_root)
+                .join("System32")
+                .join("cmd.exe"),
+        );
+        let quoted_path = quote_windows_cmd_path(path);
+        command
+            .args(["/C", "start", ""])
+            .arg(quoted_path)
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .env("WINDIR", &system_root);
+        command.spawn()?;
         Ok(())
     }
 
@@ -6681,8 +6623,36 @@ fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error
                 Err(_) => continue,
             }
         }
-        Err("No suitable editor found".into())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No suitable editor found",
+        ))
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn quote_windows_cmd_path(path: &std::path::Path) -> std::ffi::OsString {
+    let mut quoted = std::ffi::OsString::from("\"");
+    quoted.push(path.as_os_str());
+    quoted.push("\"");
+    quoted
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_system_root_from_env(
+    system_root: Option<std::ffi::OsString>,
+    windir: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
+    system_root
+        .into_iter()
+        .chain(windir)
+        .find(|root| std::path::Path::new(root).is_absolute())
+        .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_root() -> std::ffi::OsString {
+    windows_system_root_from_env(std::env::var_os("SystemRoot"), std::env::var_os("WINDIR"))
 }
 
 #[cfg(test)]
@@ -6703,6 +6673,46 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn windows_cmd_path_is_passed_as_quoted_argument() {
+        let path = std::path::Path::new(r"C:\temp\safe & literal.txt");
+
+        assert_eq!(
+            quote_windows_cmd_path(path).to_string_lossy(),
+            r#""C:\temp\safe & literal.txt""#
+        );
+    }
+
+    #[test]
+    fn windows_system_root_prefers_absolute_system_root() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("/windows")),
+            Some(std::ffi::OsString::from("/windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from("/windows"));
+    }
+
+    #[test]
+    fn windows_system_root_falls_back_to_absolute_windir() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("relative-system-root")),
+            Some(std::ffi::OsString::from("/windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from("/windir"));
+    }
+
+    #[test]
+    fn windows_system_root_ignores_relative_paths() {
+        let root = windows_system_root_from_env(
+            Some(std::ffi::OsString::from("relative-system-root")),
+            Some(std::ffi::OsString::from("relative-windir")),
+        );
+
+        assert_eq!(root, std::ffi::OsString::from(r"C:\Windows"));
     }
 
     // ---- signal_bg_task_completion tests ----
@@ -6944,6 +6954,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_permission_dialog_esc_takes_priority_over_error_modal() {
+        use crate::dialogs::PermissionRequest;
+
+        let mut app = make_app();
+        app.permission_request = Some(PermissionRequest::standard(
+            "tu-1".to_string(),
+            "Bash".to_string(),
+            "Run a shell command".to_string(),
+        ));
+        app.notifications.push(
+            crate::notifications::NotificationKind::Error,
+            "dangerous command failed".to_string(),
+            None,
+        );
+
+        app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(app.permission_request.is_none());
+        assert!(app.notifications.current_is_error());
+    }
+
+    #[test]
+    fn test_permission_dialog_navigation_takes_priority_over_context_menu() {
+        use crate::dialogs::PermissionRequest;
+
+        let mut app = make_app();
+        app.permission_request = Some(PermissionRequest::standard(
+            "tu-1".to_string(),
+            "Bash".to_string(),
+            "Run a shell command".to_string(),
+        ));
+        app.context_menu_state = Some(ContextMenuState {
+            x: 1,
+            y: 1,
+            selected_index: 0,
+            kind: ContextMenuKind::Selection,
+        });
+
+        app.handle_key_event(press_key(KeyCode::Down, KeyModifiers::empty()));
+
+        assert_eq!(
+            app.permission_request
+                .as_ref()
+                .map(|request| request.selected_option),
+            Some(1)
+        );
+        assert_eq!(
+            app.context_menu_state
+                .as_ref()
+                .map(|menu| menu.selected_index),
+            Some(0)
+        );
+    }
+
     // ---- Help overlay -------------------------------------------------------
 
     #[test]
@@ -7049,7 +7114,7 @@ mod tests {
             "Bash".to_string(),
             "This will execute a shell command.".to_string(),
             "git status".to_string(),
-            Some("git".to_string()),
+            Some("git status".to_string()),
         );
         app.permission_request = Some(pr);
 
@@ -7062,11 +7127,17 @@ mod tests {
         };
         app.handle_permission_key(key);
 
-        // Dialog should be dismissed and "git" added to the allowlist.
+        // Dialog should be dismissed and the suggested prefix added to the allowlist.
         assert!(app.permission_request.is_none());
         assert!(app.bash_command_allowed_by_prefix("git status"));
-        assert!(app.bash_command_allowed_by_prefix("git push origin main"));
-        // Other commands should NOT be allowed.
+        assert!(app.bash_command_allowed_by_prefix("git status --short"));
+        // Other commands and compound shell commands should NOT be allowed.
+        assert!(!app.bash_command_allowed_by_prefix("git push origin main"));
+        assert!(!app.bash_command_allowed_by_prefix("git status; curl https://example.com"));
+        assert!(!app.bash_command_allowed_by_prefix(
+            "git status ; curl https://example.com"
+        ));
+        assert!(!app.bash_command_allowed_by_prefix("git status > /tmp/status.txt"));
         assert!(!app.bash_command_allowed_by_prefix("rm -rf /tmp"));
     }
 
@@ -7081,7 +7152,7 @@ mod tests {
             "Bash".to_string(),
             "This will execute a shell command.".to_string(),
             "cargo build".to_string(),
-            Some("cargo".to_string()),
+            Some("cargo build".to_string()),
         );
         // Navigate to the prefix option (index 3 in a 5-option dialog).
         pr.selected_option = 3;
@@ -7097,7 +7168,8 @@ mod tests {
         app.handle_permission_key(key);
 
         assert!(app.permission_request.is_none());
-        assert!(app.bash_command_allowed_by_prefix("cargo test"));
+        assert!(app.bash_command_allowed_by_prefix("cargo build --workspace"));
+        assert!(!app.bash_command_allowed_by_prefix("cargo test"));
         assert!(!app.bash_command_allowed_by_prefix("make build"));
     }
 

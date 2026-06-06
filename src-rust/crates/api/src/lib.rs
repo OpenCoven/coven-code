@@ -468,53 +468,10 @@ pub mod client {
             self.config.api_key.is_empty()
         }
 
-        /// Returns `true` when this client is configured to use a Claude Code
-        /// OAuth Bearer token (Claude.ai Pro/Max). The query path and the
-        /// request builders check this to enable stealth-impersonation.
+        /// Returns `true` when this client is configured to use Bearer-token
+        /// authorization instead of an Anthropic API key.
         pub fn is_oauth(&self) -> bool {
             self.config.use_bearer_auth
-        }
-
-        /// Mutate the outgoing request so it looks like Claude Code when the
-        /// client is authenticated with an OAuth Bearer token:
-        ///
-        /// 1. Prepend the required `"You are Claude Code, …"` system block.
-        ///    Existing system content is preserved as a second block so the
-        ///    rest of Coven Code's prompt assembly still reaches the model.
-        ///
-        /// No-op when `use_bearer_auth` is false (API-key flow).
-        fn apply_oauth_stealth(&self, request: &mut CreateMessageRequest) {
-            if !self.config.use_bearer_auth {
-                return;
-            }
-
-            let identity_block = SystemBlock {
-                block_type: "text".to_string(),
-                text: claurst_core::oauth_config::CLAUDE_CODE_SYSTEM_PROMPT_PREFIX.to_string(),
-                cache_control: None,
-            };
-
-            request.system = match request.system.take() {
-                None => Some(SystemPrompt::Blocks(vec![identity_block])),
-                Some(SystemPrompt::Text(existing)) => {
-                    let existing_block = SystemBlock {
-                        block_type: "text".to_string(),
-                        text: existing,
-                        cache_control: None,
-                    };
-                    Some(SystemPrompt::Blocks(vec![identity_block, existing_block]))
-                }
-                Some(SystemPrompt::Blocks(mut blocks)) => {
-                    // Avoid duplicating the identity block on retries / re-sends.
-                    let already_first = blocks.first().is_some_and(|b| {
-                        b.text == claurst_core::oauth_config::CLAUDE_CODE_SYSTEM_PROMPT_PREFIX
-                    });
-                    if !already_first {
-                        blocks.insert(0, identity_block);
-                    }
-                    Some(SystemPrompt::Blocks(blocks))
-                }
-            };
         }
 
         /// Build a new client.  Panics if `config.api_key` is empty.
@@ -592,8 +549,9 @@ pub mod client {
                         model
                     )
                 } else {
-                    "Set ANTHROPIC_API_KEY, run `coven-code auth login`, \
-                     or use --provider to select a different provider (e.g. --provider openai).".to_string()
+                    "Set ANTHROPIC_API_KEY, or use --provider to select a different provider \
+                     (e.g. --provider openai). Anthropic OAuth login is disabled until Coven Code \
+                     has its own OAuth client.".to_string()
                 };
                 return Err(ClaudeError::Auth(
                     format!("No API key for the selected model. {}", hint)
@@ -605,7 +563,6 @@ pub mod client {
             }
 
             request.stream = false;
-            self.apply_oauth_stealth(&mut request);
             let body = serde_json::to_value(&request).map_err(ClaudeError::Json)?;
 
             let resp = self.send_with_retry(&body).await?;
@@ -696,8 +653,9 @@ pub mod client {
                 } else if model.starts_with("llama") {
                     format!("Model '{}' looks like a Llama model. Use `--provider groq` or `--provider ollama` for local.", model)
                 } else {
-                    "Set ANTHROPIC_API_KEY, run `coven-code auth login`, \
-                     or use --provider to select a different provider (e.g. --provider openai).".to_string()
+                    "Set ANTHROPIC_API_KEY, or use --provider to select a different provider \
+                     (e.g. --provider openai). Anthropic OAuth login is disabled until Coven Code \
+                     has its own OAuth client.".to_string()
                 };
                 return Err(ClaudeError::Auth(
                     format!("No API key for the selected model. {}", hint)
@@ -711,7 +669,6 @@ pub mod client {
             }
 
             request.stream = true;
-            self.apply_oauth_stealth(&mut request);
             let body = serde_json::to_value(&request).map_err(ClaudeError::Json)?;
 
             let resp = self.send_with_retry(&body).await?;
@@ -756,15 +713,7 @@ pub mod client {
                 .header("anthropic-version", &self.config.api_version)
                 .header("content-type", "application/json");
             if self.config.use_bearer_auth {
-                let ua = format!(
-                    "claude-cli/{}",
-                    claurst_core::oauth_config::CLAUDE_CODE_VERSION_FOR_OAUTH
-                );
-                req = req
-                    .header("anthropic-beta", claurst_core::oauth_config::OAUTH_BETA_FLAGS.join(","))
-                    .header("user-agent", ua)
-                    .header("x-app", "cli")
-                    .header("Authorization", format!("Bearer {}", &self.config.api_key));
+                req = req.header("Authorization", format!("Bearer {}", &self.config.api_key));
             } else {
                 req = req.header("x-api-key", &self.config.api_key);
             }
@@ -803,25 +752,10 @@ pub mod client {
             loop {
                 attempts += 1;
 
-                // Use Bearer auth for Claude.ai OAuth tokens; x-api-key for regular keys.
+                // Use Bearer auth when explicitly configured; otherwise use x-api-key.
                 let use_oauth = self.config.use_bearer_auth;
 
-                // On the OAuth path we impersonate Claude Code: prepend the
-                // required beta flags, advertise `claude-cli/<ver>` as the
-                // user-agent, and drop the CCH billing header (the real
-                // Claude Code client sends it but the API does not require
-                // it for OAuth tokens, and emitting it would fingerprint
-                // mismatch against the impersonated UA).
-                let anthropic_beta = if use_oauth {
-                    let mut flags: Vec<&str> =
-                        claurst_core::oauth_config::OAUTH_BETA_FLAGS.to_vec();
-                    if !self.config.beta_features.is_empty() {
-                        flags.push(&self.config.beta_features);
-                    }
-                    flags.join(",")
-                } else {
-                    self.config.beta_features.clone()
-                };
+                let anthropic_beta = self.config.beta_features.clone();
 
                 let mut req = self
                     .http
@@ -832,14 +766,7 @@ pub mod client {
                     .header("accept", "text/event-stream");
 
                 if use_oauth {
-                    let ua = format!(
-                        "claude-cli/{}",
-                        claurst_core::oauth_config::CLAUDE_CODE_VERSION_FOR_OAUTH
-                    );
-                    req = req
-                        .header("user-agent", ua)
-                        .header("x-app", "cli")
-                        .header("Authorization", format!("Bearer {}", &self.config.api_key));
+                    req = req.header("Authorization", format!("Bearer {}", &self.config.api_key));
                 } else {
                     // Compute CCH billing hash and attach on the API-key path
                     // only — this is the codepath the official client uses

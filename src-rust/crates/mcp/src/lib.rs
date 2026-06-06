@@ -1180,13 +1180,17 @@ impl McpManager {
         }
 
         if let Some(token) = oauth::get_mcp_token(server_name) {
-            if !token.is_expired(60) {
+            let token_matches_config = config
+                .url
+                .as_deref()
+                .is_some_and(|server_url| token.is_bound_to_server_url(server_url));
+            if token_matches_config && !token.is_expired(60) {
                 return McpAuthState::Authenticated {
                     token_expiry: token.expiry_datetime(),
                 };
             }
 
-            if token.refresh_token.is_some() {
+            if token_matches_config && token.refresh_token.is_some() {
                 return McpAuthState::Required {
                     auth_url: format!(
                         "{} (refreshable token detected; connection will try to refresh automatically)",
@@ -1267,12 +1271,23 @@ impl McpManager {
                 .as_secs()
                 + secs
         });
+        let config = self
+            .server_configs
+            .get(server_name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown MCP server: {}", server_name))?;
+        let server_url = config.url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MCP server '{}' has no URL configured; OAuth tokens must be bound to a server URL",
+                server_name
+            )
+        })?;
         let mcp_token = oauth::McpToken {
             access_token: token.to_string(),
             refresh_token: None,
             expires_at,
             scope: None,
             server_name: server_name.to_string(),
+            server_url: Some(server_url.trim_end_matches('/').to_string()),
         };
         oauth::store_mcp_token(&mcp_token)
             .map_err(|e| anyhow::anyhow!("Failed to store MCP token for '{}': {}", server_name, e))
@@ -1629,6 +1644,7 @@ mod tests {
             expires_at: Some(expires_at),
             scope: None,
             server_name: "remote".to_string(),
+            server_url: Some("https://example.com/mcp".to_string()),
         };
         oauth::store_mcp_token(&token).expect("store token");
 
@@ -1640,6 +1656,28 @@ mod tests {
         }
 
         oauth::remove_mcp_token("remote").ok();
+    }
+
+    #[test]
+    fn test_store_token_requires_server_url() {
+        let mut mgr = McpManager::new();
+        mgr.server_configs.insert(
+            "stdio".to_string(),
+            McpServerConfig {
+                name: "stdio".to_string(),
+                command: Some("node".to_string()),
+                args: vec![],
+                env: HashMap::new(),
+                url: None,
+                server_type: "stdio".to_string(),
+            },
+        );
+
+        let err = mgr
+            .store_token("stdio", "tok", None)
+            .expect_err("URL-less servers cannot store bound OAuth tokens");
+
+        assert!(err.to_string().contains("has no URL configured"));
     }
 }
 

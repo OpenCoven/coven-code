@@ -367,6 +367,7 @@ impl Tool for AgentTool {
             agent_definition: None,
             model_registry: Some(model_registry),
             managed_agents: None,
+            preserve_selected_model: false,
         };
         // -----------------------------------------------------------------------
         // Background mode: spawn and return agent_id immediately.
@@ -379,11 +380,7 @@ impl Tool for AgentTool {
             task.id = agent_id.clone();
             let _ = claurst_core::tasks::global_registry().register(task);
 
-            // Re-create the tool list inside the closure so it is owned and Send.
-            let agent_tools_bg: Vec<Box<dyn Tool>> = claurst_tools::all_tools()
-                .into_iter()
-                .filter(|t| t.name() != claurst_core::constants::TOOL_NAME_AGENT)
-                .collect();
+            let agent_tools_bg = agent_tools;
 
             let client_bg = client.clone();
             let ctx_bg = ctx.clone();

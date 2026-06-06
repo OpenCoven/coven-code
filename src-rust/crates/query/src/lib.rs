@@ -126,6 +126,9 @@ pub struct QueryConfig {
     pub model_registry: Option<std::sync::Arc<claurst_api::ModelRegistry>>,
     /// Managed agent (manager-executor) configuration.
     pub managed_agents: Option<claurst_core::ManagedAgentConfig>,
+    /// Preserve an explicit caller-selected model instead of allowing managed-agent
+    /// manager_model to replace it at query runtime.
+    pub preserve_selected_model: bool,
 }
 
 impl Default for QueryConfig {
@@ -152,6 +155,7 @@ impl Default for QueryConfig {
             agent_definition: None,
             model_registry: None,
             managed_agents: None,
+            preserve_selected_model: false,
         }
     }
 }
@@ -697,6 +701,26 @@ fn should_emit_turn_complete(stop: &str, max_tokens_recovery_count: u32) -> bool
     }
 }
 
+fn selected_model_for_query(config: &QueryConfig) -> String {
+    let selected_model = if let Some(ref agent) = config.agent_definition {
+        agent.model.clone().unwrap_or_else(|| config.model.clone())
+    } else {
+        config.model.clone()
+    };
+
+    if config.preserve_selected_model {
+        return selected_model;
+    }
+
+    if let Some(ref ma_config) = config.managed_agents {
+        if ma_config.enabled && !ma_config.manager_model.is_empty() {
+            return ma_config.manager_model.clone();
+        }
+    }
+
+    selected_model
+}
+
 // Spinner verbs are imported from claurst_core::spinner
 
 /// Run the agentic query loop.
@@ -726,18 +750,7 @@ pub async fn run_query_loop(
     let mut max_tokens_recovery_count: u32 = 0;
     // Active model — may switch to fallback on overloaded errors.
     // Agent model override takes priority over the session model when set.
-    let mut effective_model = if let Some(ref agent) = config.agent_definition {
-        agent.model.clone().unwrap_or_else(|| config.model.clone())
-    } else {
-        config.model.clone()
-    };
-
-    // If managed-agent mode is active, override the model to the manager model.
-    if let Some(ref ma_config) = config.managed_agents {
-        if ma_config.enabled && !ma_config.manager_model.is_empty() {
-            effective_model = ma_config.manager_model.clone();
-        }
-    }
+    let mut effective_model = selected_model_for_query(config);
 
     let mut used_fallback = false;
     // How many automatic retries remain when a stream stalls (no data for 45s).
@@ -1316,37 +1329,19 @@ pub async fn run_query_loop(
                         }
                     }).collect();
 
-                    // Execute tools if any tool_use blocks were returned.
-                    // Note: we check the blocks themselves rather than relying
-                    // solely on stop_str == "tool_use" because many OpenAI-
-                    // compatible providers (Ollama, LM Studio, etc.) return
-                    // finish_reason "stop" even when tool calls are present.
+                    // Execute tool-use blocks through the same hook-aware path used by
+                    // Anthropic streaming. Some OpenAI-compatible providers return
+                    // finish_reason "stop" even when tool calls are present, so the
+                    // block presence is authoritative here, but execution must still
+                    // enforce PreToolUse/plugin policy and emit post-hook events.
                     if !tool_use_blocks.is_empty() {
-                        let mut tool_results = Vec::new();
-                        for (tool_id, tool_name, tool_input) in tool_use_blocks {
-                            // Notify TUI that a tool is starting (matches Anthropic path).
-                            if let Some(ref tx) = event_tx {
-                                let _ = tx.send(QueryEvent::ToolStart {
-                                    tool_name: tool_name.clone(),
-                                    tool_id: tool_id.clone(),
-                                    input_json: tool_input.to_string(),
-                                });
-                            }
-                            let result = execute_tool(&*tool_name, &tool_input, tools, &tool_ctx).await;
-                            if let Some(ref tx) = event_tx {
-                                let _ = tx.send(QueryEvent::ToolEnd {
-                                    tool_name: tool_name.clone(),
-                                    tool_id: tool_id.clone(),
-                                    result: result.content.clone(),
-                                    is_error: result.is_error,
-                                });
-                            }
-                            tool_results.push(ContentBlock::ToolResult {
-                                tool_use_id: tool_id,
-                                content: claurst_core::types::ToolResultContent::Text(result.content),
-                                is_error: Some(result.is_error),
-                            });
-                        }
+                        let tool_results = execute_tool_blocks_with_hooks(
+                            tool_use_blocks,
+                            tools,
+                            &tool_ctx,
+                            event_tx.as_ref(),
+                        )
+                        .await;
                         messages.push(Message {
                             role: claurst_core::types::Role::User,
                             content: claurst_core::types::MessageContent::Blocks(tool_results),
@@ -1827,8 +1822,9 @@ pub async fn run_query_loop(
                             let agent_input = serde_json::json!({
                                 "description": "memory consolidation",
                                 "prompt": task.prompt,
+                                "tools": ["Read", "Glob", "Grep"],
                                 "max_turns": 20,
-                                "system_prompt": "You are performing automatic memory consolidation. Complete the task and return a brief summary.",
+                                "system_prompt": "You are performing automatic read-only memory consolidation. Complete the task and return a brief summary with any suggested changes. Do not read transcripts, run commands, access the network, or modify files.",
                                 "run_in_background": true,
                                 "isolation": null
                             });
@@ -1908,157 +1904,23 @@ pub async fn run_query_loop(
                     };
                 }
 
-                // ---------------------------------------------------------------------------
-                // Streaming tool executor: parallel non-agent tool dispatch.
-                //
-                // Phase 1: Run PreToolUse hooks sequentially (they can block/deny execution
-                //          and may display interactive permission dialogs).
-                // Phase 2: Dispatch all non-blocked tool executions concurrently via
-                //          futures::future::join_all, preserving original order.
-                // Phase 3: Fire PostToolUse hooks + emit events, then collect results.
-                //
-                // This mirrors the TypeScript StreamingToolExecutor pattern.
-                // ---------------------------------------------------------------------------
-
-                // Intermediate record produced during Phase 1.
-                struct PreparedTool {
-                    id: String,
-                    name: String,
-                    input: Value,
-                    /// None means the pre-hook blocked execution; the String is the error reason.
-                    blocked_result: Option<ToolResult>,
-                }
-
-                // Phase 1: sequential pre-hook pass.
-                let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());
-                for block in tool_blocks {
-                    if let ContentBlock::ToolUse { id, name, input } = block {
-                        // Clone from the references returned by get_tool_use_blocks()
-                        let id = id.clone();
-                        let name = name.clone();
-                        let input = input.clone();
-
-                        if let Some(ref tx) = event_tx {
-                            let _ = tx.send(QueryEvent::ToolStart {
-                                tool_name: name.clone(),
-                                tool_id: id.clone(),
-                                input_json: input.to_string(),
-                            });
-                        }
-
-                        let hooks = &tool_ctx.config.hooks;
-                        let hook_ctx = claurst_core::hooks::HookContext {
-                            event: "PreToolUse".to_string(),
-                            tool_name: Some(name.clone()),
-                            tool_input: Some(input.clone()),
-                            tool_output: None,
-                            is_error: None,
-                            session_id: Some(tool_ctx.session_id.clone()),
-                        };
-                        let pre_outcome = claurst_core::hooks::run_hooks(
-                            hooks,
-                            claurst_core::config::HookEvent::PreToolUse,
-                            &hook_ctx,
-                            &tool_ctx.working_dir,
-                        )
-                        .await;
-
-                        let plugin_pre_outcome =
-                            claurst_plugins::run_global_pre_tool_hook(&name, &input);
-
-                        let blocked_result =
-                            if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome {
-                                warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
-                                Some(claurst_tools::ToolResult::error(format!(
-                                    "Blocked by hook: {}",
-                                    reason
-                                )))
-                            } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
-                                warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
-                                Some(claurst_tools::ToolResult::error(format!(
-                                    "Blocked by plugin hook: {}",
-                                    reason
-                                )))
-                            } else {
-                                None
-                            };
-
-                        prepared.push(PreparedTool {
-                            id,
-                            name,
-                            input,
-                            blocked_result,
-                        });
-                    }
-                }
-
-                // Phase 2: build execution futures for non-blocked tools and join them.
-                // Blocked tools yield a ready future with the pre-computed error result.
-                // Non-blocked tools execute concurrently via join_all.
-                // Each async block owns its cloned name/input so there are no lifetime issues.
-                let exec_futures: Vec<_> = prepared
-                    .iter()
-                    .map(|p| {
-                        if p.blocked_result.is_some() {
-                            let r = p.blocked_result.clone().unwrap();
-                            futures::future::Either::Left(async move { r })
+                let tool_invocations: Vec<_> = tool_blocks
+                    .into_iter()
+                    .filter_map(|block| {
+                        if let ContentBlock::ToolUse { id, name, input } = block {
+                            Some((id.clone(), name.clone(), input.clone()))
                         } else {
-                            let name = p.name.clone();
-                            let input = p.input.clone();
-                            futures::future::Either::Right(async move {
-                                execute_tool(&name, &input, tools, tool_ctx).await
-                            })
+                            None
                         }
                     })
                     .collect();
-
-                // Run all tool futures concurrently; join_all preserves order.
-                let exec_results: Vec<ToolResult> =
-                    futures::future::join_all(exec_futures).await;
-
-                // Phase 3: post-hooks, event emission, and result block assembly.
-                let mut result_blocks: Vec<ContentBlock> =
-                    Vec::with_capacity(prepared.len());
-                for (p, result) in prepared.iter().zip(exec_results.into_iter()) {
-                    let hooks = &tool_ctx.config.hooks;
-                    let post_ctx = claurst_core::hooks::HookContext {
-                        event: "PostToolUse".to_string(),
-                        tool_name: Some(p.name.clone()),
-                        tool_input: Some(p.input.clone()),
-                        tool_output: Some(result.content.clone()),
-                        is_error: Some(result.is_error),
-                        session_id: Some(tool_ctx.session_id.clone()),
-                    };
-                    claurst_core::hooks::run_hooks(
-                        hooks,
-                        claurst_core::config::HookEvent::PostToolUse,
-                        &post_ctx,
-                        &tool_ctx.working_dir,
-                    )
-                    .await;
-
-                    claurst_plugins::run_global_post_tool_hook(
-                        &p.name,
-                        &p.input,
-                        &result.content,
-                        result.is_error,
-                    );
-
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::ToolEnd {
-                            tool_name: p.name.clone(),
-                            tool_id: p.id.clone(),
-                            result: result.content.clone(),
-                            is_error: result.is_error,
-                        });
-                    }
-
-                    result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: p.id.clone(),
-                        content: ToolResultContent::Text(result.content),
-                        is_error: if result.is_error { Some(true) } else { None },
-                    });
-                }
+                let result_blocks = execute_tool_blocks_with_hooks(
+                    tool_invocations,
+                    tools,
+                    tool_ctx,
+                    event_tx.as_ref(),
+                )
+                .await;
 
                 // Append tool results as a user message
                 messages.push(Message::user_blocks(result_blocks));
@@ -2105,6 +1967,137 @@ pub async fn run_query_loop(
             }
         }
     }
+}
+
+struct PreparedTool {
+    id: String,
+    name: String,
+    input: Value,
+    blocked_result: Option<ToolResult>,
+}
+
+/// Execute tool invocations through the common policy-aware tool path.
+async fn execute_tool_blocks_with_hooks(
+    tool_blocks: Vec<(String, String, Value)>,
+    tools: &[Box<dyn Tool>],
+    tool_ctx: &ToolContext,
+    event_tx: Option<&mpsc::UnboundedSender<QueryEvent>>,
+) -> Vec<ContentBlock> {
+    // Phase 1: Run PreToolUse hooks sequentially so policy denials can block
+    // execution before any tool side effects occur.
+    let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());
+    for (id, name, input) in tool_blocks {
+        if let Some(tx) = event_tx {
+            let _ = tx.send(QueryEvent::ToolStart {
+                tool_name: name.clone(),
+                tool_id: id.clone(),
+                input_json: input.to_string(),
+            });
+        }
+
+        let hook_ctx = claurst_core::hooks::HookContext {
+            event: "PreToolUse".to_string(),
+            tool_name: Some(name.clone()),
+            tool_input: Some(input.clone()),
+            tool_output: None,
+            is_error: None,
+            session_id: Some(tool_ctx.session_id.clone()),
+        };
+        let pre_outcome = claurst_core::hooks::run_hooks(
+            &tool_ctx.config.hooks,
+            claurst_core::config::HookEvent::PreToolUse,
+            &hook_ctx,
+            &tool_ctx.working_dir,
+        )
+        .await;
+
+        let plugin_pre_outcome = claurst_plugins::run_global_pre_tool_hook(&name, &input);
+
+        let blocked_result =
+            if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome {
+                warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by hook: {}",
+                    reason
+                )))
+            } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
+                warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by plugin hook: {}",
+                    reason
+                )))
+            } else {
+                None
+            };
+
+        prepared.push(PreparedTool {
+            id,
+            name,
+            input,
+            blocked_result,
+        });
+    }
+
+    // Phase 2: execute non-blocked tools concurrently.
+    let exec_futures: Vec<_> = prepared
+        .iter()
+        .map(|p| {
+            if let Some(result) = p.blocked_result.clone() {
+                futures::future::Either::Left(async move { result })
+            } else {
+                let name = p.name.clone();
+                let input = p.input.clone();
+                futures::future::Either::Right(async move {
+                    execute_tool(&name, &input, tools, tool_ctx).await
+                })
+            }
+        })
+        .collect();
+    let exec_results: Vec<ToolResult> = futures::future::join_all(exec_futures).await;
+
+    // Phase 3: run post-hooks, emit completion events, and return result blocks.
+    let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(prepared.len());
+    for (p, result) in prepared.iter().zip(exec_results.into_iter()) {
+        let post_ctx = claurst_core::hooks::HookContext {
+            event: "PostToolUse".to_string(),
+            tool_name: Some(p.name.clone()),
+            tool_input: Some(p.input.clone()),
+            tool_output: Some(result.content.clone()),
+            is_error: Some(result.is_error),
+            session_id: Some(tool_ctx.session_id.clone()),
+        };
+        claurst_core::hooks::run_hooks(
+            &tool_ctx.config.hooks,
+            claurst_core::config::HookEvent::PostToolUse,
+            &post_ctx,
+            &tool_ctx.working_dir,
+        )
+        .await;
+
+        claurst_plugins::run_global_post_tool_hook(
+            &p.name,
+            &p.input,
+            &result.content,
+            result.is_error,
+        );
+
+        if let Some(tx) = event_tx {
+            let _ = tx.send(QueryEvent::ToolEnd {
+                tool_name: p.name.clone(),
+                tool_id: p.id.clone(),
+                result: result.content.clone(),
+                is_error: result.is_error,
+            });
+        }
+
+        result_blocks.push(ContentBlock::ToolResult {
+            tool_use_id: p.id.clone(),
+            content: ToolResultContent::Text(result.content),
+            is_error: if result.is_error { Some(true) } else { None },
+        });
+    }
+
+    result_blocks
 }
 
 /// Execute a single tool invocation.
@@ -2296,6 +2289,7 @@ mod tests {
             agent_definition: None,
             model_registry: None,
             managed_agents: None,
+            preserve_selected_model: false,
         }
     }
 
@@ -2409,6 +2403,43 @@ mod tests {
         assert_eq!(cloned.model, "claude-sonnet-4-6");
         assert_eq!(cloned.max_tokens, 4096);
         assert_eq!(cloned.system_prompt, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_managed_agent_manager_model_overrides_by_default() {
+        let mut cfg = make_config(None, None);
+        cfg.managed_agents = Some(claurst_core::ManagedAgentConfig {
+            enabled: true,
+            manager_model: "openai/gpt-4o".to_string(),
+            executor_model: "anthropic/claude-sonnet-4-6".to_string(),
+            executor_max_turns: 10,
+            max_concurrent_executors: 4,
+            budget_split: claurst_core::BudgetSplitPolicy::SharedPool,
+            total_budget_usd: None,
+            preset_name: None,
+            executor_isolation: false,
+        });
+
+        assert_eq!(selected_model_for_query(&cfg), "openai/gpt-4o");
+    }
+
+    #[test]
+    fn test_explicit_model_selection_blocks_managed_agent_override() {
+        let mut cfg = make_config(None, None);
+        cfg.preserve_selected_model = true;
+        cfg.managed_agents = Some(claurst_core::ManagedAgentConfig {
+            enabled: true,
+            manager_model: "openai/gpt-4o".to_string(),
+            executor_model: "anthropic/claude-sonnet-4-6".to_string(),
+            executor_max_turns: 10,
+            max_concurrent_executors: 4,
+            budget_split: claurst_core::BudgetSplitPolicy::SharedPool,
+            total_budget_usd: None,
+            preset_name: None,
+            executor_isolation: false,
+        });
+
+        assert_eq!(selected_model_for_query(&cfg), "claude-sonnet-4-6");
     }
 
     // ---- QueryOutcome variant tests -----------------------------------------

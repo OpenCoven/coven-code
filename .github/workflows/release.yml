@@ -22,6 +22,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_VERSION: ${{ inputs.version }}
 
 jobs:
   # ── Preflight: validate branch, tag, and version match ──────────────
@@ -32,6 +33,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate version input
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version must be a v-prefixed SemVer tag, for example v0.1.0."
+            exit 1
+          fi
 
       - name: Must be on main branch
         run: |
@@ -42,15 +51,15 @@ jobs:
 
       - name: Tag must not already exist
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag ${{ inputs.version }} already exists"
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag $RELEASE_VERSION already exists"
             exit 1
           fi
 
       - name: Version tag must match Cargo.toml
         run: |
           CARGO_VERSION=$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG_VERSION="${{ inputs.version }}"
+          TAG_VERSION="$RELEASE_VERSION"
           TAG_VERSION="${TAG_VERSION#v}"  # strip leading v
           if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml ($CARGO_VERSION). Update Cargo.toml first."
@@ -92,6 +101,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -181,6 +192,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -258,7 +270,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          CURRENT_TAG="${{ inputs.version }}"
+          CURRENT_TAG="$RELEASE_VERSION"
           PREVIOUS_TAG="$(git tag --sort=-v:refname | grep -vxF "$CURRENT_TAG" | head -n 1 || true)"
 
           # ── Pass 1: GitHub-generated PR notes ──────────────────────────
@@ -361,9 +373,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version }}
+          tag_name: ${{ env.RELEASE_VERSION }}
           target_commitish: ${{ github.sha }}
-          name: Coven Code ${{ inputs.version }}
+          name: Coven Code ${{ env.RELEASE_VERSION }}
           draft: false
           prerelease: false
           body_path: release-notes.md
@@ -387,5 +399,5 @@ jobs:
           gh workflow run npm-publish.yml \
             --repo "${{ github.repository }}" \
             --ref main \
-            -f version="${{ inputs.version }}"
-          echo "Dispatched npm-publish.yml for ${{ inputs.version }}."
+            -f version="$RELEASE_VERSION"
+          echo "Dispatched npm-publish.yml for $RELEASE_VERSION."

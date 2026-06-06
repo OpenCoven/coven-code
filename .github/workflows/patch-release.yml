@@ -42,6 +42,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  PATCH_RELEASE_VERSION: ${{ inputs.version }}
 
 jobs:
   # ── Preflight ───────────────────────────────────────────────────────
@@ -52,6 +53,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Validate version input
+        run: |
+          if [[ ! "$PATCH_RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Invalid version: $PATCH_RELEASE_VERSION"
+            echo "::error::Expected a tag like v1.2.3 or v1.2.3-rc.1."
+            exit 1
+          fi
 
       - name: Must be on main branch
         run: |
@@ -64,9 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view "${{ inputs.version }}" \
+          if ! gh release view "$PATCH_RELEASE_VERSION" \
                --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::error::Release ${{ inputs.version }} does not exist."
+            echo "::error::Release $PATCH_RELEASE_VERSION does not exist."
             echo "::error::To cut a brand-new release, use the regular Release workflow instead."
             exit 1
           fi
@@ -74,7 +83,7 @@ jobs:
       - name: Cargo.toml version must still match the patched tag
         run: |
           CARGO_VERSION=$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG_VERSION="${{ inputs.version }}"
+          TAG_VERSION="$PATCH_RELEASE_VERSION"
           TAG_VERSION="${TAG_VERSION#v}"  # strip leading v
           if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
             echo "::error::Cargo.toml ($CARGO_VERSION) does not match patched tag ($TAG_VERSION)."
@@ -263,9 +272,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${{ inputs.version }}" "${{ github.sha }}"
-          git push -f origin "refs/tags/${{ inputs.version }}"
-          echo "Tag ${{ inputs.version }} now points at ${{ github.sha }}."
+          git tag -f "$PATCH_RELEASE_VERSION" "${{ github.sha }}"
+          git push -f origin "refs/tags/$PATCH_RELEASE_VERSION"
+          echo "Tag $PATCH_RELEASE_VERSION now points at ${{ github.sha }}."
 
       # `gh release upload --clobber` overwrites assets one at a time without
       # touching the release body, name, draft state, or prerelease flag.
@@ -279,7 +288,7 @@ jobs:
           for f in release/*; do
             echo "→ Uploading $(basename "$f")"
           done
-          gh release upload "${{ inputs.version }}" release/* \
+          gh release upload "$PATCH_RELEASE_VERSION" release/* \
             --repo "${{ github.repository }}" \
             --clobber
 
@@ -298,13 +307,15 @@ jobs:
         run: python3 scripts/append-patch-note.py
 
       - name: Summary
+        env:
+          PATCH_RELEASE_NOTE: ${{ inputs.patch_note }}
         run: |
           {
-            echo "## ✅ Patched ${{ inputs.version }} in place"
+            echo "## ✅ Patched $PATCH_RELEASE_VERSION in place"
             echo
             echo "- Tag force-moved to commit \`${{ github.sha }}\`."
             echo "- 5 binary archives + install scripts rebuilt and re-uploaded."
-            if [[ -n "${{ inputs.patch_note }}" ]]; then
+            if [[ -n "$PATCH_RELEASE_NOTE" ]]; then
               echo "- Release body received a new bullet under \`## 🩹 Patches\` at the top."
             else
               echo "- Release title, body, contributors, and Full Changelog link unchanged."

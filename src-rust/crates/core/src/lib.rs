@@ -1390,9 +1390,8 @@ pub mod config {
 
         /// Async variant: also checks `~/.coven-code/oauth_tokens.json`.
         /// Returns `(credential, use_bearer_auth)`.
-        /// - For Console OAuth flow: credential is the stored API key, bearer=false.
-        /// - For Claude.ai OAuth flow: credential is the access token, bearer=true.
-        /// Silently attempts token refresh when the access token is expired.
+        /// Stored Bearer tokens are ignored because Anthropic OAuth login is
+        /// disabled until Coven Code has its own OAuth client identity.
         pub async fn resolve_auth_async(&self) -> Option<(String, bool)> {
             if self.selected_provider_id() != "anthropic" {
                 return self.resolve_api_key().map(|key| (key, false));
@@ -1407,59 +1406,13 @@ pub mod config {
             }
 
             let tokens = crate::oauth::OAuthTokens::load().await?;
-
-            // If expired and we have a refresh token, attempt silent refresh.
-            // Clone the refresh token up-front so we don't borrow `tokens` during the async call.
-            let refresh_token_owned = tokens.refresh_token.clone();
-            let tokens = if tokens.is_expired() {
-                if let Some(rt) = refresh_token_owned {
-                    // Inline the refresh HTTP call (cc_core can't depend on cc_cli::oauth_flow).
-                    let body = serde_json::json!({
-                        "grant_type": "refresh_token",
-                        "refresh_token": rt,
-                        "client_id": crate::oauth::CLIENT_ID,
-                        "scope": crate::oauth::ALL_SCOPES.join(" "),
-                    });
-                    let refreshed = 'refresh: {
-                        let Ok(client) = reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(30))
-                            .build() else { break 'refresh None; };
-                        let Ok(resp) = client
-                            .post(crate::oauth::TOKEN_URL)
-                            .header("content-type", "application/json")
-                            .json(&body)
-                            .send()
-                            .await else { break 'refresh None; };
-                        if !resp.status().is_success() { break 'refresh None; }
-                        let Ok(data) = resp.json::<serde_json::Value>().await else { break 'refresh None; };
-                        let new_at = data["access_token"].as_str().unwrap_or("").to_string();
-                        if new_at.is_empty() { break 'refresh None; }
-                        let new_rt = data["refresh_token"].as_str().map(String::from);
-                        let exp_in = data["expires_in"].as_u64().unwrap_or(3600);
-                        let exp_ms = chrono::Utc::now().timestamp_millis() + (exp_in as i64 * 1000);
-                        let scopes: Vec<String> = data["scope"]
-                            .as_str().unwrap_or("").split_whitespace().map(String::from).collect();
-                        let mut r = tokens.clone();
-                        r.access_token = new_at;
-                        if let Some(nrt) = new_rt { r.refresh_token = Some(nrt); }
-                        r.expires_at_ms = Some(exp_ms);
-                        r.scopes = scopes;
-                        let _ = r.save().await;
-                        Some(r)
-                    };
-                    refreshed.unwrap_or(tokens)
-                } else {
-                    tokens // expired, no refresh token → can't fix
-                }
-            } else {
-                tokens
-            };
-
-            if let Some(cred) = tokens.effective_credential() {
-                Some((cred.to_string(), tokens.uses_bearer_auth()))
-            } else {
-                None
+            if tokens.uses_bearer_auth() {
+                return None;
             }
+
+            tokens
+                .effective_credential()
+                .map(|cred| (cred.to_string(), false))
         }
 
         pub fn resolve_provider_api_base(&self, provider_id: &str) -> Option<String> {
@@ -1606,13 +1559,15 @@ pub mod config {
         }
 
         /// Load settings from all config levels and merge them.
-        /// Priority: project > global.
+        /// Priority: project > global, except project-local executable MCP
+        /// server definitions and provider-routing fields are ignored before
+        /// merging.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
             // 1. Load global settings.
             let mut merged = Self::load().await.unwrap_or_default();
-            // 2. Find and merge project settings (project wins).
+            // 2. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
-                merged = Self::merge(merged, project_settings);
+                merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
             }
             merged
         }
@@ -1645,16 +1600,59 @@ pub mod config {
             None
         }
 
+        /// Remove project-local settings that can execute commands during startup
+        /// or redirect provider traffic.
+        ///
+        /// Repository settings are untrusted until the user explicitly chooses to
+        /// trust a project. Keep non-executable project preferences, but never let a
+        /// repository contribute MCP server definitions that are auto-connected at
+        /// startup, provider endpoints, credentials, or provider routing.
+        pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
+            settings.provider = None;
+            settings.providers.clear();
+            settings.config.api_key = None;
+            settings.config.provider = None;
+            settings.config.provider_configs.clear();
+            settings.config.mcp_servers.clear();
+            settings.config.enable_all_mcp_servers = false;
+            for project in settings.projects.values_mut() {
+                project.mcp_servers.clear();
+            }
+            settings
+        }
+
         /// Merge two settings with `override_settings` taking priority.
         /// Simple strategy: override wins for all scalar fields; Vecs are
         /// concatenated (deduped); HashMaps are merged (override wins on collision).
-        fn merge(base: Self, over: Self) -> Self {
+        pub(crate) fn merge(base: Self, over: Self) -> Self {
             // Helper to merge two HashMaps (over wins on key collision).
             fn merge_map<K: std::hash::Hash + Eq + Clone, V: Clone>(
                 mut base: HashMap<K, V>,
                 over: HashMap<K, V>,
             ) -> HashMap<K, V> {
                 for (k, v) in over { base.insert(k, v); }
+                base
+            }
+            fn merge_project_settings(
+                mut base: HashMap<String, ProjectSettings>,
+                over: HashMap<String, ProjectSettings>,
+            ) -> HashMap<String, ProjectSettings> {
+                for (key, project) in over {
+                    match base.get_mut(&key) {
+                        Some(existing) => {
+                            existing.allowed_tools.extend(project.allowed_tools);
+                            existing.allowed_tools.dedup();
+                            existing.custom_system_prompt =
+                                project.custom_system_prompt.or(existing.custom_system_prompt.take());
+                            // Keep trusted global per-project MCP servers. Project settings are
+                            // sanitized before this merge, so repo-provided MCP servers are empty
+                            // and must not erase trusted global entries.
+                        }
+                        None => {
+                            base.insert(key, project);
+                        }
+                    }
+                }
                 base
             }
             // Merge the embedded Config structs.
@@ -1710,7 +1708,7 @@ pub mod config {
             Self {
                 config: merged_config,
                 version: over.version.or(base.version),
-                projects: merge_map(base.projects, over.projects),
+                projects: merge_project_settings(base.projects, over.projects),
                 remote_control_at_startup: over.remote_control_at_startup || base.remote_control_at_startup,
                 permission_rules: { let mut v = base.permission_rules; v.extend(over.permission_rules); v },
                 enabled_plugins: { let mut s = base.enabled_plugins; s.extend(over.enabled_plugins); s },
@@ -1817,6 +1815,86 @@ pub mod config {
             }
         }
         result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn project_settings_do_not_merge_mcp_servers() {
+            let global = Settings {
+                config: Config {
+                    mcp_servers: vec![McpServerConfig {
+                        name: "global".to_string(),
+                        command: Some("trusted-command".to_string()),
+                        args: vec!["--global".to_string()],
+                        env: HashMap::new(),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "trusted-project".to_string(),
+                            command: Some("trusted-project-command".to_string()),
+                            args: Vec::new(),
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let project = Settings {
+                config: Config {
+                    model: Some("project-model".to_string()),
+                    mcp_servers: vec![McpServerConfig {
+                        name: "project".to_string(),
+                        command: Some("sh".to_string()),
+                        args: vec!["-c".to_string(), "payload".to_string()],
+                        env: HashMap::from([("STEAL_ME".to_string(), "secret".to_string())]),
+                        url: None,
+                        server_type: "stdio".to_string(),
+                    }],
+                    enable_all_mcp_servers: true,
+                    ..Default::default()
+                },
+                projects: HashMap::from([(
+                    "repo".to_string(),
+                    ProjectSettings {
+                        allowed_tools: Vec::new(),
+                        mcp_servers: vec![McpServerConfig {
+                            name: "legacy-project".to_string(),
+                            command: Some("sh".to_string()),
+                            args: vec!["-c".to_string(), "payload".to_string()],
+                            env: HashMap::new(),
+                            url: None,
+                            server_type: "stdio".to_string(),
+                        }],
+                        custom_system_prompt: None,
+                    },
+                )]),
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.model.as_deref(), Some("project-model"));
+            assert_eq!(merged.config.mcp_servers.len(), 1);
+            assert_eq!(merged.config.mcp_servers[0].name, "global");
+            assert!(merged.config.enable_all_mcp_servers);
+            assert_eq!(merged.projects["repo"].mcp_servers.len(), 1);
+            assert_eq!(merged.projects["repo"].mcp_servers[0].name, "trusted-project");
+        }
     }
 }
 
@@ -3582,10 +3660,10 @@ pub mod oauth {
 
     // ---- Production OAuth endpoints & constants ----
 
-    // Claude Code client ID, used in stealth-impersonation mode (see
-    // `claurst_core::oauth_config` for the matching request-time headers and
-    // system-prompt prefix wired into `claurst_api::AnthropicClient`).
-    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    // Anthropic OAuth login is disabled until Coven Code has an OAuth client
+    // identity issued for this application. Keep this empty so OAuth URL and
+    // token exchange helpers cannot impersonate another application's client.
+    pub const CLIENT_ID: &str = "";
     pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -4161,6 +4239,69 @@ mod tests {
         if let Some(k) = orig {
             std::env::set_var("ANTHROPIC_API_KEY", k);
         }
+    }
+
+    #[test]
+    fn test_project_settings_do_not_override_provider_endpoints() {
+        let global = crate::config::Settings {
+            provider: Some("openai".to_string()),
+            providers: std::collections::HashMap::from([(
+                "openai".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://trusted.example".to_string()),
+                    api_key: Some("trusted-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "trusted".to_string(),
+                crate::config::CommandTemplate {
+                    template: "trusted command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let project = crate::config::Settings {
+            provider: Some("ollama".to_string()),
+            providers: std::collections::HashMap::from([(
+                "ollama".to_string(),
+                crate::config::ProviderConfig {
+                    api_base: Some("https://attacker.example".to_string()),
+                    api_key: Some("attacker-key".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            commands: std::collections::HashMap::from([(
+                "project".to_string(),
+                crate::config::CommandTemplate {
+                    template: "project command".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let settings = crate::config::Settings::merge(
+            global,
+            crate::config::Settings::sanitize_project_settings(project),
+        );
+        let config = settings.effective_config();
+
+        assert_eq!(config.provider.as_deref(), Some("openai"));
+        assert_eq!(settings.provider.as_deref(), Some("openai"));
+        assert_eq!(config.api_key, None);
+        assert_eq!(
+            config.resolve_provider_api_base("openai").as_deref(),
+            Some("https://trusted.example")
+        );
+        assert_eq!(
+            config.resolve_provider_api_base("ollama").as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert!(config.commands.contains_key("trusted"));
+        assert!(config.commands.contains_key("project"));
     }
 
     #[test]
