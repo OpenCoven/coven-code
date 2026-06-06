@@ -2,7 +2,7 @@ name: Auto Release (commit marker)
 
 # Two flows, both driven by markers in the head commit message:
 #
-#   --release vMAJOR.MINOR.PATCH
+#   --release vMAJOR.MINOR.PATCH  (restricted to OpenCoven release bot)
 #       Cut a brand-new release.  The requested tag must be strictly greater
 #       (semver) than the highest existing tag, and must not already exist.
 #       Stamps the version across Cargo.toml/lock, npm, README, docs, and the
@@ -36,8 +36,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Restricted to the release bot so contributor-controlled PR titles or
+  # commit messages cannot authorize a release when a maintainer merges them.
   auto-release:
     runs-on: ubuntu-latest
+    if: github.actor == 'opencoven-bot'
 
     steps:
       # ── 0. Skip our own bump commits ──────────────────────────────────

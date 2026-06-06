@@ -5,8 +5,8 @@
 //! volatile, session-specific sections follow it.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Dynamic boundary marker
@@ -47,11 +47,7 @@ pub struct SystemPromptSection {
 impl SystemPromptSection {
     /// Create a memoizable (cacheable) section.
     pub fn cached(tag: &'static str, content: impl Into<String>) -> Self {
-        Self {
-            tag,
-            content: Some(content.into()),
-            cache_break: false,
-        }
+        Self { tag, content: Some(content.into()), cache_break: false }
     }
 
     /// Create a volatile section that re-evaluates every turn.
@@ -101,16 +97,16 @@ impl OutputStyle {
                 "Be maximally concise. Skip preamble, summaries, and filler. \
                 Lead with the answer. One sentence is better than three.",
             ),
-            OutputStyle::Formal => {
-                Some("Maintain a formal, professional tone. Use precise technical language.")
-            }
+            OutputStyle::Formal => Some(
+                "Maintain a formal, professional tone. Use precise technical language.",
+            ),
             OutputStyle::Casual => Some("Use a casual, conversational tone."),
             OutputStyle::Default => None,
         }
     }
 
     /// Parse from a string (case-insensitive).
-    pub fn parse(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "explanatory" => Self::Explanatory,
             "learning" => Self::Learning,
@@ -246,22 +242,38 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
         }
     }
 
-    let prefix = opts.prefix.unwrap_or_else(|| {
-        SystemPromptPrefix::detect(opts.is_non_interactive, opts.has_append_system_prompt)
-    });
+    let prefix = opts
+        .prefix
+        .unwrap_or_else(|| {
+            SystemPromptPrefix::detect(
+                opts.is_non_interactive,
+                opts.has_append_system_prompt,
+            )
+        });
 
-    let mut parts: Vec<String> = vec![
-        prefix.attribution_text().to_string(),
-        CORE_CAPABILITIES.to_string(),
-        TOOL_USE_GUIDELINES.to_string(),
-        ACTIONS_SECTION.to_string(),
-        SAFETY_GUIDELINES.to_string(),
-        CYBER_RISK_INSTRUCTION.to_string(),
-    ];
+    let mut parts: Vec<String> = Vec::new();
 
     // ------------------------------------------------------------------ //
     // CACHEABLE sections (before the dynamic boundary)                   //
     // ------------------------------------------------------------------ //
+
+    // 1. Attribution header
+    parts.push(prefix.attribution_text().to_string());
+
+    // 2. Core capabilities
+    parts.push(CORE_CAPABILITIES.to_string());
+
+    // 3. Tool use guidelines
+    parts.push(TOOL_USE_GUIDELINES.to_string());
+
+    // 4. Executing actions with care
+    parts.push(ACTIONS_SECTION.to_string());
+
+    // 5. Safety guidelines
+    parts.push(SAFETY_GUIDELINES.to_string());
+
+    // 6. Cyber-risk instruction (owned by safeguards — do not edit)
+    parts.push(CYBER_RISK_INSTRUCTION.to_string());
 
     // 7. Output style (cacheable when non-Default; its content is stable)
     if let Some(style_text) = opts
@@ -305,7 +317,10 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 
     // 12. Memory injection (from memdir)
     if !opts.memory_content.is_empty() {
-        parts.push(format!("\n<memory>\n{}\n</memory>", opts.memory_content));
+        parts.push(format!(
+            "\n<memory>\n{}\n</memory>",
+            opts.memory_content
+        ));
     }
 
     // 13. Active goal addendum (dynamic — changes each session)
@@ -337,19 +352,20 @@ fn build_env_info_section(working_dir: Option<&str>) -> String {
     let os_version = {
         #[cfg(target_os = "windows")]
         {
-            // Read ProductName from the registry via `ver` or env vars.
-            // Also include architecture for clarity.
-            let ver = std::process::Command::new("cmd")
-                .args(["/c", "ver"])
-                .output()
+            // Avoid spawning command processors while constructing the prompt:
+            // the current working directory may be an untrusted repository.
+            let os_name = std::env::var("OS")
                 .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Windows".to_string());
+            let arch = std::env::var("PROCESSOR_ARCHITECTURE")
+                .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_default();
-            match ver {
-                Some(v) => format!("{} ({})", v, arch),
-                None => format!("Windows ({})", arch),
+            match arch {
+                Some(arch) => format!("{} ({})", os_name, arch),
+                None => os_name,
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -538,10 +554,7 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_attribution() {
         let prompt = build_system_prompt(&default_opts());
-        assert!(
-            prompt.contains("Coven Code"),
-            "Default prompt must contain attribution"
-        );
+        assert!(prompt.contains("Coven Code"), "Default prompt must contain attribution");
     }
 
     #[test]
@@ -621,10 +634,10 @@ mod tests {
     }
 
     #[test]
-    fn test_output_style_parse() {
-        assert_eq!(OutputStyle::parse("concise"), OutputStyle::Concise);
-        assert_eq!(OutputStyle::parse("FORMAL"), OutputStyle::Formal);
-        assert_eq!(OutputStyle::parse("unknown"), OutputStyle::Default);
+    fn test_output_style_from_str() {
+        assert_eq!(OutputStyle::from_str("concise"), OutputStyle::Concise);
+        assert_eq!(OutputStyle::from_str("FORMAL"), OutputStyle::Formal);
+        assert_eq!(OutputStyle::from_str("unknown"), OutputStyle::Default);
     }
 
     #[test]

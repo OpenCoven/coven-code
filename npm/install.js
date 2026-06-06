@@ -2,13 +2,14 @@
 'use strict';
 
 const https = require('https');
-const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const pkg = require('./package.json');
+const checksums = require('./checksums.json');
 const VERSION = pkg.version;
 const REPO = 'OpenCoven/coven-code';
 const BASE_URL = `https://github.com/${REPO}/releases/download/v${VERSION}`;
@@ -41,13 +42,29 @@ function getPlatform() {
 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      reject(new Error(`Refusing to download non-HTTPS URL: ${url}`));
+      return;
+    }
+
     const file = fs.createWriteStream(dest);
-    const get = url.startsWith('https') ? https : http;
-    get.get(url, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
+    https.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
         file.close();
         try { fs.unlinkSync(dest); } catch (_) {}
-        download(res.headers.location, dest).then(resolve).catch(reject);
+        if (!res.headers.location) {
+          reject(new Error(`Redirect without Location header downloading ${url}`));
+          return;
+        }
+        let location;
+        try {
+          location = new URL(res.headers.location, url).toString();
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        download(location, dest).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -69,6 +86,31 @@ function download(url, dest) {
   });
 }
 
+function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  const bytes = fs.readFileSync(filePath);
+  hash.update(bytes);
+  return hash.digest('hex');
+}
+
+function expectedSha256(archiveName) {
+  const entry = checksums[archiveName];
+  if (!entry || typeof entry.sha256 !== 'string') {
+    throw new Error(`Missing SHA-256 checksum for ${archiveName} in checksums.json`);
+  }
+  return entry.sha256;
+}
+
+function verifyChecksum(filePath, archiveName) {
+  const expected = expectedSha256(archiveName).toLowerCase();
+  const actual = sha256File(filePath).toLowerCase();
+  if (actual !== expected) {
+    throw new Error(
+      `Checksum mismatch for ${archiveName}: expected ${expected}, got ${actual}`
+    );
+  }
+}
+
 async function main() {
   const { artifact, ext, archive } = getPlatform();
   const archiveName = `${artifact}${archive}`;
@@ -86,6 +128,9 @@ async function main() {
   console.log(`coven-code: downloading v${VERSION} for ${process.platform}/${process.arch}`);
   console.log(`            ${url}`);
   await download(url, tmpPath);
+
+  console.log('coven-code: verifying checksum...');
+  verifyChecksum(tmpPath, archiveName);
 
   console.log('coven-code: extracting...');
   if (archive === '.zip') {

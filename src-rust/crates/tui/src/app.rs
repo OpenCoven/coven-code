@@ -862,67 +862,10 @@ impl Default for HistorySearch {
     }
 }
 
-/// Attempt to copy text to the system clipboard using platform CLI tools.
+/// Attempt to copy text to the system clipboard using trusted platform clipboard helpers.
 /// Returns true if successful.
 pub fn try_copy_to_clipboard(text: &str) -> bool {
-    // Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("clip")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-                drop(stdin);
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // macOS
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // Linux / Wayland / X11
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write;
-        for cmd in &[
-            "wl-copy",
-            "xclip -selection clipboard",
-            "xsel --clipboard --input",
-        ] {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if let Some((prog, args)) = parts.split_first() {
-                if let Ok(mut child) = std::process::Command::new(prog)
-                    .args(args)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    crate::image_paste::write_clipboard_text(text)
 }
 
 /// Map a character to its QWERTY Latin keyboard-position equivalent.
@@ -5888,23 +5831,78 @@ impl App {
         if selected_key != Some('P') {
             return;
         }
-        if let PermissionDialogKind::Bash { command, .. } = &pr.kind {
-            // Always normalize to the first whitespace-delimited word so
-            // that the allowlist check in `bash_command_allowed_by_prefix`
-            // (which also uses `split_whitespace().next()`) matches correctly.
-            let first_word = command.split_whitespace().next().unwrap_or("").to_string();
-            if !first_word.is_empty() {
-                self.bash_prefix_allowlist.insert(first_word);
+        if let PermissionDialogKind::Bash { suggested_prefix, .. } = &pr.kind {
+            if let Some(prefix) = suggested_prefix
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                if !Self::bash_command_has_shell_control(prefix) {
+                    self.bash_prefix_allowlist.insert(prefix.to_string());
+                }
             }
         }
     }
 
+    fn bash_command_has_shell_control(command: &str) -> bool {
+        let mut chars = command.chars().peekable();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escaped = false;
+
+        while let Some(c) = chars.next() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            // In bash, backslash does not escape characters inside single quotes.
+            if c == '\\' && !in_single_quote {
+                escaped = true;
+                continue;
+            }
+
+            match c {
+                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+                '"' if !in_single_quote => in_double_quote = !in_double_quote,
+                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
+                    return true;
+                }
+                '`' if !in_single_quote => return true,
+                '$' if !in_single_quote && chars.peek() == Some(&'(') => return true,
+                _ => {}
+            }
+        }
+
+        // Treat unterminated quotes / dangling escapes as unsafe.
+        escaped || in_single_quote || in_double_quote
+    }
+
+    fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
+        let prefix = prefix.trim();
+        let command = command.trim_start();
+        if prefix.is_empty() || !command.starts_with(prefix) {
+            return false;
+        }
+
+        let rest = &command[prefix.len()..];
+        rest.is_empty()
+            || rest
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_whitespace())
+                .unwrap_or(false)
+    }
+
     /// Returns `true` if the given bash `command` is covered by the session-local
-    /// prefix allowlist (i.e. its first word matches an entry in
-    /// `bash_prefix_allowlist`).  Used by callers to skip the permission dialog.
+    /// prefix allowlist.  Shell compound commands are never allowed by prefix;
+    /// they must go through the normal permission dialog.
     pub fn bash_command_allowed_by_prefix(&self, command: &str) -> bool {
-        let first_word = command.split_whitespace().next().unwrap_or("");
-        !first_word.is_empty() && self.bash_prefix_allowlist.contains(first_word)
+        !Self::bash_command_has_shell_control(command)
+            && self
+                .bash_prefix_allowlist
+                .iter()
+                .any(|prefix| Self::bash_prefix_matches_command(prefix, command))
     }
 
     // ---- Advanced mouse interaction helpers --------------------------------
@@ -7760,7 +7758,7 @@ mod tests {
             "Bash".to_string(),
             "This will execute a shell command.".to_string(),
             "git status".to_string(),
-            Some("git".to_string()),
+            Some("git status".to_string()),
         );
         app.permission_request = Some(pr);
 
@@ -7773,11 +7771,17 @@ mod tests {
         };
         app.handle_permission_key(key);
 
-        // Dialog should be dismissed and "git" added to the allowlist.
+        // Dialog should be dismissed and the suggested prefix added to the allowlist.
         assert!(app.permission_request.is_none());
         assert!(app.bash_command_allowed_by_prefix("git status"));
-        assert!(app.bash_command_allowed_by_prefix("git push origin main"));
-        // Other commands should NOT be allowed.
+        assert!(app.bash_command_allowed_by_prefix("git status --short"));
+        // Other commands and compound shell commands should NOT be allowed.
+        assert!(!app.bash_command_allowed_by_prefix("git push origin main"));
+        assert!(!app.bash_command_allowed_by_prefix("git status; curl https://example.com"));
+        assert!(!app.bash_command_allowed_by_prefix(
+            "git status ; curl https://example.com"
+        ));
+        assert!(!app.bash_command_allowed_by_prefix("git status > /tmp/status.txt"));
         assert!(!app.bash_command_allowed_by_prefix("rm -rf /tmp"));
     }
 
@@ -7792,7 +7796,7 @@ mod tests {
             "Bash".to_string(),
             "This will execute a shell command.".to_string(),
             "cargo build".to_string(),
-            Some("cargo".to_string()),
+            Some("cargo build".to_string()),
         );
         // Navigate to the prefix option (index 3 in a 5-option dialog).
         pr.selected_option = 3;
@@ -7808,7 +7812,8 @@ mod tests {
         app.handle_permission_key(key);
 
         assert!(app.permission_request.is_none());
-        assert!(app.bash_command_allowed_by_prefix("cargo test"));
+        assert!(app.bash_command_allowed_by_prefix("cargo build --workspace"));
+        assert!(!app.bash_command_allowed_by_prefix("cargo test"));
         assert!(!app.bash_command_allowed_by_prefix("make build"));
     }
 

@@ -48,25 +48,6 @@ pub const ALL_OAUTH_SCOPES: &[&str] = &[
 pub const MINIMUM_SCOPES: &[&str] = &[CLAUDE_AI_INFERENCE_SCOPE, CLAUDE_AI_PROFILE_SCOPE];
 
 // ---------------------------------------------------------------------------
-// Claude Code stealth-impersonation constants
-// ---------------------------------------------------------------------------
-
-/// User-Agent advertised to Anthropic's API on OAuth-authenticated requests.
-/// Must match a Claude Code version the server still accepts; bump when
-/// Anthropic invalidates the current value.
-pub const CLAUDE_CODE_VERSION_FOR_OAUTH: &str = "2.1.75";
-
-/// `anthropic-beta` flags that must be present on every OAuth-authenticated
-/// request. Without these the API server rejects subscription tokens.
-pub const OAUTH_BETA_FLAGS: &[&str] = &["claude-code-20250219", "oauth-2025-04-20"];
-
-/// System-prompt prefix that must appear as the first system block on every
-/// OAuth-authenticated request. Anthropic's gate refuses requests whose system
-/// prompt does not start with this identity string.
-pub const CLAUDE_CODE_SYSTEM_PROMPT_PREFIX: &str =
-    "You are Claude Code, Anthropic's official CLI for Claude.";
-
-// ---------------------------------------------------------------------------
 // OAuthConfig struct
 // ---------------------------------------------------------------------------
 
@@ -95,17 +76,10 @@ pub struct OAuthConfig {
 // Production config (mirrors PROD_OAUTH_CONFIG in oauth.ts)
 // ---------------------------------------------------------------------------
 
-// Claude Code OAuth client ID, used in stealth-impersonation mode so that
-// Anthropic's auth server accepts Claude Pro/Max tokens through Coven Code.
-// The matching request-time impersonation (user-agent, x-app, anthropic-beta,
-// and the Claude Code system-prompt prefix) is wired up in
-// `claurst_api::client::AnthropicClient` and is required for these tokens to
-// be honoured by the API.
-//
-// Billing note: tokens minted by a Pro/Max subscription draw from the
-// account's "extra usage" pool when used by a third-party client — they do
-// not consume subscription quota. Users should be aware of this before
-// switching from API-key auth.
+// Anthropic OAuth login is disabled until Coven Code has an OAuth client
+// identity issued for this application. These endpoint definitions are retained
+// for tests and future first-party OAuth support, but the client IDs are left
+// empty so this third-party CLI does not impersonate another application.
 pub const PROD_OAUTH: OAuthConfig = OAuthConfig {
     base_api_url: "https://api.anthropic.com",
     // Routes through claude.com/cai/* for attribution, 307s to claude.ai in
@@ -116,11 +90,10 @@ pub const PROD_OAUTH: OAuthConfig = OAuthConfig {
     token_url: "https://platform.claude.com/v1/oauth/token",
     api_key_url: "https://api.anthropic.com/api/oauth/claude_cli/create_api_key",
     roles_url: "https://api.anthropic.com/api/oauth/claude_cli/roles",
-    console_success_url:
-        "https://platform.claude.com/buy_credits?returnUrl=/oauth/code/success%3Fapp%3Dclaude-code",
+    console_success_url: "https://platform.claude.com/buy_credits?returnUrl=/oauth/code/success%3Fapp%3Dclaude-code",
     claudeai_success_url: "https://platform.claude.com/oauth/code/success?app=claude-code",
     manual_redirect_url: "https://platform.claude.com/oauth/code/callback",
-    client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e", // Claude Code client ID (stealth)
+    client_id: "",
     oauth_file_suffix: "",
     mcp_proxy_url: "https://mcp-proxy.anthropic.com",
     mcp_proxy_path: "/v1/mcp/{server_id}",
@@ -141,14 +114,15 @@ pub const STAGING_OAUTH: OAuthConfig = OAuthConfig {
     console_success_url: "https://platform.staging.ant.dev/buy_credits?returnUrl=/oauth/code/success%3Fapp%3Dclaude-code",
     claudeai_success_url: "https://platform.staging.ant.dev/oauth/code/success?app=claude-code",
     manual_redirect_url: "https://platform.staging.ant.dev/oauth/code/callback",
-    client_id: "22422756-60c9-4084-8eb7-27705fd5cf9a", // Claude Code staging client ID (stealth)
+    client_id: "",
     oauth_file_suffix: "-staging-oauth",
     mcp_proxy_url: "https://mcp-proxy-staging.anthropic.com",
     mcp_proxy_path: "/v1/mcp/{server_id}",
 };
 
 /// Client-ID Metadata Document URL for MCP OAuth (CIMD / SEP-991).
-pub const MCP_CLIENT_METADATA_URL: &str = "https://claude.ai/oauth/claude-code-client-metadata";
+pub const MCP_CLIENT_METADATA_URL: &str =
+    "https://claude.ai/oauth/claude-code-client-metadata";
 
 // ---------------------------------------------------------------------------
 // Config selection
@@ -341,7 +315,10 @@ fn codex_tokens_path() -> Option<std::path::PathBuf> {
 
 /// Save Codex OAuth tokens for a named profile under
 /// `~/.coven-code/accounts/codex/<profile_id>/codex_tokens.json`.
-pub fn save_codex_tokens_for_profile(tokens: &CodexTokens, profile_id: &str) -> anyhow::Result<()> {
+pub fn save_codex_tokens_for_profile(
+    tokens: &CodexTokens,
+    profile_id: &str,
+) -> anyhow::Result<()> {
     let path = crate::accounts::codex_token_path(profile_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -381,7 +358,8 @@ pub fn save_codex_tokens_and_register(
         .find(|p| {
             (identity.email.is_some() && p.email == identity.email)
                 || (tokens.account_id.is_some() && p.account_id == tokens.account_id)
-                || (identity.account_id.is_some() && p.account_id == identity.account_id)
+                || (identity.account_id.is_some()
+                    && p.account_id == identity.account_id)
         })
         .map(|p| p.id);
 
@@ -406,7 +384,10 @@ pub fn save_codex_tokens_and_register(
         id: id.clone(),
         label: label.map(slugify_profile_id),
         email: identity.email,
-        account_id: tokens.account_id.clone().or(identity.account_id),
+        account_id: tokens
+            .account_id
+            .clone()
+            .or(identity.account_id),
         organization_uuid: None,
         subscription_tier: None,
         added_at: None,
@@ -522,11 +503,7 @@ mod tests {
             "verifier too short: {} chars",
             verifier.len()
         );
-        assert!(
-            verifier.len() <= 128,
-            "verifier too long: {} chars",
-            verifier.len()
-        );
+        assert!(verifier.len() <= 128, "verifier too long: {} chars", verifier.len());
     }
 
     #[test]
