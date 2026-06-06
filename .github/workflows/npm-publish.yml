@@ -19,8 +19,7 @@ permissions:
 # `workflow_run` is unreliable when the upstream `Release` run was itself
 # triggered by a GITHUB_TOKEN workflow_dispatch. If both paths happen to
 # fire for the same release, this static concurrency group serializes them
-# — the first one publishes, the second waits and then no-ops (or errors
-# benignly at `npm publish` because the version is already on the registry).
+# and the second run exits cleanly when the version is already on npm.
 # Releases are version-monotonic so blanket serialisation is safe; there
 # isn't a scenario where two concurrent publishes should both succeed.
 concurrency:
@@ -208,7 +207,22 @@ jobs:
 
           cat npm/checksums.json
 
+      - name: Check whether version is already published
+        id: registry_version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@opencoven/coven-code@$VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "@opencoven/coven-code@$VERSION is already published; skipping npm publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "@opencoven/coven-code@$VERSION is not published yet; continuing."
+          fi
+
       - name: Publish to npm
+        if: steps.registry_version.outputs.exists != 'true'
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ''
