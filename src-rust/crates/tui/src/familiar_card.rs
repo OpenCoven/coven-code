@@ -45,7 +45,11 @@ pub fn pick_size(width: u16) -> CardSize {
 
 /// Render the full card. `loading` is `Some(frame_count)` to spin the eyes,
 /// `None` for the resting state.
-pub fn render_card(theme: &FamiliarTheme, size: CardSize, loading: Option<u64>) -> Vec<Line<'static>> {
+pub fn render_card(
+    theme: &FamiliarTheme,
+    size: CardSize,
+    loading: Option<u64>,
+) -> Vec<Line<'static>> {
     let pose = match loading {
         Some(frame) => RustlePose::Loading { frame },
         None => RustlePose::Static,
@@ -65,7 +69,9 @@ pub fn render_card(theme: &FamiliarTheme, size: CardSize, loading: Option<u64>) 
 /// `width` is the popup interior column count; the row is left-trimmed to
 /// fit without wrapping.
 pub fn render_mini_row(theme: &FamiliarTheme, width: u16) -> Line<'static> {
-    let primary = Style::default().fg(theme.palette.primary).add_modifier(Modifier::BOLD);
+    let primary = Style::default()
+        .fg(theme.palette.primary)
+        .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(Color::Rgb(148, 163, 184));
     let dot = Span::styled("\u{25cf}", Style::default().fg(theme.access_color()));
     let mut spans = vec![
@@ -76,7 +82,13 @@ pub fn render_mini_row(theme: &FamiliarTheme, width: u16) -> Line<'static> {
     ];
     if let Some(role) = &theme.role {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(truncate(role, (width as usize).saturating_sub(theme.display_name.len() + 10)), muted));
+        spans.push(Span::styled(
+            truncate(
+                role,
+                (width as usize).saturating_sub(theme.display_name.len() + 10),
+            ),
+            muted,
+        ));
     }
     spans.push(Span::raw("  "));
     spans.push(dot);
@@ -91,7 +103,11 @@ fn glyph_only(glyph: Vec<Line<'static>>) -> Vec<Line<'static>> {
     glyph
 }
 
-fn bordered(theme: &FamiliarTheme, glyph: Vec<Line<'static>>, include_role: bool) -> Vec<Line<'static>> {
+fn bordered(
+    theme: &FamiliarTheme,
+    glyph: Vec<Line<'static>>,
+    include_role: bool,
+) -> Vec<Line<'static>> {
     let primary = theme.palette.primary;
     let inner_w = 22u16; // 11-wide glyph + 2 pad + ~9 right margin
 
@@ -129,8 +145,18 @@ fn title_line(theme: &FamiliarTheme, primary: Color, inner_w: u16) -> Line<'stat
     let used = 2 + 1 + 1 + theme.display_name.chars().count() + 1;
     let fill = (inner_w as usize).saturating_sub(used) + 1; // +1 to land on the corner
     let fill_str = "\u{2500}".repeat(fill);
-    let suffix = Span::styled(format!("{}\u{256e}", fill_str), Style::default().fg(primary));
-    Line::from(vec![title_prefix, dot, Span::raw(" "), name, title_gap, suffix])
+    let suffix = Span::styled(
+        format!("{}\u{256e}", fill_str),
+        Style::default().fg(primary),
+    );
+    Line::from(vec![
+        title_prefix,
+        dot,
+        Span::raw(" "),
+        name,
+        title_gap,
+        suffix,
+    ])
 }
 
 fn bottom_border(primary: Color, inner_w: u16) -> Line<'static> {
@@ -143,14 +169,20 @@ fn bottom_border(primary: Color, inner_w: u16) -> Line<'static> {
 
 fn wrap_line(content: Line<'static>, primary: Color, inner_w: u16) -> Line<'static> {
     let mut spans = Vec::with_capacity(content.spans.len() + 3);
-    spans.push(Span::styled("\u{2502}".to_string(), Style::default().fg(primary)));
+    spans.push(Span::styled(
+        "\u{2502}".to_string(),
+        Style::default().fg(primary),
+    ));
     let visible = visible_width(&content);
     let pad_left = 1usize;
     let pad_right = (inner_w as usize).saturating_sub(visible + pad_left);
     spans.push(Span::raw(" ".repeat(pad_left)));
     spans.extend(content.spans);
     spans.push(Span::raw(" ".repeat(pad_right)));
-    spans.push(Span::styled("\u{2502}".to_string(), Style::default().fg(primary)));
+    spans.push(Span::styled(
+        "\u{2502}".to_string(),
+        Style::default().fg(primary),
+    ));
     Line::from(spans)
 }
 
@@ -164,10 +196,7 @@ fn blank_line(primary: Color, inner_w: u16) -> Line<'static> {
 
 fn role_line(role: &str, theme: &FamiliarTheme, primary: Color, inner_w: u16) -> Line<'static> {
     let role_trimmed = truncate(role, (inner_w as usize).saturating_sub(2));
-    let text = Span::styled(
-        role_trimmed,
-        Style::default().fg(theme.palette.accent),
-    );
+    let text = Span::styled(role_trimmed, Style::default().fg(theme.palette.accent));
     let used = visible_str_width(&text.content);
     let pad_right = (inner_w as usize).saturating_sub(used + 2);
     Line::from(vec![
@@ -180,7 +209,7 @@ fn role_line(role: &str, theme: &FamiliarTheme, primary: Color, inner_w: u16) ->
 }
 
 fn rule_line(primary: Color, inner_w: u16) -> Line<'static> {
-    let inner = format!("  \u{2500}\u{2500}\u{2500}");
+    let inner = "  \u{2500}\u{2500}\u{2500}".to_string();
     let used = 5usize;
     let pad_right = (inner_w as usize).saturating_sub(used);
     Line::from(vec![
@@ -232,10 +261,19 @@ fn sigil_crystal(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
     let accent = Style::default().fg(p.accent);
     vec![
-        Line::from(Span::styled("    \u{2581}\u{2580}\u{2581}    ".to_string(), frame)),
+        Line::from(Span::styled(
+            "    \u{2581}\u{2580}\u{2581}    ".to_string(),
+            frame,
+        )),
         emoji_row(p, emoji, "  \u{25e2}", "\u{25e3}  "),
-        Line::from(Span::styled("    \u{2580}\u{2581}\u{2580}    ".to_string(), frame)),
-        Line::from(Span::styled("     \u{2022} \u{2022}    ".to_string(), accent)),
+        Line::from(Span::styled(
+            "    \u{2580}\u{2581}\u{2580}    ".to_string(),
+            frame,
+        )),
+        Line::from(Span::styled(
+            "     \u{2022} \u{2022}    ".to_string(),
+            accent,
+        )),
     ]
 }
 
@@ -243,10 +281,19 @@ fn sigil_hex(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
     let accent = Style::default().fg(p.accent);
     vec![
-        Line::from(Span::styled("   \u{256d}\u{2500}\u{2500}\u{2500}\u{256e}   ".to_string(), frame)),
+        Line::from(Span::styled(
+            "   \u{256d}\u{2500}\u{2500}\u{2500}\u{256e}   ".to_string(),
+            frame,
+        )),
         emoji_row(p, emoji, "   \u{2502}", "\u{2502}    "),
-        Line::from(Span::styled("   \u{2570}\u{2500}\u{2500}\u{2500}\u{256f}   ".to_string(), frame)),
-        Line::from(Span::styled("     \u{2024}\u{2024}\u{2024}    ".to_string(), accent)),
+        Line::from(Span::styled(
+            "   \u{2570}\u{2500}\u{2500}\u{2500}\u{256f}   ".to_string(),
+            frame,
+        )),
+        Line::from(Span::styled(
+            "     \u{2024}\u{2024}\u{2024}    ".to_string(),
+            accent,
+        )),
     ]
 }
 
@@ -254,10 +301,19 @@ fn sigil_rune(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
     let accent = Style::default().fg(p.accent);
     vec![
-        Line::from(Span::styled("    \u{258e}   \u{258e}   ".to_string(), frame)),
+        Line::from(Span::styled(
+            "    \u{258e}   \u{258e}   ".to_string(),
+            frame,
+        )),
         emoji_row(p, emoji, "    \u{258e}", "\u{258e}    "),
-        Line::from(Span::styled("    \u{2594}\u{2594}\u{2594}\u{2594}\u{2594}   ".to_string(), frame)),
-        Line::from(Span::styled("     \u{2500} \u{2500}    ".to_string(), accent)),
+        Line::from(Span::styled(
+            "    \u{2594}\u{2594}\u{2594}\u{2594}\u{2594}   ".to_string(),
+            frame,
+        )),
+        Line::from(Span::styled(
+            "     \u{2500} \u{2500}    ".to_string(),
+            accent,
+        )),
     ]
 }
 
@@ -265,10 +321,19 @@ fn sigil_seal(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
     let accent = Style::default().fg(p.accent);
     vec![
-        Line::from(Span::styled("    \u{2726} \u{2726}    ".to_string(), accent)),
+        Line::from(Span::styled(
+            "    \u{2726} \u{2726}    ".to_string(),
+            accent,
+        )),
         emoji_row(p, emoji, "   \u{2727}", "\u{2727}    "),
-        Line::from(Span::styled("    \u{2726} \u{2726}    ".to_string(), accent)),
-        Line::from(Span::styled("    \u{2500}\u{2500}\u{2500}\u{2500}    ".to_string(), frame)),
+        Line::from(Span::styled(
+            "    \u{2726} \u{2726}    ".to_string(),
+            accent,
+        )),
+        Line::from(Span::styled(
+            "    \u{2500}\u{2500}\u{2500}\u{2500}    ".to_string(),
+            frame,
+        )),
     ]
 }
 
@@ -292,7 +357,10 @@ fn emoji_row(p: &FamiliarPalette, emoji: &str, left: &str, right: &str) -> Line<
 // ── Width helpers ────────────────────────────────────────────────────────────
 
 fn visible_width(line: &Line<'_>) -> usize {
-    line.spans.iter().map(|s| visible_str_width(&s.content)).sum()
+    line.spans
+        .iter()
+        .map(|s| visible_str_width(&s.content))
+        .sum()
 }
 
 /// Approximate display width treating most chars as 1 cell and emoji /
@@ -303,7 +371,7 @@ fn visible_str_width(s: &str) -> usize {
     s.chars()
         .map(|c| {
             let cp = c as u32;
-            if cp >= 0x1F300 && cp <= 0x1FAFF {
+            if (0x1F300..=0x1FAFF).contains(&cp) {
                 2
             } else if (0x2600..=0x27BF).contains(&cp) {
                 // Misc symbols / dingbats, usually 1 cell but emoji-style

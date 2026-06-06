@@ -28,20 +28,20 @@ This document is the complete reference for every tool available to the Coven Co
 
 ## Tool System Overview
 
-Every tool in Coven Code implements a common `Tool` interface. This interface defines:
+Every tool in Coven Code implements the Rust `Tool` trait in `src-rust/crates/tools/src/lib.rs`. This trait defines:
 
-- **Identity** — name, aliases, MCP info
-- **Input schema** — a Zod schema validating the input the model must provide
-- **Capability flags** — `isReadOnly`, `isDestructive`, `isConcurrencySafe`
-- **Permission check** — `checkPermissions()` called before execution
-- **Execution** — `call()` performs the actual operation
-- **UI rendering** — React/Ink components for TUI display
+- **Identity** — the tool name the model uses to call it
+- **Description** — instructions shown to the model
+- **Input schema** — a JSON Schema object validating the input the model must provide
+- **Permission level** — `None`, `ReadOnly`, `Write`, `Execute`, `Dangerous`, or `Forbidden`
+- **Execution** — `execute()` performs the operation after permission resolution
+- **Tool definition** — `to_definition()` serializes the name, description, and schema for providers
 
-Tools are loaded eagerly at session start. The model receives tool descriptions and schemas and selects tools to call. Each tool call goes through permission resolution before `call()` is invoked.
+Built-in tools are constructed once per session by `all_tools()`. Cheap lookup paths use a static built-in tool-name catalog so status/help flows do not instantiate every tool just to list names. MCP tools are added after MCP servers connect and are wrapped as native `Tool` instances.
 
 ### Tool Concurrency
 
-Tools marked `isConcurrencySafe` may run in parallel with other tool calls. Most write tools are not concurrency-safe. Read-only tools are generally safe to parallelize.
+The query loop may run compatible tool calls in parallel. Write and execute tools still pass through permission checks, while read-only tools are generally safe to parallelize.
 
 ---
 

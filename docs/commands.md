@@ -1,6 +1,6 @@
 # Coven Code Slash Commands Reference
 
-This document is the complete reference for every slash command available in Coven Code, the Rust reimplementation of Claude Code CLI. Commands are invoked by typing `/command-name` at the REPL prompt.
+This document is the reference for the visible slash commands available in Coven Code. Commands are invoked by typing `/command-name` at the REPL prompt.
 
 ---
 
@@ -27,20 +27,11 @@ This document is the complete reference for every slash command available in Cov
 
 ## Command System Overview
 
-Commands are registered in a priority-ordered registry. When you type a command name, Coven Code resolves it through this chain:
+Commands are resolved in a priority-ordered registry. When you type a command name, Coven Code checks:
 
 ```
-bundledSkills -> builtinPluginSkills -> skillDirCommands ->
-workflowCommands -> pluginCommands -> pluginSkills -> COMMANDS()
+built-in commands -> user command templates -> discovered skills -> plugin commands
 ```
-
-### Command Types
-
-| Type | Behavior |
-|------|----------|
-| `local` | Runs synchronously; returns text output directly |
-| `local-jsx` | Renders an interactive TUI component (model picker, theme selector, etc.) |
-| `prompt` | Expands to a prompt sent to the model via the main inference loop |
 
 Commands support aliases — for example `/h`, `/?`, and `/help` all invoke the same handler.
 
@@ -50,7 +41,7 @@ Commands support aliases — for example `/h`, `/?`, and `/help` all invoke the 
 /command-name [arguments]
 ```
 
-Arguments are passed as a single string after the command name. Most commands that accept arguments are documented with an `argumentHint` shown in the command palette.
+Arguments are passed as a single string after the command name.
 
 ---
 
@@ -59,7 +50,7 @@ Arguments are passed as a single string after the command name. Most commands th
 ### /help
 **Aliases:** `h`, `?`
 
-Display all available commands with their descriptions. Respects `isHidden` flags — internal or rarely-needed commands are suppressed unless you are an Anthropic employee.
+Display all available commands with their descriptions. Hidden and setup-only commands are suppressed from the default listing.
 
 ```
 /help
@@ -342,15 +333,21 @@ Open Coven Code privacy settings. Launches a browser to the Anthropic privacy po
 
 ### /mcp
 
-Configure and manage Model Context Protocol (MCP) servers. MCP servers expose additional tools and resources to the agent.
+Inspect Model Context Protocol (MCP) servers and reconnect configured servers. MCP servers expose additional tools and resources to the agent.
 
 ```
 /mcp
 /mcp list
-/mcp add <name> <command>
-/mcp remove <name>
-/mcp restart <name>
+/mcp status
+/mcp auth <name>
+/mcp connect <name>
+/mcp logs <name>
+/mcp resources [name]
+/mcp prompts [name]
+/mcp get-prompt <name> <prompt> [key=value ...]
 ```
+
+Add or remove MCP servers by editing `~/.coven-code/settings.json`.
 
 ---
 
@@ -783,18 +780,21 @@ List and manage skills. Skills are bundled prompt-commands that extend Coven Cod
 ---
 
 ### /plugin
-**Aliases:** `plugins`, `marketplace`
+**Aliases:** `plugins`
 
-Manage plugins. Plugins are loadable modules that can register new commands, tools, and hooks. Browse the marketplace or install from a local path.
+Manage plugins. Plugins are loadable modules that can register new commands, tools, hooks, agents, skills, and MCP server definitions.
 
 ```
 /plugin
 /plugin list
-/plugin install <name>
+/plugin info <name>
+/plugin enable <name>
+/plugin disable <name>
 /plugin install <path>
-/plugin remove <name>
 /plugin reload
 ```
+
+`/plugin reload` refreshes the active session plugin registry, hook registry, plugin commands, agents, skills, and in-memory MCP server definitions. New plugin MCP servers are included in the initial MCP connection at startup; if a reload adds a new MCP server after startup, start a new session before expecting its tools in the model tool list.
 
 ---
 
@@ -1182,12 +1182,6 @@ Over the Remote Control bridge (used by IDE integrations), only `local`-type com
 
 `compact`, `clear`, `cost`, `files`
 
-### Internal-Only Commands
-
-The following commands are only available when the `USER_TYPE` environment variable is set to `ant` (Anthropic internal builds):
-
-`commit-push-pr`, `ctx_viz`, `good-claude`, `issue`, `init-verifiers`, `mock-limits`, `bridge-kick`, `ultraplan`, `summary`, `teleport`, `ant-trace`, `perf-issue`, `env`, `oauth-refresh`, `debug-tool-call`, `autofix-pr`, `bughunter`, `backfill-sessions`, `break-cache`
-
 ### Availability-Restricted Commands
 
 Some commands are available only under certain account or platform conditions:
@@ -1195,9 +1189,8 @@ Some commands are available only under certain account or platform conditions:
 | Command | Restriction |
 |---------|-------------|
 | `/fast` | Available when a fast-mode model is configured for the active provider |
-| `/privacy-settings` | Opens Anthropic privacy portal (useful for claude.ai accounts) |
+| `/install-slack-app` | Hidden; Slack setup is unavailable in this build |
+| `/privacy-settings` | Opens the provider privacy portal where supported |
 | `/sandbox-toggle` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
-
-### Feature-Flagged Commands
-
-Some commands check `isEnabled()` at runtime. For example, voice-related commands check for audio device availability; the desktop command checks for a display server.
+| `/voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
+| `/chrome` | Requires a running Chrome/Chromium instance launched with remote debugging enabled |

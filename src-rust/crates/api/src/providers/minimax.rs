@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use claurst_core::provider_id::{ModelId, ProviderId};
 use claurst_core::types::{ContentBlock, UsageInfo};
 use futures::Stream;
-use reqwest::{Client, header};
+use reqwest::{header, Client};
 use serde_json::Value;
 
 use crate::provider::{LlmProvider, ModelInfo};
@@ -33,7 +33,11 @@ impl MinimaxProvider {
         let api_base = std::env::var("MINIMAX_BASE_URL")
             .unwrap_or_else(|_| "https://api.minimax.io/anthropic".to_string());
         let mut headers = header::HeaderMap::new();
-        headers.insert("X-Api-Key", header::HeaderValue::from_str(&api_key).expect("unable to parse api key for http header"));
+        headers.insert(
+            "X-Api-Key",
+            header::HeaderValue::from_str(&api_key)
+                .expect("unable to parse api key for http header"),
+        );
         let http_client = Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(600))
@@ -50,10 +54,8 @@ impl MinimaxProvider {
 
     fn build_request(request: &ProviderRequest) -> CreateMessageRequest {
         let normalized_messages = normalize_anthropic_messages(&request.messages);
-        let api_messages: Vec<ApiMessage> = normalized_messages
-            .iter()
-            .map(ApiMessage::from)
-            .collect();
+        let api_messages: Vec<ApiMessage> =
+            normalized_messages.iter().map(ApiMessage::from).collect();
 
         let api_tools: Option<Vec<ApiToolDefinition>> = if request.tools.is_empty() {
             None
@@ -109,7 +111,11 @@ impl MinimaxProvider {
                 let id = value.get("message")?.get("id")?.as_str()?.to_string();
                 let model = value.get("message")?.get("model")?.as_str()?.to_string();
                 let usage = UsageInfo {
-                    input_tokens: value.get("message")?.get("usage")?.get("input_tokens")?.as_u64()?,
+                    input_tokens: value
+                        .get("message")?
+                        .get("usage")?
+                        .get("input_tokens")?
+                        .as_u64()?,
                     output_tokens: 0,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
@@ -126,7 +132,11 @@ impl MinimaxProvider {
                     },
                     "tool_use" => {
                         let id = value.get("content_block")?.get("id")?.as_str()?.to_string();
-                        let name = value.get("content_block")?.get("name")?.as_str()?.to_string();
+                        let name = value
+                            .get("content_block")?
+                            .get("name")?
+                            .as_str()?
+                            .to_string();
                         ContentBlock::ToolUse {
                             id,
                             name,
@@ -136,7 +146,10 @@ impl MinimaxProvider {
                     _ => return None,
                 };
 
-                Some(StreamEvent::ContentBlockStart { index, content_block })
+                Some(StreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                })
             }
             "content_block_delta" => {
                 let index = value.get("index")?.as_u64()? as usize;
@@ -156,8 +169,15 @@ impl MinimaxProvider {
                         Some(StreamEvent::SignatureDelta { index, signature })
                     }
                     "input_json_delta" => {
-                        let partial_json = value.get("delta")?.get("partial_json")?.as_str()?.to_string();
-                        Some(StreamEvent::InputJsonDelta { index, partial_json })
+                        let partial_json = value
+                            .get("delta")?
+                            .get("partial_json")?
+                            .as_str()?
+                            .to_string();
+                        Some(StreamEvent::InputJsonDelta {
+                            index,
+                            partial_json,
+                        })
                     }
                     _ => None,
                 }
@@ -167,31 +187,37 @@ impl MinimaxProvider {
                 Some(StreamEvent::ContentBlockStop { index })
             }
             "message_delta" => {
-                let stop_reason = value.get("delta")?
+                let stop_reason = value
+                    .get("delta")?
                     .get("stop_reason")?
                     .as_str()
                     .map(Self::map_stop_reason);
 
-                let usage = value.get("delta")?.get("usage")
-                    .and_then(|u| {
-                        Some(UsageInfo {
-                            input_tokens: u.get("input_tokens")?.as_u64()?,
-                            output_tokens: u.get("output_tokens")?.as_u64()?,
-                            cache_creation_input_tokens: u.get("cache_creation_input_tokens")?.as_u64().unwrap_or(0),
-                            cache_read_input_tokens: u.get("cache_read_input_tokens")?.as_u64().unwrap_or(0),
-                        })
-                    });
+                let usage = value.get("delta")?.get("usage").and_then(|u| {
+                    Some(UsageInfo {
+                        input_tokens: u.get("input_tokens")?.as_u64()?,
+                        output_tokens: u.get("output_tokens")?.as_u64()?,
+                        cache_creation_input_tokens: u
+                            .get("cache_creation_input_tokens")?
+                            .as_u64()
+                            .unwrap_or(0),
+                        cache_read_input_tokens: u
+                            .get("cache_read_input_tokens")?
+                            .as_u64()
+                            .unwrap_or(0),
+                    })
+                });
 
-                Some(StreamEvent::MessageDelta {
-                    stop_reason,
-                    usage,
-                })
+                Some(StreamEvent::MessageDelta { stop_reason, usage })
             }
             "message_stop" => Some(StreamEvent::MessageStop),
             "error" => {
                 let error_type = value.get("error")?.get("type")?.as_str()?.to_string();
                 let message = value.get("error")?.get("message")?.as_str()?.to_string();
-                Some(StreamEvent::Error { error_type, message })
+                Some(StreamEvent::Error {
+                    error_type,
+                    message,
+                })
             }
             "ping" => None,
             _ => None,
@@ -293,7 +319,10 @@ impl LlmProvider for MinimaxProvider {
                         }
                     }
                     StreamEvent::MessageStop => break,
-                    StreamEvent::Error { error_type, message } => {
+                    StreamEvent::Error {
+                        error_type,
+                        message,
+                    } => {
                         return Err(ProviderError::StreamError {
                             provider: self.id.clone(),
                             message: format!("[{}] {}", error_type, message),
@@ -331,13 +360,12 @@ impl LlmProvider for MinimaxProvider {
     {
         let api_request = Self::build_request(&request);
 
-        let body = serde_json::to_value(&api_request)
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("Failed to serialize request: {}", e),
-                status: None,
-                body: None,
-            })?;
+        let body = serde_json::to_value(&api_request).map_err(|e| ProviderError::Other {
+            provider: self.id.clone(),
+            message: format!("Failed to serialize request: {}", e),
+            status: None,
+            body: None,
+        })?;
 
         let url = format!("{}/v1/messages", self.api_base);
         let api_key = self.api_key.clone();
@@ -442,15 +470,13 @@ impl LlmProvider for MinimaxProvider {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let minimax_id = ProviderId::new(ProviderId::MINIMAX);
-        Ok(vec![
-            ModelInfo {
-                id: ModelId::new("MiniMax-M2.7"),
-                provider_id: minimax_id.clone(),
-                name: "MiniMax-M2.7".to_string(),
-                context_window: 128_000,
-                max_output_tokens: 8192,
-            },
-        ])
+        Ok(vec![ModelInfo {
+            id: ModelId::new("MiniMax-M2.7"),
+            provider_id: minimax_id.clone(),
+            name: "MiniMax-M2.7".to_string(),
+            context_window: 128_000,
+            max_output_tokens: 8192,
+        }])
     }
 
     async fn health_check(&self) -> Result<ProviderStatus, ProviderError> {

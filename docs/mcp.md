@@ -14,6 +14,8 @@ MCP defines three primitives a server can offer:
 
 Coven Code discovers tools, resources, and prompts from connected MCP servers during the handshake phase and wraps them as native `Tool` instances (via `McpToolWrapper`), making them transparent to the query loop.
 
+Plugin-provided MCP server definitions are merged into the in-memory config before the initial MCP connection. That means plugin MCP tools are available on first startup instead of requiring a reconnect after plugins load.
+
 ---
 
 ## Transports
@@ -136,9 +138,12 @@ Use `/mcp` inside an interactive session to inspect and manage MCP servers at ru
 ```
 /mcp                     — show status of all configured servers
 /mcp status              — same as above
-/mcp connect <name>      — connect to a server by name
-/mcp disconnect <name>   — disconnect a server
-/mcp restart <name>      — disconnect then reconnect a server
+/mcp auth <name>         — show OAuth auth instructions for a server
+/mcp connect <name>      — retry a disconnected configured server
+/mcp logs <name>         — show recent error/log information
+/mcp resources [name]    — list resources from connected servers
+/mcp prompts [name]      — list prompt templates from connected servers
+/mcp get-prompt <name> <prompt> [key=value ...] — expand a prompt template
 ```
 
 The status display shows the connection state and discovered tool count for each server:
@@ -184,6 +189,8 @@ Use `ListMcpResources` to discover available URIs before calling `ReadMcpResourc
 
 In addition to these, every tool that an MCP server exposes is automatically available to the model under its declared name (wrapped transparently by `McpToolWrapper`).
 
+MCP tool wrappers are built from the servers connected during session startup. `/reload-plugins` refreshes plugin MCP definitions in memory, but newly added plugin MCP servers need a new session before their tools are exposed to the model tool list.
+
 ---
 
 ## Reconnection with Exponential Backoff
@@ -194,7 +201,7 @@ When an MCP server disconnects or fails to connect, Coven Code starts a backgrou
 - Backoff factor: **2x** after each failed attempt
 - Maximum delay: **60 seconds**
 
-The loop exits as soon as the server connects successfully. A new loop can be started again if the server disconnects again later. The `/mcp restart <name>` command cancels any running loop and starts a fresh connection attempt immediately.
+The loop exits as soon as the server connects successfully. If a configured server is disconnected, `/mcp connect <name>` attempts a reconnect. Add or remove servers by editing `~/.coven-code/settings.json` and starting a new session.
 
 Server statuses during reconnection:
 

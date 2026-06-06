@@ -93,8 +93,8 @@ impl FamiliarTheme {
     /// Color the access-tier dot uses on the card.
     pub fn access_color(&self) -> Color {
         match self.access.as_str() {
-            "full" => Color::Rgb(34, 197, 94),       // emerald-500
-            "read-only" => Color::Rgb(245, 158, 11), // amber-500
+            "full" => Color::Rgb(34, 197, 94),          // emerald-500
+            "read-only" => Color::Rgb(245, 158, 11),    // amber-500
             "search-only" => Color::Rgb(148, 163, 184), // slate-400
             _ => Color::Rgb(148, 163, 184),
         }
@@ -106,26 +106,68 @@ impl FamiliarTheme {
 /// Palettes for the seven hand-crafted built-ins. Each one breaks the old
 /// uniform violet so familiars are visually distinct at a glance.
 const BUILTIN_PALETTES: &[(&str, FamiliarPalette, Archetype, &str, &str)] = &[
-    ("kitty",  FamiliarPalette::from_rgb((139,  92, 246), (167, 139, 250)), Archetype::Cat,             "Kitty",  "\u{1f431}"),
-    ("nova",   FamiliarPalette::from_rgb((245, 197,  24), (253, 230, 138)), Archetype::SorceressCrown,  "Nova",   "\u{1f451}"),
-    ("cody",   FamiliarPalette::from_rgb(( 34, 211, 238), (165, 243, 252)), Archetype::Robot,           "Cody",   "\u{1f4bb}"),
-    ("charm",  FamiliarPalette::from_rgb((236,  72, 153), (251, 207, 232)), Archetype::Heart,           "Charm",  "\u{2728}"),
-    ("sage",   FamiliarPalette::from_rgb(( 16, 185, 129), (167, 243, 208)), Archetype::WizardBook,      "Sage",   "\u{1f33f}"),
-    ("astra",  FamiliarPalette::from_rgb(( 99, 102, 241), (199, 210, 254)), Archetype::Moon,            "Astra",  "\u{1f319}"),
-    ("echo",   FamiliarPalette::from_rgb(( 20, 184, 166), (153, 246, 228)), Archetype::Ghost,           "Echo",   "\u{1f47b}"),
+    (
+        "kitty",
+        FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250)),
+        Archetype::Cat,
+        "Kitty",
+        "\u{1f431}",
+    ),
+    (
+        "nova",
+        FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138)),
+        Archetype::SorceressCrown,
+        "Nova",
+        "\u{1f451}",
+    ),
+    (
+        "cody",
+        FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252)),
+        Archetype::Robot,
+        "Cody",
+        "\u{1f4bb}",
+    ),
+    (
+        "charm",
+        FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232)),
+        Archetype::Heart,
+        "Charm",
+        "\u{2728}",
+    ),
+    (
+        "sage",
+        FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208)),
+        Archetype::WizardBook,
+        "Sage",
+        "\u{1f33f}",
+    ),
+    (
+        "astra",
+        FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254)),
+        Archetype::Moon,
+        "Astra",
+        "\u{1f319}",
+    ),
+    (
+        "echo",
+        FamiliarPalette::from_rgb((20, 184, 166), (153, 246, 228)),
+        Archetype::Ghost,
+        "Echo",
+        "\u{1f47b}",
+    ),
 ];
 
 /// Eight-color palette table used to pick a deterministic accent for any
 /// user-defined familiar by hashing its id.
 const PROCEDURAL_PALETTES: &[FamiliarPalette] = &[
-    FamiliarPalette::from_rgb((139,  92, 246), (167, 139, 250)), // violet
-    FamiliarPalette::from_rgb((245, 197,  24), (253, 230, 138)), // gold
-    FamiliarPalette::from_rgb(( 34, 211, 238), (165, 243, 252)), // cyan
-    FamiliarPalette::from_rgb((236,  72, 153), (251, 207, 232)), // pink
-    FamiliarPalette::from_rgb(( 16, 185, 129), (167, 243, 208)), // emerald
-    FamiliarPalette::from_rgb(( 99, 102, 241), (199, 210, 254)), // indigo
+    FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250)), // violet
+    FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138)), // gold
+    FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252)), // cyan
+    FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232)), // pink
+    FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208)), // emerald
+    FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254)), // indigo
     FamiliarPalette::from_rgb((251, 113, 133), (254, 205, 211)), // rose
-    FamiliarPalette::from_rgb((250, 204,  21), (253, 224,  71)), // amber
+    FamiliarPalette::from_rgb((250, 204, 21), (253, 224, 71)),  // amber
 ];
 
 const PROCEDURAL_ARCHETYPES: &[Archetype] = &[
@@ -245,7 +287,10 @@ mod tests {
         let b = resolve("qa", &f);
         // Same id must hash to same palette + archetype.
         assert_eq!(format!("{:?}", a.archetype), format!("{:?}", b.archetype));
-        assert_eq!(format!("{:?}", a.palette.primary), format!("{:?}", b.palette.primary));
+        assert_eq!(
+            format!("{:?}", a.palette.primary),
+            format!("{:?}", b.palette.primary)
+        );
     }
 
     #[test]

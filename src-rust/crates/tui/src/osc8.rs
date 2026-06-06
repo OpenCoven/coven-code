@@ -269,7 +269,8 @@ mod tests {
 
     #[test]
     fn handles_share_url_with_hash_fragment() {
-        let url = "https://opencoven.github.io/coven-code/session/#c2cc4dd0ae0d3fa6dc7ab21f2a79d7a1";
+        let url =
+            "https://opencoven.github.io/coven-code/session/#c2cc4dd0ae0d3fa6dc7ab21f2a79d7a1";
         let line = format!("Share URL: {url}");
         let buf = buffer_with(&[&line]);
         let hits = scan_buffer_for_urls(&buf);
@@ -288,8 +289,14 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         write_hits(&mut out, &hits).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("\x1b]8;;https://example.com\x1b\\"), "missing OSC 8 open in: {s:?}");
-        assert!(s.contains("\x1b]8;;\x1b\\"), "missing OSC 8 close in: {s:?}");
+        assert!(
+            s.contains("\x1b]8;;https://example.com\x1b\\"),
+            "missing OSC 8 open in: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b]8;;\x1b\\"),
+            "missing OSC 8 close in: {s:?}"
+        );
         assert!(s.contains("https://example.com"));
     }
 

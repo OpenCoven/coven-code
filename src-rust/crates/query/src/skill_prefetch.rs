@@ -85,7 +85,7 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "md") {
+                if path.extension().is_some_and(|e| e == "md") {
                     if let Some(skill) = load_skill_from_file(&path) {
                         local.insert(skill);
                     }
@@ -104,7 +104,7 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
         if let Ok(entries) = std::fs::read_dir(&bundled) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "md") {
+                if path.extension().is_some_and(|e| e == "md") {
                     if let Some(mut skill) = load_skill_from_file(&path) {
                         skill.source = "bundled".to_string();
                         local.insert(skill);
@@ -136,9 +136,9 @@ fn load_skill_from_file(path: &std::path::Path) -> Option<SkillDefinition> {
     let stem = path.file_stem()?.to_string_lossy().to_string();
 
     // Try to parse front-matter
-    if content.starts_with("---") {
-        let end = content[3..].find("\n---")? + 3;
-        let front = &content[3..end];
+    if let Some(stripped) = content.strip_prefix("---") {
+        let end = stripped.find("\n---")?;
+        let front = &stripped[..end];
         let name = extract_yaml_str(front, "name").unwrap_or_else(|| stem.clone());
         let description = extract_yaml_str(front, "description").unwrap_or_default();
         let tags = extract_yaml_list(front, "tags");
@@ -198,7 +198,10 @@ pub fn format_skill_listing(index: &SkillIndex) -> String {
         } else {
             format!(" [{}]", skill.tags.join(", "))
         };
-        out.push_str(&format!("  /{} — {}{}\n", skill.name, skill.description, tags));
+        out.push_str(&format!(
+            "  /{} — {}{}\n",
+            skill.name, skill.description, tags
+        ));
     }
     out
 }

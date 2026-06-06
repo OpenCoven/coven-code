@@ -15,83 +15,86 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // Sub-modules – each contains a full tool implementation.
+pub mod apply_patch;
 pub mod ask_user;
 pub mod bash;
-pub mod pty_bash;
+pub mod batch_edit;
 pub mod brief;
+pub mod bundled_skills;
+pub mod computer_use;
 pub mod config_tool;
 pub mod cron;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
-pub mod apply_patch;
-pub mod batch_edit;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
+pub mod formatter;
 pub mod glob_tool;
+pub mod goal_complete;
 pub mod grep_tool;
 pub mod lsp_tool;
+pub mod mcp_auth_tool;
 pub mod mcp_resources;
-pub mod todo_write;
+pub mod monitor_tool;
 pub mod notebook_edit;
 pub mod powershell;
+pub mod pty_bash;
+pub mod remote_trigger;
+pub mod repl_tool;
 pub mod send_message;
-pub mod bundled_skills;
 pub mod skill_tool;
 pub mod sleep;
+pub mod synthetic_output;
 pub mod tasks;
+pub mod team_tool;
+pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
-pub mod computer_use;
-pub mod mcp_auth_tool;
-pub mod repl_tool;
-pub mod synthetic_output;
-pub mod team_tool;
-pub mod remote_trigger;
-pub mod formatter;
-pub mod monitor_tool;
-pub mod goal_complete;
 
 // Re-exports for convenience.
-pub use formatter::try_format_file;
+pub use apply_patch::ApplyPatchTool;
 pub use ask_user::AskUserQuestionTool;
 pub use bash::BashTool;
-pub use pty_bash::PtyBashTool;
+pub use batch_edit::BatchEditTool;
 pub use brief::BriefTool;
+pub use computer_use::ComputerUseTool;
 pub use config_tool::ConfigTool;
 pub use cron::{CronCreateTool, CronDeleteTool, CronListTool};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
-pub use apply_patch::ApplyPatchTool;
-pub use batch_edit::BatchEditTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
+pub use formatter::try_format_file;
 pub use glob_tool::GlobTool;
+pub use goal_complete::GoalCompleteTool;
 pub use grep_tool::GrepTool;
 pub use lsp_tool::LspTool;
+pub use mcp_auth_tool::McpAuthTool;
 pub use mcp_resources::{ListMcpResourcesTool, ReadMcpResourceTool};
-pub use todo_write::TodoWriteTool;
+pub use monitor_tool::MonitorTool;
 pub use notebook_edit::NotebookEditTool;
 pub use powershell::PowerShellTool;
-pub use send_message::{SendMessageTool, drain_inbox, peek_inbox};
+pub use pty_bash::PtyBashTool;
+pub use remote_trigger::RemoteTriggerTool;
+pub use repl_tool::ReplTool;
+pub use send_message::{drain_inbox, peek_inbox, SendMessageTool};
 pub use skill_tool::SkillTool;
 pub use sleep::SleepTool;
-pub use tasks::{TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, Task, TaskStatus, TASK_STORE};
+pub use synthetic_output::SyntheticOutputTool;
+pub use tasks::{
+    Task, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStatus, TaskStopTool,
+    TaskUpdateTool, TASK_STORE,
+};
+pub use team_tool::{register_agent_runner, AgentRunFn, TeamCreateTool, TeamDeleteTool};
+pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
-pub use computer_use::ComputerUseTool;
-pub use mcp_auth_tool::McpAuthTool;
-pub use repl_tool::ReplTool;
-pub use synthetic_output::SyntheticOutputTool;
-pub use team_tool::{TeamCreateTool, TeamDeleteTool, register_agent_runner, AgentRunFn};
-pub use remote_trigger::RemoteTriggerTool;
-pub use monitor_tool::MonitorTool;
-pub use goal_complete::GoalCompleteTool;
 
 // ---------------------------------------------------------------------------
 // AskUser question channel
@@ -203,8 +206,9 @@ impl ShellState {
 /// Process-global registry of shell states keyed by session_id.
 /// This lets us persist cwd/env across Bash invocations without changing
 /// the `ToolContext` struct (which is constructed in places we cannot modify).
-static SHELL_STATE_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, Arc<parking_lot::Mutex<ShellState>>>> =
-    once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static SHELL_STATE_REGISTRY: once_cell::sync::Lazy<
+    dashmap::DashMap<String, Arc<parking_lot::Mutex<ShellState>>>,
+> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 /// Return the persistent `ShellState` for the given session, creating one if needed.
 pub fn session_shell_state(session_id: &str) -> Arc<parking_lot::Mutex<ShellState>> {
@@ -221,7 +225,9 @@ pub fn clear_session_shell_state(session_id: &str) {
 
 /// Return the `ShadowSnapshot` for `working_dir`, creating it on first call.
 /// Returns `None` when git is unavailable or the directory is not in a git repo.
-pub fn session_shadow(working_dir: &std::path::Path) -> Option<Arc<claurst_core::snapshot::ShadowSnapshot>> {
+pub fn session_shadow(
+    working_dir: &std::path::Path,
+) -> Option<Arc<claurst_core::snapshot::ShadowSnapshot>> {
     claurst_core::snapshot::get_or_create(working_dir)
 }
 
@@ -229,7 +235,6 @@ pub fn session_shadow(working_dir: &std::path::Path) -> Option<Arc<claurst_core:
 pub fn clear_session_shadow(working_dir: &std::path::Path) {
     claurst_core::snapshot::remove(working_dir);
 }
-
 
 /// Structured payload describing a background task's terminal state.
 /// Carried by [`CompletionNotifier`] so consumers can build their own UI
@@ -290,7 +295,8 @@ pub struct ToolContext {
     /// Queue used by interactive mode to surface permission dialogs to the TUI.
     pub pending_permissions: Option<Arc<parking_lot::Mutex<PendingPermissionStore>>>,
     /// Shared permission manager so the interactive loop can record session/persistent approvals.
-    pub permission_manager: Option<Arc<std::sync::Mutex<claurst_core::permissions::PermissionManager>>>,
+    pub permission_manager:
+        Option<Arc<std::sync::Mutex<claurst_core::permissions::PermissionManager>>>,
     /// Channel for the `AskUserQuestion` tool to send questions to the TUI and
     /// receive the user's typed answer.  `None` in headless / non-interactive mode.
     pub user_question_tx: Option<tokio::sync::mpsc::UnboundedSender<UserQuestionEvent>>,
@@ -341,13 +347,13 @@ impl ToolContext {
         let decision = self.permission_handler.request_permission(&request);
         match decision {
             PermissionDecision::Allow | PermissionDecision::AllowPermanently => Ok(()),
-            PermissionDecision::Ask { reason } if self.non_interactive => Err(
-                claurst_core::error::ClaudeError::PermissionDenied(format!(
+            PermissionDecision::Ask { reason } if self.non_interactive => {
+                Err(claurst_core::error::ClaudeError::PermissionDenied(format!(
                     "Permission denied for tool '{}': {}",
                     request.tool_name,
                     interactive_reason.unwrap_or(reason)
-                )),
-            ),
+                )))
+            }
             PermissionDecision::Ask { reason } => {
                 let Some(queue) = &self.pending_permissions else {
                     return Err(claurst_core::error::ClaudeError::PermissionDenied(format!(
@@ -390,7 +396,8 @@ impl ToolContext {
         description: &str,
         is_read_only: bool,
     ) -> Result<(), claurst_core::error::ClaudeError> {
-        let request = self.build_permission_request(tool_name, description, None, is_read_only, None);
+        let request =
+            self.build_permission_request(tool_name, description, None, is_read_only, None);
         self.request_permission_inner(request)
     }
 
@@ -401,7 +408,8 @@ impl ToolContext {
         path: PathBuf,
         is_read_only: bool,
     ) -> Result<(), claurst_core::error::ClaudeError> {
-        let request = self.build_permission_request(tool_name, description, None, is_read_only, Some(path));
+        let request =
+            self.build_permission_request(tool_name, description, None, is_read_only, Some(path));
         self.request_permission_inner(request)
     }
 
@@ -431,9 +439,9 @@ impl ToolContext {
 
     pub fn path_is_within_workspace(&self, path: &std::path::Path) -> bool {
         let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let mut roots = vec![
-            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone()),
-        ];
+        let mut roots =
+            vec![std::fs::canonicalize(&self.working_dir)
+                .unwrap_or_else(|_| self.working_dir.clone())];
         roots.extend(
             self.permission_allowed_roots()
                 .into_iter()
@@ -514,6 +522,60 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Built-in tool names in the same order as [`all_tools`].
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    claurst_core::constants::TOOL_NAME_BASH,
+    claurst_core::constants::TOOL_NAME_FILE_READ,
+    claurst_core::constants::TOOL_NAME_FILE_EDIT,
+    claurst_core::constants::TOOL_NAME_FILE_WRITE,
+    claurst_core::constants::TOOL_NAME_BATCH_EDIT,
+    claurst_core::constants::TOOL_NAME_APPLY_PATCH,
+    claurst_core::constants::TOOL_NAME_GLOB,
+    claurst_core::constants::TOOL_NAME_GREP,
+    claurst_core::constants::TOOL_NAME_WEB_FETCH,
+    claurst_core::constants::TOOL_NAME_WEB_SEARCH,
+    claurst_core::constants::TOOL_NAME_NOTEBOOK_EDIT,
+    claurst_core::constants::TOOL_NAME_TASK_CREATE,
+    claurst_core::constants::TOOL_NAME_TASK_GET,
+    claurst_core::constants::TOOL_NAME_TASK_UPDATE,
+    claurst_core::constants::TOOL_NAME_TASK_LIST,
+    claurst_core::constants::TOOL_NAME_TASK_STOP,
+    claurst_core::constants::TOOL_NAME_TASK_OUTPUT,
+    claurst_core::constants::TOOL_NAME_TODO_WRITE,
+    claurst_core::constants::TOOL_NAME_ASK_USER,
+    claurst_core::constants::TOOL_NAME_ENTER_PLAN_MODE,
+    claurst_core::constants::TOOL_NAME_EXIT_PLAN_MODE,
+    "PowerShell",
+    "Sleep",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "EnterWorktree",
+    "ExitWorktree",
+    "ListMcpResources",
+    "ReadMcpResource",
+    "ToolSearch",
+    "Brief",
+    "Config",
+    "SendMessage",
+    "Skill",
+    "LSP",
+    "REPL",
+    "TeamCreate",
+    "TeamDelete",
+    "StructuredOutput",
+    "mcp__auth",
+    "RemoteTrigger",
+    "monitor",
+    "GoalComplete",
+    #[cfg(feature = "computer-use")]
+    "ComputerUse",
+];
+
+pub fn all_tool_names() -> &'static [&'static str] {
+    BUILTIN_TOOL_NAMES
+}
+
 /// Return all built-in tools (excluding AgentTool, which lives in cc-query).
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
     vec![
@@ -569,7 +631,55 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
 
 /// Find a tool by name (case-sensitive).
 pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
-    all_tools().into_iter().find(|t| t.name() == name)
+    match name {
+        claurst_core::constants::TOOL_NAME_BASH => Some(Box::new(PtyBashTool)),
+        claurst_core::constants::TOOL_NAME_FILE_READ => Some(Box::new(FileReadTool)),
+        claurst_core::constants::TOOL_NAME_FILE_EDIT => Some(Box::new(FileEditTool)),
+        claurst_core::constants::TOOL_NAME_FILE_WRITE => Some(Box::new(FileWriteTool)),
+        claurst_core::constants::TOOL_NAME_BATCH_EDIT => Some(Box::new(BatchEditTool)),
+        claurst_core::constants::TOOL_NAME_APPLY_PATCH => Some(Box::new(ApplyPatchTool)),
+        claurst_core::constants::TOOL_NAME_GLOB => Some(Box::new(GlobTool)),
+        claurst_core::constants::TOOL_NAME_GREP => Some(Box::new(GrepTool)),
+        claurst_core::constants::TOOL_NAME_WEB_FETCH => Some(Box::new(WebFetchTool)),
+        claurst_core::constants::TOOL_NAME_WEB_SEARCH => Some(Box::new(WebSearchTool)),
+        claurst_core::constants::TOOL_NAME_NOTEBOOK_EDIT => Some(Box::new(NotebookEditTool)),
+        claurst_core::constants::TOOL_NAME_TASK_CREATE => Some(Box::new(TaskCreateTool)),
+        claurst_core::constants::TOOL_NAME_TASK_GET => Some(Box::new(TaskGetTool)),
+        claurst_core::constants::TOOL_NAME_TASK_UPDATE => Some(Box::new(TaskUpdateTool)),
+        claurst_core::constants::TOOL_NAME_TASK_LIST => Some(Box::new(TaskListTool)),
+        claurst_core::constants::TOOL_NAME_TASK_STOP => Some(Box::new(TaskStopTool)),
+        claurst_core::constants::TOOL_NAME_TASK_OUTPUT => Some(Box::new(TaskOutputTool)),
+        claurst_core::constants::TOOL_NAME_TODO_WRITE => Some(Box::new(TodoWriteTool)),
+        claurst_core::constants::TOOL_NAME_ASK_USER => Some(Box::new(AskUserQuestionTool)),
+        claurst_core::constants::TOOL_NAME_ENTER_PLAN_MODE => Some(Box::new(EnterPlanModeTool)),
+        claurst_core::constants::TOOL_NAME_EXIT_PLAN_MODE => Some(Box::new(ExitPlanModeTool)),
+        "PowerShell" => Some(Box::new(PowerShellTool)),
+        "Sleep" => Some(Box::new(SleepTool)),
+        "CronCreate" => Some(Box::new(CronCreateTool)),
+        "CronDelete" => Some(Box::new(CronDeleteTool)),
+        "CronList" => Some(Box::new(CronListTool)),
+        "EnterWorktree" => Some(Box::new(EnterWorktreeTool)),
+        "ExitWorktree" => Some(Box::new(ExitWorktreeTool)),
+        "ListMcpResources" => Some(Box::new(ListMcpResourcesTool)),
+        "ReadMcpResource" => Some(Box::new(ReadMcpResourceTool)),
+        "ToolSearch" => Some(Box::new(ToolSearchTool)),
+        "Brief" => Some(Box::new(BriefTool)),
+        "Config" => Some(Box::new(ConfigTool)),
+        "SendMessage" => Some(Box::new(SendMessageTool)),
+        "Skill" => Some(Box::new(SkillTool)),
+        "LSP" => Some(Box::new(LspTool)),
+        "REPL" => Some(Box::new(ReplTool)),
+        "TeamCreate" => Some(Box::new(TeamCreateTool)),
+        "TeamDelete" => Some(Box::new(TeamDeleteTool)),
+        "StructuredOutput" => Some(Box::new(SyntheticOutputTool)),
+        "mcp__auth" => Some(Box::new(McpAuthTool)),
+        "RemoteTrigger" => Some(Box::new(RemoteTriggerTool)),
+        "monitor" => Some(Box::new(MonitorTool)),
+        "GoalComplete" => Some(Box::new(GoalCompleteTool)),
+        #[cfg(feature = "computer-use")]
+        "ComputerUse" => Some(Box::new(ComputerUseTool)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +743,10 @@ mod tests {
     #[test]
     fn test_all_tools_non_empty() {
         let tools = all_tools();
-        assert!(!tools.is_empty(), "all_tools() must return at least one tool");
+        assert!(
+            !tools.is_empty(),
+            "all_tools() must return at least one tool"
+        );
     }
 
     #[test]
@@ -647,6 +760,13 @@ mod tests {
                 tool.name()
             );
         }
+    }
+
+    #[test]
+    fn test_all_tool_names_match_all_tools() {
+        let tools = all_tools();
+        let from_tools: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        assert_eq!(all_tool_names(), from_tools.as_slice());
     }
 
     #[test]
@@ -699,9 +819,16 @@ mod tests {
     #[test]
     fn test_core_tools_present() {
         let expected = [
-            "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-            "WebFetch", "WebSearch",
-            "TodoWrite", "Skill",
+            "Bash",
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Skill",
         ];
         for name in &expected {
             assert!(
@@ -781,7 +908,10 @@ mod tests {
             Some(PathBuf::from("Set-ExecutionPolicy RemoteSigned")),
         );
 
-        let error = ctx.request_permission_inner(request).unwrap_err().to_string();
+        let error = ctx
+            .request_permission_inner(request)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("[High risk] This may modify system-wide security policy."));
         assert!(!error.contains("generic reason"));
     }
@@ -799,7 +929,10 @@ mod tests {
             Some(PathBuf::from("ls -la")),
         );
 
-        let error = ctx.request_permission_inner(request).unwrap_err().to_string();
+        let error = ctx
+            .request_permission_inner(request)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("generic reason"));
     }
 

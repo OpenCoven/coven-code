@@ -1030,7 +1030,7 @@ async fn main() -> anyhow::Result<()> {
         query_config.thinking_budget = Some(tokens);
     }
     if let Some(ref level_str) = cli.effort {
-        if let Some(level) = claurst_core::effort::EffortLevel::from_str(level_str) {
+        if let Some(level) = claurst_core::effort::EffortLevel::parse(level_str) {
             query_config.effort_level = Some(level);
         } else {
             eprintln!("Warning: unknown effort level '{}' — expected low/medium/high/max", level_str);
@@ -2804,7 +2804,7 @@ async fn run_interactive(
                                 && !cmd_args.is_empty()
                             {
                                 if let Some(level) =
-                                    claurst_core::effort::EffortLevel::from_str(&cmd_args)
+                                    claurst_core::effort::EffortLevel::parse(&cmd_args)
                                 {
                                     current_effort = Some(level);
                                     app.effort_level = match level {

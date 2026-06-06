@@ -300,6 +300,17 @@ struct SettingsPreviewOutcome {
     skipped_count: usize,
 }
 
+#[derive(Default)]
+struct SettingsPreviewState {
+    preview_fields: Vec<PreviewField>,
+    imported_fields: Vec<String>,
+    skipped_fields: Vec<String>,
+    imported_count: usize,
+    replaced_count: usize,
+    kept_count: usize,
+    skipped_count: usize,
+}
+
 fn map_settings_preview(
     source: &Value,
     current: &Value,
@@ -309,16 +320,10 @@ fn map_settings_preview(
         .as_object()
         .ok_or_else(|| anyhow!("source settings.json must be a JSON object"))?;
 
-    let mut preview_fields = Vec::new();
-    let mut imported_fields = Vec::new();
-    let mut skipped_fields = Vec::new();
-    let mut imported_count = 0;
-    let mut replaced_count = 0;
-    let mut kept_count = 0;
-    let mut skipped_count = 0;
+    let mut state = SettingsPreviewState::default();
 
     if source_obj.contains_key("model") {
-        preview_fields.push(PreviewField {
+        state.preview_fields.push(PreviewField {
             name: "model".to_string(),
             action: PreviewAction::Skip,
             reason: Some(
@@ -326,10 +331,10 @@ fn map_settings_preview(
                     .to_string(),
             ),
         });
-        skipped_fields.push("model".to_string());
-        skipped_count += 1;
+        state.skipped_fields.push("model".to_string());
+        state.skipped_count += 1;
     } else {
-        preview_fields.push(PreviewField {
+        state.preview_fields.push(PreviewField {
             name: "model".to_string(),
             action: PreviewAction::Keep,
             reason: Some("source file does not provide this field".to_string()),
@@ -339,12 +344,7 @@ fn map_settings_preview(
     map_theme_field(
         source_obj.get("theme"),
         current.pointer("/config/theme"),
-        &mut preview_fields,
-        &mut imported_fields,
-        &mut imported_count,
-        &mut replaced_count,
-        &mut skipped_fields,
-        &mut skipped_count,
+        &mut state,
         target,
     );
 
@@ -355,10 +355,7 @@ fn map_settings_preview(
         output_style_value,
         current.pointer("/config/output_style"),
         "output_style",
-        &mut preview_fields,
-        &mut imported_fields,
-        &mut imported_count,
-        &mut replaced_count,
+        &mut state,
         || {
             if let Some(style) = output_style_value.and_then(Value::as_str) {
                 target.config.output_style = Some(style.to_string());
@@ -369,17 +366,17 @@ fn map_settings_preview(
     map_executable_config_field(
         source_obj.get("mcpServers"),
         "mcpServers",
-        &mut preview_fields,
-        &mut skipped_fields,
-        &mut skipped_count,
+        &mut state.preview_fields,
+        &mut state.skipped_fields,
+        &mut state.skipped_count,
     );
 
     map_executable_config_field(
         source_obj.get("hooks"),
         "hooks",
-        &mut preview_fields,
-        &mut skipped_fields,
-        &mut skipped_count,
+        &mut state.preview_fields,
+        &mut state.skipped_fields,
+        &mut state.skipped_count,
     );
 
     for key in [
@@ -396,35 +393,35 @@ fn map_settings_preview(
         "effortLevel",
     ] {
         if source_obj.contains_key(key) {
-            preview_fields.push(PreviewField {
+            state.preview_fields.push(PreviewField {
                 name: key.to_string(),
                 action: PreviewAction::Skip,
                 reason: Some(skip_reason_for_key(key).to_string()),
             });
-            skipped_fields.push(key.to_string());
-            skipped_count += 1;
+            state.skipped_fields.push(key.to_string());
+            state.skipped_count += 1;
         }
     }
 
-    for field in &mut preview_fields {
+    for field in &mut state.preview_fields {
         if field.action == PreviewAction::Skip {
             continue;
         }
         if let Some(reason) = &field.reason {
             if reason == "source file does not provide this field" {
-                kept_count += 1;
+                state.kept_count += 1;
             }
         }
     }
 
     Ok(SettingsPreviewOutcome {
-        preview_fields,
-        imported_fields,
-        skipped_fields,
-        imported_count,
-        replaced_count,
-        kept_count,
-        skipped_count,
+        preview_fields: state.preview_fields,
+        imported_fields: state.imported_fields,
+        skipped_fields: state.skipped_fields,
+        imported_count: state.imported_count,
+        replaced_count: state.replaced_count,
+        kept_count: state.kept_count,
+        skipped_count: state.skipped_count,
     })
 }
 
@@ -432,10 +429,7 @@ fn map_scalar_field<F>(
     source_value: Option<&Value>,
     current_value: Option<&Value>,
     name: &str,
-    preview_fields: &mut Vec<PreviewField>,
-    imported_fields: &mut Vec<String>,
-    imported_count: &mut usize,
-    replaced_count: &mut usize,
+    state: &mut SettingsPreviewState,
     apply: F,
 ) where
     F: FnOnce(),
@@ -447,20 +441,20 @@ fn map_scalar_field<F>(
                 Some(_) => PreviewAction::Replace,
                 None => PreviewAction::Import,
             };
-            preview_fields.push(PreviewField {
+            state.preview_fields.push(PreviewField {
                 name: name.to_string(),
                 action,
                 reason: None,
             });
-            imported_fields.push(name.to_string());
+            state.imported_fields.push(name.to_string());
             if action == PreviewAction::Replace {
-                *replaced_count += 1;
+                state.replaced_count += 1;
             } else {
-                *imported_count += 1;
+                state.imported_count += 1;
             }
             apply();
         }
-        None => preview_fields.push(PreviewField {
+        None => state.preview_fields.push(PreviewField {
             name: name.to_string(),
             action: PreviewAction::Keep,
             reason: Some("source file does not provide this field".to_string()),
@@ -471,12 +465,7 @@ fn map_scalar_field<F>(
 fn map_theme_field(
     source_value: Option<&Value>,
     current_value: Option<&Value>,
-    preview_fields: &mut Vec<PreviewField>,
-    imported_fields: &mut Vec<String>,
-    imported_count: &mut usize,
-    replaced_count: &mut usize,
-    skipped_fields: &mut Vec<String>,
-    skipped_count: &mut usize,
+    state: &mut SettingsPreviewState,
     target: &mut Settings,
 ) {
     match source_value.and_then(Value::as_str) {
@@ -497,29 +486,29 @@ fn map_theme_field(
                     Some(_) => PreviewAction::Replace,
                     None => PreviewAction::Import,
                 };
-                preview_fields.push(PreviewField {
+                state.preview_fields.push(PreviewField {
                     name: "theme".to_string(),
                     action,
                     reason: None,
                 });
                 target.config.theme = theme;
-                imported_fields.push("theme".to_string());
+                state.imported_fields.push("theme".to_string());
                 if action == PreviewAction::Replace {
-                    *replaced_count += 1;
+                    state.replaced_count += 1;
                 } else {
-                    *imported_count += 1;
+                    state.imported_count += 1;
                 }
             } else {
-                preview_fields.push(PreviewField {
+                state.preview_fields.push(PreviewField {
                     name: "theme".to_string(),
                     action: PreviewAction::Skip,
                     reason: Some("theme value cannot be mapped to the current program".to_string()),
                 });
-                skipped_fields.push("theme".to_string());
-                *skipped_count += 1;
+                state.skipped_fields.push("theme".to_string());
+                state.skipped_count += 1;
             }
         }
-        None => preview_fields.push(PreviewField {
+        None => state.preview_fields.push(PreviewField {
             name: "theme".to_string(),
             action: PreviewAction::Keep,
             reason: Some("source file does not provide this field".to_string()),

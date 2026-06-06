@@ -32,7 +32,7 @@ impl EffortLevel {
     ///
     /// Accepts lowercase strings: `"low"`, `"medium"`, `"high"`, `"max"`.
     /// Returns `None` for any other value.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
@@ -135,24 +135,29 @@ mod tests {
             EffortLevel::High,
             EffortLevel::Max,
         ] {
-            let parsed = EffortLevel::from_str(level.as_str());
-            assert_eq!(parsed, Some(level), "from_str({:?}) should round-trip", level);
+            let parsed = EffortLevel::parse(level.as_str());
+            assert_eq!(
+                parsed,
+                Some(level),
+                "from_str({:?}) should round-trip",
+                level
+            );
         }
     }
 
     #[test]
     fn from_str_case_insensitive() {
-        assert_eq!(EffortLevel::from_str("LOW"), Some(EffortLevel::Low));
-        assert_eq!(EffortLevel::from_str("Medium"), Some(EffortLevel::Medium));
-        assert_eq!(EffortLevel::from_str("HIGH"), Some(EffortLevel::High));
-        assert_eq!(EffortLevel::from_str("Max"), Some(EffortLevel::Max));
+        assert_eq!(EffortLevel::parse("LOW"), Some(EffortLevel::Low));
+        assert_eq!(EffortLevel::parse("Medium"), Some(EffortLevel::Medium));
+        assert_eq!(EffortLevel::parse("HIGH"), Some(EffortLevel::High));
+        assert_eq!(EffortLevel::parse("Max"), Some(EffortLevel::Max));
     }
 
     #[test]
     fn from_str_unknown_returns_none() {
-        assert_eq!(EffortLevel::from_str("ultra"), None);
-        assert_eq!(EffortLevel::from_str(""), None);
-        assert_eq!(EffortLevel::from_str("3"), None);
+        assert_eq!(EffortLevel::parse("ultra"), None);
+        assert_eq!(EffortLevel::parse(""), None);
+        assert_eq!(EffortLevel::parse("3"), None);
     }
 
     #[test]

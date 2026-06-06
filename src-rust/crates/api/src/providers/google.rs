@@ -15,7 +15,9 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use bytes::Bytes;
 use claurst_core::provider_id::{ModelId, ProviderId};
-use claurst_core::types::{ContentBlock, Message, MessageContent, Role, ToolResultContent, UsageInfo};
+use claurst_core::types::{
+    ContentBlock, Message, MessageContent, Role, ToolResultContent, UsageInfo,
+};
 use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
 use tracing::{debug, warn};
@@ -57,7 +59,10 @@ impl GoogleProvider {
 
     /// Returns true if the model supports thinking config (Gemini 2.5+ / 3.0+).
     fn supports_thinking(model: &str) -> bool {
-        model.contains("2.5") || model.contains("3.0") || model.contains("3.1") || model.contains("gemini-3")
+        model.contains("2.5")
+            || model.contains("3.0")
+            || model.contains("3.1")
+            || model.contains("gemini-3")
     }
 
     /// Build the full generateContent URL for non-streaming.
@@ -87,7 +92,11 @@ impl GoogleProvider {
                 }
             })
             .collect();
-        let base = if sanitized.is_empty() { "tool" } else { sanitized.as_str() };
+        let base = if sanitized.is_empty() {
+            "tool"
+        } else {
+            sanitized.as_str()
+        };
         if occurrence == 0 {
             format!("call_{}", base)
         } else {
@@ -144,15 +153,15 @@ impl GoogleProvider {
                             "mimeType": mime
                         }
                     }))
-                } else if let Some(url) = &source.url {
-                    Some(json!({
-                        "fileData": {
-                            "fileUri": url,
-                            "mimeType": source.media_type.as_deref().unwrap_or("image/jpeg")
-                        }
-                    }))
                 } else {
-                    None
+                    source.url.as_ref().map(|url| {
+                        json!({
+                            "fileData": {
+                                "fileUri": url,
+                                "mimeType": source.media_type.as_deref().unwrap_or("image/jpeg")
+                            }
+                        })
+                    })
                 }
             }
 
@@ -176,15 +185,13 @@ impl GoogleProvider {
                             "mimeType": mime
                         }
                     }))
-                } else if let Some(url) = &source.url {
-                    Some(json!({
+                } else {
+                    source.url.as_ref().map(|url| json!({
                         "fileData": {
                             "fileUri": url,
                             "mimeType": source.media_type.as_deref().unwrap_or("application/pdf")
                         }
                     }))
-                } else {
-                    None
                 }
             }
 
@@ -201,10 +208,16 @@ impl GoogleProvider {
             ContentBlock::SystemAPIError { message, .. } => Some(json!({
                 "text": format!("[error] {}", message)
             })),
-            ContentBlock::CollapsedReadSearch { tool_name, paths, .. } => Some(json!({
+            ContentBlock::CollapsedReadSearch {
+                tool_name, paths, ..
+            } => Some(json!({
                 "text": format!("[{}] {}", tool_name, paths.join(", "))
             })),
-            ContentBlock::TaskAssignment { id, subject, description } => Some(json!({
+            ContentBlock::TaskAssignment {
+                id,
+                subject,
+                description,
+            } => Some(json!({
                 "text": format!("[task:{}] {}: {}", id, subject, description)
             })),
 
@@ -287,24 +300,18 @@ impl GoogleProvider {
                     }
 
                     // Filter required to only include keys present in properties.
-                    if let Some(required) = map.get("required").cloned() {
-                        if let Value::Array(req_arr) = required {
-                            let prop_keys: std::collections::HashSet<String> = map
-                                .get("properties")
-                                .and_then(|p| p.as_object())
-                                .map(|o| o.keys().cloned().collect())
-                                .unwrap_or_default();
+                    if let Some(Value::Array(req_arr)) = map.get("required").cloned() {
+                        let prop_keys: std::collections::HashSet<String> = map
+                            .get("properties")
+                            .and_then(|p| p.as_object())
+                            .map(|o| o.keys().cloned().collect())
+                            .unwrap_or_default();
 
-                            let filtered: Vec<Value> = req_arr
-                                .into_iter()
-                                .filter(|v| {
-                                    v.as_str()
-                                        .map(|s| prop_keys.contains(s))
-                                        .unwrap_or(false)
-                                })
-                                .collect();
-                            map.insert("required".to_string(), Value::Array(filtered));
-                        }
+                        let filtered: Vec<Value> = req_arr
+                            .into_iter()
+                            .filter(|v| v.as_str().map(|s| prop_keys.contains(s)).unwrap_or(false))
+                            .collect();
+                        map.insert("required".to_string(), Value::Array(filtered));
                     }
                 } else {
                     // Non-object types must not carry properties/required.
@@ -317,8 +324,10 @@ impl GoogleProvider {
                     if let Some(items) = map.get_mut("items") {
                         if let Value::Object(ref mut items_map) = items {
                             if !items_map.contains_key("type") {
-                                items_map
-                                    .insert("type".to_string(), Value::String("string".to_string()));
+                                items_map.insert(
+                                    "type".to_string(),
+                                    Value::String("string".to_string()),
+                                );
                             }
                             // Recurse sanitize into items.
                             let sanitized = Self::sanitize_schema(Value::Object(items_map.clone()));
@@ -425,18 +434,12 @@ impl GoogleProvider {
 
         // ---- Generation config ----
         let mut gen_config = serde_json::Map::new();
-        gen_config.insert(
-            "maxOutputTokens".to_string(),
-            json!(request.max_tokens),
-        );
+        gen_config.insert("maxOutputTokens".to_string(), json!(request.max_tokens));
         if let Some(temp) = request.temperature {
             gen_config.insert("temperature".to_string(), json!(temp));
         }
         if !request.stop_sequences.is_empty() {
-            gen_config.insert(
-                "stopSequences".to_string(),
-                json!(request.stop_sequences),
-            );
+            gen_config.insert("stopSequences".to_string(), json!(request.stop_sequences));
         }
         if let Some(top_p) = request.top_p {
             gen_config.insert("topP".to_string(), json!(top_p));
@@ -464,10 +467,7 @@ impl GoogleProvider {
         // ---- Assemble body ----
         let mut body = serde_json::Map::new();
         body.insert("contents".to_string(), Value::Array(contents));
-        body.insert(
-            "generationConfig".to_string(),
-            Value::Object(gen_config),
-        );
+        body.insert("generationConfig".to_string(), Value::Object(gen_config));
         if let Some(si) = system_instruction {
             body.insert("systemInstruction".to_string(), si);
         }
@@ -586,7 +586,6 @@ impl GoogleProvider {
             cache_read_input_tokens: 0,
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -654,10 +653,8 @@ impl LlmProvider for GoogleProvider {
     async fn create_message_stream(
         &self,
         request: ProviderRequest,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
-        ProviderError,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
         let url = self.stream_url(&request.model);
         let model = request.model.clone();
         let body = self.build_request_body(&request);
@@ -681,10 +678,10 @@ impl LlmProvider for GoogleProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let resp_body =
-                resp.text()
-                    .await
-                    .unwrap_or_else(|_| "<unreadable>".to_string());
+            let resp_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_string());
             return Err(self.parse_error_response(status, &resp_body));
         }
 
@@ -911,10 +908,7 @@ impl LlmProvider for GoogleProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let url = format!(
-            "{}/v1beta/models?key={}",
-            self.base_url, self.api_key
-        );
+        let url = format!("{}/v1beta/models?key={}", self.base_url, self.api_key);
 
         let resp = self
             .http_client
@@ -941,13 +935,12 @@ impl LlmProvider for GoogleProvider {
             return Err(self.parse_error_response(status, &body_text));
         }
 
-        let body: Value =
-            serde_json::from_str(&body_text).map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("Failed to parse models list JSON: {}", e),
-                status: Some(status),
-                body: Some(body_text.clone()),
-            })?;
+        let body: Value = serde_json::from_str(&body_text).map_err(|e| ProviderError::Other {
+            provider: self.id.clone(),
+            message: format!("Failed to parse models list JSON: {}", e),
+            status: Some(status),
+            body: Some(body_text.clone()),
+        })?;
 
         let models_array = body
             .get("models")
@@ -1000,12 +993,10 @@ impl LlmProvider for GoogleProvider {
             Ok(_) => Ok(ProviderStatus::Degraded {
                 reason: "No Gemini models returned".to_string(),
             }),
-            Err(ProviderError::AuthFailed { message, .. }) => {
-                Err(ProviderError::AuthFailed {
-                    provider: self.id.clone(),
-                    message,
-                })
-            }
+            Err(ProviderError::AuthFailed { message, .. }) => Err(ProviderError::AuthFailed {
+                provider: self.id.clone(),
+                message,
+            }),
             Err(e) => Ok(ProviderStatus::Unavailable {
                 reason: e.to_string(),
             }),
@@ -1115,7 +1106,10 @@ mod tests {
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[0]["role"], json!("user"));
         assert_eq!(contents[0]["parts"][0]["text"], json!("before"));
-        assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], json!("search"));
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            json!("search")
+        );
         assert_eq!(contents[2]["parts"][0]["text"], json!("after"));
     }
 

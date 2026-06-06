@@ -215,6 +215,12 @@ impl FeatureFlagManager {
     }
 }
 
+impl Default for FeatureFlagManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Response from GrowthBook API
 #[derive(Debug, Deserialize)]
 struct GrowthBookApiResponse {

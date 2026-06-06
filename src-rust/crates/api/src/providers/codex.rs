@@ -224,9 +224,10 @@ impl CodexProvider {
         token: &str,
         account_id: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let builder = builder
-            .bearer_auth(token)
-            .header("User-Agent", concat!("coven-code/", env!("CARGO_PKG_VERSION")));
+        let builder = builder.bearer_auth(token).header(
+            "User-Agent",
+            concat!("coven-code/", env!("CARGO_PKG_VERSION")),
+        );
 
         if let Some(id) = account_id {
             builder.header("ChatGPT-Account-Id", id)
@@ -530,7 +531,6 @@ impl CodexProvider {
             model,
         })
     }
-
 }
 
 // ---------------------------------------------------------------------------

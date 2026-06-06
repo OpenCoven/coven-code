@@ -41,8 +41,9 @@ struct ReplSession {
 }
 
 /// Key: (session_id, language)
-static REPL_SESSIONS: Lazy<Arc<DashMap<(String, String), Arc<Mutex<ReplSession>>>>> =
-    Lazy::new(|| Arc::new(DashMap::new()));
+type ReplSessions = Arc<DashMap<(String, String), Arc<Mutex<ReplSession>>>>;
+
+static REPL_SESSIONS: Lazy<ReplSessions> = Lazy::new(|| Arc::new(DashMap::new()));
 
 // ---------------------------------------------------------------------------
 // Sentinel values

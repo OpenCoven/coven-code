@@ -219,9 +219,17 @@ pub fn slugify_profile_id(raw: &str) -> String {
     let lowered = raw.trim().to_lowercase();
     let mapped: String = lowered
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    let trimmed = mapped.trim_matches(|c: char| c == '-' || c == '_').to_string();
+    let trimmed = mapped
+        .trim_matches(|c: char| c == '-' || c == '_')
+        .to_string();
     if trimmed.is_empty() {
         "account".to_string()
     } else {
@@ -230,11 +238,7 @@ pub fn slugify_profile_id(raw: &str) -> String {
 }
 
 /// If the requested id already exists, suffix with -2, -3, … until free.
-pub fn ensure_unique_profile_id(
-    registry: &AccountRegistry,
-    provider: &str,
-    base: &str,
-) -> String {
+pub fn ensure_unique_profile_id(registry: &AccountRegistry, provider: &str, base: &str) -> String {
     let base = slugify_profile_id(base);
     if registry.get(provider, &base).is_none() {
         return base;
@@ -251,7 +255,9 @@ pub fn ensure_unique_profile_id(
 
 /// `~/.coven-code/`.
 pub fn claurst_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".coven-code")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".coven-code")
 }
 
 /// `~/.coven-code/accounts/<provider>/<id>/`.
@@ -271,7 +277,10 @@ pub fn codex_token_path(profile_id: &str) -> PathBuf {
 
 /// Backup directory for the previous live token file (rotated on each switch).
 pub fn backup_dir(provider: &str) -> PathBuf {
-    claurst_dir().join("accounts").join(provider).join(".backups")
+    claurst_dir()
+        .join("accounts")
+        .join(provider)
+        .join(".backups")
 }
 
 fn now_iso() -> String {
@@ -390,7 +399,10 @@ mod tests {
         let mut section = ProviderAccounts::default();
         section.profiles.insert(
             "work".to_string(),
-            AccountProfile { id: "work".into(), ..Default::default() },
+            AccountProfile {
+                id: "work".into(),
+                ..Default::default()
+            },
         );
         reg.providers.insert(PROVIDER_ANTHROPIC.into(), section);
 
@@ -439,7 +451,10 @@ mod tests {
 
     #[test]
     fn account_profile_display_falls_back_through_label_email_id() {
-        let mut p = AccountProfile { id: "kuber".into(), ..Default::default() };
+        let mut p = AccountProfile {
+            id: "kuber".into(),
+            ..Default::default()
+        };
         assert_eq!(p.display_name(), "kuber");
         p.email = Some("kuber@example.com".into());
         assert_eq!(p.display_name(), "kuber@example.com");
