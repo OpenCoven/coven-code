@@ -44,6 +44,7 @@ use claurst_core::types::ToolDefinition;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use clap::{ArgAction, Parser, ValueEnum};
 use parking_lot::Mutex as ParkingMutex;
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -269,6 +270,20 @@ struct Cli {
     /// Named agent to use (e.g., build, plan, explore)
     #[arg(long, short = 'A')]
     agent: Option<String>,
+
+    // ── coven-github: headless session brief / result envelope ──────────
+
+    /// Load a coven-github session brief (JSON) for fully-automated headless runs.
+    /// Overrides --model, --cwd, and --system-prompt from the brief's familiar config.
+    /// Used by coven-github workers; implies --print and --dangerously-skip-permissions.
+    #[arg(long = "context", value_name = "BRIEF_JSON")]
+    context: Option<PathBuf>,
+
+    /// Write a structured result envelope (JSON) to this path on exit.
+    /// Contains status, branch, commits, files_changed, summary, pr_body, exit_reason.
+    /// Only meaningful with --context / headless GitHub App runs.
+    #[arg(long = "output", value_name = "RESULT_JSON")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -315,6 +330,263 @@ enum CliInputFormat {
     /// Newline-delimited JSON messages — each line is {"role":"user"|"assistant","content":"..."}
     #[value(name = "stream-json")]
     StreamJson,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubSessionBrief {
+    trigger: String,
+    repo: GitHubRepoBrief,
+    task: GitHubTaskBrief,
+    familiar: GitHubFamiliarBrief,
+    workspace: GitHubWorkspaceBrief,
+    auth: GitHubAuthBrief,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRepoBrief {
+    owner: String,
+    name: String,
+    clone_url: String,
+    default_branch: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GitHubTaskBrief {
+    FixIssue {
+        issue_number: u64,
+        issue_title: String,
+        issue_body: String,
+    },
+    AddressReviewComment {
+        pr_number: u64,
+        comment_body: String,
+        diff_hunk: Option<String>,
+    },
+    RespondToMention {
+        issue_number: u64,
+        comment_body: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubFamiliarBrief {
+    id: String,
+    display_name: String,
+    model: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubWorkspaceBrief {
+    root: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubAuthBrief {
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitCommitSummary {
+    sha: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct GitResultSummary {
+    branch: Option<String>,
+    commits: Vec<GitCommitSummary>,
+    files_changed: Vec<String>,
+}
+
+impl GitHubSessionBrief {
+    fn to_headless_prompt(&self) -> String {
+        let mut lines = vec![
+            format!(
+                "You are {}, the Coven coding familiar assigned to {}/{}.",
+                self.familiar.display_name, self.repo.owner, self.repo.name
+            ),
+            format!("Trigger: {}", self.trigger),
+            format!("Default branch: {}", self.repo.default_branch),
+            format!("Clone URL: {}", self.redacted_clone_url()),
+            format!(
+                "GitHub installation auth: {}.",
+                if self.auth.token.is_empty() { "unavailable" } else { "available" }
+            ),
+            format!("Workspace: {}", self.workspace.root),
+            String::new(),
+            self.task_prompt(),
+        ];
+
+        if !self.familiar.skills.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("Use these skills where relevant: {}.", self.familiar.skills.join(", ")));
+        }
+
+        lines.push(String::new());
+        lines.push("Complete the requested code change end to end. Commit your changes on a branch when appropriate, run focused verification, and leave a concise PR-ready summary.".to_string());
+        lines.join("\n")
+    }
+
+    fn redacted_clone_url(&self) -> String {
+        if self.auth.token.is_empty() {
+            self.repo.clone_url.clone()
+        } else {
+            self.repo.clone_url.replace(&self.auth.token, "<redacted>")
+        }
+    }
+
+    fn task_prompt(&self) -> String {
+        match &self.task {
+            GitHubTaskBrief::FixIssue {
+                issue_number,
+                issue_title,
+                issue_body,
+            } => format!("Fix issue #{issue_number}: {issue_title}\n\nIssue body:\n{issue_body}"),
+            GitHubTaskBrief::AddressReviewComment {
+                pr_number,
+                comment_body,
+                diff_hunk,
+            } => {
+                let mut prompt = format!("Address the review comment on PR #{pr_number}.\n\nComment:\n{comment_body}");
+                if let Some(hunk) = diff_hunk {
+                    prompt.push_str("\n\nDiff hunk:\n");
+                    prompt.push_str(hunk);
+                }
+                prompt
+            }
+            GitHubTaskBrief::RespondToMention {
+                issue_number,
+                comment_body,
+            } => format!("Respond to the mention on issue #{issue_number}.\n\nComment:\n{comment_body}"),
+        }
+    }
+}
+
+fn load_github_context(path: Option<&PathBuf>) -> anyhow::Result<Option<GitHubSessionBrief>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read --context brief JSON at {}", path.display()))?;
+    let brief = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse --context brief JSON at {}", path.display()))?;
+    Ok(Some(brief))
+}
+
+fn github_context_cwd(brief: Option<&GitHubSessionBrief>) -> PathBuf {
+    brief
+        .map(|brief| PathBuf::from(&brief.workspace.root))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn apply_github_context_to_config(config: &mut Config, brief: Option<&GitHubSessionBrief>) {
+    let Some(brief) = brief else {
+        return;
+    };
+    if let Some(model) = &brief.familiar.model {
+        config.model = Some(model.clone());
+    }
+    config.permission_mode = PermissionMode::BypassPermissions;
+
+    let context = format!(
+        "GitHub App headless task for familiar {} ({}). Repository: {}/{}. Default branch: {}. Workspace: {}.",
+        brief.familiar.display_name,
+        brief.familiar.id,
+        brief.repo.owner,
+        brief.repo.name,
+        brief.repo.default_branch,
+        brief.workspace.root
+    );
+    config.append_system_prompt = Some(match config.append_system_prompt.take() {
+        Some(existing) => format!("{existing}\n\n{context}"),
+        None => context,
+    });
+}
+
+fn collect_git_result_summary(workspace: &std::path::Path, default_branch: Option<&str>) -> GitResultSummary {
+    let branch = git_stdout(workspace, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| !b.is_empty());
+    let base = default_branch.unwrap_or("main");
+    let log_range = format!("origin/{base}..HEAD");
+    let commits = git_stdout(workspace, &["log", "--format=%H%x00%s", &log_range])
+        .or_else(|| git_stdout(workspace, &["log", "--format=%H%x00%s", &format!("{base}..HEAD")]))
+        .map(|out| {
+            out.lines()
+                .filter_map(|line| {
+                    let (sha, message) = line.split_once('\0')?;
+                    Some(GitCommitSummary {
+                        sha: sha.to_string(),
+                        message: message.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let files_changed = git_stdout(workspace, &["diff", "--name-only", "HEAD"])
+        .into_iter()
+        .chain(git_stdout(workspace, &["diff", "--name-only", "--cached"]))
+        .chain(git_stdout(workspace, &["diff", "--name-only", &format!("origin/{base}...HEAD")]))
+        .flat_map(|out| out.lines().map(str::to_string).collect::<Vec<_>>())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    GitResultSummary {
+        branch,
+        commits,
+        files_changed,
+    }
+}
+
+fn git_stdout(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn github_output_envelope(success: bool, git: &GitResultSummary) -> serde_json::Value {
+    let commit_count = git.commits.len();
+    let file_count = git.files_changed.len();
+    let summary = if success {
+        format!(
+            "Session completed with {commit_count} commit{} and {file_count} changed file{}.",
+            if commit_count == 1 { "" } else { "s" },
+            if file_count == 1 { "" } else { "s" },
+        )
+    } else {
+        "Session failed before completing the task.".to_string()
+    };
+
+    let files = if git.files_changed.is_empty() {
+        "No changed files detected.".to_string()
+    } else {
+        git.files_changed
+            .iter()
+            .map(|file| format!("- `{file}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let pr_body = format!("## Summary\n\n{summary}\n\n## Files changed\n\n{files}");
+
+    serde_json::json!({
+        "status": if success { "success" } else { "failure" },
+        "branch": git.branch,
+        "commits": git.commits,
+        "files_changed": git.files_changed,
+        "summary": summary,
+        "pr_body": pr_body,
+        "exit_reason": if success { serde_json::Value::Null } else { serde_json::json!("infra_error") },
+    })
 }
 
 fn resolve_bridge_config(
@@ -467,11 +739,18 @@ async fn main() -> anyhow::Result<()> {
         .without_time()
         .init();
 
-    // Determine working directory
-    let cwd = cli
-        .cwd
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // --context implies full headless + skip-permissions + model/cwd override from brief.
+    let github_context = load_github_context(cli.context.as_ref())?;
+
+    // Determine working directory. GitHub session briefs are worker-authored and
+    // own the task workspace, so they intentionally override --cwd.
+    let cwd = if github_context.is_some() {
+        github_context_cwd(github_context.as_ref())
+    } else {
+        cli.cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    };
 
     debug!(cwd = %cwd.display(), "Starting Coven Code");
 
@@ -498,6 +777,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(asp) = cli.append_system_prompt.clone() {
         config.append_system_prompt = Some(asp);
     }
+    apply_github_context_to_config(&mut config, github_context.as_ref());
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -563,7 +843,7 @@ async fn main() -> anyhow::Result<()> {
     let system_prompt = system_parts.join("\n\n");
 
     // Determine mode early (needed for auth error handling and permission handler selection).
-    let is_headless = cli.print || cli.prompt.is_some();
+    let is_headless = cli.print || cli.prompt.is_some() || github_context.is_some();
 
     // Initialize API client.
     // Try config/env first; fall back to saved OAuth tokens.
@@ -648,7 +928,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pending_permissions = Arc::new(ParkingMutex::new(claurst_tools::PendingPermissionStore::default()));
 
-    let is_non_interactive = cli.print || cli.prompt.is_some();
+    let is_non_interactive = is_headless;
 
     // Side-channel for the AskUserQuestion tool to send questions to the TUI.
     // Only created in interactive mode; None in headless/print mode.
@@ -801,9 +1081,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // --print mode (headless)
-    let result = if is_headless {
+    let headless_result = if is_headless {
         run_headless(
             &cli,
+            github_context.as_ref(),
             client,
             tools,
             tool_ctx,
@@ -836,7 +1117,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     cron_cancel.cancel();
-    result
+
+    // If --output was requested (coven-github headless run), write result envelope.
+    if let Some(output_path) = &cli.output {
+        let default_branch = github_context.as_ref().map(|brief| brief.repo.default_branch.as_str());
+        let git_summary = collect_git_result_summary(&cwd, default_branch);
+        let envelope = github_output_envelope(headless_result.is_ok(), &git_summary);
+        if let Err(e) = std::fs::write(output_path, serde_json::to_string_pretty(&envelope).unwrap_or_default()) {
+            eprintln!("[coven-github] warning: failed to write --output result: {e}");
+        }
+    }
+
+    headless_result
 }
 
 async fn connect_mcp_manager_arc(
@@ -1351,6 +1643,7 @@ fn filter_search_only_tools() -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
 
 async fn run_headless(
     cli: &Cli,
+    github_context: Option<&GitHubSessionBrief>,
     client: Arc<claurst_api::AnthropicClient>,
     tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
     tool_ctx: ToolContext,
@@ -1411,6 +1704,8 @@ async fn run_headless(
         // Plain text mode
         let prompt = if let Some(ref p) = cli.prompt {
             p.clone()
+        } else if let Some(brief) = github_context {
+            brief.to_headless_prompt()
         } else {
             use tokio::io::{self, AsyncReadExt};
             let mut stdin = io::stdin();
@@ -1420,8 +1715,7 @@ async fn run_headless(
         };
 
         if prompt.is_empty() {
-            eprintln!("Error: No prompt provided. Use --print <prompt> or pipe text to stdin.");
-            std::process::exit(1);
+            anyhow::bail!("No prompt provided. Use --print <prompt> or pipe text to stdin.");
         }
 
         vec![claurst_core::types::Message::user(prompt)]
@@ -1434,8 +1728,7 @@ async fn run_headless(
     }
 
     if messages.is_empty() {
-        eprintln!("Error: No messages provided.");
-        std::process::exit(1);
+        anyhow::bail!("No messages provided.");
     }
 
     let is_json_output = matches!(cli.output_format, CliOutputFormat::Json | CliOutputFormat::StreamJson);
@@ -1538,7 +1831,7 @@ async fn run_headless(
                 QueryOutcome::Error(e) => {
                     let out = serde_json::json!({ "type": "error", "error": e.to_string() });
                     eprintln!("{}", out);
-                    std::process::exit(1);
+                    return Err(e.into());
                 }
                 _ => {}
             }
@@ -1560,7 +1853,7 @@ async fn run_headless(
                 QueryOutcome::Error(e) => {
                     let out = serde_json::json!({ "type": "error", "error": e.to_string() });
                     eprintln!("{}", out);
-                    std::process::exit(1);
+                    return Err(e.into());
                 }
                 _ => {}
             }
@@ -1579,14 +1872,16 @@ async fn run_headless(
             match outcome {
                 QueryOutcome::Error(e) => {
                     eprintln!("Error: {}", e);
-                    std::process::exit(1);
+                    return Err(e.into());
                 }
                 QueryOutcome::BudgetExceeded { cost_usd, limit_usd } => {
                     eprintln!(
                         "Budget limit ${:.4} reached (spent ${:.4}). Stopping.",
                         limit_usd, cost_usd
                     );
-                    std::process::exit(2);
+                    anyhow::bail!(
+                        "Budget limit ${limit_usd:.4} reached (spent ${cost_usd:.4})"
+                    );
                 }
                 _ => {}
             }
@@ -4672,5 +4967,72 @@ mod tests {
                 "search-only emitted disallowed tool {name}, expected subset of {ALLOWED:?}"
             );
         }
+    }
+
+    fn sample_github_brief() -> GitHubSessionBrief {
+        serde_json::from_value(serde_json::json!({
+            "trigger": "issue_assigned",
+            "repo": {
+                "owner": "OpenCoven",
+                "name": "coven-code",
+                "clone_url": "https://x-access-token:secret@github.com/OpenCoven/coven-code.git",
+                "default_branch": "main"
+            },
+            "task": {
+                "kind": "fix_issue",
+                "issue_number": 42,
+                "issue_title": "Fix auth refresh",
+                "issue_body": "Tokens expire early."
+            },
+            "familiar": {
+                "id": "cody",
+                "display_name": "Cody",
+                "model": "anthropic/claude-sonnet-4-6",
+                "skills": ["systematic-debugging"]
+            },
+            "workspace": { "root": "/tmp/coven-task-42" },
+            "auth": { "token": "secret" }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn github_context_overrides_cwd_model_permissions_and_prompt() {
+        let brief = sample_github_brief();
+        let mut config = Config::default();
+
+        apply_github_context_to_config(&mut config, Some(&brief));
+
+        assert_eq!(github_context_cwd(Some(&brief)), PathBuf::from("/tmp/coven-task-42"));
+        assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4-6"));
+        assert_eq!(config.permission_mode, PermissionMode::BypassPermissions);
+
+        let prompt = brief.to_headless_prompt();
+        assert!(prompt.contains("Fix issue #42: Fix auth refresh"));
+        assert!(prompt.contains("Tokens expire early."));
+        assert!(prompt.contains("systematic-debugging"));
+        assert!(!prompt.contains("secret"));
+    }
+
+    #[test]
+    fn github_output_envelope_includes_git_summary() {
+        let git = GitResultSummary {
+            branch: Some("cody/fix-auth-refresh".to_string()),
+            commits: vec![GitCommitSummary {
+                sha: "abc123".to_string(),
+                message: "fix auth refresh".to_string(),
+            }],
+            files_changed: vec!["src/auth.rs".to_string()],
+        };
+
+        let envelope = github_output_envelope(true, &git);
+
+        assert_eq!(envelope["status"], "success");
+        assert_eq!(envelope["branch"], "cody/fix-auth-refresh");
+        assert_eq!(envelope["commits"][0]["sha"], "abc123");
+        assert_eq!(envelope["files_changed"][0], "src/auth.rs");
+        assert_eq!(envelope["exit_reason"], serde_json::Value::Null);
+        assert!(envelope["summary"].as_str().unwrap().contains("1 commit"));
+        assert!(envelope["pr_body"].as_str().unwrap().contains("src/auth.rs"));
     }
 }
