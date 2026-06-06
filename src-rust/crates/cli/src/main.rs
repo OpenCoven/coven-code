@@ -864,7 +864,7 @@ async fn main() -> anyhow::Result<()> {
                          - Set GOOGLE_API_KEY for Google Gemini\n\
                          - Set GROQ_API_KEY for Groq (fast, free tier available)\n\
                          - Run `coven-code --provider ollama` for local models (no key needed)\n\
-                         - Anthropic OAuth login is disabled until Coven Code has its own OAuth client"
+                         - Configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, then run `coven-code auth login` for first-party Anthropic OAuth"
                     );
                 } else {
                     (String::new(), false)
@@ -3840,13 +3840,11 @@ async fn run_interactive(
                 }
                 "anthropic" => {
                     let tx2 = device_auth_tx.clone();
-                    // Anthropic OAuth requires a registered application.
-                    // Coven Code does not have its own registered OAuth app with Anthropic.
-                    // Users should use an API key from console.anthropic.com instead.
+                    // Anthropic OAuth requires a registered Coven Code application.
                     tokio::spawn(async move {
                         let _ = tx2.send(DeviceAuthEvent::Error(
-                            "Anthropic OAuth requires a registered application.\n\
-                             Use an API key instead: console.anthropic.com/settings/keys".to_string()
+                            "Anthropic OAuth requires COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID.\n\
+                             Configure a Coven Code OAuth client, or use an API key for now: console.anthropic.com/settings/keys".to_string()
                         )).await;
                     });
                 }
@@ -4238,7 +4236,7 @@ async fn run_interactive(
 // Called before Cli::parse() so it doesn't conflict with positional `prompt`.
 //
 // Usage:
-//   claude auth login [--console]   — Anthropic OAuth is disabled until Coven Code has its own client
+//   claude auth login [--console]   — Anthropic OAuth with a configured Coven Code client
 //   claude auth logout              — Clear stored credentials
 //   claude auth status [--json]     — Show authentication status
 
@@ -4325,7 +4323,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
-    eprintln!("  login [--console] [--label <name>]   Authenticate (claude.ai by default)");
+    eprintln!("  login [--console] [--label <name>]   Authenticate with a configured Coven Code OAuth client");
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
     eprintln!("  list                                  List all stored Anthropic accounts");
@@ -4651,12 +4649,12 @@ async fn auth_status(json_output: bool) {
                 .filter(|tokens| !tokens.uses_bearer_auth() && tokens.api_key.is_some())
                 .map(|_| "/login managed key".to_string())
         });
-    let usable_oauth_tokens = oauth_tokens
-        .as_ref()
-        .filter(|tokens| !tokens.uses_bearer_auth());
+    let usable_oauth_tokens = oauth_tokens.as_ref().filter(|tokens| {
+        !tokens.uses_bearer_auth() || tokens.uses_configured_oauth_client()
+    });
     let disabled_bearer_token = oauth_tokens
         .as_ref()
-        .is_some_and(|tokens| tokens.uses_bearer_auth());
+        .is_some_and(|tokens| tokens.uses_bearer_auth() && !tokens.uses_configured_oauth_client());
     let token_source = usable_oauth_tokens.map(|tokens| {
         if tokens.uses_bearer_auth() {
             "claude.ai".to_string()
@@ -4739,9 +4737,9 @@ async fn auth_status(json_output: bool) {
         if !logged_in {
             let hint = if active_provider == "anthropic" {
                 if disabled_bearer_token {
-                    "Stored claude.ai OAuth tokens are disabled; set ANTHROPIC_API_KEY.".to_string()
+                    "Stored claude.ai OAuth tokens were minted by an unsupported client; configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`, or set ANTHROPIC_API_KEY for now.".to_string()
                 } else {
-                    "Set ANTHROPIC_API_KEY.".to_string()
+                    "Set ANTHROPIC_API_KEY, or configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`.".to_string()
                 }
             } else if let Some(env_var) =
                 claurst_core::config::primary_api_key_env_var_for_provider(active_provider)

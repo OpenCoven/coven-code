@@ -1390,8 +1390,8 @@ pub mod config {
 
         /// Async variant: also checks `~/.coven-code/oauth_tokens.json`.
         /// Returns `(credential, use_bearer_auth)`.
-        /// Stored Bearer tokens are ignored because Anthropic OAuth login is
-        /// disabled until Coven Code has its own OAuth client identity.
+        /// Stored Bearer tokens are used only when they were minted by the
+        /// configured Coven Code OAuth client identity.
         pub async fn resolve_auth_async(&self) -> Option<(String, bool)> {
             if self.selected_provider_id() != "anthropic" {
                 return self.resolve_api_key().map(|key| (key, false));
@@ -1406,13 +1406,13 @@ pub mod config {
             }
 
             let tokens = crate::oauth::OAuthTokens::load().await?;
-            if tokens.uses_bearer_auth() {
+            if tokens.uses_bearer_auth() && !tokens.uses_configured_oauth_client() {
                 return None;
             }
 
             tokens
                 .effective_credential()
-                .map(|cred| (cred.to_string(), false))
+                .map(|cred| (cred.to_string(), tokens.uses_bearer_auth()))
         }
 
         pub fn resolve_provider_api_base(&self, provider_id: &str) -> Option<String> {
@@ -3660,10 +3660,10 @@ pub mod oauth {
 
     // ---- Production OAuth endpoints & constants ----
 
-    // Anthropic OAuth login is disabled until Coven Code has an OAuth client
-    // identity issued for this application. Keep this empty so OAuth URL and
-    // token exchange helpers cannot impersonate another application's client.
+    // Anthropic OAuth login requires a client identity issued for Coven Code.
+    // Keep this empty so default helpers cannot impersonate another app.
     pub const CLIENT_ID: &str = "";
+    pub const CLIENT_ID_ENV: &str = "COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID";
     pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -3709,6 +3709,9 @@ pub mod oauth {
         pub organization_uuid: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub subscription_type: Option<String>,
+        /// First-party OAuth client ID that minted this token.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub oauth_client_id: Option<String>,
         /// API key created for Console-flow users (exchanged from access token).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub api_key: Option<String>,
@@ -3719,6 +3722,19 @@ pub mod oauth {
         /// (i.e. Claude.ai subscription with `user:inference` scope).
         pub fn uses_bearer_auth(&self) -> bool {
             self.scopes.iter().any(|s| s == CLAUDE_AI_INFERENCE_SCOPE)
+        }
+
+        /// True when this Bearer token was minted by the configured Coven Code
+        /// OAuth client rather than an older borrowed-client flow.
+        pub fn uses_configured_oauth_client(&self) -> bool {
+            let Some(token_client_id) = self.oauth_client_id.as_deref() else {
+                return false;
+            };
+            std::env::var(CLIENT_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .is_some_and(|client_id| client_id == token_client_id)
         }
 
         /// The credential to present to the Anthropic API:
@@ -3923,12 +3939,31 @@ pub mod oauth {
         callback_port: u16,
         is_manual: bool,
     ) -> String {
+        build_auth_url_with_client_id(
+            authorize_base,
+            CLIENT_ID,
+            code_challenge,
+            state,
+            callback_port,
+            is_manual,
+        )
+    }
+
+    /// Build an OAuth authorization URL using a caller-supplied client ID.
+    pub fn build_auth_url_with_client_id(
+        authorize_base: &str,
+        client_id: &str,
+        code_challenge: &str,
+        state: &str,
+        callback_port: u16,
+        is_manual: bool,
+    ) -> String {
         let mut u = url::Url::parse(authorize_base)
             .expect("valid OAuth authorize base URL");
         {
             let mut q = u.query_pairs_mut();
             q.append_pair("code", "true"); // tells the login page to show Claude Max upsell
-            q.append_pair("client_id", CLIENT_ID);
+            q.append_pair("client_id", client_id);
             q.append_pair("response_type", "code");
             let redirect = if is_manual {
                 MANUAL_REDIRECT_URL.to_string()
@@ -4380,6 +4415,29 @@ mod tests {
             ..Default::default()
         };
         assert!(!tokens.uses_bearer_auth());
+    }
+
+    #[test]
+    fn test_oauth_bearer_token_requires_configured_client_id() {
+        let orig = std::env::var(crate::oauth::CLIENT_ID_ENV).ok();
+        std::env::remove_var(crate::oauth::CLIENT_ID_ENV);
+
+        let tokens = crate::oauth::OAuthTokens {
+            scopes: vec![crate::oauth::CLAUDE_AI_INFERENCE_SCOPE.to_string()],
+            oauth_client_id: Some("coven-client".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!tokens.uses_configured_oauth_client());
+        std::env::set_var(crate::oauth::CLIENT_ID_ENV, "other-client");
+        assert!(!tokens.uses_configured_oauth_client());
+        std::env::set_var(crate::oauth::CLIENT_ID_ENV, "coven-client");
+        assert!(tokens.uses_configured_oauth_client());
+
+        std::env::remove_var(crate::oauth::CLIENT_ID_ENV);
+        if let Some(value) = orig {
+            std::env::set_var(crate::oauth::CLIENT_ID_ENV, value);
+        }
     }
 
     #[test]

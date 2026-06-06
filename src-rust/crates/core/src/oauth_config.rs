@@ -76,10 +76,9 @@ pub struct OAuthConfig {
 // Production config (mirrors PROD_OAUTH_CONFIG in oauth.ts)
 // ---------------------------------------------------------------------------
 
-// Anthropic OAuth login is disabled until Coven Code has an OAuth client
-// identity issued for this application. These endpoint definitions are retained
-// for tests and future first-party OAuth support, but the client IDs are left
-// empty so this third-party CLI does not impersonate another application.
+// Anthropic OAuth login requires a client identity issued for Coven Code.
+// These endpoint definitions are retained for first-party OAuth support, but
+// the client IDs are left empty so this CLI does not impersonate another app.
 pub const PROD_OAUTH: OAuthConfig = OAuthConfig {
     base_api_url: "https://api.anthropic.com",
     // Routes through claude.com/cai/* for attribution, 307s to claude.ai in
