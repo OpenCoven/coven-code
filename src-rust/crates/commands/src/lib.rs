@@ -9893,6 +9893,18 @@ fn coven_help_text() -> &'static str {
      Control plane\n\
        /coven actions <action> [json]  POST a control-plane action\n\
      \n\
+     Coven Calls (delegation ledger)\n\
+       /coven calls [--limit N]        Read ~/.coven/cave-coven-calls.json\n\
+     \n\
+     Parallel-work protocol\n\
+       /coven claim acquire|release|status|heartbeat|canary [args]\n\
+       /coven hooks-install            Install git hooks for the claim protocol\n\
+     \n\
+     Harness adapters & maintenance\n\
+       /coven adapter list|doctor [id]\n\
+       /coven logs prune [--days N]\n\
+       /coven wt <branch>|--list|--doctor|--prune-merged|--prune-stale [DAYS]\n\
+     \n\
      Workflows\n\
        /coven patch [name] [issue]     Open the OpenClaw repair flow\n\
        /coven pc [status|top|disk|...] macOS system diagnostics\n\
@@ -9973,6 +9985,89 @@ fn coven_format_sessions(
         out.push_str(&format!(
             "{:<36}  {:<8}  {:<10}  {}\n",
             s.id, s.harness, status, title
+        ));
+    }
+    out
+}
+
+/// Read and pretty-print the Coven Calls delegation ledger written by
+/// `coven-cli/src/coven_calls.rs`.  Returns a user-facing message —
+/// either a rendered table of the most recent `limit` calls, or an
+/// explanatory string when the file is missing/empty/unparsable.
+///
+/// The on-disk shape (camelCase JSON, ledger version 1) is:
+/// `{ "version": 1, "calls": [ { id, callerFamiliarId, calleeFamiliarId,
+/// request, status, createdAt, endedAt?, sessionId?, artifact? } ] }`.
+fn coven_read_calls_ledger(limit: usize) -> String {
+    let Some(home) = claurst_core::coven_shared::coven_home() else {
+        return "Could not determine ~/.coven; is the daemon installed?".to_string();
+    };
+    let path = home.join("cave-coven-calls.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!(
+                "No delegation ledger yet at {}. Familiars only write here once they cast a Coven Call.",
+                path.display()
+            );
+        }
+        Err(e) => return format!("Could not read {}: {e}", path.display()),
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return format!("Could not parse {}: {e}", path.display()),
+    };
+    let calls = value
+        .get("calls")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if calls.is_empty() {
+        return "Delegation ledger is empty.".to_string();
+    }
+    let total = calls.len();
+    let take = limit.max(1).min(total);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<8}  {:<8}  {:<10}  {:<20}  request\n",
+        "caller", "callee", "status", "createdAt"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(78)));
+    for call in calls.iter().rev().take(take) {
+        let caller = call
+            .get("callerFamiliarId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let callee = call
+            .get("calleeFamiliarId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let status = call
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let created = call
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let request = call
+            .get("request")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let trimmed = if request.chars().count() > 36 {
+            let s: String = request.chars().take(36).collect();
+            format!("{s}…")
+        } else {
+            request.to_string()
+        };
+        out.push_str(&format!(
+            "{:<8}  {:<8}  {:<10}  {:<20}  {}\n",
+            caller, callee, status, created, trimmed
+        ));
+    }
+    if take < total {
+        out.push_str(&format!(
+            "\n…showing {take} most recent of {total} calls. Use `/coven calls --limit N` to widen.\n"
         ));
     }
     out
@@ -10402,6 +10497,65 @@ impl SlashCommand for CovenCommand {
                 argv.extend(rest.split_whitespace());
                 CommandResult::Message(coven_shell_out(&argv))
             }
+
+            // Coven-specific integrations.
+            "calls" => {
+                // Native FS read of the delegation ledger written by
+                // coven-cli/src/coven_calls.rs.  The shape is documented in
+                // that file and in coven-cave's lib/coven-calls-types.ts.
+                let mut limit: usize = 20;
+                let mut tokens = rest.split_whitespace();
+                while let Some(tok) = tokens.next() {
+                    if tok == "--limit" {
+                        if let Some(v) = tokens.next() {
+                            limit = v.parse().unwrap_or(limit);
+                        }
+                    }
+                }
+                CommandResult::Message(coven_read_calls_ledger(limit))
+            }
+            "claim" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven claim acquire|release|status|heartbeat|canary [args]"
+                            .to_string(),
+                    );
+                }
+                let mut argv: Vec<&str> = vec!["claim"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+            "hooks-install" | "hooks" => {
+                // Both names map to `coven hooks install`. We accept "hooks"
+                // as an alias to mirror the coven-cli subcommand shape.
+                CommandResult::Message(coven_shell_out(&["hooks", "install"]))
+            }
+            "adapter" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven adapter list [--json] | adapter doctor [id]".to_string(),
+                    );
+                }
+                let mut argv: Vec<&str> = vec!["adapter"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+            "logs" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven logs prune [--days N]".to_string(),
+                    );
+                }
+                let mut argv: Vec<&str> = vec!["logs"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+            "wt" => {
+                let mut argv: Vec<&str> = vec!["wt"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+
             other => CommandResult::Error(format!(
                 "Unknown /coven subcommand: '{other}'.\nRun `/coven help` for usage."
             )),
@@ -11222,6 +11376,96 @@ mod tests {
             .execute("actions coven.capabilities.refresh not-json", &mut ctx)
             .await;
         assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_help_lists_integration_subcommands() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("help", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                for verb in [
+                    "calls", "claim", "hooks-install", "adapter", "logs", "wt",
+                ] {
+                    assert!(msg.contains(verb), "help should mention {verb}: {msg}");
+                }
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_claim_requires_action() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("claim", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_adapter_requires_subaction() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("adapter", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_logs_requires_subaction() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("logs", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    // `COVEN_HOME` is process-global, so the two ledger tests must not race.
+    static COVEN_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn coven_calls_ledger_returns_message_when_file_missing() {
+        let _guard = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("COVEN_HOME").ok();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_HOME", dir.path());
+        let msg = coven_read_calls_ledger(20);
+        assert!(
+            msg.contains("No delegation ledger yet") || msg.contains("Could not"),
+            "expected friendly message, got: {msg}"
+        );
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_HOME", v);
+        } else {
+            std::env::remove_var("COVEN_HOME");
+        }
+    }
+
+    #[test]
+    fn coven_calls_ledger_renders_recent_entries() {
+        let _guard = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("COVEN_HOME").ok();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_HOME", dir.path());
+        let ledger = r#"{
+          "version": 1,
+          "calls": [
+            {"id":"a","callerFamiliarId":"nova","calleeFamiliarId":"sage",
+             "request":"first task","status":"completed","createdAt":"2026-06-07T00:00:00Z"},
+            {"id":"b","callerFamiliarId":"sage","calleeFamiliarId":"kitty",
+             "request":"second task","status":"running","createdAt":"2026-06-07T00:01:00Z"}
+          ]
+        }"#;
+        std::fs::write(dir.path().join("cave-coven-calls.json"), ledger).unwrap();
+        let out = coven_read_calls_ledger(20);
+        assert!(out.contains("nova"));
+        assert!(out.contains("sage"));
+        assert!(out.contains("kitty"));
+        assert!(out.contains("running"));
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_HOME", v);
+        } else {
+            std::env::remove_var("COVEN_HOME");
+        }
     }
 
     #[test]
