@@ -34,7 +34,7 @@ pub struct FamiliarStatus {
     pub memory_freshness: String,
 }
 
-/// Condensed view of a running (non-archived) daemon session.
+/// Condensed view of a daemon session.
 #[derive(Debug, Clone)]
 pub struct DaemonSession {
     pub id: String,
@@ -42,6 +42,18 @@ pub struct DaemonSession {
     pub title: String,
     pub status: String,
     pub project_root: String,
+    /// Present when the session has been archived; `None` for live sessions.
+    pub archived_at: Option<String>,
+}
+
+/// Daemon health response — surfaced by `GET /api/v1/health`.
+#[derive(Debug, Clone)]
+pub struct DaemonHealth {
+    pub api_version: String,
+    pub coven_version: String,
+    pub pid: Option<u32>,
+    pub socket: Option<String>,
+    pub started_at: Option<String>,
 }
 
 /// Payload for creating a new Coven daemon session.
@@ -232,9 +244,106 @@ impl DaemonClient {
                 title: r.title.unwrap_or_default(),
                 status: r.status.unwrap_or_else(|| "unknown".to_string()),
                 project_root: r.project_root.unwrap_or_default(),
+                archived_at: r.archived_at.clone(),
                 id: r.id,
             })
             .collect()
+    }
+
+    /// Fetch every session known to the daemon, including archived ones.
+    /// Returns an empty `Vec` on any error.
+    pub fn all_sessions(&self) -> Vec<DaemonSession> {
+        let body = match self.get("/api/v1/sessions") {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let raw: Vec<RawSession> = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        raw.into_iter()
+            .map(|r| DaemonSession {
+                harness: r.harness.unwrap_or_default(),
+                title: r.title.unwrap_or_default(),
+                status: r.status.unwrap_or_else(|| "unknown".to_string()),
+                project_root: r.project_root.unwrap_or_default(),
+                archived_at: r.archived_at.clone(),
+                id: r.id,
+            })
+            .collect()
+    }
+
+    /// Fetch a single session by id.
+    pub fn get_session(&self, session_id: &str) -> Option<DaemonSession> {
+        let path = format!("/api/v1/sessions/{}", url_quote(session_id));
+        let body = self.get(&path)?;
+        let r: RawSession = serde_json::from_str(&body).ok()?;
+        if r.id.is_empty() {
+            return None;
+        }
+        Some(DaemonSession {
+            harness: r.harness.unwrap_or_default(),
+            title: r.title.unwrap_or_default(),
+            status: r.status.unwrap_or_else(|| "unknown".to_string()),
+            project_root: r.project_root.unwrap_or_default(),
+            archived_at: r.archived_at.clone(),
+            id: r.id,
+        })
+    }
+
+    /// Daemon liveness + version metadata.
+    pub fn health(&self) -> Option<DaemonHealth> {
+        let body = self.get("/api/v1/health")?;
+        let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let daemon = value.get("daemon");
+        Some(DaemonHealth {
+            api_version: value
+                .get("apiVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            coven_version: value
+                .get("covenVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            pid: daemon
+                .and_then(|d| d.get("pid"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
+            socket: daemon
+                .and_then(|d| d.get("socket"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            started_at: daemon
+                .and_then(|d| d.get("startedAt"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+
+    /// Forward `input` to a live PTY-backed session.
+    pub fn send_input(&self, session_id: &str, input: &str) -> Result<(), String> {
+        let body = serde_json::to_string(&serde_json::json!({ "input": input }))
+            .map_err(|e| format!("failed to encode input: {e}"))?;
+        let path = format!("/api/v1/sessions/{}/input", url_quote(session_id));
+        self.request("POST", &path, Some(&body))
+            .ok_or_else(|| "daemon refused input or returned non-2xx".to_string())
+            .map(|_| ())
+    }
+
+    /// Terminate a live session.
+    pub fn kill_session(&self, session_id: &str) -> Result<(), String> {
+        let path = format!("/api/v1/sessions/{}/kill", url_quote(session_id));
+        self.request("POST", &path, Some("{}"))
+            .ok_or_else(|| "daemon refused kill or returned non-2xx".to_string())
+            .map(|_| ())
+    }
+
+    /// Fetch the redacted log preview for a session.
+    pub fn session_log(&self, session_id: &str) -> Option<String> {
+        let path = format!("/api/v1/sessions/{}/log", url_quote(session_id));
+        self.get(&path)
     }
 
     /// Create a daemon session and return its session id.
@@ -256,6 +365,24 @@ impl DaemonClient {
             .map(|id| id.to_string())
             .ok_or_else(|| "Coven daemon response did not include a session id".to_string())
     }
+}
+
+/// Minimal percent-encoder for path segments — escapes anything outside the
+/// unreserved set defined by RFC 3986. The daemon's session ids are UUID-shaped
+/// today, but encoding defensively avoids surprises if that ever changes.
+fn url_quote(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        let b = *byte;
+        let is_unreserved = b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

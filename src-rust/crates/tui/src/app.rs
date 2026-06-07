@@ -65,6 +65,10 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("context", "Show context window and rate limit usage"),
     ("copy", "Copy the last assistant response to clipboard"),
     ("cost", "Show cost breakdown"),
+    (
+        "coven",
+        "Drive the local Coven daemon (sessions, harness runs, rituals)",
+    ),
     ("diff", "Inspect the current git diff"),
     ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
@@ -154,6 +158,7 @@ fn help_command_category(name: &str) -> &'static str {
         "session" | "resume" | "rename" | "fork" | "clear" | "compact" | "quit" | "exit" => {
             "Session"
         }
+        "coven" | "handoff" | "familiar" => "Coven Substrate",
         _ => "Commands",
     }
 }

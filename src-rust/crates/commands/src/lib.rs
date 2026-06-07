@@ -298,6 +298,7 @@ pub struct FamiliarCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
 pub struct ManagedAgentsCommand;
+pub struct CovenCommand;
 pub struct NamedCommandAdapter {
     pub slash_name: &'static str,
     pub target_name: &'static str,
@@ -9851,6 +9852,294 @@ impl SlashCommand for ManagedAgentsCommand {
 }
 
 // ---------------------------------------------------------------------------
+// /coven — substrate (daemon) control surface
+// ---------------------------------------------------------------------------
+//
+// The `/coven` command lets users drive the local Coven daemon
+// (`~/.coven/coven.sock`) from inside Coven Code without leaving the TUI.
+// Read-only operations go through the in-process `DaemonClient`; mutating
+// rituals that the daemon does not currently expose over HTTP (archive,
+// summon, sacrifice, doctor, patch, pc, daemon lifecycle) shell out to the
+// `coven` binary, matching the exact verbs `coven-cli`'s slash TUI uses.
+
+fn coven_help_text() -> &'static str {
+    "Usage: /coven <subcommand> [args]\n\
+     \n\
+     Status & lifecycle\n\
+       /coven                          Daemon health + active session count\n\
+       /coven status                   Same as /coven\n\
+       /coven doctor                   Detect installed harness CLIs\n\
+       /coven daemon start|status|stop|restart\n\
+     \n\
+     Sessions\n\
+       /coven sessions [--all]         List active (or all) daemon sessions\n\
+       /coven run <harness> <prompt>   Launch a new harness session\n\
+       /coven attach <session-id>      Replay/follow a running session\n\
+       /coven summon <session-id>      Restore an archived session\n\
+       /coven archive <session-id>     Archive a non-running session\n\
+       /coven sacrifice <session-id>   Permanently delete a session\n\
+     \n\
+     Workflows\n\
+       /coven patch [name] [issue]     Open the OpenClaw repair flow\n\
+       /coven pc [status|top|disk|...] macOS system diagnostics\n\
+     \n\
+     /coven help                       Show this help"
+}
+
+fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> String {
+    let mut out = String::new();
+    if !client.is_online() {
+        out.push_str("Coven daemon: offline\n");
+        out.push_str("  Start it with `/coven daemon start` (or run `coven daemon start`).\n");
+        return out;
+    }
+    match client.health() {
+        Some(h) => {
+            out.push_str(&format!(
+                "Coven daemon: online ({api}, coven {ver})\n",
+                api = if h.api_version.is_empty() {
+                    "unknown api"
+                } else {
+                    h.api_version.as_str()
+                },
+                ver = if h.coven_version.is_empty() {
+                    "?"
+                } else {
+                    h.coven_version.as_str()
+                },
+            ));
+            if let Some(pid) = h.pid {
+                out.push_str(&format!("  pid: {pid}\n"));
+            }
+            if let Some(sock) = h.socket.as_deref() {
+                out.push_str(&format!("  socket: {sock}\n"));
+            }
+            if let Some(started) = h.started_at.as_deref() {
+                out.push_str(&format!("  started: {started}\n"));
+            }
+        }
+        None => {
+            out.push_str("Coven daemon: online (health response unavailable)\n");
+        }
+    }
+    let active = client.active_sessions();
+    out.push_str(&format!("  active sessions: {}\n", active.len()));
+    out
+}
+
+fn coven_format_sessions(
+    sessions: &[claurst_core::coven_shared::DaemonSession],
+    include_archived: bool,
+) -> String {
+    if sessions.is_empty() {
+        return if include_archived {
+            "No sessions found in the daemon ledger.".to_string()
+        } else {
+            "No active daemon sessions. Launch one with `/coven run <harness> <prompt>`."
+                .to_string()
+        };
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<36}  {:<8}  {:<10}  {}\n",
+        "id", "harness", "status", "title"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(78)));
+    for s in sessions {
+        let title = if s.title.is_empty() {
+            "(untitled)"
+        } else {
+            s.title.as_str()
+        };
+        let status = if s.archived_at.is_some() {
+            "archived"
+        } else {
+            s.status.as_str()
+        };
+        out.push_str(&format!(
+            "{:<36}  {:<8}  {:<10}  {}\n",
+            s.id, s.harness, status, title
+        ));
+    }
+    out
+}
+
+/// Spawn the `coven` binary with the given argv tail and capture stdout/stderr.
+/// Returns the combined human-readable output (or an explanatory error if the
+/// binary is missing).
+fn coven_shell_out(args: &[&str]) -> String {
+    let mut cmd = std::process::Command::new("coven");
+    cmd.args(args);
+    match cmd.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let mut buf = String::new();
+            if !stdout.is_empty() {
+                buf.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&stderr);
+            }
+            if !out.status.success() {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&format!(
+                    "(coven exited with status {})",
+                    out.status.code().unwrap_or(-1)
+                ));
+            }
+            if buf.is_empty() {
+                "(no output)".to_string()
+            } else {
+                buf
+            }
+        }
+        Err(e) => format!(
+            "Could not launch the `coven` binary: {e}\n\
+             Install it from https://github.com/OpenCoven/coven or `npm install -g @opencoven/cli`."
+        ),
+    }
+}
+
+#[async_trait]
+impl SlashCommand for CovenCommand {
+    fn name(&self) -> &str {
+        "coven"
+    }
+    fn description(&self) -> &str {
+        "Drive the local Coven daemon (sessions, harness runs, rituals)"
+    }
+    fn help(&self) -> &str {
+        coven_help_text()
+    }
+    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        use claurst_core::coven_shared::DaemonClient;
+
+        let trimmed = args.trim();
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("").trim();
+        let rest = parts.next().unwrap_or("").trim();
+
+        // No subcommand → status. Matches `coven` (default) UX in coven-cli.
+        if sub.is_empty() || sub == "status" {
+            match DaemonClient::new() {
+                Some(client) => return CommandResult::Message(coven_format_health(&client)),
+                None => {
+                    return CommandResult::Message(
+                        "Coven daemon socket not found at ~/.coven/coven.sock.\n\
+                         Start it with `/coven daemon start` (or `coven daemon start`)."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        if sub == "help" || sub == "--help" || sub == "-h" {
+            return CommandResult::Message(coven_help_text().to_string());
+        }
+
+        match sub {
+            // Read-only listings — use the in-process client.
+            "sessions" => {
+                let include_archived = rest.split_whitespace().any(|t| t == "--all" || t == "-a");
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                let sessions = if include_archived {
+                    client.all_sessions()
+                } else {
+                    client.active_sessions()
+                };
+                CommandResult::Message(coven_format_sessions(&sessions, include_archived))
+            }
+
+            // Verbs that shell out — the daemon's HTTP API does not expose
+            // these yet, but the `coven` CLI implements them against the same
+            // store. We keep the verb names identical to coven-cli/src/tui/shell.rs.
+            "run" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven run <harness> <prompt>".to_string(),
+                    );
+                }
+                let mut harness_split = rest.splitn(2, char::is_whitespace);
+                let harness = harness_split.next().unwrap_or("");
+                let prompt = harness_split.next().unwrap_or("").trim();
+                if harness.is_empty() || prompt.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven run <harness> <prompt>".to_string(),
+                    );
+                }
+                CommandResult::Message(coven_shell_out(&["run", harness, prompt]))
+            }
+            "attach" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven attach <session-id>".to_string());
+                }
+                CommandResult::Message(coven_shell_out(&["attach", rest]))
+            }
+            "summon" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven summon <session-id>".to_string());
+                }
+                CommandResult::Message(coven_shell_out(&["summon", rest]))
+            }
+            "archive" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven archive <session-id>".to_string());
+                }
+                CommandResult::Message(coven_shell_out(&["archive", rest]))
+            }
+            "sacrifice" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven sacrifice <session-id>\n\
+                         Sacrifice is irreversible; the underlying CLI requires --yes."
+                            .to_string(),
+                    );
+                }
+                // The coven CLI requires --yes for sacrifice; injecting it
+                // mirrors the slash-TUI behavior in coven-cli where users
+                // confirm by typing the slash command.
+                CommandResult::Message(coven_shell_out(&["sacrifice", rest, "--yes"]))
+            }
+            "doctor" => CommandResult::Message(coven_shell_out(&["doctor"])),
+            "daemon" => {
+                let action = rest.split_whitespace().next().unwrap_or("status");
+                if !matches!(action, "start" | "status" | "stop" | "restart") {
+                    return CommandResult::Error(format!(
+                        "Unknown daemon action: '{action}'.\nUse start | status | stop | restart."
+                    ));
+                }
+                CommandResult::Message(coven_shell_out(&["daemon", action]))
+            }
+            "patch" => {
+                // Pass the remainder through verbatim — `coven patch` takes a
+                // flexible mix of positional name + issue text + flags.
+                let mut argv: Vec<&str> = vec!["patch"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+            "pc" => {
+                let mut argv: Vec<&str> = vec!["pc"];
+                argv.extend(rest.split_whitespace());
+                CommandResult::Message(coven_shell_out(&argv))
+            }
+            other => CommandResult::Error(format!(
+                "Unknown /coven subcommand: '{other}'.\nRun `/coven help` for usage."
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -10042,6 +10331,8 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ManagedAgentsCommand),
         // Durable long-running goals
         Box::new(GoalCommand),
+        // Coven daemon control surface (sessions, harness runs, rituals)
+        Box::new(CovenCommand),
     ]
 });
 
@@ -10519,6 +10810,52 @@ mod tests {
         let cmd = find_command("import-config").unwrap();
         let result = cmd.execute("", &mut ctx).await;
         assert!(matches!(result, CommandResult::OpenImportConfigOverlay));
+    }
+
+    #[tokio::test]
+    async fn test_coven_command_registered() {
+        // `/coven` must be wired into the registry so the TUI autocompletes it.
+        assert!(find_command("coven").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_coven_help_returns_usage_message() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("help", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Usage: /coven"));
+                assert!(msg.contains("sessions"));
+                assert!(msg.contains("attach"));
+                assert!(msg.contains("sacrifice"));
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_attach_without_id_errors() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("attach", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_unknown_subcommand_errors() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("nonsense", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_daemon_rejects_bad_action() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("daemon explode", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
     }
 
     #[test]
