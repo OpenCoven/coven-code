@@ -9868,13 +9868,21 @@ fn coven_help_text() -> &'static str {
      Status & lifecycle\n\
        /coven                          Daemon health + active session count\n\
        /coven status                   Same as /coven\n\
+       /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
        /coven daemon start|status|stop|restart\n\
      \n\
-     Sessions\n\
+     Sessions (read-only)\n\
        /coven sessions [--all]         List active (or all) daemon sessions\n\
+       /coven log <session-id>         Fetch the redacted log preview\n\
+     \n\
+     Sessions (live control)\n\
        /coven run <harness> <prompt>   Launch a new harness session\n\
+       /coven send <session-id> <txt>  Forward input to a live session\n\
+       /coven kill <session-id>        Terminate a live session\n\
        /coven attach <session-id>      Replay/follow a running session\n\
+     \n\
+     Session rituals\n\
        /coven summon <session-id>      Restore an archived session\n\
        /coven archive <session-id>     Archive a non-running session\n\
        /coven sacrifice <session-id>   Permanently delete a session\n\
@@ -10058,6 +10066,86 @@ impl SlashCommand for CovenCommand {
                     client.active_sessions()
                 };
                 CommandResult::Message(coven_format_sessions(&sessions, include_archived))
+            }
+
+            // Native-API verbs. The daemon's HTTP contract exposes these
+            // directly, so we hit it in-process and bypass the shell-out
+            // path entirely.
+            "familiars" => {
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                let statuses = client.familiar_statuses();
+                if statuses.is_empty() {
+                    return CommandResult::Message(
+                        "No familiars reported by the daemon.".to_string(),
+                    );
+                }
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "{:<12}  {:<14}  {:<8}  active  freshness\n",
+                    "id", "display", "status"
+                ));
+                out.push_str(&format!("{}\n", "-".repeat(64)));
+                for f in &statuses {
+                    out.push_str(&format!(
+                        "{:<12}  {:<14}  {:<8}  {:>6}  {}\n",
+                        f.id, f.display_name, f.status, f.active_sessions, f.memory_freshness,
+                    ));
+                }
+                CommandResult::Message(out)
+            }
+            "log" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven log <session-id>".to_string());
+                }
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.session_log(rest) {
+                    Some(log) if !log.is_empty() => CommandResult::Message(log),
+                    Some(_) => CommandResult::Message("(session log is empty)".to_string()),
+                    None => CommandResult::Error(format!(
+                        "Daemon returned no log for session '{rest}'. Check the id with `/coven sessions`."
+                    )),
+                }
+            }
+            "send" => {
+                let mut split = rest.splitn(2, char::is_whitespace);
+                let id = split.next().unwrap_or("");
+                let input = split.next().unwrap_or("").trim();
+                if id.is_empty() || input.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven send <session-id> <text>".to_string(),
+                    );
+                }
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.send_input(id, input) {
+                    Ok(()) => CommandResult::Message(format!("Sent input to {id}.")),
+                    Err(e) => CommandResult::Error(format!("Failed to send input: {e}")),
+                }
+            }
+            "kill" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven kill <session-id>".to_string());
+                }
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.kill_session(rest) {
+                    Ok(()) => CommandResult::Message(format!("Killed session {rest}.")),
+                    Err(e) => CommandResult::Error(format!("Failed to kill session: {e}")),
+                }
             }
 
             // Verbs that shell out — the daemon's HTTP API does not expose
@@ -10856,6 +10944,51 @@ mod tests {
         let cmd = find_command("coven").unwrap();
         let result = cmd.execute("daemon explode", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_send_requires_id_and_text() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        assert!(matches!(
+            cmd.execute("send", &mut ctx).await,
+            CommandResult::Error(_)
+        ));
+        assert!(matches!(
+            cmd.execute("send abc-123", &mut ctx).await,
+            CommandResult::Error(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_coven_kill_requires_id() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("kill", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_log_requires_id() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("log", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_help_lists_native_subcommands() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("help", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                for verb in ["familiars", "log", "send", "kill"] {
+                    assert!(msg.contains(verb), "help should mention {verb}: {msg}");
+                }
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
     }
 
     #[test]
