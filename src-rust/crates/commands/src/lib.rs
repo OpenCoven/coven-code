@@ -9868,13 +9868,16 @@ fn coven_help_text() -> &'static str {
      Status & lifecycle\n\
        /coven                          Daemon health + active session count\n\
        /coven status                   Same as /coven\n\
+       /coven capabilities             Daemon capability catalog (harness manifests)\n\
        /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
        /coven daemon start|status|stop|restart\n\
      \n\
      Sessions (read-only)\n\
        /coven sessions [--all]         List active (or all) daemon sessions\n\
+       /coven info <session-id>        Show full session record\n\
        /coven log <session-id>         Fetch the redacted log preview\n\
+       /coven events <id> [--after N] [--limit M]   Stream a page of session events\n\
      \n\
      Sessions (live control)\n\
        /coven run <harness> <prompt>   Launch a new harness session\n\
@@ -9886,6 +9889,9 @@ fn coven_help_text() -> &'static str {
        /coven summon <session-id>      Restore an archived session\n\
        /coven archive <session-id>     Archive a non-running session\n\
        /coven sacrifice <session-id>   Permanently delete a session\n\
+     \n\
+     Control plane\n\
+       /coven actions <action> [json]  POST a control-plane action\n\
      \n\
      Workflows\n\
        /coven patch [name] [issue]     Open the OpenClaw repair flow\n\
@@ -10145,6 +10151,182 @@ impl SlashCommand for CovenCommand {
                 match client.kill_session(rest) {
                     Ok(()) => CommandResult::Message(format!("Killed session {rest}.")),
                     Err(e) => CommandResult::Error(format!("Failed to kill session: {e}")),
+                }
+            }
+            "capabilities" => {
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.capabilities() {
+                    Some(body) => {
+                        let pretty = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                            .unwrap_or(body);
+                        CommandResult::Message(pretty)
+                    }
+                    None => CommandResult::Error(
+                        "Daemon returned no capability catalog.".to_string(),
+                    ),
+                }
+            }
+            "info" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /coven info <session-id>".to_string());
+                }
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.get_session(rest) {
+                    Some(s) => {
+                        let archived = s
+                            .archived_at
+                            .as_deref()
+                            .map(|t| format!("\n  archived: {t}"))
+                            .unwrap_or_default();
+                        let title = if s.title.is_empty() {
+                            "(untitled)"
+                        } else {
+                            s.title.as_str()
+                        };
+                        CommandResult::Message(format!(
+                            "Session {id}\n  harness: {h}\n  status: {st}\n  project: {root}\n  title: {t}{a}",
+                            id = s.id,
+                            h = s.harness,
+                            st = s.status,
+                            root = s.project_root,
+                            t = title,
+                            a = archived,
+                        ))
+                    }
+                    None => CommandResult::Error(format!(
+                        "No session with id '{rest}' (or daemon offline)."
+                    )),
+                }
+            }
+            "events" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven events <session-id> [--after N] [--limit M]".to_string(),
+                    );
+                }
+                let mut tokens = rest.split_whitespace();
+                let id = tokens.next().unwrap_or("");
+                let mut after: Option<i64> = None;
+                let mut limit: Option<u32> = None;
+                while let Some(tok) = tokens.next() {
+                    match tok {
+                        "--after" | "--after-seq" => {
+                            if let Some(v) = tokens.next() {
+                                after = v.parse().ok();
+                            }
+                        }
+                        "--limit" => {
+                            if let Some(v) = tokens.next() {
+                                limit = v.parse().ok();
+                            }
+                        }
+                        _ => {
+                            return CommandResult::Error(format!(
+                                "Unknown flag '{tok}'.\nUsage: /coven events <session-id> [--after N] [--limit M]"
+                            ));
+                        }
+                    }
+                }
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.session_events(id, after, limit) {
+                    Some(page) => {
+                        if page.events.is_empty() {
+                            return CommandResult::Message(
+                                "(no events in this page)".to_string(),
+                            );
+                        }
+                        let mut out = String::new();
+                        out.push_str(&format!(
+                            "{:<5}  {:<16}  {:<20}  {}\n",
+                            "seq", "kind", "createdAt", "payload (truncated)"
+                        ));
+                        out.push_str(&format!("{}\n", "-".repeat(78)));
+                        for ev in &page.events {
+                            let seq = ev
+                                .seq
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "?".to_string());
+                            let payload = if ev.payload_json.len() > 36 {
+                                format!("{}…", &ev.payload_json[..36])
+                            } else {
+                                ev.payload_json.clone()
+                            };
+                            out.push_str(&format!(
+                                "{:<5}  {:<16}  {:<20}  {}\n",
+                                seq, ev.kind, ev.created_at, payload
+                            ));
+                        }
+                        if page.has_more {
+                            if let Some(next) = page.next_after_seq {
+                                out.push_str(&format!(
+                                    "\nMore events available — `/coven events {id} --after {next}`."
+                                ));
+                            } else {
+                                out.push_str("\nMore events available.");
+                            }
+                        }
+                        CommandResult::Message(out)
+                    }
+                    None => CommandResult::Error(format!(
+                        "Daemon returned no events for session '{id}'."
+                    )),
+                }
+            }
+            "actions" => {
+                if rest.is_empty() {
+                    return CommandResult::Error(
+                        "Usage: /coven actions <action> [json-args]".to_string(),
+                    );
+                }
+                let mut split = rest.splitn(2, char::is_whitespace);
+                let action = split.next().unwrap_or("").trim();
+                let args_raw = split.next().unwrap_or("").trim();
+                let args = if args_raw.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(args_raw) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            return CommandResult::Error(format!(
+                                "Could not parse args as JSON: {e}\nUsage: /coven actions <action> [json-args]"
+                            ));
+                        }
+                    }
+                };
+                let Some(client) = DaemonClient::new() else {
+                    return CommandResult::Message(
+                        "Coven daemon offline. Try `/coven daemon start`.".to_string(),
+                    );
+                };
+                match client.control_action(action, args) {
+                    Ok(res) => {
+                        let mut out = format!(
+                            "action: {a}\nstatus: {st}\naccepted: {acc}\nok: {ok}",
+                            a = res.action,
+                            st = res.status,
+                            acc = res.accepted,
+                            ok = res.ok,
+                        );
+                        if let Some(r) = res.reason {
+                            out.push_str(&format!("\nreason: {r}"));
+                        }
+                        CommandResult::Message(out)
+                    }
+                    Err(e) => CommandResult::Error(format!("Action failed: {e}")),
                 }
             }
 
@@ -10983,12 +11165,63 @@ mod tests {
         let result = cmd.execute("help", &mut ctx).await;
         match result {
             CommandResult::Message(msg) => {
-                for verb in ["familiars", "log", "send", "kill"] {
+                for verb in [
+                    "familiars",
+                    "log",
+                    "send",
+                    "kill",
+                    "capabilities",
+                    "info",
+                    "events",
+                    "actions",
+                ] {
                     assert!(msg.contains(verb), "help should mention {verb}: {msg}");
                 }
             }
             other => panic!("expected Message, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_coven_info_requires_id() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("info", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_events_requires_id() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("events", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_events_rejects_unknown_flag() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("events abc-123 --wat 1", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_actions_requires_name() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("actions", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_coven_actions_rejects_bad_json_args() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd
+            .execute("actions coven.capabilities.refresh not-json", &mut ctx)
+            .await;
+        assert!(matches!(result, CommandResult::Error(_)));
     }
 
     #[test]

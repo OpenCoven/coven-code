@@ -56,6 +56,35 @@ pub struct DaemonHealth {
     pub started_at: Option<String>,
 }
 
+/// Page of session events returned by `GET /api/v1/sessions/:id/events`.
+#[derive(Debug, Clone)]
+pub struct EventPage {
+    pub events: Vec<EventRecord>,
+    pub next_after_seq: Option<i64>,
+    pub has_more: bool,
+}
+
+/// One session event from the daemon's event ledger.
+#[derive(Debug, Clone)]
+pub struct EventRecord {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub seq: Option<i64>,
+    pub created_at: String,
+    pub payload_json: String,
+}
+
+/// Result of `POST /api/v1/actions`. Mirrors the daemon's `ControlActionResponse`.
+#[derive(Debug, Clone)]
+pub struct ControlActionResult {
+    pub ok: bool,
+    pub accepted: bool,
+    pub action: String,
+    pub status: String,
+    pub reason: Option<String>,
+}
+
 /// Payload for creating a new Coven daemon session.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateSessionRequest {
@@ -344,6 +373,117 @@ impl DaemonClient {
     pub fn session_log(&self, session_id: &str) -> Option<String> {
         let path = format!("/api/v1/sessions/{}/log", url_quote(session_id));
         self.get(&path)
+    }
+
+    /// Fetch the daemon's capability catalog. Returns the raw JSON body so
+    /// callers can pretty-print it without us tying the client to one shape.
+    pub fn capabilities(&self) -> Option<String> {
+        self.get("/api/v1/capabilities")
+    }
+
+    /// Fetch a page of session events. Uses the documented `afterSeq` cursor
+    /// pagination.
+    pub fn session_events(
+        &self,
+        session_id: &str,
+        after_seq: Option<i64>,
+        limit: Option<u32>,
+    ) -> Option<EventPage> {
+        let mut path = format!("/api/v1/sessions/{}/events", url_quote(session_id));
+        let mut query: Vec<String> = Vec::new();
+        if let Some(seq) = after_seq {
+            query.push(format!("afterSeq={seq}"));
+        }
+        if let Some(n) = limit {
+            query.push(format!("limit={n}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        let body = self.get(&path)?;
+        let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let events_json = value.get("events").and_then(|v| v.as_array())?;
+        let events: Vec<EventRecord> = events_json
+            .iter()
+            .map(|ev| EventRecord {
+                id: ev.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                session_id: ev
+                    .get("sessionId")
+                    .or_else(|| ev.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                kind: ev.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                seq: ev.get("seq").and_then(|v| v.as_i64()),
+                created_at: ev
+                    .get("createdAt")
+                    .or_else(|| ev.get("created_at"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                payload_json: ev
+                    .get("payload")
+                    .or_else(|| ev.get("payloadJson"))
+                    .or_else(|| ev.get("payload_json"))
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let next_after_seq = value
+            .get("nextCursor")
+            .and_then(|c| c.get("afterSeq"))
+            .and_then(|v| v.as_i64());
+        let has_more = value
+            .get("hasMore")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Some(EventPage {
+            events,
+            next_after_seq,
+            has_more,
+        })
+    }
+
+    /// Send a control-plane action. `args` is an optional JSON object that
+    /// will be included as the request's `args` field if present.
+    pub fn control_action(
+        &self,
+        action: &str,
+        args: Option<serde_json::Value>,
+    ) -> Result<ControlActionResult, String> {
+        let mut payload = serde_json::Map::new();
+        payload.insert("action".to_string(), serde_json::Value::String(action.to_string()));
+        if let Some(a) = args {
+            payload.insert("args".to_string(), a);
+        }
+        let body = serde_json::Value::Object(payload).to_string();
+        let response = self
+            .request("POST", "/api/v1/actions", Some(&body))
+            .ok_or_else(|| "daemon refused action or returned non-2xx".to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| format!("daemon returned invalid action JSON: {e}"))?;
+        Ok(ControlActionResult {
+            ok: value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            accepted: value
+                .get("accepted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            action: value
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or(action)
+                .to_string(),
+            status: value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            reason: value
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
     }
 
     /// Create a daemon session and return its session id.
