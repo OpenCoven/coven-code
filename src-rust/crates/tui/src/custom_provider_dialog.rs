@@ -119,7 +119,7 @@ pub fn render_custom_provider_dialog(
         return;
     }
 
-    let pink = Color::Rgb(233, 30, 99);
+    let accent = Color::Rgb(184, 175, 220);
     let dim = Color::Rgb(90, 90, 90);
     let muted = Color::Rgb(180, 180, 180);
     let dialog_bg = COVEN_CODE_PANEL_BG;
@@ -184,7 +184,7 @@ pub fn render_custom_provider_dialog(
     lines.push(Line::from(vec![
         Span::styled(
             format!(" {}", title_text),
-            Style::default().fg(pink).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>width$}", "esc ", width = title_pad),
@@ -204,7 +204,7 @@ pub fn render_custom_provider_dialog(
             } else {
                 ""
             },
-            Style::default().fg(pink),
+            Style::default().fg(accent),
         ),
     ]));
     lines.push(Line::from(""));
@@ -220,7 +220,7 @@ pub fn render_custom_provider_dialog(
             } else {
                 ""
             },
-            Style::default().fg(pink),
+            Style::default().fg(accent),
         ),
     ]));
     lines.push(Line::from(""));

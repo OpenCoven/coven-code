@@ -76,7 +76,7 @@ const SPINNER: &[char] = &[
     '\u{00b7}', '\u{2722}', '\u{2733}', '\u{2736}', '\u{273b}', '\u{273d}', '\u{273d}', '\u{273b}',
     '\u{2736}', '\u{2733}', '\u{2722}', '\u{00b7}',
 ];
-const CLAUDE_ORANGE: Color = Color::Rgb(233, 30, 99);
+const COVEN_VIOLET: Color = Color::Rgb(184, 175, 220);
 const APP_BACKGROUND: Color = Color::Rgb(0, 0, 0);
 // 11 rows: 1 (top border) + 1 (Welcome) + 1 (blank) + 4 (familiar card) +
 // 1 (Status header in right column) + 4 (Model/Provider/Daemon/Familiar) +
@@ -280,7 +280,7 @@ fn startup_notice_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             Span::styled(
                 format!(" {} ", crate::figures::REFERENCE_MARK),
                 Style::default()
-                    .fg(CLAUDE_ORANGE)
+                    .fg(COVEN_VIOLET)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -302,7 +302,7 @@ fn startup_notice_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 "Remote session active".to_string()
             };
             lines.push(Line::from(vec![
-                Span::styled(" remote ", Style::default().fg(CLAUDE_ORANGE)),
+                Span::styled(" remote ", Style::default().fg(COVEN_VIOLET)),
                 Span::styled(label, Style::default().fg(Color::DarkGray)),
             ]));
         }
@@ -329,7 +329,7 @@ fn startup_notice_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if let Some(url) = app.remote_session_url.as_deref() {
         lines.push(Line::from(vec![
-            Span::styled(" link ", Style::default().fg(CLAUDE_ORANGE)),
+            Span::styled(" link ", Style::default().fg(COVEN_VIOLET)),
             Span::styled(
                 truncate_end(url, max_width),
                 Style::default().fg(Color::DarkGray),
@@ -1245,7 +1245,7 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
             indicator,
             Style::default()
                 .fg(Color::Black)
-                .bg(CLAUDE_ORANGE)
+                .bg(COVEN_VIOLET)
                 .add_modifier(Modifier::BOLD),
         )]);
         frame.render_widget(Paragraph::new(vec![ind_line]), ind_area);
@@ -1639,7 +1639,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 "Coven Code ",
                 Style::default()
-                    .fg(CLAUDE_ORANGE)
+                    .fg(COVEN_VIOLET)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1935,7 +1935,7 @@ fn render_tool_block_lines(
     let accent = if block.status == ToolStatus::Error {
         Color::Rgb(255, 140, 0)
     } else {
-        CLAUDE_ORANGE
+        COVEN_VIOLET
     };
     let mut header_spans = vec![Span::styled(
         "   ~ ".to_string(),
@@ -2839,20 +2839,20 @@ fn render_prompt_suggestions(frame: &mut Frame, app: &App, area: Rect) {
         let is_selected = start + row == selected;
         let accent_style = if is_selected {
             Style::default()
-                .fg(CLAUDE_ORANGE)
+                .fg(COVEN_VIOLET)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
         let label_style = if is_selected {
             Style::default()
-                .fg(CLAUDE_ORANGE)
+                .fg(COVEN_VIOLET)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
         let detail_style = if is_selected {
-            Style::default().fg(CLAUDE_ORANGE)
+            Style::default().fg(COVEN_VIOLET)
         } else {
             Style::default().fg(Color::DarkGray)
         };

@@ -60,7 +60,7 @@ const TRUNCATE_USER_PROMPT_HEAD_CHARS: usize = 2_500;
 const TRUNCATE_USER_PROMPT_TAIL_CHARS: usize = 2_500;
 
 /// Claude orange: Rgb(215, 119, 87)
-const CLAUDE_ORANGE: Color = Color::Rgb(233, 30, 99);
+const COVEN_VIOLET: Color = Color::Rgb(184, 175, 220);
 const TRANSCRIPT_USER_BG: Color = Color::Rgb(23, 23, 31);
 const TRANSCRIPT_CHIP_BG: Color = Color::Rgb(31, 31, 41);
 const TRANSCRIPT_TEXT: Color = Color::Rgb(236, 236, 241);
@@ -169,7 +169,7 @@ fn apply_block_style(mut line: Line<'static>, width: u16) -> Line<'static> {
     }
 
     let mut spans = vec![
-        Span::styled("▏", Style::default().fg(CLAUDE_ORANGE).bg(bg)),
+        Span::styled("▏", Style::default().fg(COVEN_VIOLET).bg(bg)),
         Span::styled(" ", Style::default().bg(bg)),
     ];
     spans.extend(line.spans);
@@ -189,7 +189,7 @@ fn empty_block_line(width: u16) -> Line<'static> {
     apply_block_style(Line::from(""), width)
 }
 fn render_attachment_chip(kind: &str, label: String) -> Line<'static> {
-    render_attachment_chip_colored(kind, label, CLAUDE_ORANGE, Color::Black)
+    render_attachment_chip_colored(kind, label, COVEN_VIOLET, Color::Black)
 }
 
 fn render_file_chip(label: String) -> Line<'static> {
@@ -1124,7 +1124,7 @@ fn render_tool_use_inner(tool_name: &str, input: &serde_json::Value) -> Vec<Line
             return {
                 let mut task_lines = Vec::new();
                 task_lines.push(Line::from(vec![
-                    Span::styled("  ~ ".to_string(), Style::default().fg(CLAUDE_ORANGE)),
+                    Span::styled("  ~ ".to_string(), Style::default().fg(COVEN_VIOLET)),
                     Span::styled(
                         subagent_title(input),
                         Style::default()
@@ -1145,7 +1145,7 @@ fn render_tool_use_inner(tool_name: &str, input: &serde_json::Value) -> Vec<Line
     };
 
     lines.push(Line::from(vec![
-        Span::styled("  ~ ".to_string(), Style::default().fg(CLAUDE_ORANGE)),
+        Span::styled("  ~ ".to_string(), Style::default().fg(COVEN_VIOLET)),
         Span::styled(
             title.to_string(),
             Style::default()
@@ -1288,7 +1288,7 @@ pub fn render_tool_result_rejected(tool_name: &str, reason: &str) -> Vec<Line<'s
     vec![
         Line::from(vec![Span::styled(
             format!("  \u{2717} {} \u{2014} interrupted", tool_name),
-            Style::default().fg(CLAUDE_ORANGE),
+            Style::default().fg(COVEN_VIOLET),
         )]),
         Line::from(vec![Span::styled(
             format!("    {}", reason),
@@ -1435,12 +1435,12 @@ pub fn render_plan_steps(steps: &[String]) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![Span::styled(
         "  Plan:".to_string(),
         Style::default()
-            .fg(CLAUDE_ORANGE)
+            .fg(COVEN_VIOLET)
             .add_modifier(Modifier::BOLD),
     )]));
     for (i, step) in steps.iter().enumerate() {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {}. ", i + 1), Style::default().fg(CLAUDE_ORANGE)),
+            Span::styled(format!("  {}. ", i + 1), Style::default().fg(COVEN_VIOLET)),
             Span::styled(step.clone(), Style::default().fg(Color::White)),
         ]));
     }
@@ -1453,7 +1453,7 @@ pub fn render_plan_approval_prompt() -> Vec<Line<'static>> {
         Span::styled(
             "  Approve this plan? ".to_string(),
             Style::default()
-                .fg(CLAUDE_ORANGE)
+                .fg(COVEN_VIOLET)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -1630,7 +1630,7 @@ fn prefix_message_lines(
         Role::User => (
             "› ",
             Style::default()
-                .fg(Color::Rgb(233, 30, 99))
+                .fg(Color::Rgb(184, 175, 220))
                 .add_modifier(Modifier::BOLD),
             Style::default().fg(Color::White),
         ),
@@ -2127,7 +2127,7 @@ pub fn render_task_assignment(id: &str, subject: &str, desc: &str) -> Vec<Line<'
         subject.trim()
     };
     lines.push(Line::from(vec![
-        Span::styled("  ~ ", Style::default().fg(CLAUDE_ORANGE)),
+        Span::styled("  ~ ", Style::default().fg(COVEN_VIOLET)),
         Span::styled(
             title.to_string(),
             Style::default()

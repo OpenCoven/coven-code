@@ -233,7 +233,7 @@ pub fn render_feedback_survey(state: &FeedbackSurveyState, area: Rect, buf: &mut
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(Color::Rgb(233, 30, 99)));
+        .border_style(Style::default().fg(Color::Rgb(184, 175, 220)));
 
     let para = Paragraph::new(body_lines)
         .block(block)
