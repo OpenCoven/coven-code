@@ -2,10 +2,12 @@
  * App entry point: single-page layout with scroll-spy navigation
  */
 
+import Alpine from 'alpinejs';
 import { initSidebar, updateActiveSection } from './sidebar.js';
 import { renderHero, fetchStars, formatStars } from './hero.js';
 import { processCodeBlocks } from './code-highlight.js';
 import { sections } from './content/index.js';
+import { registerDemos } from './demos.js';
 
 async function init() {
   const heroContainer = document.getElementById('hero-container');
@@ -26,6 +28,13 @@ async function init() {
 
   contentEl.innerHTML = html;
   processCodeBlocks(contentEl);
+
+  // Register Alpine.data() factories for each demo, then start Alpine.
+  // Alpine scans the DOM once on start; doing this after innerHTML is set
+  // means directives in rendered content modules get bound.
+  registerDemos(Alpine);
+  window.Alpine = Alpine;
+  Alpine.start();
 
   initSidebar();
   setupScrollSpy();

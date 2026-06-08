@@ -16,6 +16,57 @@ export function render() {
     <h3>Agentic loop</h3>
     <p>Coven Code runs a multi-turn loop: it streams a response from the model, executes any tool calls (file read, bash, web search, …), feeds the results back, and continues until the task is done or the turn limit is reached.</p>
 
+    <div class="demo" x-data="agenticLoop" x-init="init()">
+      <div class="demo-header">
+        <span>walkthrough · "add input validation"</span>
+        <div class="demo-header-actions">
+          <button class="demo-btn" @click="prev()" title="Previous step">‹</button>
+          <button class="demo-btn" @click="toggle()" :aria-pressed="playing" x-text="playing ? 'Pause' : 'Play'"></button>
+          <button class="demo-btn" @click="next()" title="Next step">›</button>
+          <button class="demo-btn" @click="reset()" title="Reset to start">⟲</button>
+        </div>
+      </div>
+      <div class="demo-body">
+        <div class="loop-wrap">
+          <div class="loop-stages">
+            <div class="loop-stage" :data-active="current.actor === 'user'">
+              <span class="loop-stage-num">01</span>
+              You prompt
+            </div>
+            <div class="loop-stage" :data-active="current.actor === 'model' && !current.tool">
+              <span class="loop-stage-num">02</span>
+              Model thinks
+            </div>
+            <div class="loop-stage" :data-active="current.actor === 'model' && !!current.tool">
+              <span class="loop-stage-num">03</span>
+              Tool call
+            </div>
+            <div class="loop-stage" :data-active="current.actor === 'tool'">
+              <span class="loop-stage-num">04</span>
+              Result returns
+            </div>
+          </div>
+          <div class="loop-message" :class="'loop-actor-' + current.actor">
+            <div class="loop-actor">
+              <span class="loop-actor-dot"></span>
+              <span x-text="current.label"></span>
+              <span style="margin-left:auto; color: var(--color-text-dimmer); font-family: var(--font-mono); font-size: 11px;">
+                step <span x-text="step + 1"></span> / <span x-text="steps.length"></span>
+              </span>
+            </div>
+            <div class="loop-text" x-text="current.text"></div>
+            <template x-if="current.tool">
+              <div class="loop-tool">
+                <span class="loop-tool-name" x-text="current.tool"></span>(<span class="loop-tool-args" x-text="current.toolArgs"></span>)
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p>The loop repeats — model emits a tool call, Coven Code runs it, the result feeds back in, the model decides what to do next. It only stops when the model says it's done, when a goal is verified complete, or when the turn limit is hit.</p>
+
     <h3>40+ built-in tools</h3>
     <ul>
       <li><strong>File operations</strong> — read, write, edit, patch, batch-edit</li>

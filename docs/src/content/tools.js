@@ -33,65 +33,90 @@ export function render() {
 
     <p>Permission rules are evaluated per-project and per-user — first match wins. Manage them with <code>/permissions</code>.</p>
 
-    <h2>File tools</h2>
+    <div class="demo" x-data="permissionViz">
+      <div class="demo-header">
+        <span>permission visualizer · pick a mode</span>
+      </div>
+      <div class="demo-body">
+        <div class="perm-modes">
+          <template x-for="m in modes" :key="m">
+            <button class="demo-btn" @click="mode = m" :aria-pressed="mode === m" x-text="m"></button>
+          </template>
+        </div>
+        <p class="perm-mode-blurb" x-text="blurbs[mode]"></p>
+        <div class="perm-grid">
+          <template x-for="level in levels" :key="level">
+            <div class="perm-row" :data-state="cell(level)">
+              <div class="perm-level" x-text="level"></div>
+              <div class="perm-state">
+                <span class="perm-mark" x-text="cellMark(level)"></span>
+                <span x-text="cellLabel(level)"></span>
+              </div>
+              <div class="perm-tools">
+                <template x-for="tool in examples[level]" :key="tool">
+                  <span class="perm-tool" x-text="tool"></span>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
 
-    <table>
-      <thead><tr><th>Tool</th><th>Level</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>FileReadTool</code></td><td>ReadOnly</td><td>Read files (text, images, PDFs, notebooks). Tracks reads for write enforcement.</td></tr>
-        <tr><td><code>FileWriteTool</code></td><td>Write</td><td>Create or overwrite a file. Requires prior read unless file is new.</td></tr>
-        <tr><td><code>FileEditTool</code></td><td>Write</td><td>Exact-string replacement; fails if <code>old_string</code> is missing or not unique.</td></tr>
-        <tr><td><code>BatchEditTool</code></td><td>Write</td><td>Apply many edits in one call; aborts atomically on any failure.</td></tr>
-        <tr><td><code>ApplyPatchTool</code></td><td>Write</td><td>Apply a unified diff patch.</td></tr>
-      </tbody>
-    </table>
+    <h2>Browse the toolkit</h2>
 
-    <p>Write tools enforce read-before-write: a file must have been read in the current session before it can be modified, preventing blind overwrites.</p>
+    <p>Click a tool to see its parameters and an example invocation. Write tools enforce read-before-write — a file must have been read in the current session before it can be modified, preventing blind overwrites.</p>
 
-    <h2>Shell execution</h2>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>BashTool</code></td><td>Execute shell commands with persistent working directory and environment.</td></tr>
-        <tr><td><code>MonitorTool</code></td><td>Tail a long-running background process started by Bash.</td></tr>
-        <tr><td><code>PtyBashTool</code></td><td>Bash in a pseudo-terminal — for commands needing TTY.</td></tr>
-        <tr><td><code>PowerShellTool</code></td><td>PowerShell execution on Windows.</td></tr>
-        <tr><td><code>ReplTool</code></td><td>Persistent REPL session (python, node, etc.).</td></tr>
-      </tbody>
-    </table>
-
-    <h2>Search</h2>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>GlobTool</code></td><td>Match files by glob pattern (e.g. <code>src/**/*.rs</code>).</td></tr>
-        <tr><td><code>GrepTool</code></td><td>Regex-search file contents — ripgrep semantics.</td></tr>
-        <tr><td><code>ToolSearchTool</code></td><td>Look up tools by name/keyword (used by the model for deferred tools).</td></tr>
-      </tbody>
-    </table>
-
-    <h2>Web</h2>
-
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>WebFetchTool</code></td><td>Fetch a URL and summarize/extract via a small fast model.</td></tr>
-        <tr><td><code>WebSearchTool</code></td><td>Web search with snippet results.</td></tr>
-      </tbody>
-    </table>
-
-    <h2>Task management</h2>
-
-    <p><code>TaskCreate</code>, <code>TaskUpdate</code>, <code>TaskList</code>, <code>TaskGet</code>, <code>TaskOutput</code>, <code>TaskStop</code> — for breaking work into trackable units, visible to the user via <code>/tasks</code>.</p>
+    <div class="demo" x-data="toolsGrid">
+      <div class="demo-header">
+        <span>tools catalog · click any card</span>
+      </div>
+      <div class="demo-body">
+        <template x-for="cat in categories" :key="cat.name">
+          <div class="tools-cat">
+            <div class="tools-cat-title" x-text="cat.name"></div>
+            <div class="tools-cards">
+              <template x-for="tool in cat.tools" :key="tool.name">
+                <button
+                  type="button"
+                  class="tool-card"
+                  :aria-expanded="expanded === tool.name"
+                  @click="toggle(tool.name)"
+                >
+                  <div class="tool-card-head">
+                    <span class="tool-card-name" x-text="tool.name"></span>
+                    <span class="tool-card-level" x-text="tool.level"></span>
+                  </div>
+                  <div class="tool-card-desc" x-text="tool.desc"></div>
+                  <template x-if="expanded === tool.name">
+                    <div class="tool-detail" @click.stop>
+                      <div class="tool-detail-section" x-show="tool.params.length">
+                        <div class="tool-detail-label">Parameters</div>
+                        <div class="tool-detail-params">
+                          <template x-for="p in tool.params" :key="p">
+                            <span class="tool-detail-param" x-text="p"></span>
+                          </template>
+                        </div>
+                      </div>
+                      <div class="tool-detail-section">
+                        <div class="tool-detail-label">Example</div>
+                        <div class="tool-detail-example" x-text="tool.example"></div>
+                      </div>
+                    </div>
+                  </template>
+                </button>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
 
     <h2>Other categories</h2>
 
     <ul>
-      <li><strong>Git</strong> — commit, branch, worktree</li>
       <li><strong>Notebooks</strong> — read and edit Jupyter notebooks</li>
-      <li><strong>Desktop automation</strong> — screenshot, click, type (optional feature)</li>
+      <li><strong>Desktop automation</strong> — screenshot, click, type (optional <code>computer-use</code> feature)</li>
       <li><strong>MCP tools</strong> — dynamically added when MCP servers connect; see <a href="#mcp">MCP</a></li>
     </ul>
 
