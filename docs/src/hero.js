@@ -11,9 +11,6 @@ export function renderHero(starCount) {
       <div class="hero-grid relative z-1">
         <div class="hero-copy">
           <div class="hero-kicker" style="animation: fade-up 0.7s cubic-bezier(0.16,1,0.3,1) both">Field manual / coven-code</div>
-          <div class="relative inline-block mb-8">
-            <img src="/coven.svg" alt="Coven Code" class="hero-logo h-36 w-auto relative z-1 max-sm:h-24" style="animation: hero-logo-in 0.8s 0.04s cubic-bezier(0.16,1,0.3,1) both" />
-          </div>
           <p class="hero-title" style="animation: fade-up 0.7s 0.1s cubic-bezier(0.16,1,0.3,1) both">A terminal coding agent in Rust</p>
           <p class="hero-subtitle" style="animation: fade-up 0.7s 0.2s cubic-bezier(0.16,1,0.3,1) both">Open-source agent for your terminal. 40+ tools, 15+ LLM providers, multi-account auth, plugin system, and native integration with the Coven daemon.</p>
           <div class="hero-actions" style="animation: fade-up 0.7s 0.3s cubic-bezier(0.16,1,0.3,1) both">
