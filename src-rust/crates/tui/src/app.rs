@@ -45,20 +45,32 @@ use std::io::Stdout;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
-const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
+/// Pairs of (name, one-line description) shown by the slash-command
+/// autocompletion, /help overlay, and the command palette. Must stay in
+/// sync with the non-hidden entries returned by
+/// `claurst_commands::all_commands()`; the
+/// `prompt_slash_commands_covers_registry` test in `claurst-commands`
+/// enforces that.
+pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("accounts", "List every stored account across providers"),
+    (
+        "add-dir",
+        "Add an extra workspace root to the active session",
+    ),
     ("advisor", "Set or unset the server-side advisor model"),
-    (
-        "familiar",
-        "Set your active familiar — changes the TUI mascot live",
-    ),
-    (
-        "handoff",
-        "Hand off current session context to a Coven familiar",
-    ),
     ("agent", "List available familiars or show familiar details"),
     ("agents", "Browse familiar definitions and active familiars"),
-    ("changes", "Inspect changes from the current session"),
+    ("branch", "Create or switch session branches"),
+    ("btw", "Send a side-channel note to the model"),
+    ("caveman", "Caveman speech mode — save big token"),
+    ("checkpoints", "Browse session snapshots / restore points"),
+    ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
+    ("color", "Set the prompt bar color for the current session"),
+    (
+        "commit",
+        "Stage and commit changes (model drafts the message)",
+    ),
     ("compact", "Compact the conversation context"),
     ("config", "Open settings"),
     ("connect", "Connect an AI provider"),
@@ -69,18 +81,31 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
     ),
+    ("ctx-viz", "Visualize context-window contents and usage"),
+    ("desktop", "Computer-use desktop control"),
     ("diff", "Inspect the current git diff"),
     ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
     ("exit", "Quit Coven Code"),
     ("export", "Export conversation"),
+    ("extra-usage", "Detailed token usage breakdown"),
+    (
+        "familiar",
+        "Set your active familiar — changes the TUI mascot live",
+    ),
     ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
+    ("files", "List files read or written this session"),
     ("fork", "Fork session into a new branch"),
     ("goal", "Set or view the current session goal"),
+    (
+        "handoff",
+        "Hand off current session context to a Coven familiar",
+    ),
     ("heapdump", "Show process memory and diagnostic information"),
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
+    ("ide", "Connect to the active IDE integration"),
     (
         "import-config",
         "Import CLAUDE.md and settings.json from ~/.claude",
@@ -90,6 +115,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "insights",
         "Generate a session analysis report with conversation statistics",
     ),
+    ("install-github-app", "Install the Coven Code GitHub App"),
     (
         "install-slack-app",
         "Install the Coven Code Slack integration",
@@ -104,32 +130,82 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
+    (
+        "mobile",
+        "Show QR code / links for the mobile companion app",
+    ),
     ("model", "Change the AI model"),
-    ("output-style", "Toggle output style (auto/stream/verbose)"),
-    ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
-    ("providers", "List available AI providers and their status"),
-    ("caveman", "Caveman speech mode — save big token"),
-    ("rocky", "Rocky speech mode — amaze amaze amaze"),
     ("normal", "Deactivate speech mode"),
+    ("output-style", "Toggle output style (auto/stream/verbose)"),
+    ("passes", "Inspect per-turn pass history"),
+    ("permissions", "Manage tool permission rules"),
+    ("plan", "Enter plan mode (read-only)"),
+    ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
+    (
+        "pr-comments",
+        "Read or post comments on the active GitHub PR",
+    ),
+    ("privacy-settings", "Open Coven Code privacy settings"),
+    ("providers", "List available AI providers and their status"),
     ("quit", "Exit Coven Code"),
+    ("rate-limit-options", "Configure rate-limit handling"),
     ("refresh", "Clear saved provider auth and model caches"),
+    ("release-notes", "View Coven Code release notes / changelog"),
+    (
+        "reload-plugins",
+        "Reload the active session plugin registry",
+    ),
+    ("remote-control", "Remote-control session via the bridge"),
+    ("remote-env", "Configure the remote-control environment"),
     ("rename", "Rename this session"),
     ("resume", "Resume a previous session"),
+    ("revert", "Revert a file to its pre-session state"),
     ("review", "Review changes (git diff)"),
     ("rewind", "Rewind to an earlier turn"),
+    ("rocky", "Rocky speech mode — amaze amaze amaze"),
+    ("sandbox-toggle", "Toggle sandboxed shell execution"),
+    ("search", "Search the codebase by natural language or regex"),
+    ("security-review", "Run a security-focused review pass"),
     ("session", "Browse and manage sessions"),
     ("settings", "Open settings"),
     (
         "share",
         "Upload the current session as a secret gist and get a shareable URL",
     ),
+    ("skills", "List and manage skills"),
+    ("snapshot", "Manage filesystem snapshots"),
     ("stats", "Open token and cost stats"),
+    ("status", "Show the current session status"),
+    ("statusline", "Configure the TUI status line"),
+    ("stickers", "Open the Coven Code sticker page"),
+    ("summary", "Generate a session summary"),
     ("survey", "Open session feedback survey"),
+    ("switch", "Switch the active account for a provider"),
+    ("tag", "Tag the current session with a label"),
+    ("tasks", "Manage tracked background tasks"),
+    (
+        "teleport",
+        "Bundle session state for teleporting to another machine",
+    ),
+    (
+        "terminal-setup",
+        "Run the terminal capability detection wizard",
+    ),
     ("theme", "Open the theme picker"),
+    (
+        "think-back",
+        "Show extended-thinking traces from previous responses",
+    ),
+    (
+        "thinkback-play",
+        "Replay a previous thinking trace as a walkthrough",
+    ),
+    ("thinking", "Configure extended thinking for the session"),
     (
         "ultrareview",
         "Run an exhaustive multi-dimensional code review",
     ),
+    ("undo", "Undo a file change made during this session"),
     (
         "update",
         "Check for updates and upgrade to the latest version",
@@ -138,8 +214,11 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "upgrade",
         "Check for updates and upgrade to the latest version",
     ),
+    ("usage", "Detailed per-call token usage breakdown"),
+    ("version", "Display the current Coven Code version"),
     ("vim", "Toggle vim keybindings"),
     ("voice", "Toggle voice input mode"),
+    ("web-setup", "Open the web-setup proxy assistant"),
 ];
 
 fn help_command_category(name: &str) -> &'static str {
@@ -147,9 +226,7 @@ fn help_command_category(name: &str) -> &'static str {
         "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => {
             "Model & Provider"
         }
-        "changes" | "diff" | "review" | "rewind" | "export" | "copy" | "share" | "links" => {
-            "Review & History"
-        }
+        "diff" | "review" | "rewind" | "export" | "copy" | "share" | "links" => "Review & History",
         "stats" | "cost" | "context" | "insights" | "heapdump" | "doctor" => "Diagnostics",
         "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
             "Workspace"

@@ -11400,6 +11400,67 @@ mod tests {
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
+    /// The TUI's slash-command autocomplete and `/help` overlay both read
+    /// from `claurst_tui::app::PROMPT_SLASH_COMMANDS`. That list is hand-
+    /// maintained — when a new command is added to the registry but not to
+    /// the list, the TUI silently hides it from autocomplete. This test is
+    /// the safety net.
+    #[test]
+    fn prompt_slash_commands_covers_registry() {
+        use std::collections::HashSet;
+
+        // Names that appear in autocomplete on purpose even though they're
+        // not (or not primarily) registered SlashCommands:
+        //  - quit / settings / survey: user-facing aliases of exit / config /
+        //    feedback.
+        //  - handoff: intercepted directly by the TUI via
+        //    `App::intercept_slash_command_with_args` (sends the current
+        //    session context to a Coven familiar). It is documented in
+        //    docs/familiars.md and lives in tui/src/handoff.rs.
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
+
+        let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+
+        // Every non-hidden registered command must show up in autocomplete.
+        let mut missing: Vec<&str> = all_commands()
+            .iter()
+            .filter(|c| !c.hidden())
+            .map(|c| c.name())
+            .filter(|name| !prompt_names.contains(name))
+            .collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "PROMPT_SLASH_COMMANDS is missing entries for non-hidden \
+             registered commands: {missing:?}. Add them to \
+             crates/tui/src/app.rs::PROMPT_SLASH_COMMANDS."
+        );
+
+        // No orphans in the prompt list (every entry must either match a
+        // registered command name/alias or be in the allow-list).
+        let known_names_and_aliases: HashSet<&str> = all_commands()
+            .iter()
+            .flat_map(|c| std::iter::once(c.name()).chain(c.aliases()))
+            .collect();
+        let mut orphans: Vec<&str> = prompt_names
+            .iter()
+            .copied()
+            .filter(|name| {
+                !known_names_and_aliases.contains(name) && !ALLOWED_ALIAS_NAMES.contains(name)
+            })
+            .collect();
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "PROMPT_SLASH_COMMANDS has orphan entries with no matching \
+             command: {orphans:?}. Either register the command or drop \
+             the entry."
+        );
+    }
+
     #[tokio::test]
     async fn test_coven_help_lists_integration_subcommands() {
         let mut ctx = make_ctx();
