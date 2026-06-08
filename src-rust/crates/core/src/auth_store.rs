@@ -49,14 +49,56 @@ impl AuthStore {
         }
     }
 
-    /// Persist the store to disk (best-effort).
+    /// Persist the store to disk (best-effort) using an atomic write.
+    ///
+    /// Writes go to a sibling tempfile and then `fs::rename` swaps it into
+    /// place. This avoids torn writes (a partially-written `auth.json` if
+    /// the process is killed mid-`write_all`) and the lost-update race
+    /// where two concurrent callers both truncate the file. The trade-off
+    /// is that we lose data only on rename failure, not on partial writes.
     pub fn save(&self) {
-        let path = Self::path();
+        let _ = self.save_to(&Self::path());
+    }
+
+    /// Atomic save to an arbitrary path. Returns an io::Error on failure so
+    /// tests can assert behaviour. The public `save()` wrapper keeps the
+    /// best-effort void return for backwards compatibility.
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Tempfile lives in the same directory so the rename is a same-
+        // filesystem atomic operation on Unix and ReplaceFile on Windows.
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("auth.json");
+
+        // Each tempfile name needs to be unique even across threads in the
+        // same process and the same nanosecond. PID + monotonic counter +
+        // current thread id is sufficient.
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = parent.join(format!(
+            ".{file_name}.tmp.{pid}.{tid:?}.{counter}",
+            pid = std::process::id(),
+            tid = std::thread::current().id(),
+        ));
+
+        std::fs::write(&tmp_path, json)?;
+        // rename is atomic on POSIX; on Windows std::fs::rename uses
+        // MoveFileExW with MOVEFILE_REPLACE_EXISTING.
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Best-effort cleanup of the leftover tempfile.
+                let _ = std::fs::remove_file(&tmp_path);
+                Err(e)
+            }
         }
     }
 
@@ -198,5 +240,71 @@ mod tests {
         );
 
         assert_eq!(store.api_key_for("openrouter").as_deref(), Some("or-key"));
+    }
+
+    /// Atomic save: a concurrent racer that creates the file mid-flight
+    /// must never leave us with a truncated `auth.json`. We test by writing
+    /// 50 stores in parallel to the same path and asserting the final
+    /// contents are a parseable AuthStore.
+    #[test]
+    fn save_to_is_atomic_under_concurrent_writers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().join("auth.json"));
+
+        let handles: Vec<_> = (0..50)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || {
+                    let mut store = AuthStore::default();
+                    store.credentials.insert(
+                        format!("provider-{i}"),
+                        StoredCredential::ApiKey {
+                            key: format!("key-{i}"),
+                        },
+                    );
+                    store.save_to(&path).expect("save_to should succeed");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        // The file must end up as a parseable AuthStore with exactly one
+        // credential (whichever writer rename'd last). Crucially, partial
+        // truncated JSON would fail to parse.
+        let body = std::fs::read_to_string(&*path).expect("file must exist");
+        let parsed: AuthStore = serde_json::from_str(&body)
+            .expect("final auth.json must be a valid AuthStore (not torn)");
+        assert_eq!(
+            parsed.credentials.len(),
+            1,
+            "exactly one writer's entry should survive"
+        );
+    }
+
+    #[test]
+    fn save_to_does_not_leave_tempfile_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = AuthStore::default();
+        store.save_to(&path).expect("save_to should succeed");
+
+        // The destination file is the only entry; no `.auth.json.tmp.*`
+        // residue should remain after a successful rename.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "auth.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected no tempfile residue, found {leftovers:?}"
+        );
     }
 }
