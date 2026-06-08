@@ -2,10 +2,10 @@ export const meta = { title: 'Familiars' };
 
 export function render() {
   return `
-    <h1>Coven familiars</h1>
+    <h1>Coven Familiars</h1>
     <p class="lead">Coven Code integrates natively with the Coven daemon's familiar roster. When the daemon is installed and running, every familiar you have configured under <code>~/.coven/</code> is automatically available inside Coven Code as a selectable agent persona — no extra setup required.</p>
 
-    <h2>What is a familiar?</h2>
+    <h2>What Is a Familiar?</h2>
 
     <p>A familiar is a named AI persona defined in the Coven ecosystem. Each familiar has an identity (display name, emoji, pronouns), a role description, and optional metadata used to shape how the model presents itself and reasons about tasks. Familiars are user-defined and live in <code>~/.coven/familiars.toml</code>, managed by the Coven daemon.</p>
 
@@ -22,7 +22,7 @@ export function render() {
 
     <p>You define your own familiars — the names, roles, and roster are entirely yours.</p>
 
-    <h2>How familiars appear</h2>
+    <h2>How Familiars Appear</h2>
 
     <p>When the daemon is present, <code>load_agent_definitions()</code> reads <code>~/.coven/familiars.toml</code> and converts each familiar into an <code>AgentDefinition</code> with:</p>
 
@@ -35,7 +35,7 @@ export function render() {
 
     <p>Familiars are appended <strong>after</strong> workspace agents in the list. If a user-defined agent shares the same display name as a familiar, the user definition wins.</p>
 
-    <h2>Where familiars show up</h2>
+    <h2>Where Familiars Show Up</h2>
 
     <ol>
       <li>The <strong>welcome panel</strong> (top-left of the home screen): glyph, name, access tier dot, and on wider terminals the role and an accent rule. See <a href="#welcome-screen">Welcome Screen</a>.</li>
@@ -43,7 +43,7 @@ export function render() {
       <li>The <strong><code>/agents</code> detail view</strong>: the card appears above the persona preview when you select a familiar-sourced agent.</li>
     </ol>
 
-    <h2>Switching familiars</h2>
+    <h2>Switching Familiars</h2>
 
     <p>From the TUI, press <kbd>F2</kbd> to open the switcher, or use the slash command:</p>
 
@@ -61,7 +61,7 @@ coven-code agents use raven</code></pre>
   "familiar": "raven"
 }</code></pre>
 
-    <h2>Without the daemon</h2>
+    <h2>Without the Daemon</h2>
 
     <p>Coven Code works fully standalone. Without the daemon, familiars degrade gracefully:</p>
 

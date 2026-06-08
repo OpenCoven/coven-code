@@ -5,7 +5,7 @@ export function render() {
     <h1>Model Context Protocol</h1>
     <p class="lead">MCP servers extend Coven Code with external tools, resources, and prompts. Servers run as subprocesses (stdio) or remote HTTP/SSE endpoints; their capabilities are discovered at handshake and wrapped as native tools the model can call.</p>
 
-    <h2>What MCP offers</h2>
+    <h2>What MCP Offers</h2>
 
     <ul>
       <li><strong>Tools</strong> — callable functions the model can invoke (analogous to built-ins like <code>Bash</code> or <code>Read</code>)</li>
@@ -15,7 +15,7 @@ export function render() {
 
     <h2>Transports</h2>
 
-    <h3>stdio (subprocess)</h3>
+    <h3>stdio (Subprocess)</h3>
 
     <p>Default transport. Coven Code spawns the server as a child process and communicates over its stdin/stdout using newline-delimited JSON-RPC 2.0.</p>
 
@@ -36,7 +36,7 @@ export function render() {
   "type": "http"
 }</code></pre>
 
-    <h2>Configuration fields</h2>
+    <h2>Configuration Fields</h2>
 
     <table>
       <thead><tr><th>Field</th><th>Required</th><th>Description</th></tr></thead>
@@ -50,7 +50,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Environment expansion</h2>
+    <h2>Environment Expansion</h2>
 
     <p>All string fields support shell-style variable expansion before the server is launched:</p>
 
@@ -62,7 +62,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Adding servers to settings.json</h2>
+    <h2>Adding Servers to settings.json</h2>
 
     <pre><code data-lang="json">{
   "config": {
@@ -92,11 +92,11 @@ export function render() {
 
     <p>Project-level servers go in <code>.coven-code/settings.json</code> at the project root and override global servers with the same name. Plugin-provided servers are merged before the initial MCP connection, so they're available on first startup.</p>
 
-    <h2>The /mcp command</h2>
+    <h2>The /mcp Command</h2>
 
     <p>Use <code>/mcp</code> inside an interactive session to list connected servers, see their tools/resources/prompts, reconnect, or inspect connection errors.</p>
 
-    <h2>MCP tools available to the model</h2>
+    <h2>MCP Tools Available to the Model</h2>
 
     <ul>
       <li><code>ListMcpResources</code> — enumerate URIs exposed by a server</li>
