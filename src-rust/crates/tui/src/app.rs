@@ -5836,7 +5836,10 @@ impl App {
         if selected_key != Some('P') {
             return;
         }
-        if let PermissionDialogKind::Bash { suggested_prefix, .. } = &pr.kind {
+        if let PermissionDialogKind::Bash {
+            suggested_prefix, ..
+        } = &pr.kind
+        {
             if let Some(prefix) = suggested_prefix
                 .as_deref()
                 .map(str::trim)
@@ -5870,7 +5873,9 @@ impl App {
             match c {
                 '\'' if !in_double_quote => in_single_quote = !in_single_quote,
                 '"' if !in_single_quote => in_double_quote = !in_double_quote,
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
+                ';' | '|' | '&' | '<' | '>' | '\n' | '\r'
+                    if !in_single_quote && !in_double_quote =>
+                {
                     return true;
                 }
                 '`' if !in_single_quote => return true,
@@ -7783,9 +7788,7 @@ mod tests {
         // Other commands and compound shell commands should NOT be allowed.
         assert!(!app.bash_command_allowed_by_prefix("git push origin main"));
         assert!(!app.bash_command_allowed_by_prefix("git status; curl https://example.com"));
-        assert!(!app.bash_command_allowed_by_prefix(
-            "git status ; curl https://example.com"
-        ));
+        assert!(!app.bash_command_allowed_by_prefix("git status ; curl https://example.com"));
         assert!(!app.bash_command_allowed_by_prefix("git status > /tmp/status.txt"));
         assert!(!app.bash_command_allowed_by_prefix("rm -rf /tmp"));
     }
