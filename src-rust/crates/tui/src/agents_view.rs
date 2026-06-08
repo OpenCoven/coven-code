@@ -408,6 +408,59 @@ impl AgentsMenuState {
         self.editor.error = None;
         Ok(msg)
     }
+
+    pub fn delete_selected_definition(&mut self) -> Result<String, String> {
+        let idx = match self.route {
+            AgentsRoute::List => {
+                if self.selected_row == 0 {
+                    return Err("Select a workspace agent to remove.".to_string());
+                }
+                self.selected_row - 1
+            }
+            AgentsRoute::Detail(idx) => idx,
+            AgentsRoute::Editor(_) => {
+                return Err("Leave the editor before removing an agent.".to_string());
+            }
+        };
+
+        let def = self
+            .definitions
+            .get(idx)
+            .ok_or_else(|| "Selected agent is no longer available.".to_string())?
+            .clone();
+        if def.source.starts_with("coven:familiar") {
+            return Err(
+                "Coven familiars are read-only in this menu. Remove them from ~/.coven/familiars.toml."
+                    .to_string(),
+            );
+        }
+        if def.source != "user" {
+            return Err(format!(
+                "Agents from {} cannot be removed from this menu.",
+                def.source
+            ));
+        }
+
+        std::fs::remove_file(&def.file_path)
+            .map_err(|err| format!("Failed to remove {}: {}", def.file_path.display(), err))?;
+
+        if let Some(root) = self.project_root.clone() {
+            self.definitions = load_agent_definitions(&root);
+        } else {
+            self.definitions.remove(idx);
+        }
+        self.route = AgentsRoute::List;
+        self.selected_row = if self.definitions.is_empty() {
+            0
+        } else {
+            (idx + 1).min(self.definitions.len())
+        };
+        self.list_scroll = self
+            .list_scroll
+            .min(self.definitions.len().saturating_sub(1));
+        self.editor = AgentEditorState::new();
+        Ok(format!("Removed agent {}.", def.name))
+    }
 }
 
 impl Default for AgentsMenuState {
@@ -764,6 +817,52 @@ mod tests {
         let result = state.confirm_selection();
         assert_eq!(result, Some(("nova".to_string(), "Nova".to_string())));
     }
+
+    #[test]
+    fn delete_selected_definition_removes_workspace_agent_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = temp.path().join(".coven-code").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let agent_path = agents_dir.join("reviewer.md");
+        std::fs::write(
+            &agent_path,
+            "---\nname: Reviewer\nmodel: claude-sonnet-4-6\ndescription: Reviews code\n---\n\nReview code.",
+        )
+        .expect("write agent");
+
+        let mut state = AgentsMenuState::new();
+        state.open(temp.path());
+        state.selected_row = 1;
+
+        let msg = state
+            .delete_selected_definition()
+            .expect("delete workspace agent");
+
+        assert_eq!(msg, "Removed agent Reviewer.");
+        assert!(!agent_path.exists());
+        assert!(!state
+            .definitions
+            .iter()
+            .any(|def| def.file_path == agent_path));
+        assert!(matches!(state.route, AgentsRoute::List));
+    }
+
+    #[test]
+    fn delete_selected_definition_rejects_coven_familiar() {
+        let mut state = AgentsMenuState::new();
+        state.definitions = vec![familiar_def("nova", "Nova")];
+        state.route = AgentsRoute::List;
+        state.selected_row = 1;
+
+        let err = state
+            .delete_selected_definition()
+            .expect_err("daemon familiar should not be removed from this menu");
+
+        assert_eq!(
+            err,
+            "Coven familiars are read-only in this menu. Remove them from ~/.coven/familiars.toml."
+        );
+    }
 }
 
 fn validate_editor(editor: &AgentEditorState) -> Result<(), String> {
@@ -841,7 +940,7 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
                 state.active_agents.len(),
                 state.definitions.len()
             ),
-            " j/k navigate  ·  enter open  ·  esc close".to_string(),
+            " j/k navigate  ·  enter open  ·  d remove  ·  esc close".to_string(),
         ),
         AgentsRoute::Detail(idx) => {
             let is_familiar = state
@@ -860,7 +959,7 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
                     " read-only  ·  create a workspace override to customise  ·  esc back"
                         .to_string()
                 } else {
-                    " enter edit  ·  esc back".to_string()
+                    " enter edit  ·  d remove  ·  esc back".to_string()
                 },
             )
         }

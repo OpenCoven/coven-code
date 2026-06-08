@@ -560,6 +560,36 @@ mod tests {
     }
 
     #[test]
+    fn test_agents_menu_d_removes_selected_workspace_agent() {
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join(".coven-code").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let agent_path = agents_dir.join("reviewer.md");
+        std::fs::write(
+            &agent_path,
+            "---\nname: Reviewer\nmodel: claude-sonnet-4-6\ndescription: Reviews code\n---\n\nReview code.",
+        )
+        .unwrap();
+
+        let mut app = make_app();
+        app.config.project_dir = Some(temp.path().to_path_buf());
+        assert!(app.intercept_slash_command("agents"));
+        app.agents_menu.selected_row = 1;
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+
+        assert!(!agent_path.exists());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Removed agent Reviewer.")
+        );
+        assert!(matches!(
+            app.agents_menu.route,
+            agents_view::AgentsRoute::List
+        ));
+    }
+
+    #[test]
     fn test_ctrl_c_requires_two_presses_to_exit() {
         let mut app = make_app();
         // First Ctrl+C: shows warning, doesn't exit

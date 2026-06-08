@@ -5247,6 +5247,12 @@ impl App {
                     self.activate_familiar_agent(id, display);
                 }
             }
+            KeyCode::Char('d') if key.modifiers.is_empty() => {
+                self.status_message = Some(match self.agents_menu.delete_selected_definition() {
+                    Ok(msg) => msg,
+                    Err(err) => err,
+                });
+            }
             KeyCode::Left => self.agents_menu.go_back(),
             _ => {}
         }
