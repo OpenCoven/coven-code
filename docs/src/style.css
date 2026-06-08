@@ -1317,8 +1317,33 @@ a {
 }
 .explorer-results {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
+}
+
+/* 2-column grid with orphan fill: odd count → last spans both cols */
+@media (min-width: 560px) and (max-width: 859.99px) {
+  .explorer-results { grid-template-columns: 1fr 1fr; }
+  .explorer-results > .explorer-item:last-child:nth-child(2n+1) {
+    grid-column: span 2;
+  }
+}
+
+/* 3-column grid on desktop, built on a 6-col base so we can spread
+   orphans evenly across the last row instead of leaving empty cells.
+     N % 3 == 1 → last item spans all 6 cols (full width)
+     N % 3 == 2 → last two items each span 3 (50/50)
+   This is what the rest of the docs follow as "kanban style". */
+@media (min-width: 860px) {
+  .explorer-results { grid-template-columns: repeat(6, 1fr); }
+  .explorer-results > .explorer-item { grid-column: span 2; }
+  .explorer-results > .explorer-item:last-child:nth-child(3n+1) {
+    grid-column: span 6;
+  }
+  .explorer-results > .explorer-item:last-child:nth-child(3n+2),
+  .explorer-results > .explorer-item:nth-last-child(2):nth-child(3n+1) {
+    grid-column: span 3;
+  }
 }
 .explorer-item {
   padding: 10px 12px;
