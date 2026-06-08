@@ -12,18 +12,18 @@ export function renderHero(starCount) {
         <div class="hero-copy">
           <div class="hero-kicker" style="animation: fade-up 0.7s cubic-bezier(0.16,1,0.3,1) both">Field manual / coven-code</div>
           <div class="relative inline-block mb-8">
-            <img src="/coven.svg" alt="Coven Code" class="hero-logo h-36 w-auto relative z-1 drop-shadow-[0_0_80px_rgba(233,30,99,0.35)] max-sm:h-24" style="animation: hero-logo-in 0.8s 0.04s cubic-bezier(0.16,1,0.3,1) both" />
+            <img src="/coven.svg" alt="Coven Code" class="hero-logo h-36 w-auto relative z-1 max-sm:h-24" style="animation: hero-logo-in 0.8s 0.04s cubic-bezier(0.16,1,0.3,1) both" />
           </div>
           <p class="hero-title" style="animation: fade-up 0.7s 0.1s cubic-bezier(0.16,1,0.3,1) both">A terminal coding agent in Rust</p>
           <p class="hero-subtitle" style="animation: fade-up 0.7s 0.2s cubic-bezier(0.16,1,0.3,1) both">Open-source agent for your terminal. 40+ tools, 15+ LLM providers, multi-account auth, plugin system, and native integration with the Coven daemon.</p>
           <div class="hero-actions" style="animation: fade-up 0.7s 0.3s cubic-bezier(0.16,1,0.3,1) both">
-            <a href="#getting-started" class="hero-btn-primary inline-flex items-center gap-2 px-7 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold bg-accent border border-accent shadow-[0_0_24px_rgba(233,30,99,0.2),inset_0_1px_0_rgba(255,255,255,0.1)] hover:bg-accent-light hover:border-accent-light hover:-translate-y-0.5 hover:shadow-[0_8px_32px_rgba(233,30,99,0.35)] transition-all cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">Read the field manual</a>
-            <a href="https://github.com/OpenCoven/coven-code" target="_blank" rel="noopener" class="hero-secondary-action inline-flex items-center gap-2 px-5 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold bg-bg-card text-text-primary border border-border-light hover:border-border-hover hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-all cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">
+            <a href="#getting-started" class="hero-btn-primary inline-flex items-center gap-2 px-7 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">Read the field manual</a>
+            <a href="https://github.com/OpenCoven/coven-code" target="_blank" rel="noopener" class="hero-secondary-action inline-flex items-center gap-2 px-5 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
               Star
-              <span class="hero-star-badge bg-accent-glow-mid text-accent px-1.5 py-px rounded-lg text-[11.5px] font-semibold tabular-nums" ${starCount ? '' : 'style="display:none"'}>${starCount ? formatStars(starCount) : ''}</span>
+              <span class="hero-star-badge px-1.5 py-px rounded-lg text-[11.5px] font-semibold tabular-nums" ${starCount ? '' : 'style="display:none"'}>${starCount ? formatStars(starCount) : ''}</span>
             </a>
-            <button id="hero-copy-btn" title="Copy to clipboard" class="hero-install-btn group inline-flex items-center gap-2.5 bg-bg-code border border-border rounded-[10px] px-5 h-10 cursor-pointer hover:border-border-hover hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-all">
+            <button id="hero-copy-btn" title="Copy to clipboard" class="hero-install-btn group inline-flex items-center gap-2.5 rounded-[10px] px-5 h-10 cursor-pointer">
               <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g coven-code</code>
               <svg class="hero-copy-icon text-text-dimmer group-hover:text-accent transition-colors" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               <svg class="hero-check-icon hidden text-text-secondary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>

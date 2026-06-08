@@ -1,10 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 144">
-  <defs>
-    <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#f06292"/>
-      <stop offset="100%" stop-color="#e91e63"/>
-    </linearGradient>
-  </defs>
-  <text x="160" y="92" font-family="'IBM Plex Serif',Georgia,serif" font-weight="600" font-size="84" letter-spacing="-4" text-anchor="middle" fill="url(#logo-gradient)">coven</text>
-  <text x="160" y="124" font-family="'JetBrains Mono','SF Mono',monospace" font-weight="500" font-size="14" letter-spacing="6" text-anchor="middle" fill="#a1a1aa">CODE</text>
+  <text x="160" y="92" font-family="'IBM Plex Serif',Georgia,serif" font-weight="600" font-size="84" letter-spacing="-4" text-anchor="middle" fill="#9a8ecd">coven</text>
+  <text x="160" y="124" font-family="'JetBrains Mono','SF Mono',monospace" font-weight="500" font-size="14" letter-spacing="6" text-anchor="middle" fill="#808088">CODE</text>
 </svg>

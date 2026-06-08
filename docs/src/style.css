@@ -1,37 +1,53 @@
 @import "tailwindcss";
 
 /* ============================================
-   Coven Code Documentation — Theme & Custom Styles
+   Coven Code Documentation — OpenCoven brand
+   Source of truth: github.com/OpenCoven/brand/DESIGN.md
+   Brand rules:
+   - No gradients (flat solid colors only)
+   - No glow shadows (border-color changes on hover, not box-shadow)
+   - No blur/glass (no backdrop-filter; solid surface colors)
    ============================================ */
 
 @theme {
-  --color-bg: #09090b;
-  --color-bg-elevated: #0f0f12;
-  --color-bg-card: #16161a;
-  --color-bg-code: #111114;
-  --color-border: #1e1e24;
-  --color-border-light: #2a2a32;
-  --color-border-hover: #3a3a44;
-  --color-text-primary: #dcdce0;
-  --color-text-secondary: #a1a1aa;
-  --color-text-dim: #71717a;
-  --color-text-dimmer: #52525b;
-  --color-accent: #e91e63;
-  --color-accent-light: #f06292;
-  --color-accent-subtle: #f8bbd0;
-  --color-accent-glow: rgba(233, 30, 99, 0.1);
-  --color-accent-glow-mid: rgba(233, 30, 99, 0.18);
-  --color-accent-glow-strong: rgba(233, 30, 99, 0.35);
+  /* Surfaces */
+  --color-bg: #080808;
+  --color-bg-elevated: #0f0f0f;
+  --color-bg-card: #141414;
+  --color-bg-code: #1a1a1a;
+
+  /* Borders (white at low alpha per brand) */
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-light: rgba(255, 255, 255, 0.10);
+  --color-border-hover: rgba(255, 255, 255, 0.18);
+  --color-border-accent: rgba(154, 142, 205, 0.18);
+
+  /* Text */
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #b4b4b8;
+  --color-text-dim: #808088;
+  --color-text-dimmer: #565660;
+
+  /* Violet spectrum — OpenCoven signature */
+  --color-accent: #9a8ecd;        /* canonical violet */
+  --color-accent-light: #b8afdc;  /* lighter / subtle */
+  --color-accent-dim: #6a5fa0;    /* dim / secondary */
+
+  /* Accent tint backgrounds (still flat solids, brand-allowed alpha) */
+  --color-accent-tint: rgba(154, 142, 205, 0.08);
+  --color-accent-tint-mid: rgba(154, 142, 205, 0.14);
+
   --color-success: #9ca3af;
-  --color-success-strong: #6b7280;
-  --color-success-bg: rgba(156, 163, 175, 0.1);
-  --color-success-border: rgba(156, 163, 175, 0.24);
+  --color-success-bg: rgba(156, 163, 175, 0.08);
+
   --font-display: 'IBM Plex Serif', Georgia, serif;
   --font-body: 'DM Sans', sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
 }
 
-/* Base */
+/* ============================================
+   Base
+   ============================================ */
 html {
   scroll-behavior: smooth;
   scroll-padding-top: 24px;
@@ -39,35 +55,19 @@ html {
 
 body {
   font-family: var(--font-body);
-  background:
-    radial-gradient(circle at 18% 0%, rgba(233, 30, 99, 0.12), transparent 30%),
-    radial-gradient(circle at 88% 8%, rgba(240, 98, 146, 0.08), transparent 26%),
-    linear-gradient(180deg, #050507 0%, var(--color-bg) 42%, #070709 100%);
+  background: var(--color-bg);
   color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Noise texture overlay */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  background-size: 256px 256px;
-  pointer-events: none;
-  z-index: 9999;
-  opacity: 0.4;
-}
-
 ::selection {
-  background: var(--color-accent-glow-strong);
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-bg);
 }
 
 a {
   text-decoration: none;
-  transition: color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 0.15s ease-out;
 }
 
 .content a {
@@ -77,9 +77,11 @@ a {
   color: var(--color-accent-light);
 }
 
-/* Hero primary button */
-.hero-btn-primary {
-  color: #fff !important;
+/* ============================================
+   Hero
+   ============================================ */
+.hero {
+  border-bottom: 1px solid var(--color-border);
 }
 
 .hero-grid {
@@ -93,6 +95,10 @@ a {
 
 .hero-copy {
   text-align: left;
+}
+
+.hero-logo {
+  filter: none !important;
 }
 
 .hero-kicker,
@@ -109,10 +115,10 @@ a {
   display: inline-flex;
   padding: 5px 9px;
   margin-bottom: 24px;
-  border: 1px solid rgba(233, 30, 99, 0.24);
+  border: 1px solid var(--color-border-accent);
   border-radius: 999px;
-  background: rgba(233, 30, 99, 0.08);
-  color: var(--color-accent-subtle);
+  background: var(--color-accent-tint);
+  color: var(--color-accent-light);
   font-size: 10px;
 }
 
@@ -142,8 +148,41 @@ a {
   align-items: stretch;
 }
 
+/* Primary CTA — flat violet, border-color hover, no shadow */
+.hero-btn-primary {
+  color: var(--color-bg) !important;
+  background: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  box-shadow: none !important;
+  transition: background-color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.hero-btn-primary:hover {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent-light);
+  transform: none !important;
+}
+
+/* Secondary CTA + install button — surface card with border-color hover */
+.hero-secondary-action,
+.hero-install-btn {
+  background: var(--color-bg-card) !important;
+  border: 1px solid var(--color-border-light) !important;
+  box-shadow: none !important;
+  transition: border-color 0.15s ease-out;
+}
+.hero-secondary-action:hover,
+.hero-install-btn:hover {
+  border-color: var(--color-accent) !important;
+  transform: none !important;
+}
+
 .hero-secondary-action svg {
-  color: var(--color-accent-light);
+  color: var(--color-accent);
+}
+
+.hero-star-badge {
+  background: var(--color-accent-tint-mid) !important;
+  color: var(--color-accent-light) !important;
 }
 
 .hero-proof-strip {
@@ -159,33 +198,17 @@ a {
   padding: 5px 8px;
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--color-bg-elevated);
 }
 
+/* Hero quickstart panel — flat surface, no blur, no glow */
 .hero-manual {
   position: relative;
   padding: 18px;
-  border: 1px solid rgba(233, 30, 99, 0.26);
-  border-radius: 24px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.025)),
-    rgba(10, 10, 14, 0.74);
-  box-shadow:
-    0 24px 80px rgba(0, 0, 0, 0.42),
-    0 0 70px rgba(233, 30, 99, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  overflow: hidden;
-}
-
-.hero-manual::before {
-  content: '';
-  position: absolute;
-  inset: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.055);
+  border: 1px solid var(--color-border-accent);
   border-radius: 18px;
-  pointer-events: none;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
 }
 
 .manual-topline {
@@ -208,23 +231,23 @@ a {
   grid-template-columns: 42px 1fr;
   gap: 12px;
   align-items: center;
-  padding: 12px 12px;
+  padding: 12px;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.22);
+  border-radius: 10px;
+  background: var(--color-bg-card);
   color: var(--color-text-secondary);
   font-size: 13px;
 }
 
 .manual-row-active {
-  border-color: rgba(233, 30, 99, 0.42);
-  background: rgba(233, 30, 99, 0.09);
+  border-color: var(--color-accent);
+  background: var(--color-accent-tint);
   color: var(--color-text-primary);
 }
 
 .manual-index {
   font-family: var(--font-mono);
-  color: var(--color-accent-light);
+  color: var(--color-accent);
   font-size: 11px;
 }
 
@@ -242,12 +265,13 @@ a {
   border-radius: 10px;
   color: var(--color-text-dim);
   text-align: center;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--color-bg-card);
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
 }
 
 .manual-doc-links a:hover {
   color: var(--color-accent-light);
-  border-color: rgba(233, 30, 99, 0.36);
+  border-color: var(--color-accent);
 }
 
 .manual-command {
@@ -255,10 +279,10 @@ a {
   gap: 8px;
   align-items: center;
   padding: 12px 14px;
-  border: 1px solid rgba(233, 30, 99, 0.24);
-  border-radius: 14px;
-  background: rgba(0, 0, 0, 0.34);
-  color: var(--color-accent-light);
+  border: 1px solid var(--color-border-accent);
+  border-radius: 12px;
+  background: var(--color-bg-card);
+  color: var(--color-accent);
   font-size: 12px;
 }
 
@@ -270,17 +294,14 @@ a {
   .hero-grid {
     grid-template-columns: 1fr;
   }
-
   .hero-copy {
     text-align: center;
   }
-
   .hero-title,
   .hero-subtitle {
     margin-left: auto;
     margin-right: auto;
   }
-
   .hero-actions,
   .hero-proof-strip {
     justify-content: center;
@@ -292,70 +313,20 @@ a {
     flex-direction: column;
     align-items: center;
   }
-
   .manual-doc-links {
     grid-template-columns: 1fr;
   }
 }
 
-/* ============================================
-   Hero Pseudo-Elements (can't do in Tailwind)
-   ============================================ */
-.hero::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(233, 30, 99, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(233, 30, 99, 0.035) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 70% 90% at 50% 40%, black 0%, transparent 100%);
-  -webkit-mask-image: radial-gradient(ellipse 70% 90% at 50% 40%, black 0%, transparent 100%);
-}
-
-.hero::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(
-    ellipse at 50% 35%,
-    rgba(233, 30, 99, 0.14) 0%,
-    rgba(233, 30, 99, 0.06) 35%,
-    rgba(233, 30, 99, 0.02) 60%,
-    transparent 85%
-  );
-  pointer-events: none;
-}
-
-/* Scanline animation */
-@keyframes scanline-drift {
-  0% { background-position: 0 0; }
-  100% { background-position: 0 120px; }
-}
-
+/* Subtle scanlines kept as low-alpha repeating pattern, single-color (not a color gradient) */
 .hero-scanlines {
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(233, 30, 99, 0.02) 2px,
-    rgba(233, 30, 99, 0.02) 4px
-  );
-  animation: scanline-drift 10s linear infinite;
+  display: none;
 }
 
-/* Logo entrance */
-@keyframes hero-logo-in {
-  from {
-    opacity: 0;
-    transform: translateY(16px) scale(0.93);
-    filter: drop-shadow(0 0 0 rgba(233, 30, 99, 0));
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: drop-shadow(0 0 50px rgba(233, 30, 99, 0.3));
-  }
+/* Strip the hero pseudo-element gradients entirely */
+.hero::before,
+.hero::after {
+  content: none;
 }
 
 @keyframes fade-up {
@@ -363,13 +334,13 @@ a {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes content-in {
-  from { opacity: 0; transform: translateY(6px); }
+@keyframes hero-logo-in {
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 /* ============================================
-   Nav Links
+   Nav
    ============================================ */
 .nav-link {
   display: block;
@@ -377,7 +348,7 @@ a {
   font-size: 13px;
   color: var(--color-text-dim);
   border-left: 2px solid transparent;
-  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 0.15s ease-out, border-left-color 0.15s ease-out;
 }
 .nav-link:hover {
   color: var(--color-text-secondary);
@@ -390,10 +361,8 @@ a {
 }
 
 /* ============================================
-   Content Typography (rendered HTML)
+   Content typography
    ============================================ */
-
-/* Section dividers for single-page layout */
 .doc-section + .doc-section {
   margin-top: 48px;
   padding-top: 48px;
@@ -485,7 +454,7 @@ a {
   border: 1px solid var(--color-border);
   padding: 2px 7px;
   border-radius: 4px;
-  color: var(--color-accent-subtle);
+  color: var(--color-accent-light);
   letter-spacing: -0.02em;
 }
 
@@ -498,7 +467,7 @@ a {
   border-left: 3px solid var(--color-accent);
   background: var(--color-bg-code);
   overflow-x: auto;
-  transition: border-color 0.2s;
+  transition: border-color 0.15s ease-out;
 }
 .content pre:hover {
   border-color: var(--color-border-light);
@@ -518,7 +487,6 @@ a {
   letter-spacing: 0;
 }
 
-/* Copy button */
 .code-copy {
   position: absolute;
   top: 8px;
@@ -531,18 +499,16 @@ a {
   color: var(--color-text-dimmer);
   display: flex;
   align-items: center;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   opacity: 0;
-  transform: translateY(-2px);
+  transition: opacity 0.15s ease-out, color 0.15s ease-out, border-color 0.15s ease-out;
 }
 .content pre:hover .code-copy {
   opacity: 1;
-  transform: translateY(0);
 }
 .code-copy:hover {
   color: var(--color-accent);
   border-color: var(--color-accent);
-  background: var(--color-accent-glow);
+  background: var(--color-bg-card);
 }
 
 .code-lang {
@@ -554,7 +520,7 @@ a {
   font-weight: 500;
   color: var(--color-text-dimmer);
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity 0.15s ease-out;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -562,12 +528,12 @@ a {
   opacity: 1;
 }
 
-/* Syntax highlighting */
-.hl-keyword { color: #f8bbd0; }
-.hl-string { color: #d4d4d8; }
-.hl-comment { color: #546e7a; font-style: italic; }
-.hl-number { color: #f06292; }
-.hl-fn { color: #e91e63; }
+/* Syntax highlighting — violet spectrum */
+.hl-keyword { color: var(--color-accent-light); }
+.hl-string  { color: #d4d4d8; }
+.hl-comment { color: #565660; font-style: italic; }
+.hl-number  { color: var(--color-accent); }
+.hl-fn      { color: var(--color-accent-dim); }
 
 /* Tables */
 .content table {
@@ -598,7 +564,7 @@ a {
 
 .content td { color: var(--color-text-secondary); }
 .content tr:last-child td { border-bottom: none; }
-.content tr:hover td { background: rgba(255, 255, 255, 0.015); }
+.content tr:hover td { background: var(--color-bg-card); }
 
 /* Callouts */
 .callout {
@@ -608,11 +574,12 @@ a {
   border-left: 3px solid;
   font-size: 14px;
   color: var(--color-text-secondary);
+  background: var(--color-bg-elevated);
 }
 
-.callout-info { background: rgba(233, 30, 99, 0.06); border-color: #e91e63; }
-.callout-warning { background: rgba(240, 98, 146, 0.07); border-color: #f06292; }
-.callout-tip { background: var(--color-success-bg); border-color: var(--color-success-strong); }
+.callout-info    { border-color: var(--color-accent); }
+.callout-warning { border-color: var(--color-accent-light); }
+.callout-tip     { background: var(--color-success-bg); border-color: var(--color-success); }
 
 .callout-title {
   font-family: var(--font-display);
@@ -623,9 +590,9 @@ a {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.callout-info .callout-title { color: var(--color-accent-light); }
-.callout-warning .callout-title { color: var(--color-accent-subtle); }
-.callout-tip .callout-title { color: var(--color-success); }
+.callout-info    .callout-title { color: var(--color-accent); }
+.callout-warning .callout-title { color: var(--color-accent-light); }
+.callout-tip     .callout-title { color: var(--color-success); }
 
 /* Keyboard */
 .content kbd {
@@ -662,7 +629,7 @@ a {
   color: var(--color-text-secondary);
 }
 
-/* Provider/familiar logo cloud */
+/* Agent / familiar logo cloud */
 .agent-cloud {
   display: flex;
   flex-wrap: wrap;
@@ -679,16 +646,12 @@ a {
   gap: 8px;
   padding: 16px 18px 12px;
   text-decoration: none;
-  transition: opacity 0.2s;
+  transition: opacity 0.15s ease-out;
   opacity: 0.55;
 }
-
 .agent-cloud-item:first-child { padding-left: 0; }
-.agent-cloud-item:last-child { padding-right: 0; }
-
-.agent-cloud-item:hover {
-  opacity: 1;
-}
+.agent-cloud-item:last-child  { padding-right: 0; }
+.agent-cloud-item:hover       { opacity: 1; }
 
 .agent-cloud-logo {
   height: 32px;
@@ -711,15 +674,9 @@ a {
 }
 
 @media (max-width: 640px) {
-  .agent-cloud-item {
-    padding: 12px 12px 8px;
-  }
-  .agent-cloud-logo {
-    height: 24px;
-  }
-  .agent-cloud-item span {
-    font-size: 10px;
-  }
+  .agent-cloud-item { padding: 12px 12px 8px; }
+  .agent-cloud-logo { height: 24px; }
+  .agent-cloud-item span { font-size: 10px; }
 }
 
 /* Footer */
@@ -733,11 +690,11 @@ a {
   color: var(--color-text-dim);
   font-size: 13px;
   font-weight: 600;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  background: var(--color-bg-elevated);
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
 }
 
 .footer-links a:hover {
   color: var(--color-accent-light);
-  border-color: rgba(233, 30, 99, 0.3);
-  background: rgba(233, 30, 99, 0.06);
+  border-color: var(--color-accent);
 }
