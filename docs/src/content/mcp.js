@@ -38,17 +38,60 @@ export function render() {
 
     <h2>Configuration Fields</h2>
 
-    <table>
-      <thead><tr><th>Field</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>name</code></td><td>yes</td><td>Unique identifier for the server</td></tr>
-        <tr><td><code>command</code></td><td>stdio only</td><td>Executable (e.g. <code>"npx"</code>, <code>"uvx"</code>)</td></tr>
-        <tr><td><code>args</code></td><td>no</td><td>Arguments passed to <code>command</code></td></tr>
-        <tr><td><code>env</code></td><td>no</td><td>Extra env vars for the child process</td></tr>
-        <tr><td><code>url</code></td><td>http only</td><td>Full SSE endpoint URL</td></tr>
-        <tr><td><code>type</code></td><td>no</td><td><code>"stdio"</code> (default) or <code>"http"</code></td></tr>
-      </tbody>
-    </table>
+    <p>Type to filter, or pick a chip to scope. <em>Required-ness depends on transport</em> — <code>command</code> is required for stdio, <code>url</code> is required for http.</p>
+
+    <div class="demo" x-data="mcpFieldExplorer">
+      <div class="demo-header">
+        <span>mcp config explorer · <span x-text="count"></span> / <span x-text="total"></span> shown</span>
+      </div>
+      <div class="demo-body">
+        <div class="explorer-controls">
+          <input
+            type="text"
+            class="explorer-input"
+            placeholder="Search fields — try 'stdio', 'env', 'required'…"
+            x-model="query"
+            aria-label="Search MCP config fields"
+          />
+          <span class="explorer-count">
+            <span x-text="count"></span> matches
+          </span>
+        </div>
+        <div class="explorer-chips">
+          <template x-for="cat in categories" :key="cat">
+            <button
+              type="button"
+              class="explorer-chip"
+              :aria-pressed="category === cat"
+              @click="pick(cat)"
+            >
+              <span x-text="cat"></span>
+              <span class="explorer-chip-count" x-text="countIn(cat)"></span>
+            </button>
+          </template>
+          <button
+            type="button"
+            class="explorer-clear"
+            x-show="query || category"
+            @click="clear()"
+          >Clear</button>
+        </div>
+        <div class="explorer-results" x-show="count > 0">
+          <template x-for="item in filtered" :key="item.id">
+            <div class="explorer-item">
+              <div class="explorer-item-head">
+                <span class="explorer-item-id" x-text="item.id"></span>
+                <span class="explorer-item-cat" x-text="item.category"></span>
+              </div>
+              <div class="explorer-item-desc" x-text="item.desc"></div>
+            </div>
+          </template>
+        </div>
+        <div class="explorer-empty" x-show="count === 0">
+          No fields match. <a href="#" @click.prevent="clear()" style="color: var(--color-accent);">Clear filters</a>
+        </div>
+      </div>
+    </div>
 
     <h2>Environment Expansion</h2>
 

@@ -435,6 +435,23 @@ export function registerDemos(Alpine) {
     })
   );
 
+  // ----- MCP server config field explorer --------------------------------
+  Alpine.data(
+    'mcpFieldExplorer',
+    makeExplorer({
+      categories: ['Identity', 'Transport', 'Runtime'],
+      search: ['id', 'desc', 'keywords'],
+      items: [
+        { id: 'name',    category: 'Identity',  desc: 'Required. Unique identifier for the server within the session. Used as the prefix for tools/resources surfaced by this server.',                                                          keywords: 'required id label' },
+        { id: 'type',    category: 'Transport', desc: 'Optional. Transport: "stdio" (default — subprocess over stdin/stdout) or "http" (remote SSE endpoint).',                                                                                  keywords: 'optional stdio http sse transport' },
+        { id: 'command', category: 'Transport', desc: 'Required for stdio. Executable to spawn (e.g. "npx", "uvx", "python", absolute paths). Ignored for http transport.',                                                                       keywords: 'stdio required executable npx uvx' },
+        { id: 'args',    category: 'Transport', desc: 'Optional. Array of arguments passed to command. Supports ${VAR} env expansion.',                                                                                                          keywords: 'stdio arguments argv' },
+        { id: 'url',     category: 'Transport', desc: 'Required for http. Full SSE endpoint URL. Ignored for stdio transport.',                                                                                                                  keywords: 'http required endpoint sse' },
+        { id: 'env',     category: 'Runtime',   desc: 'Optional. Map of extra environment variables set for the child process (stdio) or passed in headers (http). Values support ${VAR} and ${VAR:-default} expansion.',                          keywords: 'optional environment variables' },
+      ],
+    })
+  );
+
   // ----- Demo 4: Tools grid ----------------------------------------------
   Alpine.data('toolsGrid', () => ({
     expanded: null,
