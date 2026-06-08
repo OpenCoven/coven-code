@@ -13,7 +13,7 @@
 // Re-export Tier B IPC types for convenience.
 pub use crate::coven_daemon::{
     ControlActionResult, CreateSessionRequest, DaemonClient, DaemonError, DaemonHealth,
-    DaemonSession, EventPage, EventRecord, FamiliarStatus,
+    DaemonReachability, DaemonSession, EventPage, EventRecord, FamiliarStatus,
 };
 
 use serde::Deserialize;

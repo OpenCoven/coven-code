@@ -214,6 +214,38 @@ impl std::fmt::Display for DaemonError {
 impl std::error::Error for DaemonError {}
 
 // ---------------------------------------------------------------------------
+// DaemonReachability
+// ---------------------------------------------------------------------------
+
+/// Three-valued result for a lightweight "is the daemon reachable?" probe.
+///
+/// [`DaemonClient::is_online`] collapses `TimedOut` and `Offline` into the
+/// same `false`, which is fine for a quick polling indicator but lies on a
+/// busy daemon — see issue #50. Callers that paint a sticky status line
+/// (e.g. the welcome screen) should call [`DaemonClient::check_reachability`]
+/// instead and treat `TimedOut` as "best-effort: still online".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonReachability {
+    /// Socket connected and the daemon responded within the timeout budget.
+    Online,
+    /// Socket connected but the daemon didn't respond in time. The daemon
+    /// is almost certainly alive — it's just busy serving a different
+    /// request. Don't render this as "offline".
+    TimedOut,
+    /// Socket file is missing or connect was actively refused — the daemon
+    /// genuinely isn't running.
+    Offline,
+}
+
+impl DaemonReachability {
+    /// `true` for both `Online` and `TimedOut` — i.e. anything that isn't
+    /// a confirmed offline state.
+    pub fn looks_alive(self) -> bool {
+        !matches!(self, DaemonReachability::Offline)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DaemonClient
 // ---------------------------------------------------------------------------
 
@@ -247,11 +279,24 @@ impl DaemonClient {
 
     // -- internal helpers ---------------------------------------------------
 
-    /// Open a fresh `UnixStream` connection with a short timeout.
+    /// Default per-call timeout for the quick polling path
+    /// ([`is_online`], the high-frequency status-row indicator).
+    /// Chosen short so a missing daemon shows up as offline in < 1
+    /// frame; callers that need correctness over latency should use
+    /// [`Self::check_reachability`] with an explicit budget.
+    #[cfg(unix)]
+    const DEFAULT_TIMEOUT_MS: u64 = 200;
+
+    /// Open a fresh `UnixStream` connection with the default short timeout.
     #[cfg(unix)]
     fn connect(&self) -> std::io::Result<UnixStream> {
+        self.connect_with_timeout(Duration::from_millis(Self::DEFAULT_TIMEOUT_MS))
+    }
+
+    /// Open a fresh `UnixStream` connection with a caller-supplied timeout.
+    #[cfg(unix)]
+    fn connect_with_timeout(&self, timeout: Duration) -> std::io::Result<UnixStream> {
         let stream = UnixStream::connect(&self.sock_path)?;
-        let timeout = Duration::from_millis(200);
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         Ok(stream)
@@ -353,9 +398,73 @@ impl DaemonClient {
 
     /// Quick liveness check — returns `true` if the daemon responds with 200
     /// to `GET /api/v1/familiars`. Discards the structured-error envelope on
-    /// purpose; use [`Self::health`] for richer diagnostics.
+    /// purpose; use [`Self::health`] for richer diagnostics. Uses the
+    /// default short timeout; callers that need to distinguish "offline"
+    /// from "busy" should use [`Self::check_reachability`] instead.
     pub fn is_online(&self) -> bool {
         self.get("/api/v1/familiars").is_ok()
+    }
+
+    /// Three-valued reachability probe. Spends up to `timeout` waiting for
+    /// the daemon to respond and reports whether the failure (if any) was
+    /// a hard offline state or a transient timeout.
+    ///
+    /// Welcome-screen status indicators should call this with a longer
+    /// budget (~2 s) so a busy daemon doesn't flicker to "offline" — see
+    /// issue #50. The status-row polling indicator can keep using
+    /// [`Self::is_online`] with the default short timeout.
+    pub fn check_reachability(&self, timeout: Duration) -> DaemonReachability {
+        #[cfg(unix)]
+        {
+            use std::io::{Read, Write};
+
+            let mut stream = match self.connect_with_timeout(timeout) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    return DaemonReachability::TimedOut;
+                }
+                Err(_) => return DaemonReachability::Offline,
+            };
+
+            let request =
+                "GET /api/v1/familiars HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n";
+            if let Err(e) = stream.write_all(request.as_bytes()) {
+                return match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        DaemonReachability::TimedOut
+                    }
+                    _ => DaemonReachability::Offline,
+                };
+            }
+            if let Err(e) = stream.flush() {
+                return match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        DaemonReachability::TimedOut
+                    }
+                    _ => DaemonReachability::Offline,
+                };
+            }
+
+            // We only need to see the response start arriving — we don't
+            // care about parsing it. Read one byte (or hit timeout) and
+            // call it.
+            let mut peek = [0_u8; 1];
+            match stream.read(&mut peek) {
+                Ok(0) => DaemonReachability::Offline, // peer closed before any byte
+                Ok(_) => DaemonReachability::Online,
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        DaemonReachability::TimedOut
+                    }
+                    _ => DaemonReachability::Offline,
+                },
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            DaemonReachability::Offline
+        }
     }
 
     fn parse_session_list(body: &str) -> Result<Vec<DaemonSession>, DaemonError> {
@@ -883,5 +992,88 @@ mod tests {
         assert!(err.is_offline());
         assert!(err.code().is_none());
         assert!(err.status().is_none());
+    }
+
+    /// Issue #50: a real reachability probe against a daemon that has
+    /// accepted the connection but doesn't write any bytes back within
+    /// the budget must return `TimedOut`, not `Offline`. Renderers like
+    /// the welcome panel can then treat the daemon as still alive
+    /// instead of flickering to "offline" during heavy load.
+    #[cfg(unix)]
+    #[test]
+    fn issue_50_check_reachability_distinguishes_timeout_from_offline() {
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // Slow-daemon scenario: accept the connection but never write a
+        // response. The client must time out within its budget.
+        let _server = std::thread::spawn(move || {
+            // Hold the connection open for longer than any sane test
+            // timeout so the client is forced into TimedOut.
+            let (_stream, _) = match listener.accept() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        // Probe with a 200 ms budget — well under the server's 5 s hold.
+        let result = client.check_reachability(Duration::from_millis(200));
+        assert_eq!(
+            result,
+            DaemonReachability::TimedOut,
+            "slow daemon must be TimedOut, not Offline"
+        );
+        assert!(
+            result.looks_alive(),
+            "TimedOut must count as 'looks alive' so the welcome stays online"
+        );
+    }
+
+    /// Reachability against a tempdir with no socket file at all must
+    /// return `Offline` — the absent-socket case is the only path that
+    /// should ever paint "Daemon: offline" in the welcome.
+    #[cfg(unix)]
+    #[test]
+    fn issue_50_check_reachability_offline_when_socket_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("definitely-not-here.sock");
+        let client = DaemonClient { sock_path: sock };
+        let result = client.check_reachability(std::time::Duration::from_millis(200));
+        assert_eq!(result, DaemonReachability::Offline);
+        assert!(!result.looks_alive(), "Offline must NOT count as alive");
+    }
+
+    /// A daemon that accepts and responds with a 200 OK within the
+    /// budget must return `Online`.
+    #[cfg(unix)]
+    #[test]
+    fn issue_50_check_reachability_online_when_daemon_responds() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let _server = std::thread::spawn(move || {
+            let (mut stream, _) = match listener.accept() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ =
+                stream.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n[]");
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let result = client.check_reachability(std::time::Duration::from_secs(2));
+        assert_eq!(result, DaemonReachability::Online);
     }
 }

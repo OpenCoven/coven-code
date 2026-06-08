@@ -1598,13 +1598,19 @@ fn welcome_provider_label(app: &App) -> String {
         .unwrap_or_else(|| "anthropic".to_string())
 }
 
-/// One-glance daemon status: "Daemon: online" / "Daemon: offline". Cheap —
-/// just a socket-existence check, no RPC.
+/// One-glance daemon status: "Daemon: online" / "Daemon: offline".
+///
+/// Uses [`DaemonClient::check_reachability`] with a 2 s budget so a busy
+/// daemon doesn't flip the welcome panel to "offline" mid-load. A
+/// `TimedOut` result is rendered as "online" (best-effort) since by far
+/// the most common cause of a missed probe on a working install is the
+/// daemon being mid-request — see issue #50.
 fn welcome_daemon_label() -> String {
-    if claurst_core::coven_shared::DaemonClient::new()
-        .map(|c| c.is_online())
-        .unwrap_or(false)
-    {
+    use claurst_core::coven_shared::{DaemonClient, DaemonReachability};
+    let reachable = DaemonClient::new()
+        .map(|c| c.check_reachability(std::time::Duration::from_millis(2000)))
+        .unwrap_or(DaemonReachability::Offline);
+    if reachable.looks_alive() {
         "Daemon: online".to_string()
     } else {
         "Daemon: offline".to_string()
