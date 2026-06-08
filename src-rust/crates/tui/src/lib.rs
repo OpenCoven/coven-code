@@ -1575,4 +1575,54 @@ mod tests {
         assert_eq!(pr.options[2].key, 'p');
         assert_eq!(pr.options[3].key, 'n');
     }
+
+    /// Regression: the audit flagged a double-unwrap in
+    /// `handle_permission_key`'s Up/Down arms. If the dialog was cleared
+    /// between the outer `as_mut()` bind and the inner `.as_mut().unwrap()`
+    /// (e.g. a tool result resolved the request), the second unwrap would
+    /// panic the TUI. Now those branches pattern-match and silently no-op.
+    /// This test pins the no-panic contract by handling Up/Down with no
+    /// active permission dialog.
+    #[test]
+    fn arrow_keys_do_not_panic_without_permission_dialog() {
+        let mut app = make_app();
+        assert!(app.permission_request.is_none());
+        // Either branch could have panicked before the fix.
+        app.handle_key_event(key(KeyCode::Up));
+        app.handle_key_event(key(KeyCode::Down));
+        // No assertion needed — surviving these calls is the assertion.
+    }
+
+    /// Up/Down with an active dialog adjusts `selected_option` correctly
+    /// and saturates at the bounds.
+    #[test]
+    fn arrow_keys_navigate_permission_dialog_selection() {
+        let mut app = make_app();
+        let mut pr = PermissionRequest::standard(
+            "tu_test".to_string(),
+            "Bash".to_string(),
+            "Run a command".to_string(),
+        );
+        pr.selected_option = 0;
+        app.permission_request = Some(pr);
+
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 1);
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 2);
+        app.handle_key_event(key(KeyCode::Up));
+        assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 1);
+
+        // Saturation: walking past index 0 should stay at 0.
+        app.handle_key_event(key(KeyCode::Up));
+        app.handle_key_event(key(KeyCode::Up));
+        app.handle_key_event(key(KeyCode::Up));
+        assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 0);
+
+        // Saturation at the end too — 4 options, max index 3.
+        for _ in 0..10 {
+            app.handle_key_event(key(KeyCode::Down));
+        }
+        assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 3);
+    }
 }

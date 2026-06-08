@@ -5880,15 +5880,21 @@ impl App {
                 self.permission_request = None;
             }
             KeyCode::Up => {
-                let pr = self.permission_request.as_mut().unwrap();
-                if pr.selected_option > 0 {
-                    pr.selected_option -= 1;
+                // Pattern-match instead of `.as_mut().unwrap()`: the
+                // permission_request can be cleared between key events
+                // (e.g. by a model-side cancellation), so we must not
+                // panic when the dialog has gone away.
+                if let Some(pr) = self.permission_request.as_mut() {
+                    if pr.selected_option > 0 {
+                        pr.selected_option -= 1;
+                    }
                 }
             }
             KeyCode::Down => {
-                let pr = self.permission_request.as_mut().unwrap();
-                if pr.selected_option + 1 < pr.options.len() {
-                    pr.selected_option += 1;
+                if let Some(pr) = self.permission_request.as_mut() {
+                    if pr.selected_option + 1 < pr.options.len() {
+                        pr.selected_option += 1;
+                    }
                 }
             }
             KeyCode::Esc => {
