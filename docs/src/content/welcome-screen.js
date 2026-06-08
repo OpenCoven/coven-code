@@ -72,40 +72,7 @@ export function render() {
     <p>Your familiar's portrait (animated glyph for built-ins, static card for daemon-registered familiars) under a <code>Welcome back &lt;user&gt;!</code> greeting. The art is driven by the <code>"familiar"</code> field in your settings; see <a href="#familiars">Familiars</a>.</p>
 
     <h2>Right Column</h2>
-    <p>A rotating getting-started tip, then a <strong>Status</strong> block:</p>
-
-    <table>
-      <thead>
-        <tr><th>Field</th><th>What it shows</th><th>Configured in</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>Model</code></td>
-          <td>Active model id, or the effective default if unset</td>
-          <td><code>model</code> in <a href="#configuration">settings.json</a>, <code>/model</code></td>
-        </tr>
-        <tr>
-          <td><code>Provider</code></td>
-          <td>Active provider id (<code>anthropic</code> when unset)</td>
-          <td><code>provider</code> in <a href="#configuration">settings.json</a>, see <a href="#providers">Providers</a></td>
-        </tr>
-        <tr>
-          <td><code>Daemon</code></td>
-          <td><code>online</code> / <code>offline</code> from a cheap socket check — no RPC</td>
-          <td>Install <code>@opencoven/coven</code> to bring it online</td>
-        </tr>
-        <tr>
-          <td><code>Familiar</code></td>
-          <td>Current familiar id, with an <code>(F2 to switch)</code> hint</td>
-          <td><code>familiar</code> in settings, <code>/familiar</code>, or <kbd>F2</kbd></td>
-        </tr>
-        <tr>
-          <td><code>Goal</code></td>
-          <td>Active autonomous goal (only shown when one is set)</td>
-          <td><code>/goal &lt;objective&gt;</code></td>
-        </tr>
-      </tbody>
-    </table>
+    <p>A rotating getting-started tip, then a <strong>Status</strong> block listing the active model, provider, daemon state, familiar (with an <kbd>F2</kbd> to switch hint), and goal (only when set). Hover any row in the mockup above for what each field shows and where to change it.</p>
 
     <p>Press <kbd>F2</kbd> at any time to open the familiar switcher popup.</p>
 

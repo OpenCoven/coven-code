@@ -67,15 +67,24 @@ coven-code auth logout</code></pre>
 
     <p>Inside the TUI, the same operations are available as slash commands:</p>
 
-    <table>
-      <thead><tr><th>Command</th><th>Action</th></tr></thead>
-      <tbody>
-        <tr><td><code>/login</code></td><td>OAuth login (use <code>--codex</code> for ChatGPT, <code>--label &lt;name&gt;</code> to name the profile)</td></tr>
-        <tr><td><code>/accounts</code></td><td>List stored Anthropic + Codex accounts</td></tr>
-        <tr><td><code>/switch &lt;id&gt;</code></td><td>Switch active account (<code>--codex</code> for Codex)</td></tr>
-        <tr><td><code>/logout</code></td><td>Clear credentials for the active profile (<code>--all</code> to purge)</td></tr>
-      </tbody>
-    </table>
+    <div class="fields-grid">
+      <div class="field-card">
+        <div class="field-card-name">/login</div>
+        <div class="field-card-desc">OAuth login. Use <code>--codex</code> for ChatGPT, <code>--label &lt;name&gt;</code> to name the profile.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">/accounts</div>
+        <div class="field-card-desc">List stored Anthropic + Codex accounts.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">/switch &lt;id&gt;</div>
+        <div class="field-card-desc">Switch active account. <code>--codex</code> for Codex.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">/logout</div>
+        <div class="field-card-desc">Clear credentials for the active profile. <code>--all</code> to purge.</div>
+      </div>
+    </div>
 
     <h2>Token Storage</h2>
 

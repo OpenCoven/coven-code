@@ -62,17 +62,32 @@ export function render() {
 
     <h2>Common Fields</h2>
 
-    <table>
-      <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>timeout</code></td><td>Per-hook timeout in seconds</td></tr>
-        <tr><td><code>statusMessage</code></td><td>Custom spinner text shown while the hook runs</td></tr>
-        <tr><td><code>async</code></td><td>Run in the background without blocking the event</td></tr>
-        <tr><td><code>asyncRewake</code></td><td>Background hook that wakes the model on exit code 2</td></tr>
-        <tr><td><code>once</code></td><td>Remove from the session after first fire</td></tr>
-        <tr><td><code>if</code></td><td>Permission-rule-style filter (e.g. <code>"Bash(git *)"</code>)</td></tr>
-      </tbody>
-    </table>
+    <div class="fields-grid">
+      <div class="field-card">
+        <div class="field-card-name">timeout</div>
+        <div class="field-card-desc">Per-hook timeout in seconds.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">statusMessage</div>
+        <div class="field-card-desc">Custom spinner text shown while the hook runs.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">async</div>
+        <div class="field-card-desc">Run in the background without blocking the event.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">asyncRewake</div>
+        <div class="field-card-desc">Background hook that wakes the model on exit code 2.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">once</div>
+        <div class="field-card-desc">Remove from the session after the first fire.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-name">if</div>
+        <div class="field-card-desc">Permission-rule-style filter (e.g. <code>"Bash(git *)"</code>).</div>
+      </div>
+    </div>
 
     <h2>Hook Events</h2>
 

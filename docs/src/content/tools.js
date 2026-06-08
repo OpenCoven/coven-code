@@ -5,31 +5,9 @@ export function render() {
     <h1>Tools Reference</h1>
     <p class="lead">Coven Code ships with 40+ built-in tools across file ops, shell execution, search, web, task management, git, notebooks, and desktop automation. Each tool is gated by a permission level and the active permission mode.</p>
 
-    <h2>Permission Levels</h2>
+    <h2>Permissions</h2>
 
-    <table>
-      <thead><tr><th>Level</th><th>Description</th><th>Examples</th></tr></thead>
-      <tbody>
-        <tr><td><strong>None</strong></td><td>No external effects</td><td><code>SleepTool</code></td></tr>
-        <tr><td><strong>ReadOnly</strong></td><td>Reads data; no writes or execution</td><td><code>FileReadTool</code>, <code>GlobTool</code>, <code>WebFetchTool</code></td></tr>
-        <tr><td><strong>Write</strong></td><td>Creates or modifies data</td><td><code>FileWriteTool</code>, <code>FileEditTool</code>, <code>ConfigTool</code></td></tr>
-        <tr><td><strong>Execute</strong></td><td>Runs code or spawns processes</td><td><code>BashTool</code>, <code>TaskCreateTool</code>, <code>SendMessageTool</code></td></tr>
-        <tr><td><strong>Dangerous</strong></td><td>Broad system access; high blast radius</td><td><code>ComputerUseTool</code></td></tr>
-      </tbody>
-    </table>
-
-    <h2>Permission Modes</h2>
-
-    <table>
-      <thead><tr><th>Mode</th><th>Behavior</th></tr></thead>
-      <tbody>
-        <tr><td><code>default</code></td><td>Prompts for any tool that isn't pre-approved</td></tr>
-        <tr><td><code>plan</code></td><td>All write/execute blocked; read-only runs freely</td></tr>
-        <tr><td><code>auto</code></td><td>Non-destructive tools run silently; destructive prompt</td></tr>
-        <tr><td><code>acceptEdits</code></td><td>File edits auto-approved; shell still prompts</td></tr>
-        <tr><td><code>bypassPermissions</code></td><td>All tools run without prompting (headless/CI only)</td></tr>
-      </tbody>
-    </table>
+    <p>Every tool is gated by a <strong>permission level</strong> (None / ReadOnly / Write / Execute / Dangerous) and the session's active <strong>permission mode</strong>. Modes decide whether each level runs, prompts, or is blocked. Pick a mode below to see how the matrix shifts.</p>
 
     <p>Permission rules are evaluated per-project and per-user — first match wins. Manage them with <code>/permissions</code>.</p>
 

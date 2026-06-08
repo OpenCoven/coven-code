@@ -45,26 +45,39 @@ export function render() {
     <h2>Common <code>config</code> Options</h2>
 
     <h3>Model and Tokens</h3>
-    <table>
-      <thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>api_key</code></td><td><code>null</code></td><td>Anthropic API key. Overrides <code>ANTHROPIC_API_KEY</code>. Prefer the env var in shared environments.</td></tr>
-        <tr><td><code>model</code></td><td>provider default</td><td>Model ID. Falls back to the provider's default (e.g. <code>claude-sonnet-4-6</code>).</td></tr>
-        <tr><td><code>max_tokens</code></td><td><code>8192</code></td><td>Maximum tokens per model response.</td></tr>
-        <tr><td><code>provider</code></td><td><code>"anthropic"</code></td><td>Active provider.</td></tr>
-      </tbody>
-    </table>
+    <div class="fields-grid">
+      <div class="field-card">
+        <div class="field-card-head">
+          <span class="field-card-name">api_key</span>
+          <span class="field-card-meta">null</span>
+        </div>
+        <div class="field-card-desc">Anthropic API key. Overrides <code>ANTHROPIC_API_KEY</code>. Prefer the env var in shared environments.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-head">
+          <span class="field-card-name">model</span>
+          <span class="field-card-meta">provider default</span>
+        </div>
+        <div class="field-card-desc">Model ID. Falls back to the provider's default (e.g. <code>claude-sonnet-4-6</code>).</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-head">
+          <span class="field-card-name">max_tokens</span>
+          <span class="field-card-meta">8192</span>
+        </div>
+        <div class="field-card-desc">Maximum tokens per model response.</div>
+      </div>
+      <div class="field-card">
+        <div class="field-card-head">
+          <span class="field-card-name">provider</span>
+          <span class="field-card-meta">"anthropic"</span>
+        </div>
+        <div class="field-card-desc">Active provider. See <a href="#providers">Providers</a> for the full list.</div>
+      </div>
+    </div>
 
     <h3>Permission Mode</h3>
-    <table>
-      <thead><tr><th>Mode</th><th>Behavior</th></tr></thead>
-      <tbody>
-        <tr><td><code>default</code></td><td>Prompt for any tool that touches your filesystem or shell.</td></tr>
-        <tr><td><code>acceptEdits</code></td><td>Auto-approve file edits; still prompt for shell.</td></tr>
-        <tr><td><code>bypassPermissions</code></td><td>No prompts. Use only in trusted, sandboxed contexts.</td></tr>
-        <tr><td><code>plan</code></td><td>Read-only mode. Model can read and search but cannot write or run commands.</td></tr>
-      </tbody>
-    </table>
+    <p>Set <code>"permission_mode"</code> to one of <code>"default"</code>, <code>"acceptEdits"</code>, <code>"bypassPermissions"</code>, or <code>"plan"</code>. See the <a href="#tools">interactive permission visualizer</a> for what each mode allows, prompts on, and blocks.</p>
 
     <h3>Familiar</h3>
     <p>Set <code>"familiar"</code> to the id of your active familiar (e.g. <code>"kitty"</code>, <code>"raven"</code>). This drives the welcome-screen portrait and the <code>/agents</code> overlay when the daemon is online.</p>
