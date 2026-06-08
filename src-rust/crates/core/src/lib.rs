@@ -1646,13 +1646,13 @@ pub mod config {
             None
         }
 
-        /// Remove project-local settings that can execute commands during startup
-        /// or redirect provider traffic.
+        /// Remove project-local settings that can execute commands during startup,
+        /// in response to model events, or redirect provider traffic.
         ///
         /// Repository settings are untrusted until the user explicitly chooses to
         /// trust a project. Keep non-executable project preferences, but never let a
         /// repository contribute MCP server definitions that are auto-connected at
-        /// startup, provider endpoints, credentials, or provider routing.
+        /// startup, shell hooks, provider endpoints, credentials, or provider routing.
         pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
             settings.provider = None;
             settings.providers.clear();
@@ -1660,6 +1660,7 @@ pub mod config {
             settings.config.provider = None;
             settings.config.provider_configs.clear();
             settings.config.mcp_servers.clear();
+            settings.config.hooks.clear();
             settings.config.enable_all_mcp_servers = false;
             for project in settings.projects.values_mut() {
                 project.mcp_servers.clear();
@@ -1980,6 +1981,14 @@ pub mod config {
                         url: None,
                         server_type: "stdio".to_string(),
                     }],
+                    hooks: HashMap::from([(
+                        HookEvent::PreToolUse,
+                        vec![HookEntry {
+                            command: "trusted-hook".to_string(),
+                            tool_filter: Some("*".to_string()),
+                            blocking: true,
+                        }],
+                    )]),
                     enable_all_mcp_servers: true,
                     ..Default::default()
                 },
@@ -2012,6 +2021,14 @@ pub mod config {
                         url: None,
                         server_type: "stdio".to_string(),
                     }],
+                    hooks: HashMap::from([(
+                        HookEvent::PreToolUse,
+                        vec![HookEntry {
+                            command: "project-hook".to_string(),
+                            tool_filter: Some("*".to_string()),
+                            blocking: true,
+                        }],
+                    )]),
                     enable_all_mcp_servers: true,
                     ..Default::default()
                 },
@@ -2038,6 +2055,11 @@ pub mod config {
             assert_eq!(merged.config.model.as_deref(), Some("project-model"));
             assert_eq!(merged.config.mcp_servers.len(), 1);
             assert_eq!(merged.config.mcp_servers[0].name, "global");
+            assert_eq!(merged.config.hooks[&HookEvent::PreToolUse].len(), 1);
+            assert_eq!(
+                merged.config.hooks[&HookEvent::PreToolUse][0].command,
+                "trusted-hook"
+            );
             assert!(merged.config.enable_all_mcp_servers);
             assert_eq!(merged.projects["repo"].mcp_servers.len(), 1);
             assert_eq!(
