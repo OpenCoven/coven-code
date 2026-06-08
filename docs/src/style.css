@@ -1023,6 +1023,157 @@ a {
   background: var(--color-bg-elevated);
 }
 
+/* ----- Searchable explorer (commands + keybindings) ----- */
+.explorer-controls {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+.explorer-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 14px 0 36px;
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 0.15s ease-out;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23808088' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg>");
+  background-repeat: no-repeat;
+  background-position: 12px center;
+}
+.explorer-input:focus {
+  border-color: var(--color-accent);
+}
+.explorer-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.explorer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.explorer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out, background 0.15s ease-out;
+}
+.explorer-chip:hover {
+  border-color: var(--color-border-hover);
+  color: var(--color-text-primary);
+}
+.explorer-chip[aria-pressed="true"] {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-tint);
+}
+.explorer-chip-count {
+  font-size: 10px;
+  color: var(--color-text-dimmer);
+}
+.explorer-chip[aria-pressed="true"] .explorer-chip-count {
+  color: var(--color-accent-light);
+}
+.explorer-clear {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  transition: color 0.15s ease-out;
+}
+.explorer-clear:hover {
+  color: var(--color-accent-light);
+}
+.explorer-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+.explorer-item {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-card);
+  transition: border-color 0.15s ease-out;
+}
+.explorer-item:hover {
+  border-color: var(--color-accent);
+}
+.explorer-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.explorer-item-id {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--color-accent);
+}
+.explorer-item-cat {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-dimmer);
+}
+.explorer-item-desc {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+.explorer-empty {
+  padding: 28px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-dim);
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-card);
+}
+
+/* Key-style ID for keybinding explorer items */
+.explorer-item-id.key-id {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border-light);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
 /* ----- Demo 4: Tools grid ----- */
 .tools-cat {
   margin-bottom: 18px;

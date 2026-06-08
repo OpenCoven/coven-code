@@ -5,79 +5,76 @@ export function render() {
     <h1>Keybindings</h1>
     <p class="lead">Coven Code uses a context-aware keybinding system — the same key can have different effects depending on where focus is, and bindings in more specific contexts override broader ones. Customise via the <code>/keybindings</code> editor or <code>~/.coven-code/keybindings.json</code>.</p>
 
-    <h2>Global context</h2>
+    <h2>Browse shortcuts</h2>
 
-    <p>Active everywhere.</p>
+    <p>Type to filter by key, action, or description. Click a context chip to narrow to that scope.</p>
 
-    <table class="shortcut-table">
-      <thead><tr><th>Key</th><th>Action</th></tr></thead>
-      <tbody>
-        <tr><td><kbd>Ctrl+C</kbd></td><td>Interrupt the current operation (non-rebindable)</td></tr>
-        <tr><td><kbd>Ctrl+D</kbd></td><td>Exit Coven Code (non-rebindable)</td></tr>
-        <tr><td><kbd>Ctrl+L</kbd></td><td>Redraw the terminal screen</td></tr>
-        <tr><td><kbd>Ctrl+R</kbd></td><td>Open interactive history search</td></tr>
-        <tr><td><kbd>Ctrl+B</kbd></td><td>Create a new git branch</td></tr>
-        <tr><td><kbd>Alt+H</kbd></td><td>Open the help panel</td></tr>
-        <tr><td><kbd>F2</kbd></td><td>Open familiar switcher</td></tr>
-      </tbody>
-    </table>
+    <div class="demo" x-data="keybindingExplorer">
+      <div class="demo-header">
+        <span>keybinding explorer · <span x-text="count"></span> / <span x-text="total"></span> shown</span>
+      </div>
+      <div class="demo-body">
+        <div class="explorer-controls">
+          <input
+            type="text"
+            class="explorer-input"
+            placeholder="Search keys or actions — try 'ctrl', 'history', 'palette', 'word'…"
+            x-model="query"
+            aria-label="Search keybindings"
+          />
+          <span class="explorer-count">
+            <span x-text="count"></span> matches
+          </span>
+        </div>
+        <div class="explorer-chips">
+          <template x-for="cat in categories" :key="cat">
+            <button
+              type="button"
+              class="explorer-chip"
+              :aria-pressed="category === cat"
+              @click="pick(cat)"
+            >
+              <span x-text="cat"></span>
+              <span class="explorer-chip-count" x-text="countIn(cat)"></span>
+            </button>
+          </template>
+          <button
+            type="button"
+            class="explorer-clear"
+            x-show="query || category"
+            @click="clear()"
+          >Clear</button>
+        </div>
+        <div class="explorer-results" x-show="count > 0">
+          <template x-for="item in filtered" :key="item.id + item.category">
+            <div class="explorer-item">
+              <div class="explorer-item-head">
+                <span class="explorer-item-id key-id" x-text="item.id"></span>
+                <span class="explorer-item-cat" x-text="item.category"></span>
+              </div>
+              <div class="explorer-item-desc" x-text="item.desc"></div>
+            </div>
+          </template>
+        </div>
+        <div class="explorer-empty" x-show="count === 0">
+          No shortcuts match. <a href="#" @click.prevent="clear()" style="color: var(--color-accent);">Clear filters</a>
+        </div>
+      </div>
+    </div>
 
-    <h2>Chat context</h2>
+    <h2>How contexts work</h2>
 
-    <p>Active when focus is in the chat input.</p>
+    <p>The same key can have different effects depending on which UI surface has focus. Bindings in a more specific context take precedence over a broader one.</p>
 
-    <table class="shortcut-table">
-      <thead><tr><th>Key</th><th>Action</th></tr></thead>
-      <tbody>
-        <tr><td><kbd>Enter</kbd></td><td>Submit message</td></tr>
-        <tr><td><kbd>Shift+Enter</kbd> / <kbd>Ctrl+J</kbd></td><td>Insert a literal newline</td></tr>
-        <tr><td><kbd>Up</kbd> / <kbd>Ctrl+O</kbd></td><td>Previous in input history</td></tr>
-        <tr><td><kbd>Down</kbd> / <kbd>Ctrl+I</kbd></td><td>Next in input history</td></tr>
-        <tr><td><kbd>Tab</kbd></td><td>Indent (or cycle completions)</td></tr>
-        <tr><td><kbd>Page Up</kbd> / <kbd>Page Down</kbd></td><td>Scroll conversation</td></tr>
-        <tr><td><kbd>Ctrl+A</kbd> / <kbd>Ctrl+E</kbd></td><td>Move cursor to line start / end</td></tr>
-        <tr><td><kbd>Ctrl+Left</kbd> / <kbd>Ctrl+Right</kbd></td><td>Move one word</td></tr>
-        <tr><td><kbd>Alt+Left</kbd> / <kbd>Alt+Right</kbd></td><td>Jump to previous/next message</td></tr>
-        <tr><td><kbd>Ctrl+Shift+A</kbd></td><td>Open model picker</td></tr>
-        <tr><td><kbd>Ctrl+K</kbd></td><td>Open slash command palette</td></tr>
-        <tr><td><kbd>Ctrl+U</kbd></td><td>Kill to start of line</td></tr>
-        <tr><td><kbd>Ctrl+W</kbd> / <kbd>Alt+Backspace</kbd></td><td>Delete word before cursor</td></tr>
-        <tr><td><kbd>Alt+D</kbd></td><td>Delete word after cursor</td></tr>
-        <tr><td><kbd>Ctrl+F</kbd></td><td>Find within current conversation</td></tr>
-        <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Global codebase search</td></tr>
-        <tr><td><kbd>F3</kbd> / <kbd>Shift+F3</kbd></td><td>Next / previous search match</td></tr>
-      </tbody>
-    </table>
-
-    <h2>Confirmation context</h2>
-
-    <p>Active during yes/no permission prompts.</p>
-
-    <table class="shortcut-table">
-      <thead><tr><th>Key</th><th>Action</th></tr></thead>
-      <tbody>
-        <tr><td><kbd>Y</kbd></td><td>Approve</td></tr>
-        <tr><td><kbd>N</kbd></td><td>Deny</td></tr>
-        <tr><td><kbd>A</kbd></td><td>Approve + add permanent allow rule</td></tr>
-        <tr><td><kbd>Enter</kbd></td><td>Accept the highlighted default</td></tr>
-        <tr><td><kbd>Escape</kbd></td><td>Cancel (deny)</td></tr>
-      </tbody>
-    </table>
-
-    <h2>Contexts</h2>
-
-    <table>
-      <thead><tr><th>Context</th><th>Active when</th></tr></thead>
-      <tbody>
-        <tr><td><code>global</code></td><td>Always</td></tr>
-        <tr><td><code>chat</code></td><td>Chat input has focus</td></tr>
-        <tr><td><code>confirmation</code></td><td>Permission dialog is open</td></tr>
-        <tr><td><code>modelPicker</code></td><td>Model selection overlay open</td></tr>
-        <tr><td><code>commandPalette</code></td><td>Slash command palette open</td></tr>
-        <tr><td><code>search</code></td><td>Inline search bar open</td></tr>
-        <tr><td><code>vim.normal</code> / <code>vim.insert</code> / <code>vim.visual</code></td><td>Vim mode active in the matching mode</td></tr>
-      </tbody>
-    </table>
+    <ul>
+      <li><code>global</code> — always active</li>
+      <li><code>chat</code> — chat input has focus</li>
+      <li><code>confirmation</code> — a permission dialog is open</li>
+      <li><code>modelPicker</code> — the model selection overlay is open</li>
+      <li><code>commandPalette</code> — the slash command palette is open</li>
+      <li><code>search</code> — the inline search bar is open</li>
+      <li><code>vim.normal</code> / <code>vim.insert</code> / <code>vim.visual</code> — when vim mode is enabled</li>
+    </ul>
 
     <h2>Customising</h2>
 

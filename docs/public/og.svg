@@ -2,5 +2,5 @@
   <rect width="1200" height="630" fill="#080808"/>
   <text x="600" y="310" font-family="'IBM Plex Serif',Georgia,serif" font-weight="600" font-size="180" letter-spacing="-9" text-anchor="middle" fill="#9a8ecd">coven</text>
   <text x="600" y="380" font-family="'JetBrains Mono','SF Mono',monospace" font-weight="500" font-size="28" letter-spacing="12" text-anchor="middle" fill="#ffffff">CODE</text>
-  <text x="600" y="470" font-family="'DM Sans',sans-serif" font-weight="400" font-size="28" text-anchor="middle" fill="#b4b4b8">A terminal coding agent in Rust</text>
+  <text x="600" y="470" font-family="'DM Sans',sans-serif" font-weight="400" font-size="28" text-anchor="middle" fill="#b4b4b8">Terminal Coding Familiar in Rust</text>
 </svg>

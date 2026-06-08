@@ -159,6 +159,188 @@ export function registerDemos(Alpine) {
     },
   }));
 
+  // ----- Shared: Searchable explorer factory ------------------------------
+  // Used by both commandExplorer and keybindingExplorer below. Filters items
+  // by selected category (null = all) AND by free-text query against the
+  // configured search fields. Returns up to `limit` results.
+  function makeExplorer({ items, categories, search = ['id', 'desc'], limit = null }) {
+    return () => ({
+      query: '',
+      category: null,
+      items,
+      categories,
+      pick(cat) {
+        this.category = this.category === cat ? null : cat;
+      },
+      clear() {
+        this.query = '';
+        this.category = null;
+      },
+      get filtered() {
+        const q = this.query.trim().toLowerCase();
+        let out = this.items;
+        if (this.category) out = out.filter((it) => it.category === this.category);
+        if (q) {
+          out = out.filter((it) =>
+            search.some((f) => String(it[f] || '').toLowerCase().includes(q))
+          );
+        }
+        return limit ? out.slice(0, limit) : out;
+      },
+      get count() {
+        return this.filtered.length;
+      },
+      get total() {
+        return this.items.length;
+      },
+      countIn(cat) {
+        return this.items.filter((it) => it.category === cat).length;
+      },
+    });
+  }
+
+  // ----- Slash command explorer ------------------------------------------
+  Alpine.data(
+    'commandExplorer',
+    makeExplorer({
+      categories: [
+        'Session', 'Model', 'Config', 'Code & Git', 'Memory & Cost',
+        'Agents & Tasks', 'Auth', 'Display', 'Coven', 'Diagnostics',
+      ],
+      search: ['id', 'desc', 'keywords'],
+      items: [
+        // Session
+        { id: '/help', category: 'Session', desc: 'Show all commands', keywords: 'h ?' },
+        { id: '/clear', category: 'Session', desc: 'Clear the conversation' },
+        { id: '/exit', category: 'Session', desc: 'Quit the session', keywords: 'quit q' },
+        { id: '/resume', category: 'Session', desc: 'Resume a previous session' },
+        { id: '/session', category: 'Session', desc: 'List or pick a session' },
+        { id: '/fork', category: 'Session', desc: 'Branch the current session into a new one' },
+        { id: '/rename', category: 'Session', desc: 'Rename the current session' },
+        { id: '/rewind', category: 'Session', desc: 'Go back to a previous message' },
+        { id: '/compact', category: 'Session', desc: 'Compress conversation history' },
+        // Model
+        { id: '/model', category: 'Model', desc: 'Switch model or provider' },
+        { id: '/providers', category: 'Model', desc: 'List available providers' },
+        { id: '/connect', category: 'Model', desc: 'Connect to a remote provider endpoint' },
+        { id: '/thinking', category: 'Model', desc: 'Toggle extended thinking display' },
+        { id: '/effort', category: 'Model', desc: 'Set extended-thinking effort level', keywords: 'low medium high max' },
+        { id: '/advisor', category: 'Model', desc: 'Set a secondary advisor model' },
+        { id: '/fast', category: 'Model', desc: 'Toggle fast mode (smaller, faster model)' },
+        // Config
+        { id: '/config', category: 'Config', desc: 'Open the settings editor' },
+        { id: '/keybindings', category: 'Config', desc: 'Open the interactive keybinding editor' },
+        { id: '/permissions', category: 'Config', desc: 'Manage tool permission rules' },
+        { id: '/hooks', category: 'Config', desc: 'Inspect active hooks' },
+        { id: '/mcp', category: 'Config', desc: 'Manage MCP servers' },
+        { id: '/output-style', category: 'Config', desc: 'Switch output style' },
+        { id: '/theme', category: 'Config', desc: 'Switch visual theme' },
+        { id: '/statusline', category: 'Config', desc: 'Configure status line' },
+        { id: '/vim', category: 'Config', desc: 'Toggle vim mode' },
+        { id: '/voice', category: 'Config', desc: 'Voice input mode' },
+        // Code & Git
+        { id: '/commit', category: 'Code & Git', desc: 'Stage and commit current changes', keywords: 'git' },
+        { id: '/diff', category: 'Code & Git', desc: 'Show working-tree diff', keywords: 'git' },
+        { id: '/undo', category: 'Code & Git', desc: 'Undo the last file edit (uses snapshot)' },
+        { id: '/review', category: 'Code & Git', desc: 'Review a PR or current changes' },
+        { id: '/security-review', category: 'Code & Git', desc: 'Security audit of pending changes' },
+        { id: '/init', category: 'Code & Git', desc: 'Initialise a new AGENTS.md for the project' },
+        { id: '/search', category: 'Code & Git', desc: 'Codebase search', keywords: 'grep find' },
+        // Memory & Cost
+        { id: '/memory', category: 'Memory & Cost', desc: 'Browse persistent memory entries' },
+        { id: '/context', category: 'Memory & Cost', desc: 'Show context window usage' },
+        { id: '/cost', category: 'Memory & Cost', desc: 'Token usage and dollar cost for the session', keywords: 'tokens money' },
+        { id: '/usage', category: 'Memory & Cost', desc: 'Session usage statistics' },
+        { id: '/stats', category: 'Memory & Cost', desc: 'Session statistics' },
+        { id: '/insights', category: 'Memory & Cost', desc: 'Session statistics and tool usage report' },
+        { id: '/status', category: 'Memory & Cost', desc: 'Connection and daemon status' },
+        // Agents & Tasks
+        { id: '/agents', category: 'Agents & Tasks', desc: 'List built-in, custom, and familiar agents' },
+        { id: '/agent', category: 'Agents & Tasks', desc: 'Switch active agent for this session' },
+        { id: '/tasks', category: 'Agents & Tasks', desc: 'Show the live task list' },
+        { id: '/goal', category: 'Agents & Tasks', desc: 'Set an autonomous multi-turn goal' },
+        { id: '/managed-agents', category: 'Agents & Tasks', desc: 'Configure manager-executor agents' },
+        { id: '/plan', category: 'Agents & Tasks', desc: 'Enter planning mode (read-only)' },
+        { id: '/ultraplan', category: 'Agents & Tasks', desc: 'Deep planning mode' },
+        { id: '/ultrareview', category: 'Agents & Tasks', desc: 'Exhaustive multi-dimensional code review' },
+        // Auth
+        { id: '/login', category: 'Auth', desc: 'OAuth login (--codex for ChatGPT, --label to name)' },
+        { id: '/accounts', category: 'Auth', desc: 'List stored profiles' },
+        { id: '/switch', category: 'Auth', desc: 'Switch active account' },
+        { id: '/logout', category: 'Auth', desc: 'Clear credentials' },
+        { id: '/refresh', category: 'Auth', desc: 'Refresh OAuth tokens' },
+        // Display
+        { id: '/caveman', category: 'Display', desc: 'Telegraphic speech mode (saves 40–85% tokens)' },
+        { id: '/rocky', category: 'Display', desc: 'Rocky (Project Hail Mary) speech mode' },
+        { id: '/normal', category: 'Display', desc: 'Deactivate speech modes' },
+        { id: '/mobile', category: 'Display', desc: 'Compact mobile-friendly rendering' },
+        { id: '/color', category: 'Display', desc: 'Adjust colour palette at runtime' },
+        { id: '/stickers', category: 'Display', desc: 'Toggle sticker rendering' },
+        // Coven
+        { id: '/coven', category: 'Coven', desc: 'Substrate surface: kill, log, send, familiars, etc.' },
+        { id: '/familiar', category: 'Coven', desc: 'Switch active familiar (also F2)' },
+        { id: '/handoff', category: 'Coven', desc: 'Hand off a session between familiars' },
+        // Diagnostics
+        { id: '/doctor', category: 'Diagnostics', desc: 'Environment and substrate health check' },
+        { id: '/version', category: 'Diagnostics', desc: 'Show version info' },
+        { id: '/update', category: 'Diagnostics', desc: 'Check for and download updates' },
+        { id: '/export', category: 'Diagnostics', desc: 'Save session transcript' },
+        { id: '/copy', category: 'Diagnostics', desc: 'Copy last response to clipboard', keywords: 'clipboard' },
+        { id: '/think-back', category: 'Diagnostics', desc: 'View thinking traces from previous responses' },
+        { id: '/sandbox-toggle', category: 'Diagnostics', desc: 'Toggle sandboxed shell execution' },
+      ],
+    })
+  );
+
+  // ----- Keybinding explorer ---------------------------------------------
+  Alpine.data(
+    'keybindingExplorer',
+    makeExplorer({
+      categories: ['Global', 'Chat', 'Confirmation'],
+      search: ['id', 'desc', 'keys'],
+      items: [
+        // Global
+        { id: 'Ctrl+C',  keys: 'ctrl c interrupt cancel', category: 'Global', desc: 'Interrupt the current operation (non-rebindable)' },
+        { id: 'Ctrl+D',  keys: 'ctrl d exit quit',        category: 'Global', desc: 'Exit Coven Code (non-rebindable)' },
+        { id: 'Ctrl+L',  keys: 'ctrl l redraw refresh',   category: 'Global', desc: 'Redraw the terminal screen' },
+        { id: 'Ctrl+R',  keys: 'ctrl r history search',   category: 'Global', desc: 'Open interactive history search' },
+        { id: 'Ctrl+B',  keys: 'ctrl b git branch',       category: 'Global', desc: 'Create a new git branch' },
+        { id: 'Alt+H',   keys: 'alt h help',              category: 'Global', desc: 'Open the help panel' },
+        { id: 'F2',      keys: 'f2 familiar switcher',    category: 'Global', desc: 'Open familiar switcher popup' },
+        // Chat
+        { id: 'Enter',           keys: 'enter return submit',         category: 'Chat', desc: 'Submit message' },
+        { id: 'Shift+Enter',     keys: 'shift enter newline',         category: 'Chat', desc: 'Insert a literal newline (also Ctrl+J)' },
+        { id: 'Up',              keys: 'up arrow history previous',   category: 'Chat', desc: 'Previous in input history (or Ctrl+O)' },
+        { id: 'Down',            keys: 'down arrow history next',     category: 'Chat', desc: 'Next in input history (or Ctrl+I)' },
+        { id: 'Tab',              keys: 'tab indent completion',      category: 'Chat', desc: 'Indent (or cycle completions if open)' },
+        { id: 'Page Up / Down',   keys: 'page up down scroll',        category: 'Chat', desc: 'Scroll conversation by one page' },
+        { id: 'Ctrl+A',           keys: 'ctrl a line start',           category: 'Chat', desc: 'Move cursor to start of line (Emacs-style)' },
+        { id: 'Ctrl+E',           keys: 'ctrl e line end',             category: 'Chat', desc: 'Move cursor to end of line' },
+        { id: 'Ctrl+Left',        keys: 'ctrl left word backward',     category: 'Chat', desc: 'Move one word left' },
+        { id: 'Ctrl+Right',       keys: 'ctrl right word forward',     category: 'Chat', desc: 'Move one word right' },
+        { id: 'Alt+Left',         keys: 'alt left previous message',   category: 'Chat', desc: 'Jump to previous message' },
+        { id: 'Alt+Right',        keys: 'alt right next message',      category: 'Chat', desc: 'Jump to next message' },
+        { id: 'Ctrl+Shift+A',     keys: 'ctrl shift a model picker',   category: 'Chat', desc: 'Open the model picker' },
+        { id: 'Ctrl+K',           keys: 'ctrl k palette command',      category: 'Chat', desc: 'Open the slash command palette' },
+        { id: 'Ctrl+U',           keys: 'ctrl u kill line',            category: 'Chat', desc: 'Kill from cursor to start of line' },
+        { id: 'Ctrl+W',           keys: 'ctrl w kill word',            category: 'Chat', desc: 'Delete word before cursor (or Alt+Backspace)' },
+        { id: 'Alt+D',            keys: 'alt d delete word',           category: 'Chat', desc: 'Delete word after cursor' },
+        { id: 'Ctrl+F',           keys: 'ctrl f find in conversation', category: 'Chat', desc: 'Find within current conversation' },
+        { id: 'Ctrl+Shift+F',     keys: 'ctrl shift f global search',  category: 'Chat', desc: 'Open global codebase search' },
+        { id: 'F3',               keys: 'f3 next match',               category: 'Chat', desc: 'Jump to next search match (Shift+F3 for prev)' },
+        { id: 'Ctrl+G',           keys: 'ctrl g go to line',           category: 'Chat', desc: 'Jump to a specific line' },
+        { id: 'Ctrl+.',           keys: 'ctrl dot error',              category: 'Chat', desc: 'Jump to next error / issue' },
+        { id: '@',                keys: 'at file injection',           category: 'Chat', desc: 'Open file picker (typeahead injects file contents)' },
+        // Confirmation
+        { id: 'Y',       keys: 'y yes approve',           category: 'Confirmation', desc: 'Approve the pending action' },
+        { id: 'N',       keys: 'n no deny',               category: 'Confirmation', desc: 'Deny the pending action' },
+        { id: 'A',       keys: 'a always allow',          category: 'Confirmation', desc: 'Approve and add a permanent allow rule' },
+        { id: 'Enter',   keys: 'enter default',           category: 'Confirmation', desc: 'Accept the highlighted default option' },
+        { id: 'Escape',  keys: 'escape cancel',           category: 'Confirmation', desc: 'Cancel and deny' },
+      ],
+    })
+  );
+
   // ----- Demo 4: Tools grid ----------------------------------------------
   Alpine.data('toolsGrid', () => ({
     expanded: null,
