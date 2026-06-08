@@ -620,11 +620,12 @@ fn daemon_familiar_statuses() -> HashMap<String, coven_shared::FamiliarStatus> {
         }
     }
 
+    // Daemon is optional and frequently absent; on any error we degrade to
+    // an empty map and the agents view shows familiars without live badges.
     let statuses: HashMap<String, coven_shared::FamiliarStatus> = coven_shared::DaemonClient::new()
-        .map(|client| {
-            client
-                .familiar_statuses()
-                .into_iter()
+        .and_then(|client| client.familiar_statuses().ok())
+        .map(|list| {
+            list.into_iter()
                 .filter(|status| familiar_live_badge(status).is_some())
                 .map(|status| (status.id.clone(), status))
                 .collect()

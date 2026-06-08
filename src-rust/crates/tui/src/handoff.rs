@@ -48,13 +48,15 @@ pub fn send_handoff(
     let client = DaemonClient::new()
         .ok_or_else(|| "Coven daemon not running; install coven to use /handoff".to_string())?;
     let title = format!("Handoff from coven-code: {}", infer_short_topic(&context));
-    client.create_session(CreateSessionRequest {
-        familiar: familiar_name.to_string(),
-        project_root: project_root.to_string(),
-        harness: "openclaw".to_string(),
-        title,
-        initial_message: context,
-    })
+    client
+        .create_session(CreateSessionRequest {
+            familiar: familiar_name.to_string(),
+            project_root: project_root.to_string(),
+            harness: "openclaw".to_string(),
+            title,
+            initial_message: context,
+        })
+        .map_err(|e| e.to_string())
 }
 
 fn format_message(message: &Message) -> String {

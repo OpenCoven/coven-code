@@ -9912,6 +9912,21 @@ fn coven_help_text() -> &'static str {
      /coven help                       Show this help"
 }
 
+/// Expected API version negotiated against `coven.daemon.v1`. Bump this
+/// when coven-code is ready to talk to a newer daemon contract.
+const COVEN_DAEMON_EXPECTED_API: &str = "coven.daemon.v1";
+
+/// Render a [`DaemonError`] into a user-facing string. Offline errors are
+/// rewritten to suggest `/coven daemon start`; other errors surface the
+/// structured code so users can distinguish `session_not_live` from
+/// `session_not_found` etc.
+fn coven_render_error(err: &claurst_core::coven_shared::DaemonError) -> String {
+    if err.is_offline() {
+        return "Coven daemon offline. Try `/coven daemon start`.".to_string();
+    }
+    err.to_string()
+}
+
 fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> String {
     let mut out = String::new();
     if !client.is_online() {
@@ -9920,7 +9935,7 @@ fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> Str
         return out;
     }
     match client.health() {
-        Some(h) => {
+        Ok(h) => {
             out.push_str(&format!(
                 "Coven daemon: online ({api}, coven {ver})\n",
                 api = if h.api_version.is_empty() {
@@ -9934,6 +9949,12 @@ fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> Str
                     h.coven_version.as_str()
                 },
             ));
+            if !h.api_version.is_empty() && h.api_version != COVEN_DAEMON_EXPECTED_API {
+                out.push_str(&format!(
+                    "  warning: client expects {} — features may misbehave on this daemon.\n",
+                    COVEN_DAEMON_EXPECTED_API
+                ));
+            }
             if let Some(pid) = h.pid {
                 out.push_str(&format!("  pid: {pid}\n"));
             }
@@ -9944,12 +9965,14 @@ fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> Str
                 out.push_str(&format!("  started: {started}\n"));
             }
         }
-        None => {
-            out.push_str("Coven daemon: online (health response unavailable)\n");
+        Err(e) => {
+            out.push_str(&format!("Coven daemon: online (health unavailable: {e})\n"));
         }
     }
-    let active = client.active_sessions();
-    out.push_str(&format!("  active sessions: {}\n", active.len()));
+    match client.active_sessions() {
+        Ok(active) => out.push_str(&format!("  active sessions: {}\n", active.len())),
+        Err(e) => out.push_str(&format!("  active sessions: ? ({e})\n")),
+    }
     out
 }
 
@@ -10042,18 +10065,12 @@ fn coven_read_calls_ledger(limit: usize) -> String {
             .get("calleeFamiliarId")
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        let status = call
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
+        let status = call.get("status").and_then(|v| v.as_str()).unwrap_or("?");
         let created = call
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        let request = call
-            .get("request")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let request = call.get("request").and_then(|v| v.as_str()).unwrap_or("");
         let trimmed = if request.chars().count() > 36 {
             let s: String = request.chars().take(36).collect();
             format!("{s}…")
@@ -10161,12 +10178,17 @@ impl SlashCommand for CovenCommand {
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
                 };
-                let sessions = if include_archived {
+                let result = if include_archived {
                     client.all_sessions()
                 } else {
                     client.active_sessions()
                 };
-                CommandResult::Message(coven_format_sessions(&sessions, include_archived))
+                match result {
+                    Ok(sessions) => {
+                        CommandResult::Message(coven_format_sessions(&sessions, include_archived))
+                    }
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
+                }
             }
 
             // Native-API verbs. The daemon's HTTP contract exposes these
@@ -10178,7 +10200,10 @@ impl SlashCommand for CovenCommand {
                         "Coven daemon offline. Try `/coven daemon start`.".to_string(),
                     );
                 };
-                let statuses = client.familiar_statuses();
+                let statuses = match client.familiar_statuses() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(coven_render_error(&e)),
+                };
                 if statuses.is_empty() {
                     return CommandResult::Message(
                         "No familiars reported by the daemon.".to_string(),
@@ -10208,11 +10233,9 @@ impl SlashCommand for CovenCommand {
                     );
                 };
                 match client.session_log(rest) {
-                    Some(log) if !log.is_empty() => CommandResult::Message(log),
-                    Some(_) => CommandResult::Message("(session log is empty)".to_string()),
-                    None => CommandResult::Error(format!(
-                        "Daemon returned no log for session '{rest}'. Check the id with `/coven sessions`."
-                    )),
+                    Ok(log) if !log.is_empty() => CommandResult::Message(log),
+                    Ok(_) => CommandResult::Message("(session log is empty)".to_string()),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "send" => {
@@ -10231,7 +10254,7 @@ impl SlashCommand for CovenCommand {
                 };
                 match client.send_input(id, input) {
                     Ok(()) => CommandResult::Message(format!("Sent input to {id}.")),
-                    Err(e) => CommandResult::Error(format!("Failed to send input: {e}")),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "kill" => {
@@ -10245,7 +10268,7 @@ impl SlashCommand for CovenCommand {
                 };
                 match client.kill_session(rest) {
                     Ok(()) => CommandResult::Message(format!("Killed session {rest}.")),
-                    Err(e) => CommandResult::Error(format!("Failed to kill session: {e}")),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "capabilities" => {
@@ -10255,16 +10278,14 @@ impl SlashCommand for CovenCommand {
                     );
                 };
                 match client.capabilities() {
-                    Some(body) => {
+                    Ok(body) => {
                         let pretty = serde_json::from_str::<serde_json::Value>(&body)
                             .ok()
                             .and_then(|v| serde_json::to_string_pretty(&v).ok())
                             .unwrap_or(body);
                         CommandResult::Message(pretty)
                     }
-                    None => CommandResult::Error(
-                        "Daemon returned no capability catalog.".to_string(),
-                    ),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "info" => {
@@ -10277,7 +10298,7 @@ impl SlashCommand for CovenCommand {
                     );
                 };
                 match client.get_session(rest) {
-                    Some(s) => {
+                    Ok(s) => {
                         let archived = s
                             .archived_at
                             .as_deref()
@@ -10298,9 +10319,7 @@ impl SlashCommand for CovenCommand {
                             a = archived,
                         ))
                     }
-                    None => CommandResult::Error(format!(
-                        "No session with id '{rest}' (or daemon offline)."
-                    )),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "events" => {
@@ -10312,7 +10331,10 @@ impl SlashCommand for CovenCommand {
                 let mut tokens = rest.split_whitespace();
                 let id = tokens.next().unwrap_or("");
                 let mut after: Option<i64> = None;
-                let mut limit: Option<u32> = None;
+                // Default page size so a user doesn't accidentally fetch
+                // every event in a long session. `/coven events <id>
+                // --limit 0` opts back into the daemon-default (unset).
+                let mut limit: Option<u32> = Some(50);
                 while let Some(tok) = tokens.next() {
                     match tok {
                         "--after" | "--after-seq" => {
@@ -10322,7 +10344,11 @@ impl SlashCommand for CovenCommand {
                         }
                         "--limit" => {
                             if let Some(v) = tokens.next() {
-                                limit = v.parse().ok();
+                                match v.parse::<u32>() {
+                                    Ok(0) => limit = None,
+                                    Ok(n) => limit = Some(n),
+                                    Err(_) => {}
+                                }
                             }
                         }
                         _ => {
@@ -10338,11 +10364,9 @@ impl SlashCommand for CovenCommand {
                     );
                 };
                 match client.session_events(id, after, limit) {
-                    Some(page) => {
+                    Ok(page) => {
                         if page.events.is_empty() {
-                            return CommandResult::Message(
-                                "(no events in this page)".to_string(),
-                            );
+                            return CommandResult::Message("End of events stream.".to_string());
                         }
                         let mut out = String::new();
                         out.push_str(&format!(
@@ -10373,12 +10397,12 @@ impl SlashCommand for CovenCommand {
                             } else {
                                 out.push_str("\nMore events available.");
                             }
+                        } else {
+                            out.push_str("\nEnd of events stream.");
                         }
                         CommandResult::Message(out)
                     }
-                    None => CommandResult::Error(format!(
-                        "Daemon returned no events for session '{id}'."
-                    )),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
             "actions" => {
@@ -10421,7 +10445,7 @@ impl SlashCommand for CovenCommand {
                         }
                         CommandResult::Message(out)
                     }
-                    Err(e) => CommandResult::Error(format!("Action failed: {e}")),
+                    Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
             }
 
@@ -10542,9 +10566,7 @@ impl SlashCommand for CovenCommand {
             }
             "logs" => {
                 if rest.is_empty() {
-                    return CommandResult::Error(
-                        "Usage: /coven logs prune [--days N]".to_string(),
-                    );
+                    return CommandResult::Error("Usage: /coven logs prune [--days N]".to_string());
                 }
                 let mut argv: Vec<&str> = vec!["logs"];
                 argv.extend(rest.split_whitespace());
@@ -11385,9 +11407,7 @@ mod tests {
         let result = cmd.execute("help", &mut ctx).await;
         match result {
             CommandResult::Message(msg) => {
-                for verb in [
-                    "calls", "claim", "hooks-install", "adapter", "logs", "wt",
-                ] {
+                for verb in ["calls", "claim", "hooks-install", "adapter", "logs", "wt"] {
                     assert!(msg.contains(verb), "help should mention {verb}: {msg}");
                 }
             }
@@ -11424,7 +11444,9 @@ mod tests {
 
     #[test]
     fn coven_calls_ledger_returns_message_when_file_missing() {
-        let _guard = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("COVEN_HOME").ok();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("COVEN_HOME", dir.path());
@@ -11442,7 +11464,9 @@ mod tests {
 
     #[test]
     fn coven_calls_ledger_renders_recent_entries() {
-        let _guard = COVEN_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("COVEN_HOME").ok();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("COVEN_HOME", dir.path());

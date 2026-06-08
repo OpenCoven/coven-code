@@ -132,6 +132,88 @@ struct RawSession {
 }
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Structured error returned by [`DaemonClient`] methods.
+///
+/// The daemon's HTTP contract (`coven.daemon.v1`) wraps every error in
+/// `{ "error": { "code": "...", "message": "...", "details": {...} } }`.
+/// We surface those fields here so user-facing layers can render
+/// actionable messages like `Session not running (session_not_live)`
+/// instead of a generic `daemon offline`.
+#[derive(Debug, Clone)]
+pub enum DaemonError {
+    /// Socket file is missing or the daemon refused the connection.
+    Offline { reason: String },
+    /// Connection succeeded but the request/response cycle failed at the
+    /// transport layer (read/write timed out, peer closed mid-stream, etc.).
+    Transport(String),
+    /// HTTP completed but the daemon returned a non-2xx status. `code`
+    /// carries the structured error code when the daemon supplied one,
+    /// `message` carries the human-readable hint.
+    BadStatus {
+        status: u16,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    /// Response body could not be parsed as JSON / the expected shape.
+    MalformedResponse(String),
+    /// Response was well-formed but a required field was missing.
+    MissingField(&'static str),
+}
+
+impl DaemonError {
+    /// Return the structured error code when one is present.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            DaemonError::BadStatus { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Return the HTTP status when this is a bad-status error.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            DaemonError::BadStatus { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// `true` when the error indicates the daemon is not reachable at all
+    /// (socket missing, connection refused). UI layers can use this to
+    /// decide whether to suggest `coven daemon start`.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, DaemonError::Offline { .. })
+    }
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonError::Offline { reason } => write!(f, "Coven daemon offline ({reason})"),
+            DaemonError::Transport(msg) => write!(f, "daemon transport error: {msg}"),
+            DaemonError::BadStatus {
+                status,
+                code,
+                message,
+            } => match (code.as_deref(), message.as_deref()) {
+                (Some(c), Some(m)) => write!(f, "{m} ({status} {c})"),
+                (Some(c), None) => write!(f, "daemon returned {status} ({c})"),
+                (None, Some(m)) => write!(f, "{m} ({status})"),
+                (None, None) => write!(f, "daemon returned {status}"),
+            },
+            DaemonError::MalformedResponse(msg) => {
+                write!(f, "daemon returned invalid response: {msg}")
+            }
+            DaemonError::MissingField(name) => write!(f, "daemon response missing field `{name}`"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonError {}
+
+// ---------------------------------------------------------------------------
 // DaemonClient
 // ---------------------------------------------------------------------------
 
@@ -179,10 +261,14 @@ impl DaemonClient {
     ///
     /// HTTP/1.0 is used so the server closes the connection after the
     /// response — no need to parse `Content-Length` or chunked encoding.
-    fn request(&self, method: &str, path: &str, body: Option<&str>) -> Option<String> {
+    /// Non-2xx responses are surfaced via [`DaemonError::BadStatus`] with
+    /// the daemon's structured error envelope parsed out.
+    fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String, DaemonError> {
         #[cfg(unix)]
         {
-            let mut stream = self.connect().ok()?;
+            let mut stream = self.connect().map_err(|e| DaemonError::Offline {
+                reason: e.to_string(),
+            })?;
             let request = match body {
                 Some(body) => format!(
                     "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -192,59 +278,109 @@ impl DaemonClient {
                     "{method} {path} HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n"
                 ),
             };
-            stream.write_all(request.as_bytes()).ok()?;
-            stream.flush().ok()?;
+            stream
+                .write_all(request.as_bytes())
+                .map_err(|e| DaemonError::Transport(e.to_string()))?;
+            stream
+                .flush()
+                .map_err(|e| DaemonError::Transport(e.to_string()))?;
 
             let mut raw = Vec::new();
-            stream.read_to_end(&mut raw).ok()?;
+            stream
+                .read_to_end(&mut raw)
+                .map_err(|e| DaemonError::Transport(e.to_string()))?;
 
             let response = String::from_utf8_lossy(&raw);
+            let idx = response.find("\r\n\r\n").ok_or_else(|| {
+                DaemonError::MalformedResponse("missing header/body delimiter".to_string())
+            })?;
 
-            // Split on the blank line that separates headers from body.
-            if let Some(idx) = response.find("\r\n\r\n") {
-                // Verify the response has a 2xx status code.
-                let status_line = response.lines().next().unwrap_or("");
-                let status_code = status_line.split_whitespace().nth(1)?.parse::<u16>().ok()?;
-                if !(200..300).contains(&status_code) {
-                    return None;
-                }
-                Some(response[idx + 4..].to_string())
+            let status_line = response.lines().next().unwrap_or("");
+            let status_code = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    DaemonError::MalformedResponse(format!(
+                        "could not parse status from `{status_line}`"
+                    ))
+                })?;
+
+            let body_str = response[idx + 4..].to_string();
+
+            if (200..300).contains(&status_code) {
+                Ok(body_str)
             } else {
-                None
+                // Try to extract the structured envelope:
+                // { "error": { "code": "...", "message": "..." } }
+                let (code, message) = match serde_json::from_str::<serde_json::Value>(&body_str) {
+                    Ok(v) => {
+                        let err = v.get("error");
+                        let code = err
+                            .and_then(|e| e.get("code"))
+                            .and_then(|c| c.as_str())
+                            .map(str::to_string);
+                        let message = err
+                            .and_then(|e| e.get("message"))
+                            .and_then(|c| c.as_str())
+                            .map(str::to_string);
+                        (code, message)
+                    }
+                    Err(_) => (None, None),
+                };
+                Err(DaemonError::BadStatus {
+                    status: status_code,
+                    code,
+                    message,
+                })
             }
         }
         #[cfg(not(unix))]
         {
-            let _ = method;
-            let _ = path;
-            let _ = body;
-            None
+            let _ = (method, path, body);
+            Err(DaemonError::Offline {
+                reason: "unix sockets unavailable on this platform".to_string(),
+            })
         }
     }
 
     /// Send a minimal HTTP/1.0 GET and return the body string.
-    fn get(&self, path: &str) -> Option<String> {
+    fn get(&self, path: &str) -> Result<String, DaemonError> {
         self.request("GET", path, None)
     }
 
     // -- public API ---------------------------------------------------------
 
-    /// Quick liveness check — returns `true` if the daemon responds with 200.
+    /// Quick liveness check — returns `true` if the daemon responds with 200
+    /// to `GET /api/v1/familiars`. Discards the structured-error envelope on
+    /// purpose; use [`Self::health`] for richer diagnostics.
     pub fn is_online(&self) -> bool {
-        self.get("/api/v1/familiars").is_some()
+        self.get("/api/v1/familiars").is_ok()
     }
 
-    /// Fetch all familiar statuses.  Returns an empty `Vec` on any error.
-    pub fn familiar_statuses(&self) -> Vec<FamiliarStatus> {
-        let body = match self.get("/api/v1/familiars") {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-        let raw: Vec<RawFamiliar> = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        raw.into_iter()
+    fn parse_session_list(body: &str) -> Result<Vec<DaemonSession>, DaemonError> {
+        let raw: Vec<RawSession> = serde_json::from_str(body)
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+        Ok(raw
+            .into_iter()
+            .map(|r| DaemonSession {
+                harness: r.harness.unwrap_or_default(),
+                title: r.title.unwrap_or_default(),
+                status: r.status.unwrap_or_else(|| "unknown".to_string()),
+                project_root: r.project_root.unwrap_or_default(),
+                archived_at: r.archived_at.clone(),
+                id: r.id,
+            })
+            .collect())
+    }
+
+    /// Fetch all familiar statuses.
+    pub fn familiar_statuses(&self) -> Result<Vec<FamiliarStatus>, DaemonError> {
+        let body = self.get("/api/v1/familiars")?;
+        let raw: Vec<RawFamiliar> = serde_json::from_str(&body)
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+        Ok(raw
+            .into_iter()
             .map(|r| FamiliarStatus {
                 display_name: r.display_name.unwrap_or_else(|| r.id.clone()),
                 emoji: r.emoji.unwrap_or_default(),
@@ -253,64 +389,34 @@ impl DaemonClient {
                 memory_freshness: r.memory_freshness.unwrap_or_default(),
                 id: r.id,
             })
-            .collect()
+            .collect())
     }
 
-    /// Fetch non-archived sessions.  Returns an empty `Vec` on any error.
-    pub fn active_sessions(&self) -> Vec<DaemonSession> {
-        let body = match self.get("/api/v1/sessions") {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-        let raw: Vec<RawSession> = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        raw.into_iter()
-            .filter(|r| r.archived_at.is_none())
-            .map(|r| DaemonSession {
-                harness: r.harness.unwrap_or_default(),
-                title: r.title.unwrap_or_default(),
-                status: r.status.unwrap_or_else(|| "unknown".to_string()),
-                project_root: r.project_root.unwrap_or_default(),
-                archived_at: r.archived_at.clone(),
-                id: r.id,
-            })
-            .collect()
+    /// Fetch non-archived sessions.
+    pub fn active_sessions(&self) -> Result<Vec<DaemonSession>, DaemonError> {
+        let body = self.get("/api/v1/sessions")?;
+        Ok(Self::parse_session_list(&body)?
+            .into_iter()
+            .filter(|s| s.archived_at.is_none())
+            .collect())
     }
 
     /// Fetch every session known to the daemon, including archived ones.
-    /// Returns an empty `Vec` on any error.
-    pub fn all_sessions(&self) -> Vec<DaemonSession> {
-        let body = match self.get("/api/v1/sessions") {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-        let raw: Vec<RawSession> = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        raw.into_iter()
-            .map(|r| DaemonSession {
-                harness: r.harness.unwrap_or_default(),
-                title: r.title.unwrap_or_default(),
-                status: r.status.unwrap_or_else(|| "unknown".to_string()),
-                project_root: r.project_root.unwrap_or_default(),
-                archived_at: r.archived_at.clone(),
-                id: r.id,
-            })
-            .collect()
+    pub fn all_sessions(&self) -> Result<Vec<DaemonSession>, DaemonError> {
+        let body = self.get("/api/v1/sessions")?;
+        Self::parse_session_list(&body)
     }
 
     /// Fetch a single session by id.
-    pub fn get_session(&self, session_id: &str) -> Option<DaemonSession> {
+    pub fn get_session(&self, session_id: &str) -> Result<DaemonSession, DaemonError> {
         let path = format!("/api/v1/sessions/{}", url_quote(session_id));
         let body = self.get(&path)?;
-        let r: RawSession = serde_json::from_str(&body).ok()?;
+        let r: RawSession = serde_json::from_str(&body)
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
         if r.id.is_empty() {
-            return None;
+            return Err(DaemonError::MissingField("id"));
         }
-        Some(DaemonSession {
+        Ok(DaemonSession {
             harness: r.harness.unwrap_or_default(),
             title: r.title.unwrap_or_default(),
             status: r.status.unwrap_or_else(|| "unknown".to_string()),
@@ -321,11 +427,12 @@ impl DaemonClient {
     }
 
     /// Daemon liveness + version metadata.
-    pub fn health(&self) -> Option<DaemonHealth> {
+    pub fn health(&self) -> Result<DaemonHealth, DaemonError> {
         let body = self.get("/api/v1/health")?;
-        let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
         let daemon = value.get("daemon");
-        Some(DaemonHealth {
+        Ok(DaemonHealth {
             api_version: value
                 .get("apiVersion")
                 .and_then(|v| v.as_str())
@@ -352,32 +459,28 @@ impl DaemonClient {
     }
 
     /// Forward `input` to a live PTY-backed session.
-    pub fn send_input(&self, session_id: &str, input: &str) -> Result<(), String> {
+    pub fn send_input(&self, session_id: &str, input: &str) -> Result<(), DaemonError> {
         let body = serde_json::to_string(&serde_json::json!({ "input": input }))
-            .map_err(|e| format!("failed to encode input: {e}"))?;
+            .map_err(|e| DaemonError::MalformedResponse(format!("encode input: {e}")))?;
         let path = format!("/api/v1/sessions/{}/input", url_quote(session_id));
-        self.request("POST", &path, Some(&body))
-            .ok_or_else(|| "daemon refused input or returned non-2xx".to_string())
-            .map(|_| ())
+        self.request("POST", &path, Some(&body)).map(|_| ())
     }
 
     /// Terminate a live session.
-    pub fn kill_session(&self, session_id: &str) -> Result<(), String> {
+    pub fn kill_session(&self, session_id: &str) -> Result<(), DaemonError> {
         let path = format!("/api/v1/sessions/{}/kill", url_quote(session_id));
-        self.request("POST", &path, Some("{}"))
-            .ok_or_else(|| "daemon refused kill or returned non-2xx".to_string())
-            .map(|_| ())
+        self.request("POST", &path, Some("{}")).map(|_| ())
     }
 
     /// Fetch the redacted log preview for a session.
-    pub fn session_log(&self, session_id: &str) -> Option<String> {
+    pub fn session_log(&self, session_id: &str) -> Result<String, DaemonError> {
         let path = format!("/api/v1/sessions/{}/log", url_quote(session_id));
         self.get(&path)
     }
 
     /// Fetch the daemon's capability catalog. Returns the raw JSON body so
     /// callers can pretty-print it without us tying the client to one shape.
-    pub fn capabilities(&self) -> Option<String> {
+    pub fn capabilities(&self) -> Result<String, DaemonError> {
         self.get("/api/v1/capabilities")
     }
 
@@ -388,7 +491,7 @@ impl DaemonClient {
         session_id: &str,
         after_seq: Option<i64>,
         limit: Option<u32>,
-    ) -> Option<EventPage> {
+    ) -> Result<EventPage, DaemonError> {
         let mut path = format!("/api/v1/sessions/{}/events", url_quote(session_id));
         let mut query: Vec<String> = Vec::new();
         if let Some(seq) = after_seq {
@@ -402,19 +505,31 @@ impl DaemonClient {
             path.push_str(&query.join("&"));
         }
         let body = self.get(&path)?;
-        let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-        let events_json = value.get("events").and_then(|v| v.as_array())?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+        let events_json = value
+            .get("events")
+            .and_then(|v| v.as_array())
+            .ok_or(DaemonError::MissingField("events"))?;
         let events: Vec<EventRecord> = events_json
             .iter()
             .map(|ev| EventRecord {
-                id: ev.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                id: ev
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 session_id: ev
                     .get("sessionId")
                     .or_else(|| ev.get("session_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                kind: ev.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                kind: ev
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 seq: ev.get("seq").and_then(|v| v.as_i64()),
                 created_at: ev
                     .get("createdAt")
@@ -438,7 +553,7 @@ impl DaemonClient {
             .get("hasMore")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        Some(EventPage {
+        Ok(EventPage {
             events,
             next_after_seq,
             has_more,
@@ -451,18 +566,19 @@ impl DaemonClient {
         &self,
         action: &str,
         args: Option<serde_json::Value>,
-    ) -> Result<ControlActionResult, String> {
+    ) -> Result<ControlActionResult, DaemonError> {
         let mut payload = serde_json::Map::new();
-        payload.insert("action".to_string(), serde_json::Value::String(action.to_string()));
+        payload.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.to_string()),
+        );
         if let Some(a) = args {
             payload.insert("args".to_string(), a);
         }
         let body = serde_json::Value::Object(payload).to_string();
-        let response = self
-            .request("POST", "/api/v1/actions", Some(&body))
-            .ok_or_else(|| "daemon refused action or returned non-2xx".to_string())?;
+        let response = self.request("POST", "/api/v1/actions", Some(&body))?;
         let value: serde_json::Value = serde_json::from_str(&response)
-            .map_err(|e| format!("daemon returned invalid action JSON: {e}"))?;
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
         Ok(ControlActionResult {
             ok: value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
             accepted: value
@@ -487,23 +603,19 @@ impl DaemonClient {
     }
 
     /// Create a daemon session and return its session id.
-    pub fn create_session(&self, req: CreateSessionRequest) -> Result<String, String> {
+    pub fn create_session(&self, req: CreateSessionRequest) -> Result<String, DaemonError> {
         let body = serde_json::to_string(&req)
-            .map_err(|e| format!("Failed to encode daemon session request: {e}"))?;
-        let response = self
-            .request("POST", "/api/v1/sessions", Some(&body))
-            .ok_or_else(|| {
-                "Coven daemon did not return a successful session response".to_string()
-            })?;
+            .map_err(|e| DaemonError::MalformedResponse(format!("encode request: {e}")))?;
+        let response = self.request("POST", "/api/v1/sessions", Some(&body))?;
         let value: serde_json::Value = serde_json::from_str(&response)
-            .map_err(|e| format!("Coven daemon returned invalid session JSON: {e}"))?;
+            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
         value
             .get("id")
             .or_else(|| value.get("session_id"))
             .or_else(|| value.get("sessionId"))
             .and_then(|id| id.as_str())
             .map(|id| id.to_string())
-            .ok_or_else(|| "Coven daemon response did not include a session id".to_string())
+            .ok_or(DaemonError::MissingField("id"))
     }
 }
 
@@ -514,8 +626,7 @@ fn url_quote(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.as_bytes() {
         let b = *byte;
-        let is_unreserved = b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'_' | b'.' | b'~');
+        let is_unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
         if is_unreserved {
             out.push(b as char);
         } else {
@@ -636,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn familiar_statuses_returns_empty_on_bad_json() {
+    fn familiar_statuses_returns_offline_when_connect_fails() {
         let _lock = COVEN_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -645,8 +756,12 @@ mod tests {
         fs::write(dir.path().join("coven.sock"), b"").unwrap();
         let _g = EnvGuard::set("COVEN_HOME", dir.path().to_str().unwrap());
         let client = DaemonClient::new().unwrap();
-        // connect() will fail → familiar_statuses() must return empty vec, not panic.
-        assert!(client.familiar_statuses().is_empty());
+        // connect() will fail → familiar_statuses() must surface a structured
+        // Offline error, not silently empty.
+        match client.familiar_statuses() {
+            Err(DaemonError::Offline { .. }) => {}
+            other => panic!("expected Offline, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -687,5 +802,86 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(session_id, "sess_123");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_input_surfaces_session_not_live_envelope() {
+        // The daemon's 409 response carries a structured error code; we must
+        // surface it through DaemonError::BadStatus so /coven send can render
+        // "Session is not running (session_not_live)" instead of generic
+        // "daemon offline".
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.0 409 Conflict\r\nContent-Type: application/json\r\n\r\n\
+                      {\"error\":{\"code\":\"session_not_live\",\
+                      \"message\":\"Session is not running.\"}}",
+                )
+                .unwrap();
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let err = client.send_input("dead-session", "hi").unwrap_err();
+        server.join().unwrap();
+
+        match err {
+            DaemonError::BadStatus {
+                status,
+                code,
+                message,
+            } => {
+                assert_eq!(status, 409);
+                assert_eq!(code.as_deref(), Some("session_not_live"));
+                assert_eq!(message.as_deref(), Some("Session is not running."));
+            }
+            other => panic!("expected BadStatus(409 session_not_live), got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_session_surfaces_404_session_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n\
+                      {\"error\":{\"code\":\"session_not_found\",\
+                      \"message\":\"Session was not found.\"}}",
+                )
+                .unwrap();
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let err = client.get_session("ghost").unwrap_err();
+        server.join().unwrap();
+
+        assert_eq!(err.status(), Some(404));
+        assert_eq!(err.code(), Some("session_not_found"));
+        assert!(!err.is_offline());
+    }
+
+    #[test]
+    fn offline_error_is_marked_offline() {
+        let err = DaemonError::Offline {
+            reason: "ENOENT".to_string(),
+        };
+        assert!(err.is_offline());
+        assert!(err.code().is_none());
+        assert!(err.status().is_none());
     }
 }

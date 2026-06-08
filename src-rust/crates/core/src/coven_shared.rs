@@ -11,7 +11,10 @@
 //! `~/.coven/coven.sock`) lives in [`crate::coven_daemon`].
 
 // Re-export Tier B IPC types for convenience.
-pub use crate::coven_daemon::{CreateSessionRequest, DaemonClient, DaemonSession, FamiliarStatus};
+pub use crate::coven_daemon::{
+    ControlActionResult, CreateSessionRequest, DaemonClient, DaemonError, DaemonHealth,
+    DaemonSession, EventPage, EventRecord, FamiliarStatus,
+};
 
 use serde::Deserialize;
 use std::path::PathBuf;
