@@ -41,18 +41,49 @@ cargo install --path crates/cli</code></pre>
 
     <h2>Interactive vs Headless</h2>
 
-    <table>
-      <thead>
-        <tr><th>Mode</th><th>Command</th><th>Use case</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Interactive TUI</td><td><code>coven-code</code></td><td>Day-to-day coding</td></tr>
-        <tr><td>Single prompt</td><td><code>coven-code "task"</code></td><td>Quick one-shot tasks</td></tr>
-        <tr><td>Headless print</td><td><code>coven-code --print "task"</code></td><td>Scripts, CI</td></tr>
-        <tr><td>JSON output</td><td><code>coven-code --output-format json "task"</code></td><td>Machine consumption</td></tr>
-        <tr><td>Stream JSON</td><td><code>coven-code --output-format stream-json "task"</code></td><td>Real-time piping</td></tr>
-      </tbody>
-    </table>
+    <div class="demo">
+      <div class="demo-header">
+        <span>five run modes · pick the one that fits the situation</span>
+      </div>
+      <div class="demo-body">
+        <div class="compare">
+          <div class="compare-card">
+            <div class="compare-card-name">interactive</div>
+            <span class="compare-card-tag">day-to-day</span>
+            <div class="compare-card-desc">Full ratatui TUI with streaming, slash commands, permission dialogs, session history. The default when you launch with no args.</div>
+            <div class="compare-card-cmd">coven-code</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">single prompt</div>
+            <span class="compare-card-tag">one-shot</span>
+            <div class="compare-card-desc">One pass over a single task, then exit. TUI still renders the run so you can watch tools fire in real time.</div>
+            <div class="compare-card-cmd">coven-code "task"</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">headless print</div>
+            <span class="compare-card-tag">scripts · CI</span>
+            <div class="compare-card-desc">Plain text output to stdout — no TUI, no colour codes, no permission prompts. Use in shell pipelines and CI runners.</div>
+            <div class="compare-card-cmd">coven-code --print "task"</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">json output</div>
+            <span class="compare-card-tag">machine</span>
+            <div class="compare-card-desc">Single JSON document with the full run transcript, tool calls, and final result. Parse with jq or feed into downstream tooling.</div>
+            <div class="compare-card-cmd">coven-code --output-format json "task"</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">stream-json</div>
+            <span class="compare-card-tag">real-time</span>
+            <div class="compare-card-desc">Newline-delimited JSON events as they happen — useful for streaming progress into another process or live UI.</div>
+            <div class="compare-card-cmd">coven-code --output-format stream-json "task"</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <h2>Coven Daemon (Optional)</h2>
 

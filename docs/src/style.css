@@ -1491,6 +1491,86 @@ a {
   .ctx-legend { grid-template-columns: 1fr; }
 }
 
+/* ----- Comparison cards (built-in agents, modes) ----- */
+.compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.compare-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-card);
+  transition: border-color 0.15s ease-out;
+}
+.compare-card:hover {
+  border-color: var(--color-accent);
+}
+.compare-card-name {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-accent);
+  margin-bottom: 4px;
+}
+.compare-card-tag {
+  display: inline-block;
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+  margin-bottom: 12px;
+}
+.compare-card-fields {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--color-border);
+}
+.compare-card-field {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12.5px;
+}
+.compare-card-key {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-dim);
+}
+.compare-card-val {
+  color: var(--color-accent-light);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.compare-card-desc {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  flex: 1;
+}
+.compare-card-cmd {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
 /* ----- Demo 4: Tools grid ----- */
 .tools-cat {
   margin-bottom: 18px;

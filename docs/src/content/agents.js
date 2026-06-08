@@ -7,14 +7,65 @@ export function render() {
 
     <h2>Built-In Agents</h2>
 
-    <table>
-      <thead><tr><th>Agent</th><th>Access</th><th>Max turns</th><th>Use</th></tr></thead>
-      <tbody>
-        <tr><td><code>build</code></td><td>full — all tools</td><td>unlimited</td><td>Implement features, fix bugs</td></tr>
-        <tr><td><code>plan</code></td><td>read-only — no writes or shell</td><td>20</td><td>Analyze codebases, plan changes</td></tr>
-        <tr><td><code>explore</code></td><td>search-only — search tools only</td><td>15</td><td>Quickly locate code, answer structure questions</td></tr>
-      </tbody>
-    </table>
+    <div class="demo">
+      <div class="demo-header">
+        <span>built-in agents · compare side-by-side</span>
+      </div>
+      <div class="demo-body">
+        <div class="compare">
+          <div class="compare-card">
+            <div class="compare-card-name">build</div>
+            <span class="compare-card-tag">default</span>
+            <div class="compare-card-fields">
+              <div class="compare-card-field">
+                <span class="compare-card-key">Access</span>
+                <span class="compare-card-val">full · all tools</span>
+              </div>
+              <div class="compare-card-field">
+                <span class="compare-card-key">Max turns</span>
+                <span class="compare-card-val">unlimited</span>
+              </div>
+            </div>
+            <div class="compare-card-desc">Implement features and fix bugs. The full toolset is available; use this when you want Coven Code to actually make changes.</div>
+            <div class="compare-card-cmd">coven-code --agent build "…"</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">plan</div>
+            <span class="compare-card-tag">read-only</span>
+            <div class="compare-card-fields">
+              <div class="compare-card-field">
+                <span class="compare-card-key">Access</span>
+                <span class="compare-card-val">read · no writes / shell</span>
+              </div>
+              <div class="compare-card-field">
+                <span class="compare-card-key">Max turns</span>
+                <span class="compare-card-val">20</span>
+              </div>
+            </div>
+            <div class="compare-card-desc">Analyse a codebase and propose changes before committing to implementation. Cannot write files or run shell commands.</div>
+            <div class="compare-card-cmd">coven-code --agent plan "…"</div>
+          </div>
+
+          <div class="compare-card">
+            <div class="compare-card-name">explore</div>
+            <span class="compare-card-tag">search-only</span>
+            <div class="compare-card-fields">
+              <div class="compare-card-field">
+                <span class="compare-card-key">Access</span>
+                <span class="compare-card-val">search · grep / glob / fetch</span>
+              </div>
+              <div class="compare-card-field">
+                <span class="compare-card-key">Max turns</span>
+                <span class="compare-card-val">15</span>
+              </div>
+            </div>
+            <div class="compare-card-desc">Quickly locate code and answer questions about repository structure. Search and read only — no writes, no shell.</div>
+            <div class="compare-card-cmd">coven-code --agent explore "…"</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <h2>Selecting an Agent</h2>
 
