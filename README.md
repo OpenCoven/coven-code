@@ -45,14 +45,18 @@ This drops `coven-code` into `~/.coven-code/bin` (or `%USERPROFILE%\.coven-code\
 ### npm / Bun
 
 ```bash
+npm install -g coven-code
+# or the scoped package
 npm install -g @opencoven/coven-code
-# or
+
+bun install -g coven-code
+# or the scoped package
 bun install -g @opencoven/coven-code
 ```
 
 ```bash
-npx @opencoven/coven-code
-bunx @opencoven/coven-code
+npx coven-code
+bunx coven-code
 ```
 
 ### Upgrade

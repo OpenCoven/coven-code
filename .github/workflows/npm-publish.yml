@@ -86,7 +86,7 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing coven-code@$VERSION"
+          echo "Publishing npm packages for Coven Code $VERSION"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -153,17 +153,6 @@ jobs:
           }
           NODE
 
-      - name: Set npm package version
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('npm/package.json', 'utf8'));
-            pkg.version = '${VERSION}';
-            fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          echo "Publishing coven-code@${VERSION}"
-
       - name: Generate npm checksum manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -207,24 +196,73 @@ jobs:
 
           cat npm/checksums.json
 
-      - name: Check whether version is already published
-        id: registry_version
+      - name: Publish npm packages
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          if npm view "@opencoven/coven-code@$VERSION" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "@opencoven/coven-code@$VERSION is already published; skipping npm publish."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "@opencoven/coven-code@$VERSION is not published yet; continuing."
-          fi
-
-      - name: Publish to npm
-        if: steps.registry_version.outputs.exists != 'true'
-        working-directory: npm
-        env:
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+
+          prepare_package() {
+            local package_name="$1"
+            node - "$package_name" "$VERSION" <<'NODE'
+          const fs = require('fs');
+
+          const packageName = process.argv[2];
+          const version = process.argv[3];
+          const supportedPackageNames = new Set(['@opencoven/coven-code', 'coven-code']);
+
+          if (!supportedPackageNames.has(packageName)) {
+            console.error(`::error::Unsupported npm package name: ${packageName}`);
+            process.exit(1);
+          }
+          if (!/^\d+\.\d+\.\d+$/.test(version)) {
+            console.error(`::error::Invalid npm package version: ${version}`);
+            process.exit(1);
+          }
+
+          function stringifyJson(value) {
+            return JSON.stringify(value, null, 2).replace(/[^\x00-\x7F]/g, (char) => {
+              return `\\u${char.codePointAt(0).toString(16).padStart(4, '0')}`;
+            }) + '\n';
+          }
+
+          function replaceRequired(text, pattern, replacement, label) {
+            if (!pattern.test(text)) {
+              console.error(`::error::Failed to update ${label}`);
+              process.exit(1);
+            }
+            return text.replace(pattern, replacement);
+          }
+
+          const pkg = JSON.parse(fs.readFileSync('npm/package.json', 'utf8'));
+          pkg.name = packageName;
+          pkg.version = version;
+          fs.writeFileSync('npm/package.json', stringifyJson(pkg));
+
+          let readme = fs.readFileSync('npm/README.md', 'utf8');
+          readme = replaceRequired(readme, /^# .+$/m, `# ${packageName}`, 'README heading');
+          readme = replaceRequired(readme, /npm\/v\/[^?]+(\?style=flat-square)/, `npm/v/${packageName}$1`, 'README npm badge');
+          readme = replaceRequired(readme, /npmjs\.com\/package\/[^\)\s]+/, `npmjs.com/package/${packageName}`, 'README npm package link');
+          readme = replaceRequired(readme, /^npm install -g .+$/m, `npm install -g ${packageName}`, 'README npm install command');
+          readme = replaceRequired(readme, /^bun install -g .+$/m, `bun install -g ${packageName}`, 'README bun install command');
+          fs.writeFileSync('npm/README.md', readme);
+          NODE
+          }
+
+          packages=("@opencoven/coven-code" "coven-code")
+          for package_name in "${packages[@]}"; do
+            if npm view "${package_name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${package_name}@${VERSION} is already published; skipping."
+              continue
+            fi
+
+            echo "${package_name}@${VERSION} is not published yet; publishing."
+            prepare_package "$package_name"
+            if [[ "$package_name" == @*/* ]]; then
+              (cd npm && npm publish --access public --provenance)
+            else
+              (cd npm && npm publish --provenance)
+            fi
+          done
