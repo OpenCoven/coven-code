@@ -8,6 +8,7 @@ import { renderHero, fetchStars, formatStars } from './hero.js';
 import { processCodeBlocks } from './code-highlight.js';
 import { sections } from './content/index.js';
 import { registerDemos } from './demos.js';
+import { registerPalette } from './palette.js';
 
 async function init() {
   const heroContainer = document.getElementById('hero-container');
@@ -34,6 +35,7 @@ async function init() {
   // Alpine scans the DOM once on start; doing this after innerHTML is set
   // means directives in rendered content modules get bound.
   registerDemos(Alpine);
+  registerPalette(Alpine, buildDynamicPaletteItems);
   window.Alpine = Alpine;
   Alpine.start();
 
@@ -146,6 +148,38 @@ function highlightToc(headingId) {
   tocContainer.querySelectorAll('.page-toc-link').forEach((link) => {
     link.classList.toggle('active', link.dataset.tocId === headingId);
   });
+}
+
+/**
+ * Builds the runtime portion of the palette index: every section in the
+ * sidebar plus every H2/H3 we slugged in addHeadingAnchors. Called via
+ * a callback from the palette factory each time `all` is computed.
+ */
+function buildDynamicPaletteItems() {
+  const items = [];
+  for (const section of sections) {
+    for (const page of section.pages) {
+      const id = page.path.slice(1);
+      items.push({
+        kind: 'Section',
+        label: page.title,
+        category: section.title,
+        desc: `Top of the ${page.title} section`,
+        href: `#${id}`,
+      });
+      const headings = tocBySection.get(id) || [];
+      for (const h of headings) {
+        items.push({
+          kind: 'Heading',
+          label: h.text,
+          category: page.title,
+          desc: `Sub-section under ${page.title}`,
+          href: `#${h.id}`,
+        });
+      }
+    }
+  }
+  return items;
 }
 
 /**

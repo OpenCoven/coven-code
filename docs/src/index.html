@@ -48,6 +48,58 @@
     <aside id="page-toc" class="sticky top-6 self-start w-[180px] shrink-0 pt-7 pb-10 max-h-[calc(100vh-48px)] overflow-y-auto hidden xl:block"></aside>
   </div>
 
+  <!-- Global Cmd+K command palette -->
+  <div
+    x-data="commandPalette"
+    @keydown.window.escape.prevent.stop="open && close()"
+    class="palette-root"
+  >
+    <div class="palette-overlay" x-show="open" @click="close()" x-transition.opacity></div>
+    <div class="palette-modal" x-show="open" x-transition>
+      <div class="palette-search">
+        <input
+          id="palette-input"
+          type="text"
+          class="palette-input"
+          placeholder="Search the docs — commands, keys, providers, headings…"
+          x-model.debounce.50ms="query"
+          @input="onInput()"
+          @keydown.down.prevent="moveCursor(1)"
+          @keydown.up.prevent="moveCursor(-1)"
+          @keydown.enter.prevent="onEnter()"
+          @keydown.escape.prevent="close()"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <span class="palette-count">
+          <span x-text="count"></span> · ⌘K
+        </span>
+      </div>
+      <div class="palette-results" x-show="count > 0">
+        <template x-for="(item, idx) in results" :key="idx + item.href + item.label">
+          <a
+            :href="item.href"
+            class="palette-result"
+            :class="{ active: cursor === idx }"
+            @click.prevent="select(idx)"
+            @mouseenter="cursor = idx"
+          >
+            <span class="palette-result-kind" x-text="item.kind"></span>
+            <span class="palette-result-label" x-text="item.label"></span>
+            <span class="palette-result-cat" x-text="item.category"></span>
+            <span class="palette-result-desc" x-text="item.desc"></span>
+          </a>
+        </template>
+      </div>
+      <div class="palette-empty" x-show="count === 0">
+        <p>No results. Try a different query.</p>
+      </div>
+      <div class="palette-hint">
+        <kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>↵</kbd> open · <kbd>Esc</kbd> close · open from anywhere with <kbd>⌘K</kbd> or <kbd>/</kbd>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="./main.js"></script>
 </body>
 </html>
