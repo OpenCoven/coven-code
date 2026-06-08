@@ -38,6 +38,7 @@ async function init() {
   Alpine.start();
 
   initSidebar();
+  initPageToc(contentEl);
   setupScrollSpy();
 
   function showStars(count) {
@@ -65,6 +66,7 @@ function setupScrollSpy() {
       for (const entry of entries) {
         if (entry.isIntersecting) {
           updateActiveSection(entry.target.id);
+          updatePageToc(entry.target.id);
           break;
         }
       }
@@ -75,6 +77,75 @@ function setupScrollSpy() {
   for (const el of sectionEls) {
     observer.observe(el);
   }
+}
+
+// --- in-page (right-rail) table of contents --------------------------------
+const tocBySection = new Map(); // sectionId -> [{id, text, level}]
+let tocContainer = null;
+let tocHeadingObserver = null;
+let activeTocId = null;
+
+function initPageToc(contentEl) {
+  tocContainer = document.getElementById('page-toc');
+  if (!tocContainer) return;
+  // Build per-section index of H2/H3 headings (slug ids set by addHeadingAnchors)
+  for (const sec of contentEl.querySelectorAll('.doc-section')) {
+    const items = [];
+    for (const h of sec.querySelectorAll('h2, h3')) {
+      const id = h.id;
+      if (!id) continue;
+      // Clone + strip the .heading-anchor so text comes out clean,
+      // even when the heading contains nested <code>/<em>/etc.
+      const clone = h.cloneNode(true);
+      clone.querySelectorAll('.heading-anchor').forEach((n) => n.remove());
+      const text = clone.textContent.trim();
+      if (!text) continue;
+      items.push({ id, text, level: h.tagName === 'H3' ? 3 : 2 });
+    }
+    tocBySection.set(sec.id, items);
+  }
+}
+
+function updatePageToc(sectionId) {
+  if (!tocContainer) return;
+  const items = tocBySection.get(sectionId) || [];
+  if (items.length === 0) {
+    tocContainer.innerHTML = '';
+    return;
+  }
+  let html = `<div class="page-toc-label">On this page</div>`;
+  for (const it of items) {
+    html += `<a href="#${it.id}" class="page-toc-link page-toc-l${it.level}" data-toc-id="${it.id}">${it.text}</a>`;
+  }
+  tocContainer.innerHTML = html;
+  setupTocScrollSpy(items);
+}
+
+function setupTocScrollSpy(items) {
+  if (tocHeadingObserver) tocHeadingObserver.disconnect();
+  tocHeadingObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          highlightToc(entry.target.id);
+          break;
+        }
+      }
+    },
+    { rootMargin: '-15% 0px -70% 0px' }
+  );
+  for (const it of items) {
+    const el = document.getElementById(it.id);
+    if (el) tocHeadingObserver.observe(el);
+  }
+}
+
+function highlightToc(headingId) {
+  if (!tocContainer || headingId === activeTocId) return;
+  activeTocId = headingId;
+  tocContainer.querySelectorAll('.page-toc-link').forEach((link) => {
+    link.classList.toggle('active', link.dataset.tocId === headingId);
+  });
 }
 
 /**

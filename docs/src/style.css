@@ -361,6 +361,45 @@ a {
 }
 
 /* ============================================
+   Right-rail in-page TOC
+   ============================================ */
+.page-toc-label {
+  padding: 2px 0 8px;
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-dimmer);
+}
+.page-toc-link {
+  display: block;
+  padding: 3px 0 3px 12px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--color-text-dim);
+  border-left: 2px solid transparent;
+  transition: color 0.15s ease-out, border-left-color 0.15s ease-out;
+}
+.page-toc-link:hover {
+  color: var(--color-text-secondary);
+  border-left-color: var(--color-border-light);
+}
+.page-toc-link.active {
+  color: var(--color-accent);
+  border-left-color: var(--color-accent);
+  font-weight: 500;
+}
+.page-toc-l3 {
+  padding-left: 22px;
+  font-size: 12px;
+  color: var(--color-text-dimmer);
+}
+.page-toc-l3.active {
+  color: var(--color-accent);
+}
+
+/* ============================================
    Content typography
    ============================================ */
 .doc-section + .doc-section {

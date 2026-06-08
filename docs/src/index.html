@@ -24,10 +24,10 @@
   <!-- Hero -->
   <div id="hero-container"></div>
 
-  <!-- Docs body: floating nav + all content -->
-  <div class="flex max-w-[1140px] mx-auto px-6">
+  <!-- Docs body: left nav + content + right in-page TOC -->
+  <div class="flex max-w-[1340px] mx-auto px-6 gap-6">
     <nav id="sidebar-nav" class="sticky top-6 self-start w-[180px] shrink-0 pt-7 pb-10 max-h-[calc(100vh-48px)] overflow-y-auto hidden lg:block"></nav>
-    <main id="main" class="flex-1 min-w-0 border-l border-border pl-12 max-lg:border-l-0 max-lg:pl-0">
+    <main id="main" class="flex-1 min-w-0 border-l border-border pl-8 max-lg:border-l-0 max-lg:pl-0">
       <div id="content" class="content max-w-[820px] py-11 max-sm:py-7"></div>
       <footer class="max-w-[820px] pt-12 pb-14 mt-16 border-t border-border">
         <div class="footer-links flex items-center justify-center gap-4 mb-5 flex-wrap">
@@ -45,6 +45,7 @@
         <p class="text-center text-[13px] text-text-dimmer">Released under the MIT License. Coven Code is maintained at <a href="https://github.com/OpenCoven/coven-code" target="_blank" rel="noopener" class="text-text-dim hover:text-text-primary transition-colors">OpenCoven/coven-code</a>.</p>
       </footer>
     </main>
+    <aside id="page-toc" class="sticky top-6 self-start w-[180px] shrink-0 pt-7 pb-10 max-h-[calc(100vh-48px)] overflow-y-auto hidden xl:block"></aside>
   </div>
 
   <script type="module" src="./main.js"></script>
