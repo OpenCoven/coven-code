@@ -2,10 +2,10 @@ export const meta = { title: 'Agents' };
 
 export function render() {
   return `
-    <h1>Agents &amp; multi-agent</h1>
+    <h1>Agents &amp; Multi-Agent</h1>
     <p class="lead">Coven Code ships with three built-in named agents and supports user-defined agents, coordinator-mode parallelism, and a managed-agents preview where a manager model delegates to executor agents.</p>
 
-    <h2>Built-in agents</h2>
+    <h2>Built-In Agents</h2>
 
     <table>
       <thead><tr><th>Agent</th><th>Access</th><th>Max turns</th><th>Use</th></tr></thead>
@@ -16,7 +16,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Selecting an agent</h2>
+    <h2>Selecting an Agent</h2>
 
     <pre><code data-lang="bash">coven-code --agent build "implement the OAuth2 login flow"
 coven-code --agent plan "analyze the database schema and suggest improvements"
@@ -28,7 +28,7 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
 
     <p>Inside the TUI, use <code>/agents</code> to list everything available (built-in, custom, plus Coven familiars when the daemon is online).</p>
 
-    <h2>Custom agents</h2>
+    <h2>Custom Agents</h2>
 
     <p>Define custom agents in <code>~/.coven-code/settings.json</code> under <code>agents</code>. Custom definitions override built-ins with the same name.</p>
 
@@ -48,7 +48,7 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
 
     <p>Workspace agents can also be defined as markdown files in <code>.coven-code/agents/*.md</code> with frontmatter — these are picked up automatically and surfaced in <code>/agents</code>.</p>
 
-    <h2>Coordinator mode</h2>
+    <h2>Coordinator Mode</h2>
 
     <p>Coordinator mode runs a manager model that dispatches tasks to worker agents in parallel. Enable it with:</p>
 
@@ -56,11 +56,11 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
 
     <p>The coordinator has access to coordinator-only tools (Spawn, Wait, TaskCreate / TaskUpdate / TaskList) and cannot directly edit files or run shell — that work is done by spawned workers. Workers run with the standard tool set minus the coordinator tools.</p>
 
-    <h2>Coven familiars as agents</h2>
+    <h2>Coven Familiars as Agents</h2>
 
     <p>When the Coven daemon is running, every familiar in <code>~/.coven/familiars.toml</code> is automatically surfaced as a selectable agent. See <a href="#familiars">Familiars</a> for details.</p>
 
-    <h2>Managed agents (preview)</h2>
+    <h2>Managed Agents (Preview)</h2>
 
     <p>Configure a manager-executor architecture with <code>/managed-agents</code>. The manager delegates subtasks to parallel executor agents with full budget split controls.</p>
 

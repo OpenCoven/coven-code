@@ -5,7 +5,7 @@ export function render() {
     <h1>Keybindings</h1>
     <p class="lead">Coven Code uses a context-aware keybinding system — the same key can have different effects depending on where focus is, and bindings in more specific contexts override broader ones. Customise via the <code>/keybindings</code> editor or <code>~/.coven-code/keybindings.json</code>.</p>
 
-    <h2>Browse shortcuts</h2>
+    <h2>Browse Shortcuts</h2>
 
     <p>Type to filter by key, action, or description. Click a context chip to narrow to that scope.</p>
 
@@ -62,7 +62,7 @@ export function render() {
       </div>
     </div>
 
-    <h2>How contexts work</h2>
+    <h2>How Contexts Work</h2>
 
     <p>The same key can have different effects depending on which UI surface has focus. Bindings in a more specific context take precedence over a broader one.</p>
 
@@ -98,7 +98,7 @@ export function render() {
 
     <p>The file uses smart merge so user customisations survive schema upgrades.</p>
 
-    <h2>Vim mode</h2>
+    <h2>Vim Mode</h2>
 
     <p>Enable in settings:</p>
 
@@ -106,7 +106,7 @@ export function render() {
 
     <p>Adds <code>vim.normal</code>, <code>vim.insert</code>, and <code>vim.visual</code> contexts with standard motions, text objects, and a mode indicator in the input gutter.</p>
 
-    <h2>@file injection</h2>
+    <h2>@file Injection</h2>
 
     <p>Type <code>@</code> in the chat input to open the file picker. Typeahead suggests paths from the workspace as you type; press <kbd>Tab</kbd> or <kbd>Enter</kbd> to inject. Size and binary safety checks run before submit.</p>
 

@@ -2,7 +2,7 @@ export const meta = { title: 'Getting Started' };
 
 export function render() {
   return `
-    <h1>Getting started</h1>
+    <h1>Getting Started</h1>
     <p class="lead">Install, authenticate, and run your first session in under a minute.</p>
 
     <h2>1. Install</h2>
@@ -18,18 +18,18 @@ export function render() {
     <h3>npm</h3>
     <pre><code data-lang="bash">npm i -g coven-code</code></pre>
 
-    <h3>From source</h3>
+    <h3>From Source</h3>
     <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
 cd coven-code/src-rust
 cargo install --path crates/cli</code></pre>
 
-    <h2>2. Set your API key</h2>
+    <h2>2. Set Your API Key</h2>
 
     <pre><code data-lang="bash">export ANTHROPIC_API_KEY=sk-ant-...</code></pre>
 
     <p>Or run <code>coven-code /login</code> to authenticate via OAuth (Claude.ai or ChatGPT). Multiple named accounts can coexist; switch with <code>/switch &lt;id&gt;</code>.</p>
 
-    <h2>3. Run interactively</h2>
+    <h2>3. Run Interactively</h2>
 
     <pre><code data-lang="bash">coven-code</code></pre>
 
@@ -39,7 +39,7 @@ cargo install --path crates/cli</code></pre>
 
     <pre><code data-lang="bash">coven-code --print "explain the auth module"</code></pre>
 
-    <h2>Interactive vs headless</h2>
+    <h2>Interactive vs Headless</h2>
 
     <table>
       <thead>
@@ -54,7 +54,7 @@ cargo install --path crates/cli</code></pre>
       </tbody>
     </table>
 
-    <h2>Coven daemon (optional)</h2>
+    <h2>Coven Daemon (Optional)</h2>
 
     <p>Coven Code connects natively to the Coven daemon when it's running on your machine. With the daemon active, familiars appear as agents, daemon-registered skills become awareness context, and the welcome panel animates with your familiar's glyph.</p>
 

@@ -411,6 +411,30 @@ export function registerDemos(Alpine) {
     })
   );
 
+  // ----- Plugin manifest field explorer ----------------------------------
+  Alpine.data(
+    'pluginFieldExplorer',
+    makeExplorer({
+      categories: ['Identity', 'Metadata', 'Content', 'Inline', 'Config'],
+      search: ['id', 'desc', 'keywords'],
+      items: [
+        { id: 'name',           category: 'Identity', desc: 'Required. Unique plugin identifier — must be set.',                                       keywords: 'required id' },
+        { id: 'version',        category: 'Identity', desc: 'Required. Semver string, e.g. "1.0.0".',                                                  keywords: 'required semver' },
+        { id: 'description',    category: 'Metadata', desc: 'Optional one-line summary surfaced in /plugin list and /plugin info.',                    keywords: 'optional summary' },
+        { id: 'author',         category: 'Metadata', desc: 'Optional. Object: { name, email, url } describing the maintainer.',                       keywords: 'optional maintainer' },
+        { id: 'marketplace_id', category: 'Metadata', desc: 'Optional. Marketplace listing identifier in owner/name form (e.g. "you/my-plugin").',     keywords: 'optional marketplace' },
+        { id: 'commands',       category: 'Content',  desc: 'Optional. Extra slash command markdown files beyond the conventional commands/ dir.',     keywords: 'optional slash extra' },
+        { id: 'agents',         category: 'Content',  desc: 'Optional. Extra agent markdown files beyond the conventional agents/ dir.',                keywords: 'optional extra' },
+        { id: 'skills',         category: 'Content',  desc: 'Optional. Extra skill directories beyond the conventional skills/ dir.',                   keywords: 'optional extra' },
+        { id: 'mcp_servers',    category: 'Inline',   desc: 'Optional array. Inline MCP server definitions merged into the global MCP config on load.', keywords: 'optional inline' },
+        { id: 'lsp_servers',    category: 'Inline',   desc: 'Optional array. Inline LSP server definitions for in-editor language tooling.',            keywords: 'optional inline language' },
+        { id: 'hooks',          category: 'Inline',   desc: 'Optional. Inline hook definitions — also discoverable via a plugin\'s hooks/ directory.',  keywords: 'optional inline events' },
+        { id: 'user_config',    category: 'Config',   desc: 'Optional. Schema for user-configurable options — surfaced in /plugin info as form fields.', keywords: 'optional settings' },
+        { id: 'capabilities',   category: 'Config',   desc: 'Optional. Capability grants array (e.g. ["read_files","network","shell"]). Omit to allow all.', keywords: 'optional grants permissions' },
+      ],
+    })
+  );
+
   // ----- Demo 4: Tools grid ----------------------------------------------
   Alpine.data('toolsGrid', () => ({
     expanded: null,

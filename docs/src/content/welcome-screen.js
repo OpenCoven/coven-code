@@ -2,7 +2,7 @@ export const meta = { title: 'Welcome Screen' };
 
 export function render() {
   return `
-    <h1>The welcome screen</h1>
+    <h1>The Welcome Screen</h1>
     <p class="lead">When you launch <code>coven-code</code> interactively, the home screen opens with a single rounded panel titled <code>Coven Code v&lt;version&gt;</code>. It's the at-a-glance status surface — every value comes from another subsystem, so use it as a jumping-off point rather than a source of truth.</p>
 
     <div class="demo" x-data="welcomeMockup">
@@ -68,10 +68,10 @@ export function render() {
       </div>
     </div>
 
-    <h2>Left column</h2>
+    <h2>Left Column</h2>
     <p>Your familiar's portrait (animated glyph for built-ins, static card for daemon-registered familiars) under a <code>Welcome back &lt;user&gt;!</code> greeting. The art is driven by the <code>"familiar"</code> field in your settings; see <a href="#familiars">Familiars</a>.</p>
 
-    <h2>Right column</h2>
+    <h2>Right Column</h2>
     <p>A rotating getting-started tip, then a <strong>Status</strong> block:</p>
 
     <table>
@@ -109,7 +109,7 @@ export function render() {
 
     <p>Press <kbd>F2</kbd> at any time to open the familiar switcher popup.</p>
 
-    <h2>Small-terminal fallback</h2>
+    <h2>Small-Terminal Fallback</h2>
     <p>On terminals narrower than ~30 columns or shorter than 11 rows, the panel collapses to a single line — <code>Coven Code v… · &lt;model&gt; · &lt;daemon&gt; · &lt;familiar&gt;</code> — so the essentials stay visible even in a tiny pane.</p>
   `;
 }

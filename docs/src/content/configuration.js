@@ -5,7 +5,7 @@ export function render() {
     <h1>Configuration</h1>
     <p class="lead">Coven Code is configured through a layered system of JSON files, environment variables, and command-line flags. Project settings override global settings; CLI flags override both.</p>
 
-    <h2>File locations</h2>
+    <h2>File Locations</h2>
 
     <p>The global settings file lives at:</p>
 
@@ -13,7 +13,7 @@ export function render() {
 
     <p>The directory is created automatically on first run. Files are standard JSON (or JSONC — comments are stripped before parsing).</p>
 
-    <h3>Per-project settings</h3>
+    <h3>Per-Project Settings</h3>
 
     <p>Coven Code walks up from the current working directory looking for a project-level settings file. The first file found wins:</p>
 
@@ -22,7 +22,7 @@ export function render() {
 
     <p>Keys present in the project file override the global value; keys absent fall back to global.</p>
 
-    <h2>Top-level structure</h2>
+    <h2>Top-Level Structure</h2>
 
     <pre><code data-lang="json">{
   "version": 1,
@@ -42,9 +42,9 @@ export function render() {
 
     <p>Most day-to-day options live inside the <code>config</code> object. Provider credentials live in the <code>providers</code> map.</p>
 
-    <h2>Common <code>config</code> options</h2>
+    <h2>Common <code>config</code> Options</h2>
 
-    <h3>Model and tokens</h3>
+    <h3>Model and Tokens</h3>
     <table>
       <thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
@@ -55,7 +55,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h3>Permission mode</h3>
+    <h3>Permission Mode</h3>
     <table>
       <thead><tr><th>Mode</th><th>Behavior</th></tr></thead>
       <tbody>
@@ -79,7 +79,7 @@ export function render() {
   }
 }</code></pre>
 
-    <h2>Environment variables</h2>
+    <h2>Environment Variables</h2>
 
     <table>
       <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>

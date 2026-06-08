@@ -5,7 +5,7 @@ export function render() {
     <h1>Installation</h1>
     <p class="lead">A statically-linked Rust binary with no runtime dependencies. Install via the official installer script, npm, or build from source.</p>
 
-    <h2>System requirements</h2>
+    <h2>System Requirements</h2>
 
     <table>
       <thead><tr><th>Platform</th><th>Architecture</th><th>Minimum OS</th></tr></thead>
@@ -18,7 +18,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Quick install</h2>
+    <h2>Quick Install</h2>
 
     <h3>Linux / macOS</h3>
 
@@ -30,7 +30,7 @@ export function render() {
 
     <p>Both installers detect platform/arch, download the matching archive, drop <code>coven-code</code> into <code>~/.coven-code/bin/</code>, and add that directory to your <code>PATH</code>. On macOS, they also strip the Gatekeeper quarantine attribute so the unsigned binary runs without a manual override.</p>
 
-    <h3>Installer flags</h3>
+    <h3>Installer Flags</h3>
 
     <table>
       <thead><tr><th>Flag (sh)</th><th>Flag (ps1)</th><th>Effect</th></tr></thead>
@@ -61,7 +61,7 @@ coven-code upgrade --force          # reinstall the same version</code></pre>
 
     <p>Settings under <code>~/.coven-code/</code> are preserved.</p>
 
-    <h2>Manual install</h2>
+    <h2>Manual Install</h2>
 
     <p>Grab archives from <a href="https://github.com/OpenCoven/coven-code/releases" target="_blank" rel="noopener">GitHub Releases</a>:</p>
 
@@ -76,13 +76,13 @@ coven-code upgrade --force          # reinstall the same version</code></pre>
       </tbody>
     </table>
 
-    <h2>From source</h2>
+    <h2>From Source</h2>
 
     <h3>Via Cargo</h3>
 
     <pre><code data-lang="bash">cargo install --git https://github.com/OpenCoven/coven-code coven-code-cli</code></pre>
 
-    <h3>Clone and build</h3>
+    <h3>Clone and Build</h3>
 
     <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
 cd coven-code/src-rust
@@ -93,7 +93,7 @@ cargo build
 # Release build (optimised, smaller, for everyday use)
 cargo build --release</code></pre>
 
-    <h3>Linux system dependencies</h3>
+    <h3>Linux System Dependencies</h3>
 
     <pre><code data-lang="bash"># Debian / Ubuntu
 sudo apt install build-essential pkg-config libssl-dev
@@ -104,7 +104,7 @@ sudo dnf install gcc pkgconfig openssl-devel
 # Arch
 sudo pacman -S base-devel pkgconf openssl</code></pre>
 
-    <h2>Shell completions</h2>
+    <h2>Shell Completions</h2>
 
     <pre><code data-lang="bash"># bash — add to ~/.bashrc
 eval "$(coven-code completion bash)"

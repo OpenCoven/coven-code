@@ -2,10 +2,10 @@ export const meta = { title: 'Providers' };
 
 export function render() {
   return `
-    <h1>LLM providers</h1>
+    <h1>LLM Providers</h1>
     <p class="lead">Coven Code supports a wide range of LLM providers through a unified <code>LlmProvider</code> trait. Switching between them requires only a configuration change.</p>
 
-    <h2>Selecting a provider</h2>
+    <h2>Selecting a Provider</h2>
 
     <p>Use <code>--provider</code> on any invocation to override the active provider:</p>
 
@@ -21,7 +21,7 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
 
     <p>When no provider is specified, Coven Code defaults to <strong>Anthropic</strong>.</p>
 
-    <h2>Browse providers</h2>
+    <h2>Browse Providers</h2>
 
     <p>Type to filter by id, env var, or model family. Use the chips to narrow to cloud, aggregator, or local providers.</p>
 
@@ -78,7 +78,7 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
       </div>
     </div>
 
-    <h2>Anthropic (default)</h2>
+    <h2>Anthropic (Default)</h2>
 
     <p>Uses the <code>/v1/messages</code> streaming endpoint. Authenticate via <code>ANTHROPIC_API_KEY</code> or run <code>/login</code> for OAuth.</p>
 
@@ -93,7 +93,7 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
 
     <p>All Anthropic models support tool calling, vision, and extended reasoning.</p>
 
-    <h2>Per-provider configuration</h2>
+    <h2>Per-Provider Configuration</h2>
 
     <p>Provider-specific settings live under <code>providers.&lt;id&gt;</code> in <code>settings.json</code>:</p>
 

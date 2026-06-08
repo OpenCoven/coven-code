@@ -965,7 +965,7 @@ a {
 }
 .perm-row {
   display: grid;
-  grid-template-columns: 120px 60px 1fr;
+  grid-template-columns: 120px 150px 1fr;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
@@ -992,6 +992,7 @@ a {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 .perm-row[data-state="allow"]  .perm-state { color: var(--color-accent); }
 .perm-row[data-state="prompt"] .perm-state { color: var(--color-accent-light); }
@@ -1172,6 +1173,188 @@ a {
   border-radius: 4px;
   color: var(--color-text-primary);
   font-weight: 500;
+}
+
+/* ----- Lifecycle timeline (hook events) ----- */
+.lifecycle {
+  display: grid;
+  gap: 14px;
+}
+.lifecycle-phase {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-card);
+  padding: 14px 16px;
+}
+.lifecycle-phase-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.lifecycle-phase-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+.lifecycle-phase-when {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+.lifecycle-track {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.lifecycle-event {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-accent);
+  border-radius: 999px;
+  color: var(--color-accent-light);
+  white-space: nowrap;
+}
+.lifecycle-event-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+.lifecycle-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--color-text-dim);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.lifecycle-arrow::before {
+  content: '──';
+  letter-spacing: -2px;
+  color: var(--color-border-light);
+}
+.lifecycle-arrow::after {
+  content: '──›';
+  letter-spacing: -2px;
+  color: var(--color-border-light);
+}
+.lifecycle-aside {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--color-border-accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  flex-wrap: wrap;
+}
+.lifecycle-aside .lifecycle-event {
+  background: var(--color-bg-code);
+}
+.lifecycle-events-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lifecycle-note {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+/* ----- State diagram (goal lifecycle) ----- */
+.state-diagram {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+.state-node {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 14px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 12px;
+  background: var(--color-bg-card);
+  text-align: center;
+  min-height: 96px;
+}
+.state-node-active   { border-color: var(--color-accent); background: var(--color-accent-tint); }
+.state-node-blocked  { border-color: var(--color-accent-dim); }
+.state-node-terminal { border-color: var(--color-border-light); }
+.state-node-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  margin-bottom: 4px;
+}
+.state-node-terminal .state-node-name { color: var(--color-text-secondary); }
+.state-node-desc {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+.state-transitions {
+  margin-top: 16px;
+  display: grid;
+  gap: 8px;
+}
+.state-transition {
+  display: grid;
+  grid-template-columns: 90px 30px 90px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.state-transition-from,
+.state-transition-to {
+  color: var(--color-accent-light);
+  text-align: center;
+}
+.state-transition-arrow {
+  color: var(--color-text-dim);
+  text-align: center;
+}
+.state-transition-trigger {
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 720px) {
+  .state-diagram { grid-template-columns: 1fr; }
+  .state-transition { grid-template-columns: 80px 22px 80px; }
+  .state-transition-trigger {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    padding-top: 4px;
+  }
 }
 
 /* ----- Demo 4: Tools grid ----- */

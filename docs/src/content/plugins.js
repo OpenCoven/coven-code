@@ -22,7 +22,7 @@ export function render() {
 
     <p>The loader normalises camelCase and snake_case field names, so manifests written in either convention are accepted.</p>
 
-    <h2>plugin.toml example</h2>
+    <h2>plugin.toml Example</h2>
 
     <pre><code data-lang="json">name        = "my-plugin"
 version     = "1.0.0"
@@ -64,26 +64,64 @@ capabilities = ["read_files", "network", "shell"]
 # Marketplace identifier
 marketplace_id = "you/my-plugin"</code></pre>
 
-    <h2>Required &amp; optional fields</h2>
+    <h2>Manifest Fields</h2>
 
-    <table>
-      <thead><tr><th>Field</th><th>Required</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>name</code></td><td>yes</td><td>Unique plugin identifier</td></tr>
-        <tr><td><code>version</code></td><td>yes</td><td>Semver string</td></tr>
-        <tr><td><code>description</code></td><td>no</td><td>One-line summary surfaced in <code>/plugin list</code></td></tr>
-        <tr><td><code>author</code></td><td>no</td><td><code>{ name, email, url }</code></td></tr>
-        <tr><td><code>commands</code> / <code>agents</code> / <code>skills</code></td><td>no</td><td>Extra files beyond the conventional directories</td></tr>
-        <tr><td><code>mcp_servers</code></td><td>no</td><td>Inline MCP server definitions</td></tr>
-        <tr><td><code>lsp_servers</code></td><td>no</td><td>Inline LSP server definitions</td></tr>
-        <tr><td><code>hooks</code></td><td>no</td><td>Inline hook definitions</td></tr>
-        <tr><td><code>user_config</code></td><td>no</td><td>Schema for user-configurable options</td></tr>
-        <tr><td><code>capabilities</code></td><td>no</td><td>Capability grants; omit to allow all</td></tr>
-        <tr><td><code>marketplace_id</code></td><td>no</td><td>ID for marketplace listings (<code>owner/name</code>)</td></tr>
-      </tbody>
-    </table>
+    <p>Type to filter by field name or purpose. Click a chip to scope to a group — Identity (required), Metadata, Content, Inline definitions, or user-facing Config.</p>
 
-    <h2>Managing plugins</h2>
+    <div class="demo" x-data="pluginFieldExplorer">
+      <div class="demo-header">
+        <span>plugin field explorer · <span x-text="count"></span> / <span x-text="total"></span> shown</span>
+      </div>
+      <div class="demo-body">
+        <div class="explorer-controls">
+          <input
+            type="text"
+            class="explorer-input"
+            placeholder="Search fields — try 'name', 'mcp', 'required', 'marketplace'…"
+            x-model="query"
+            aria-label="Search plugin manifest fields"
+          />
+          <span class="explorer-count">
+            <span x-text="count"></span> matches
+          </span>
+        </div>
+        <div class="explorer-chips">
+          <template x-for="cat in categories" :key="cat">
+            <button
+              type="button"
+              class="explorer-chip"
+              :aria-pressed="category === cat"
+              @click="pick(cat)"
+            >
+              <span x-text="cat"></span>
+              <span class="explorer-chip-count" x-text="countIn(cat)"></span>
+            </button>
+          </template>
+          <button
+            type="button"
+            class="explorer-clear"
+            x-show="query || category"
+            @click="clear()"
+          >Clear</button>
+        </div>
+        <div class="explorer-results" x-show="count > 0">
+          <template x-for="item in filtered" :key="item.id">
+            <div class="explorer-item">
+              <div class="explorer-item-head">
+                <span class="explorer-item-id" x-text="item.id"></span>
+                <span class="explorer-item-cat" x-text="item.category"></span>
+              </div>
+              <div class="explorer-item-desc" x-text="item.desc"></div>
+            </div>
+          </template>
+        </div>
+        <div class="explorer-empty" x-show="count === 0">
+          No fields match. <a href="#" @click.prevent="clear()" style="color: var(--color-accent);">Clear filters</a>
+        </div>
+      </div>
+    </div>
+
+    <h2>Managing Plugins</h2>
 
     <table>
       <thead><tr><th>Command</th><th>Action</th></tr></thead>
@@ -98,7 +136,7 @@ marketplace_id = "you/my-plugin"</code></pre>
 
     <p>Enabled/disabled state is persisted in <code>settings.json</code> under <code>enabledPlugins</code> and <code>disabledPlugins</code>.</p>
 
-    <h2>Inline hooks</h2>
+    <h2>Inline Hooks</h2>
 
     <p>Plugins can define hooks in the manifest. Each hook lists an event name and a command/prompt/agent/http handler. See <a href="#hooks">Hooks</a> for the full event list and handler types.</p>
 

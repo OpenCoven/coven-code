@@ -2,10 +2,10 @@ export const meta = { title: 'Slash Commands' };
 
 export function render() {
   return `
-    <h1>Slash commands</h1>
+    <h1>Slash Commands</h1>
     <p class="lead">Coven Code ships with 70+ slash commands organised into categories — session control, model selection, configuration, code &amp; git workflows, agents, MCP, and more. Type <code>/</code> in the chat input to open the palette, or <kbd>Ctrl+K</kbd> from anywhere.</p>
 
-    <h2>Resolution order</h2>
+    <h2>Resolution Order</h2>
 
     <p>When you type a command, the registry checks in priority order:</p>
 
@@ -13,7 +13,7 @@ export function render() {
 
     <p>The first match wins, so user templates can override built-ins of the same name.</p>
 
-    <h2>Browse the palette</h2>
+    <h2>Browse the Palette</h2>
 
     <p>Type to filter by name, alias, or description. Click a category chip to narrow the list.</p>
 

@@ -5,7 +5,7 @@ export function render() {
     <h1>Hooks</h1>
     <p class="lead">Hooks are executable logic Coven Code calls at lifecycle events — before a tool runs, after a turn completes, when the session starts. Hooks can be shell commands, LLM evaluations, sub-agent verifications, or HTTP POSTs.</p>
 
-    <h2>How hooks work</h2>
+    <h2>How Hooks Work</h2>
 
     <p>When an event fires, Coven Code:</p>
 
@@ -18,9 +18,9 @@ export function render() {
 
     <p>Because every hook receives structured JSON and returns a plain exit code, hooks can be written in any language that reads stdin and writes stderr/stdout.</p>
 
-    <h2>Hook types</h2>
+    <h2>Hook Types</h2>
 
-    <h3><code>command</code> — shell command</h3>
+    <h3><code>command</code> — Shell Command</h3>
 
     <pre><code data-lang="json">{
   "type": "command",
@@ -29,7 +29,7 @@ export function render() {
 
     <p>Runs the string through the configured shell (<code>bash</code> by default, or <code>powershell</code>).</p>
 
-    <h3><code>prompt</code> — LLM evaluation</h3>
+    <h3><code>prompt</code> — LLM Evaluation</h3>
 
     <pre><code data-lang="json">{
   "type": "prompt",
@@ -38,7 +38,7 @@ export function render() {
 
     <p>Sends the event payload to a lightweight model. Must respond <code>{"ok": true}</code> to pass, <code>{"ok": false, "reason": "..."}</code> to fail. Defaults to the fastest available small model.</p>
 
-    <h3><code>agent</code> — agentic verifier</h3>
+    <h3><code>agent</code> — Agentic Verifier</h3>
 
     <pre><code data-lang="json">{
   "type": "agent",
@@ -60,7 +60,7 @@ export function render() {
 
     <p>POSTs the event payload JSON to a URL. Header values may reference env vars using <code>$VAR</code> or <code>\${VAR}</code>, but only env vars listed in <code>allowedEnvVars</code> are interpolated.</p>
 
-    <h2>Common fields</h2>
+    <h2>Common Fields</h2>
 
     <table>
       <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
@@ -74,7 +74,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Hook events</h2>
+    <h2>Hook Events</h2>
 
     <p>Type to filter by event name or behaviour. Use the chips to scope to a lifecycle phase.</p>
 
@@ -133,7 +133,101 @@ export function render() {
 
     <p>Most events use exit code <code>0</code> for success, <code>1</code> for failure (block + report), and <code>2</code> for "rewake the model with this stderr as feedback."</p>
 
-    <h2>Where hooks live</h2>
+    <h2>Lifecycle Timeline</h2>
+
+    <p>The explorer above tells you what each event does. This shows <em>when</em> each event fires relative to the others. Phases nest: a session runs many turns, a turn runs many tool calls.</p>
+
+    <div class="demo">
+      <div class="demo-header">
+        <span>firing order · outer → inner</span>
+      </div>
+      <div class="demo-body">
+        <div class="lifecycle">
+
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Session</span>
+              <span class="lifecycle-phase-when">fires once at process start / exit</span>
+            </div>
+            <div class="lifecycle-track">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>SessionStart</span>
+              <span class="lifecycle-arrow">many turns</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>SessionEnd</span>
+            </div>
+          </div>
+
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Turn</span>
+              <span class="lifecycle-phase-when">fires once per user prompt</span>
+            </div>
+            <div class="lifecycle-track">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>UserPromptSubmit</span>
+              <span class="lifecycle-arrow">model + tools</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>Stop</span>
+              <span class="lifecycle-arrow">or</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>StopFailure</span>
+            </div>
+            <div class="lifecycle-aside">
+              fires anytime →
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>Notification</span>
+            </div>
+          </div>
+
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Tool</span>
+              <span class="lifecycle-phase-when">fires once per tool call (many per turn)</span>
+            </div>
+            <div class="lifecycle-track">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PreToolUse</span>
+              <span class="lifecycle-arrow">tool runs</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PostToolUse</span>
+              <span class="lifecycle-arrow">or on error</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PostToolUseFailure</span>
+            </div>
+            <div class="lifecycle-aside">
+              if approval needed →
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PermissionRequest</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PermissionDenied</span>
+            </div>
+          </div>
+
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Compaction</span>
+              <span class="lifecycle-phase-when">fires when context approaches its limit</span>
+            </div>
+            <div class="lifecycle-track">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PreCompact</span>
+              <span class="lifecycle-arrow">summarise</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PostCompact</span>
+            </div>
+            <p class="lifecycle-note">PreCompact exit code 2 blocks the compaction entirely.</p>
+          </div>
+
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Ad-hoc</span>
+              <span class="lifecycle-phase-when">fires whenever the underlying action happens</span>
+            </div>
+            <div class="lifecycle-events-grid">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>SubagentStart</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>SubagentStop</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>TaskCreated</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>TaskCompleted</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>Elicitation</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>ElicitationResult</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>ConfigChange</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>WorktreeCreate</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <h2>Where Hooks Live</h2>
 
     <ul>
       <li><strong>User-level</strong>: <code>~/.coven-code/hooks.json</code></li>

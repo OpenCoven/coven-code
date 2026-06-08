@@ -2,10 +2,10 @@ export const meta = { title: 'Tools' };
 
 export function render() {
   return `
-    <h1>Tools reference</h1>
+    <h1>Tools Reference</h1>
     <p class="lead">Coven Code ships with 40+ built-in tools across file ops, shell execution, search, web, task management, git, notebooks, and desktop automation. Each tool is gated by a permission level and the active permission mode.</p>
 
-    <h2>Permission levels</h2>
+    <h2>Permission Levels</h2>
 
     <table>
       <thead><tr><th>Level</th><th>Description</th><th>Examples</th></tr></thead>
@@ -18,7 +18,7 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Permission modes</h2>
+    <h2>Permission Modes</h2>
 
     <table>
       <thead><tr><th>Mode</th><th>Behavior</th></tr></thead>
@@ -63,7 +63,7 @@ export function render() {
       </div>
     </div>
 
-    <h2>Browse the toolkit</h2>
+    <h2>Browse the Toolkit</h2>
 
     <p>Click a tool to see its parameters and an example invocation. Write tools enforce read-before-write — a file must have been read in the current session before it can be modified, preventing blind overwrites.</p>
 
@@ -112,7 +112,7 @@ export function render() {
       </div>
     </div>
 
-    <h2>Other categories</h2>
+    <h2>Other Categories</h2>
 
     <ul>
       <li><strong>Notebooks</strong> — read and edit Jupyter notebooks</li>

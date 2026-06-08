@@ -5,7 +5,7 @@ export function render() {
     <h1>Authentication</h1>
     <p class="lead">Coven Code supports API keys, OAuth (Claude.ai / Console / ChatGPT), and per-provider environment variables, with named multi-account profiles so you can switch identities without re-logging-in.</p>
 
-    <h2>Credential priority</h2>
+    <h2>Credential Priority</h2>
 
     <p>For Anthropic, credentials are checked in this order — the first non-empty match wins:</p>
 
@@ -19,7 +19,7 @@ export function render() {
 
     <p>Provider-specific credentials (OpenAI, Google, etc.) follow the same pattern with their own env vars. Codex (ChatGPT subscription) accounts live under <code>~/.coven-code/accounts/codex/&lt;id&gt;/</code>.</p>
 
-    <h2>Method 1: API key</h2>
+    <h2>Method 1: API Key</h2>
 
     <p>Get a key at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> → Settings → API Keys, then either set it in your shell:</p>
 
@@ -37,7 +37,7 @@ export function render() {
 
     <pre><code data-lang="bash">coven-code --api-key "sk-ant-..." "your prompt"</code></pre>
 
-    <h2>Method 2: OAuth login</h2>
+    <h2>Method 2: OAuth Login</h2>
 
     <p>OAuth 2.0 PKCE flow through Claude.ai or Console. Requires a registered first-party client ID:</p>
 
@@ -46,7 +46,7 @@ coven-code auth login</code></pre>
 
     <p>A localhost callback server starts, your browser opens the authorization URL, and the tokens are saved under <code>~/.coven-code/accounts/anthropic/&lt;profile-id&gt;/</code>. Use <code>--codex</code> to authenticate against ChatGPT subscription credentials instead.</p>
 
-    <h2>Multi-account profiles</h2>
+    <h2>Multi-Account Profiles</h2>
 
     <pre><code data-lang="bash"># Add accounts (each login becomes its own profile)
 coven-code auth login --label work
@@ -77,7 +77,7 @@ coven-code auth logout</code></pre>
       </tbody>
     </table>
 
-    <h2>Token storage</h2>
+    <h2>Token Storage</h2>
 
     <p>Each profile gets its own directory:</p>
 
