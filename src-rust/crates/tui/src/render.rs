@@ -2133,6 +2133,54 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
     );
 }
 
+/// Pick a streaming-state label that distinguishes tool calls from
+/// reasoning from text generation. Returns an owned String because the
+/// most informative label may interpolate the active tool's name.
+///
+/// Precedence:
+///   1. Adapter-set `status_message` (when it's not the generic
+///      "thinking" placeholder)
+///   2. Running tool call — "Running <tool>"
+///   3. Active streaming text — "Generating"
+///   4. Active streaming thinking — "Reasoning"
+///   5. App-level `spinner_verb` override
+///   6. Default — "Thinking"
+fn streaming_status_label(app: &App) -> String {
+    // 1. adapter-set message wins (unless it's the placeholder)
+    if let Some(custom) = app.status_message.as_deref() {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case(STATUS_THINKING)
+            && !trimmed.eq_ignore_ascii_case(STATUS_THINKING_ELLIPSIS)
+        {
+            return trimmed.to_string();
+        }
+    }
+    // 2. tool call in progress — show the most-recent active tool name
+    if let Some(running) = app
+        .tool_use_blocks
+        .iter()
+        .rev()
+        .find(|b| matches!(b.status, crate::app::ToolStatus::Running))
+    {
+        return format!("Running {}", running.name);
+    }
+    // 3. streaming text
+    if !app.streaming_text.is_empty() {
+        return "Generating".to_string();
+    }
+    // 4. streaming reasoning
+    if !app.streaming_thinking.is_empty() {
+        return "Reasoning".to_string();
+    }
+    // 5. spinner_verb override (sampled at turn start)
+    if let Some(v) = app.spinner_verb.as_deref().filter(|s| !s.is_empty()) {
+        return v.to_string();
+    }
+    // 6. default
+    "Thinking".to_string()
+}
+
 fn should_render_status_row(app: &App) -> bool {
     let interesting_stream_status = app
         .status_message
@@ -2165,20 +2213,17 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )]
     } else if app.is_streaming {
-        // Pick a label: use the status message if it has real content,
-        // otherwise show a default "Thinking" shimmer so the user always
-        // sees that the model is working.
-        let raw_label = app
-            .status_message
-            .as_deref()
-            .filter(|s| {
-                let t = s.trim();
-                !t.is_empty()
-                    && !t.eq_ignore_ascii_case(STATUS_THINKING)
-                    && !t.eq_ignore_ascii_case(STATUS_THINKING_ELLIPSIS)
-            })
-            .or(app.spinner_verb.as_deref())
-            .unwrap_or("Thinking");
+        // Pick a streaming status label. We try to differentiate the three
+        // distinguishable streaming modes so the spinner means something:
+        //
+        //   1. tool call in progress  →  "Running <tool>…"
+        //   2. streaming text         →  "Generating…"
+        //   3. streaming thinking     →  "Reasoning…"
+        //   4. fallback               →  custom status / spinner_verb / "Thinking"
+        //
+        // A custom `status_message` set by the model adapter (e.g. extended
+        // thinking budgets) still wins so adapters can override.
+        let raw_label = streaming_status_label(app);
 
         let mut s = vec![Span::styled(
             spinner_char(app.frame_count).to_string(),
@@ -3438,6 +3483,72 @@ mod welcome_tests {
     fn welcome_familiar_label_reflects_config_override() {
         let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
         assert_eq!(welcome_familiar_label(&app), "Familiar: sage");
+    }
+
+    #[test]
+    fn streaming_status_label_prefers_running_tool_over_default() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        app.tool_use_blocks.push(crate::app::ToolUseBlock {
+            id: "tu_1".to_string(),
+            name: "Bash".to_string(),
+            turn_index: None,
+            status: crate::app::ToolStatus::Running,
+            output_preview: None,
+            input_json: String::new(),
+        });
+        assert_eq!(streaming_status_label(&app), "Running Bash");
+    }
+
+    #[test]
+    fn streaming_status_label_falls_back_through_text_then_thinking() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        assert_eq!(streaming_status_label(&app), "Thinking");
+        app.streaming_thinking = "let me think".to_string();
+        assert_eq!(streaming_status_label(&app), "Reasoning");
+        app.streaming_text = "let me think".to_string();
+        // Text is more user-visible than reasoning, so it wins the race.
+        assert_eq!(streaming_status_label(&app), "Generating");
+    }
+
+    #[test]
+    fn streaming_status_label_adapter_message_overrides_everything() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        app.tool_use_blocks.push(crate::app::ToolUseBlock {
+            id: "tu_1".to_string(),
+            name: "Bash".to_string(),
+            turn_index: None,
+            status: crate::app::ToolStatus::Running,
+            output_preview: None,
+            input_json: String::new(),
+        });
+        // Adapter-set message wins even when a tool is running.
+        app.status_message = Some("Compacting context".to_string());
+        assert_eq!(streaming_status_label(&app), "Compacting context");
+    }
+
+    #[test]
+    fn streaming_status_label_ignores_placeholder_thinking_message() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        // "thinking" / "thinking…" are placeholders — they should NOT win
+        // over more informative state.
+        app.status_message = Some("thinking".to_string());
+        app.streaming_text = "hello".to_string();
+        assert_eq!(streaming_status_label(&app), "Generating");
+    }
+
+    #[test]
+    fn streaming_status_label_skips_completed_tools() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        // A done tool from a previous turn must not hijack the label.
+        app.tool_use_blocks.push(crate::app::ToolUseBlock {
+            id: "tu_1".to_string(),
+            name: "Bash".to_string(),
+            turn_index: None,
+            status: crate::app::ToolStatus::Done,
+            output_preview: None,
+            input_json: String::new(),
+        });
+        assert_eq!(streaming_status_label(&app), "Thinking");
     }
 
     #[test]

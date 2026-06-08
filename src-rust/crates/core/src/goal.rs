@@ -520,4 +520,181 @@ mod tests {
         assert!(!goal.is_over_budget(999));
         assert!(goal.is_over_budget(1000));
     }
+
+    // --- Regression tests added to cover the full /goal state machine ------
+
+    /// `add_tokens` accumulates across calls and reaches the budget boundary
+    /// at exactly the budget value (boundary is inclusive in
+    /// `is_over_budget`).
+    #[test]
+    fn add_tokens_accumulates_to_budget_boundary() {
+        let store = open_tmp();
+        store
+            .set_goal("sess1", "consolidate memory", Some(1_000))
+            .unwrap();
+        store.add_tokens("sess1", 400).unwrap();
+        store.add_tokens("sess1", 599).unwrap();
+        let g = store.get_goal("sess1").unwrap();
+        assert_eq!(g.tokens_used, 999, "tokens_used must accumulate");
+        assert!(!g.is_over_budget(g.tokens_used));
+        store.add_tokens("sess1", 1).unwrap();
+        let g = store.get_goal("sess1").unwrap();
+        assert_eq!(g.tokens_used, 1_000);
+        assert!(
+            g.is_over_budget(g.tokens_used),
+            "is_over_budget must trip exactly at budget"
+        );
+    }
+
+    /// Transition into the BudgetLimited state (matching the `/goal` UX
+    /// where exceeding the soft token budget pauses autonomous work) and
+    /// back out via Active.
+    #[test]
+    fn budget_limited_transition_round_trips() {
+        let store = open_tmp();
+        store.set_goal("sess1", "drain ticket queue", None).unwrap();
+        store
+            .set_status("sess1", GoalStatus::BudgetLimited)
+            .unwrap();
+        assert_eq!(
+            store.get_goal("sess1").unwrap().status,
+            GoalStatus::BudgetLimited
+        );
+        assert!(
+            store.get_active_goal("sess1").is_none(),
+            "BudgetLimited must not count as active"
+        );
+        store.set_status("sess1", GoalStatus::Active).unwrap();
+        assert_eq!(
+            store.get_active_goal("sess1").map(|g| g.status),
+            Some(GoalStatus::Active)
+        );
+    }
+
+    /// Sanity-check that MAX_GOAL_TURNS is a real, conservative cap.
+    /// The runaway guard is enforced at the call site (query loop) but
+    /// the constant must stay non-zero and bounded so the cap stays
+    /// meaningful. Bounds are checked in a `const { }` block so the
+    /// build fails at compile time if a future edit pushes the constant
+    /// out of range.
+    #[test]
+    fn max_goal_turns_is_a_reasonable_runaway_guard() {
+        const _: () = {
+            assert!(MAX_GOAL_TURNS > 0);
+            assert!(MAX_GOAL_TURNS <= 1_000);
+        };
+        // record_turn must be cheap enough to call MAX_GOAL_TURNS times.
+        let store = open_tmp();
+        store.set_goal("sess1", "long-running", None).unwrap();
+        for _ in 0..MAX_GOAL_TURNS {
+            store.record_turn("sess1", 1).unwrap();
+        }
+        let g = store.get_goal("sess1").unwrap();
+        assert_eq!(g.turns_used, MAX_GOAL_TURNS);
+    }
+
+    /// Two sessions must keep independent goals — setting/clearing in one
+    /// does not affect the other.
+    #[test]
+    fn goals_are_isolated_per_session() {
+        let store = open_tmp();
+        store.set_goal("alpha", "ship feature A", None).unwrap();
+        store
+            .set_goal("beta", "ship feature B", Some(50_000))
+            .unwrap();
+        assert_eq!(
+            store.get_goal("alpha").map(|g| g.objective),
+            Some("ship feature A".to_string())
+        );
+        assert_eq!(
+            store.get_goal("beta").and_then(|g| g.token_budget),
+            Some(50_000)
+        );
+        store.set_status("alpha", GoalStatus::Complete).unwrap();
+        // alpha completed; beta still active.
+        assert!(store.get_active_goal("alpha").is_none());
+        assert_eq!(
+            store.get_active_goal("beta").map(|g| g.objective),
+            Some("ship feature B".to_string())
+        );
+        store.clear_goal("beta").unwrap();
+        // alpha (Complete but not deleted) survives the clear of beta.
+        assert!(store.get_goal("alpha").is_some());
+        assert!(store.get_goal("beta").is_none());
+    }
+
+    /// On-disk goals must survive a `GoalStore` drop + re-open. This is the
+    /// goal-continuation-across-sessions guarantee: a user who restarts
+    /// `coven-code` must find their active goal still present.
+    #[test]
+    fn goals_persist_across_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        {
+            let store = GoalStore::open(&path).unwrap();
+            store
+                .set_goal("sess1", "audit the migration", Some(250_000))
+                .unwrap();
+            store.add_tokens("sess1", 12_000).unwrap();
+            store.record_turn("sess1", 60).unwrap();
+            store.set_status("sess1", GoalStatus::Paused).unwrap();
+        }
+        // store dropped — re-open and verify state survived.
+        let store = GoalStore::open(&path).unwrap();
+        let g = store.get_goal("sess1").expect("goal must persist");
+        assert_eq!(g.objective, "audit the migration");
+        assert_eq!(g.token_budget, Some(250_000));
+        assert_eq!(g.tokens_used, 12_000);
+        assert_eq!(g.turns_used, 1);
+        assert_eq!(g.time_used_secs, 60);
+        assert_eq!(g.status, GoalStatus::Paused);
+    }
+
+    /// The kickoff message is what the model first sees when a goal is
+    /// set. Pin a minimum semantic contract so future edits don't drop
+    /// the objective from the prompt.
+    #[test]
+    fn goal_kickoff_message_includes_objective_and_count() {
+        let goal = Goal {
+            id: "g".into(),
+            session_id: "s".into(),
+            objective: "rewrite the cache layer".into(),
+            status: GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_secs: 0,
+            turns_used: 3,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let msg = goal_kickoff_message(&goal);
+        assert!(
+            msg.contains("rewrite the cache layer"),
+            "kickoff must include the objective verbatim, got: {msg}"
+        );
+        assert!(
+            msg.contains("GoalComplete"),
+            "kickoff must instruct the model to call GoalComplete, got: {msg}"
+        );
+    }
+
+    /// `goals_enabled()` should default to true so the feature ships on by
+    /// default, and respect a `=0` env var opt-out.
+    #[test]
+    fn goals_enabled_respects_env_opt_out() {
+        let prev = std::env::var("COVEN_CODE_GOALS").ok();
+        std::env::remove_var("COVEN_CODE_GOALS");
+        assert!(goals_enabled(), "default must be enabled");
+        std::env::set_var("COVEN_CODE_GOALS", "0");
+        assert!(!goals_enabled(), "=0 must disable");
+        std::env::set_var("COVEN_CODE_GOALS", "false");
+        assert!(!goals_enabled(), "=false must disable");
+        std::env::set_var("COVEN_CODE_GOALS", "1");
+        assert!(goals_enabled(), "=1 must enable");
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_CODE_GOALS", v);
+        } else {
+            std::env::remove_var("COVEN_CODE_GOALS");
+        }
+    }
 }
