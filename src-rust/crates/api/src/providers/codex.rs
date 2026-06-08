@@ -12,8 +12,9 @@
 // Model list: static — the Codex endpoint does not expose a /models route,
 //   so we use the `CODEX_MODELS` constant from `claurst-core`.
 
+use parking_lot::Mutex;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
@@ -93,7 +94,7 @@ impl CodexProvider {
     async fn access_token(&self) -> Result<String, ProviderError> {
         // Check expiry under the lock; clone what we need; release.
         let (token, needs_refresh, refresh_token) = {
-            let guard = self.tokens.lock().unwrap();
+            let guard = self.tokens.lock();
             let expired = Self::is_expired(&guard);
             (
                 guard.access_token.clone(),
@@ -193,7 +194,7 @@ impl CodexProvider {
 
         // Persist and cache the refreshed tokens.
         let mut updated = {
-            let guard = self.tokens.lock().unwrap();
+            let guard = self.tokens.lock();
             guard.clone()
         };
         updated.access_token = new_access.clone();
@@ -207,7 +208,7 @@ impl CodexProvider {
         }
 
         {
-            let mut guard = self.tokens.lock().unwrap();
+            let mut guard = self.tokens.lock();
             *guard = updated;
         }
 
@@ -237,7 +238,7 @@ impl CodexProvider {
     }
 
     fn account_id(&self) -> Option<String> {
-        self.tokens.lock().unwrap().account_id.clone()
+        self.tokens.lock().account_id.clone()
     }
 
     fn system_prompt_to_text(request: &ProviderRequest) -> String {
@@ -913,7 +914,7 @@ impl LlmProvider for CodexProvider {
 
     async fn health_check(&self) -> Result<ProviderStatus, ProviderError> {
         // Validate that a non-expired token exists without making a network call.
-        let guard = self.tokens.lock().unwrap();
+        let guard = self.tokens.lock();
         if guard.access_token.is_empty() {
             return Ok(ProviderStatus::Unavailable {
                 reason: "no Codex access token — run /connect to authenticate".to_string(),

@@ -739,7 +739,11 @@ impl ModelRegistry {
             models = self.list_by_provider(provider_id);
         }
         if models.is_empty() {
-            return None;
+            // Codex models are not on models.dev (OAuth-only), so the bundled
+            // snapshot has no entries for them. Fall back to the canonical
+            // constant in claurst_core::codex_oauth so `/model` and the
+            // effective-model resolver still pick a real id for Codex users.
+            return codex_models_fallback(provider_id, /* small = */ false);
         }
 
         let priority_patterns = flagship_patterns_for(provider_id);
@@ -785,7 +789,8 @@ impl ModelRegistry {
             models = self.list_by_provider(provider_id);
         }
         if models.is_empty() {
-            return None;
+            // See best_model_for_provider for the Codex rationale.
+            return codex_models_fallback(provider_id, /* small = */ true);
         }
 
         let small_priority = small_patterns_for(provider_id);
@@ -1039,6 +1044,28 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
 }
 
 /// Substring patterns marking a model as the lightweight/cheap default.
+/// Codex is OAuth-only and absent from the models.dev bundled snapshot, so
+/// `list_by_provider("codex")` always returns empty. This fallback returns
+/// the canonical default / small ids from
+/// `claurst_core::codex_oauth::CODEX_MODELS` so `/model` and `/fast` keep
+/// working for Codex users.
+fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
+    if !matches!(provider_id, "codex" | "openai-codex") {
+        return None;
+    }
+    if small {
+        // Prefer the documented "mini" entry; fall through to the default
+        // model id if the constant is ever pruned.
+        claurst_core::codex_oauth::CODEX_MODELS
+            .iter()
+            .find(|(id, _)| id.contains("mini"))
+            .map(|(id, _)| (*id).to_string())
+            .or_else(|| Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL.to_string()))
+    } else {
+        Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL.to_string())
+    }
+}
+
 fn small_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" | "amazon-bedrock" | "github-copilot" | "azure" => {
@@ -1186,6 +1213,39 @@ mod tests {
         let anthropic = reg.provider("anthropic").expect("anthropic provider");
         assert_eq!(anthropic.name, "Anthropic");
         assert!(anthropic.env.iter().any(|e| e == "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn codex_best_models_return_real_ids_without_snapshot() {
+        // Codex is OAuth-only and intentionally absent from the bundled
+        // models.dev snapshot. Before the fallback in codex_models_fallback,
+        // best_model_for_provider("codex") returned None, which broke
+        // `/model` defaults and the `/fast` toggle for Codex users.
+        let reg = ModelRegistry::new();
+        // Sanity: snapshot really has no codex entries.
+        assert!(reg.list_by_provider("codex").is_empty());
+
+        let best = reg
+            .best_model_for_provider("codex")
+            .expect("codex best model must fall back to CODEX_MODELS default");
+        assert!(
+            best.contains("codex"),
+            "best codex model should look like a codex id, got {best:?}"
+        );
+        let small = reg
+            .best_small_model_for_provider("codex")
+            .expect("codex small model must fall back to a mini/default id");
+        assert!(
+            small.contains("codex"),
+            "small codex model should look like a codex id, got {small:?}"
+        );
+        // The alias `openai-codex` must take the same path.
+        assert!(reg.best_model_for_provider("openai-codex").is_some());
+        assert!(reg.best_small_model_for_provider("openai-codex").is_some());
+        // Unrelated providers continue to return None when absent.
+        assert!(reg
+            .best_model_for_provider("definitely-not-a-provider")
+            .is_none());
     }
 
     #[test]
