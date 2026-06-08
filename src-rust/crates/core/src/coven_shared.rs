@@ -213,16 +213,26 @@ pub fn default_agents_with_familiars(
 /// Return built-in agents, settings-defined agents, and familiars with the
 /// correct security precedence for runtime agent resolution.
 ///
-/// Settings-defined agents may override built-ins as before, but a familiar id
-/// from `~/.coven/familiars.toml` cannot be shadowed by project settings. That
-/// keeps the `/agents` familiar picker and runtime tool filter resolving the
-/// same trusted [`crate::config::AgentDefinition::access`] tier.
+/// Built-in reserved ids (`build`, `plan`, `explore`) and familiar ids from
+/// `~/.coven/familiars.toml` **cannot** be shadowed by project settings.
+/// These names carry security-significant access tiers (e.g. `plan` is
+/// read-only) and the TUI mode switcher relies on those tiers holding
+/// regardless of repository configuration. Non-reserved settings ids are
+/// merged as usual.
 pub fn default_agents_with_familiars_and_config(
     config_agents: &std::collections::HashMap<String, crate::config::AgentDefinition>,
 ) -> std::collections::HashMap<String, crate::config::AgentDefinition> {
     let builtins = crate::config::default_agents();
     let mut map = builtins.clone();
-    map.extend(config_agents.clone());
+
+    // Only merge in settings-defined agents whose id does not collide with a
+    // reserved built-in. This is the security boundary that
+    // `resolve_tui_agent_mode` and the Tab cycle in the TUI rely on.
+    for (id, def) in config_agents {
+        if !builtins.contains_key(id) {
+            map.insert(id.clone(), def.clone());
+        }
+    }
 
     if let Some(fams) = load_familiars() {
         for fam in &fams {
@@ -528,13 +538,17 @@ role = "Code"
     }
 
     #[test]
-    fn default_agents_with_familiars_and_config_preserves_settings_builtin_override() {
+    fn default_agents_with_familiars_and_config_protects_builtin_ids() {
+        // Security policy: reserved built-in ids (build / plan / explore)
+        // carry access tiers that the TUI mode switcher relies on. Project
+        // settings must NOT be able to swap a "full"-access `build` agent
+        // into the read-only `plan` slot or vice-versa.
         let _g = with_coven_home(|_| {});
         let mut config_agents = std::collections::HashMap::new();
         config_agents.insert(
             "build".to_string(),
             crate::config::AgentDefinition {
-                description: Some("Custom build".to_string()),
+                description: Some("Malicious shadow build".to_string()),
                 model: None,
                 temperature: None,
                 prompt: Some("Custom build prompt".to_string()),
@@ -547,8 +561,10 @@ role = "Code"
 
         let merged = default_agents_with_familiars_and_config(&config_agents);
         let build = merged.get("build").expect("build agent should be present");
-        assert_eq!(build.access, "read-only");
-        assert_eq!(build.description.as_deref(), Some("Custom build"));
+        // The built-in `build` agent has `access = "full"`; project settings
+        // cannot override that.
+        assert_eq!(build.access, "full");
+        assert_ne!(build.description.as_deref(), Some("Malicious shadow build"));
     }
 
     #[test]

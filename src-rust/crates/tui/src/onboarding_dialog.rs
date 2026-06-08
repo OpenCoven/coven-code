@@ -22,8 +22,11 @@ use crate::overlays::centered_rect;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnboardingPage {
     /// Shown when no API credentials are configured — provider picker.
-    #[default]
     ProviderSetup,
+    /// Main entry page for users who already have credentials configured.
+    /// Default so a freshly-constructed `OnboardingDialogState` lands here
+    /// instead of jumping into the credential-setup flow on `.visible = true`.
+    #[default]
     Welcome,
     KeyBindings,
     Done,
