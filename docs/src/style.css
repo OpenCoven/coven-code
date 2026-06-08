@@ -1357,6 +1357,140 @@ a {
   }
 }
 
+/* ----- Effort scale (extended thinking levels) ----- */
+.effort-scale {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.effort-step {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-card);
+  min-height: 130px;
+}
+.effort-step-bar {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+.effort-step-tick {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-border);
+}
+.effort-step-tick.on { background: var(--color-accent); }
+.effort-step-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.effort-step-desc {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+  margin-bottom: auto;
+}
+.effort-step-meta {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+@media (max-width: 720px) {
+  .effort-scale { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ----- Context window meter ----- */
+.ctx-meter {
+  font-family: var(--font-mono);
+}
+.ctx-bar {
+  position: relative;
+  display: grid;
+  grid-template-columns: 90fr 8.5fr 1.5fr;
+  height: 38px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  margin-bottom: 30px;
+}
+.ctx-bar-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+.ctx-bar-safe  { background: var(--color-accent-tint-mid); color: var(--color-accent); }
+.ctx-bar-warn  { background: var(--color-accent-dim); color: var(--color-bg); }
+.ctx-bar-block { background: var(--color-text-dimmer); color: var(--color-bg); font-weight: 600; }
+.ctx-bar-tick {
+  position: absolute;
+  top: -16px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+.ctx-bar-tick::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  width: 1px;
+  height: 12px;
+  background: var(--color-text-dim);
+}
+.ctx-legend {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  font-family: var(--font-body);
+}
+.ctx-legend-item {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-card);
+}
+.ctx-legend-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.ctx-legend-item-safe  .ctx-legend-name { color: var(--color-accent); }
+.ctx-legend-item-warn  .ctx-legend-name { color: var(--color-accent-light); }
+.ctx-legend-item-block .ctx-legend-name { color: var(--color-text-secondary); }
+.ctx-legend-desc {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .ctx-legend { grid-template-columns: 1fr; }
+}
+
 /* ----- Demo 4: Tools grid ----- */
 .tools-cat {
   margin-bottom: 18px;

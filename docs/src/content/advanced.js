@@ -15,23 +15,91 @@ export function render() {
 coven-code --thinking &lt;tokens&gt;   # specific token budget
 coven-code --effort &lt;level&gt;</code></pre>
 
-    <table>
-      <thead><tr><th>Level</th><th>Use</th></tr></thead>
-      <tbody>
-        <tr><td><code>low</code></td><td>Minimal thinking; fastest responses</td></tr>
-        <tr><td><code>medium</code></td><td>Moderate reasoning; balanced</td></tr>
-        <tr><td><code>high</code></td><td>Deep reasoning; best quality for most tasks</td></tr>
-        <tr><td><code>max</code></td><td>Maximum budget; Opus-class models only (falls back to <code>high</code>)</td></tr>
-      </tbody>
-    </table>
+    <div class="demo">
+      <div class="demo-header">
+        <span>effort scale · low → max</span>
+      </div>
+      <div class="demo-body">
+        <div class="effort-scale">
+          <div class="effort-step">
+            <div class="effort-step-bar">
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick"></span>
+              <span class="effort-step-tick"></span>
+              <span class="effort-step-tick"></span>
+            </div>
+            <div class="effort-step-name">low</div>
+            <div class="effort-step-desc">Minimal thinking; fastest responses.</div>
+            <div class="effort-step-meta">persisted</div>
+          </div>
+          <div class="effort-step">
+            <div class="effort-step-bar">
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick"></span>
+              <span class="effort-step-tick"></span>
+            </div>
+            <div class="effort-step-name">medium</div>
+            <div class="effort-step-desc">Moderate reasoning; balanced speed + quality.</div>
+            <div class="effort-step-meta">persisted</div>
+          </div>
+          <div class="effort-step">
+            <div class="effort-step-bar">
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick"></span>
+            </div>
+            <div class="effort-step-name">high</div>
+            <div class="effort-step-desc">Deep reasoning; best quality for most tasks. API default.</div>
+            <div class="effort-step-meta">persisted</div>
+          </div>
+          <div class="effort-step">
+            <div class="effort-step-bar">
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+              <span class="effort-step-tick on"></span>
+            </div>
+            <div class="effort-step-name">max</div>
+            <div class="effort-step-desc">Maximum budget — Opus-class only. Falls back to high on unsupported models.</div>
+            <div class="effort-step-meta">session only</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-    <p><code>low</code>, <code>medium</code>, <code>high</code> persist across sessions; <code>max</code> is session-scoped. Override with <code>CLAUDE_CODE_EFFORT_LEVEL</code>.</p>
+    <p>Override with the <code>CLAUDE_CODE_EFFORT_LEVEL</code> env var; conflicts surface a warning when you run <code>/effort</code>.</p>
 
     <h2>Auto-Compaction</h2>
 
     <p>The context window is finite. Auto-compaction summarises history when usage approaches the limit (effective window minus a 13,000-token buffer), keeping the session alive without manual intervention.</p>
 
-    <p>Hooks <code>PreCompact</code> and <code>PostCompact</code> fire around the operation; <code>PreCompact</code> can block via exit code 2.</p>
+    <div class="demo">
+      <div class="demo-header">
+        <span>auto-compaction flow</span>
+      </div>
+      <div class="demo-body">
+        <div class="lifecycle">
+          <div class="lifecycle-phase">
+            <div class="lifecycle-phase-head">
+              <span class="lifecycle-phase-name">Triggered</span>
+              <span class="lifecycle-phase-when">usage crosses the auto-compact threshold</span>
+            </div>
+            <div class="lifecycle-track">
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>turn N completes</span>
+              <span class="lifecycle-arrow">tokens checked</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PreCompact hook</span>
+              <span class="lifecycle-arrow">summarise</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>PostCompact hook</span>
+              <span class="lifecycle-arrow">resume</span>
+              <span class="lifecycle-event"><span class="lifecycle-event-dot"></span>turn N+1</span>
+            </div>
+            <p class="lifecycle-note">PreCompact exit code 2 blocks the compaction; the session continues until you free space manually with <code>/compact</code>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <pre><code data-lang="bash">DISABLE_AUTO_COMPACT=1 coven-code               # disable auto, keep /compact
 DISABLE_COMPACT=1 coven-code                    # disable entirely
@@ -45,11 +113,38 @@ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80 coven-code   # custom threshold</code></pre>
 
     <pre><code data-lang="bash">/context     # show usage relative to the model's window</code></pre>
 
-    <ul>
-      <li><strong>Warning threshold:</strong> 20,000 tokens before the limit</li>
-      <li><strong>Error threshold:</strong> 20,000 tokens before — more prominent visual</li>
-      <li><strong>Blocking limit:</strong> 3,000 tokens before — further input blocked until compaction</li>
-    </ul>
+    <div class="demo">
+      <div class="demo-header">
+        <span>context window meter · 200k example</span>
+      </div>
+      <div class="demo-body">
+        <div class="ctx-meter">
+          <div class="ctx-bar">
+            <span class="ctx-bar-tick" style="left: 0%;">0</span>
+            <span class="ctx-bar-tick" style="left: 90%;">180k</span>
+            <span class="ctx-bar-tick" style="left: 98.5%;">197k</span>
+            <span class="ctx-bar-tick" style="left: 100%;">200k</span>
+            <span class="ctx-bar-zone ctx-bar-safe">Safe</span>
+            <span class="ctx-bar-zone ctx-bar-warn">Warn / Error</span>
+            <span class="ctx-bar-zone ctx-bar-block">Block</span>
+          </div>
+          <div class="ctx-legend">
+            <div class="ctx-legend-item ctx-legend-item-safe">
+              <div class="ctx-legend-name">Safe · 0 → limit−20k</div>
+              <div class="ctx-legend-desc">Plenty of headroom. Auto-compact won't fire yet.</div>
+            </div>
+            <div class="ctx-legend-item ctx-legend-item-warn">
+              <div class="ctx-legend-name">Warning / Error · last 20k</div>
+              <div class="ctx-legend-desc">Status line escalates from warning to error visual. Auto-compact triggers around here.</div>
+            </div>
+            <div class="ctx-legend-item ctx-legend-item-block">
+              <div class="ctx-legend-name">Block · last 3k</div>
+              <div class="ctx-legend-desc">Further input blocked until you compact, either manually with <code>/compact</code> or by waiting for auto-compact.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <p>External viewer: <code>ctx-viz</code> for inspecting transcripts outside the TUI.</p>
 
