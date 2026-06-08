@@ -47,13 +47,20 @@ impl AnthropicProvider {
     }
 
     /// Construct directly from a [`ClientConfig`], creating the inner client.
-    pub fn from_config(config: ClientConfig) -> Self {
-        let client = AnthropicClient::new(config)
-            .expect("AnthropicProvider::from_config: failed to create AnthropicClient");
-        Self {
+    /// Returns an error when the underlying HTTP client cannot be built (e.g.
+    /// TLS init failure); callers should treat that as "provider unavailable"
+    /// rather than letting the process crash.
+    pub fn from_config(config: ClientConfig) -> Result<Self, ProviderError> {
+        let client = AnthropicClient::new(config).map_err(|e| ProviderError::Other {
+            provider: ProviderId::new(ProviderId::ANTHROPIC),
+            message: format!("failed to create AnthropicClient: {e}"),
+            status: None,
+            body: None,
+        })?;
+        Ok(Self {
             client: Arc::new(client),
             id: ProviderId::new(ProviderId::ANTHROPIC),
-        }
+        })
     }
 
     /// Build a [`CreateMessageRequest`] from a [`ProviderRequest`].

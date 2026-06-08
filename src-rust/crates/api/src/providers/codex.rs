@@ -52,26 +52,24 @@ pub struct CodexProvider {
 }
 
 impl CodexProvider {
-    pub fn new(tokens: CodexTokens) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
-            id: ProviderId::new(ProviderId::CODEX),
+    pub fn new(tokens: CodexTokens) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::CODEX);
+        let http_client = crate::providers::http_util::build_default_http_client(&id)?;
+        Ok(Self {
+            id,
             http_client,
             tokens: Arc::new(Mutex::new(tokens)),
-        }
+        })
     }
 
-    /// Construct from stored tokens; returns `None` if no tokens are saved.
+    /// Construct from stored tokens; returns `None` if no tokens are saved or
+    /// if the HTTP client could not be built.
     pub fn from_stored() -> Option<Self> {
         let tokens = get_codex_tokens()?;
         if tokens.access_token.is_empty() {
             return None;
         }
-        Some(Self::new(tokens))
+        Self::new(tokens).ok()
     }
 
     // -----------------------------------------------------------------------

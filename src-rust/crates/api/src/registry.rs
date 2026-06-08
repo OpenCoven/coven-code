@@ -63,21 +63,41 @@ fn provider_from_key(provider_id: &str, key: String) -> Option<Arc<dyn LlmProvid
         return Some(Arc::new(provider.with_api_key(key)));
     }
 
+    // Helper: turn a fallible provider constructor into the Arc<dyn LlmProvider>
+    // shape this function returns. Constructor errors (e.g. HTTP client build
+    // failures) are logged and treated as "provider unavailable" rather than
+    // surfaced as a process panic.
+    fn lift<P: LlmProvider + 'static>(
+        provider_id: &str,
+        result: Result<P, crate::provider_error::ProviderError>,
+    ) -> Option<Arc<dyn LlmProvider>> {
+        match result {
+            Ok(p) => Some(Arc::new(p) as Arc<dyn LlmProvider>),
+            Err(e) => {
+                tracing::warn!(provider = provider_id, error = %e, "could not build provider");
+                None
+            }
+        }
+    }
+
     match provider_id {
-        "anthropic" => Some(Arc::new(AnthropicProvider::from_config(ClientConfig {
-            api_key: key,
-            ..Default::default()
-        }))),
-        "minimax" => Some(Arc::new(MinimaxProvider::new(key))),
-        "openai" => Some(Arc::new(OpenAiProvider::new(key))),
+        "anthropic" => lift(
+            "anthropic",
+            AnthropicProvider::from_config(ClientConfig {
+                api_key: key,
+                ..Default::default()
+            }),
+        ),
+        "minimax" => lift("minimax", MinimaxProvider::new(key)),
+        "openai" => lift("openai", OpenAiProvider::new(key)),
         "google" => Some(Arc::new(GoogleProvider::new(key))),
-        "github-copilot" => Some(Arc::new(CopilotProvider::new(key))),
+        "github-copilot" => lift("github-copilot", CopilotProvider::new(key)),
         "codex" | "openai-codex" => {
             // The Codex provider is OAuth-based; the `key` field is not used.
             // Load from the stored token file instead.
             CodexProvider::from_stored().map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
         }
-        "cohere" => Some(Arc::new(CohereProvider::new(key))),
+        "cohere" => lift("cohere", CohereProvider::new(key)),
         "custom-openai" => Some(Arc::new(p::custom_openai().with_api_key(key))),
         // "free" needs two keys (Zen + OpenRouter) — single-key path doesn't
         // apply.  The auth-store-aware path `runtime_provider_for` handles it.
@@ -112,7 +132,9 @@ pub fn build_free_provider() -> Option<Arc<dyn LlmProvider>> {
 
         let provider: Option<Arc<dyn LlmProvider>> = match upstream.id {
             "google" => Some(Arc::new(GoogleProvider::new(key))),
-            "cohere" => Some(Arc::new(CohereProvider::new(key))),
+            "cohere" => CohereProvider::new(key)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn LlmProvider>),
             id => crate::providers::openai_compat_providers::provider_for_id(id)
                 .map(|p| Arc::new(p.with_api_key(key)) as Arc<dyn LlmProvider>),
         };
@@ -151,14 +173,16 @@ pub fn provider_from_config(
         // auth store; the `api_key` resolved above is ignored.
         "free" => build_free_provider(),
         "openai" => {
-            let mut provider = OpenAiProvider::new(api_key.unwrap_or_default());
+            let mut provider = OpenAiProvider::new(api_key.unwrap_or_default()).ok()?;
             if let Some(base) = api_base {
                 provider = provider.with_base_url(base);
             }
             Some(Arc::new(provider))
         }
         "google" => api_key.map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn LlmProvider>),
-        "minimax" => api_key.map(|key| Arc::new(MinimaxProvider::new(key)) as Arc<dyn LlmProvider>),
+        "minimax" => api_key
+            .and_then(|key| MinimaxProvider::new(key).ok())
+            .map(|p| Arc::new(p) as Arc<dyn LlmProvider>),
         "azure" => {
             let resource_name = provider_cfg
                 .and_then(|provider| provider.options.get("resource_name"))
@@ -172,9 +196,9 @@ pub fn provider_from_config(
                 });
 
             match (resource_name, api_key) {
-                (Some(resource_name), Some(key)) => {
-                    Some(Arc::new(AzureProvider::new(resource_name, key)) as Arc<dyn LlmProvider>)
-                }
+                (Some(resource_name), Some(key)) => AzureProvider::new(resource_name, key)
+                    .ok()
+                    .map(|p| Arc::new(p) as Arc<dyn LlmProvider>),
                 _ => None,
             }
         }
@@ -239,10 +263,12 @@ pub fn provider_from_config(
             }
             Some(Arc::new(provider))
         }
-        "cohere" => api_key.map(|key| Arc::new(CohereProvider::new(key)) as Arc<dyn LlmProvider>),
-        "github-copilot" => {
-            api_key.map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn LlmProvider>)
-        }
+        "cohere" => api_key
+            .and_then(|key| CohereProvider::new(key).ok())
+            .map(|p| Arc::new(p) as Arc<dyn LlmProvider>),
+        "github-copilot" => api_key
+            .and_then(|key| CopilotProvider::new(key).ok())
+            .map(|p| Arc::new(p) as Arc<dyn LlmProvider>),
         "codex" | "openai-codex" => {
             CodexProvider::from_stored().map(|provider| Arc::new(provider) as Arc<dyn LlmProvider>)
         }
@@ -351,11 +377,21 @@ impl ProviderRegistry {
     /// default provider.  Takes the same [`ClientConfig`] that
     /// [`AnthropicClient`] takes.
     ///
+    /// If the Anthropic HTTP client cannot be built (rare TLS init failure),
+    /// the registry is returned empty and a warning is logged. Callers
+    /// downstream already handle "no providers registered".
+    ///
     /// [`AnthropicClient`]: crate::client::AnthropicClient
     pub fn with_anthropic(config: ClientConfig) -> Self {
         let mut registry = Self::new();
-        let provider = Arc::new(AnthropicProvider::from_config(config));
-        registry.register(provider);
+        match AnthropicProvider::from_config(config) {
+            Ok(p) => {
+                registry.register(Arc::new(p));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not register Anthropic provider in registry");
+            }
+        }
         registry
     }
 
@@ -406,8 +442,12 @@ impl ProviderRegistry {
     /// environment.  Returns `&mut self` for builder chaining.
     pub fn with_openai_if_key_set(&mut self) -> &mut Self {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            let provider = Arc::new(OpenAiProvider::new(key));
-            self.register(provider);
+            match OpenAiProvider::new(key) {
+                Ok(p) => {
+                    self.register(Arc::new(p));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not register OpenAI provider"),
+            }
         }
         self
     }
@@ -616,7 +656,12 @@ impl ProviderRegistry {
             .unwrap_or(false)
         {
             let key = std::env::var("MINIMAX_API_KEY").unwrap_or_default();
-            self.register(Arc::new(MinimaxProvider::new(key)));
+            match MinimaxProvider::new(key) {
+                Ok(p) => {
+                    self.register(Arc::new(p));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not register Minimax provider"),
+            }
         }
         if std::env::var("NVIDIA_API_KEY")
             .map(|v| !v.is_empty())

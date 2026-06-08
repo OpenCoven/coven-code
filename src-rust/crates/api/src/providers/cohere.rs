@@ -40,26 +40,24 @@ pub struct CohereProvider {
 
 impl CohereProvider {
     /// Create a new CohereProvider with the given API key.
-    pub fn new(api_key: String) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
-            id: ProviderId::new(ProviderId::COHERE),
+    pub fn new(api_key: String) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::COHERE);
+        let http_client = crate::providers::http_util::build_default_http_client(&id)?;
+        Ok(Self {
+            id,
             api_key,
             http_client,
-        }
+        })
     }
 
     /// Construct from the `COHERE_API_KEY` environment variable.
-    /// Returns `None` if the variable is absent or empty.
+    /// Returns `None` if the variable is absent, empty, or the HTTP client
+    /// could not be built.
     pub fn from_env() -> Option<Self> {
         std::env::var("COHERE_API_KEY")
             .ok()
             .filter(|k| !k.is_empty())
-            .map(Self::new)
+            .and_then(|k| Self::new(k).ok())
     }
 
     // -----------------------------------------------------------------------

@@ -113,13 +113,23 @@ impl OpenAiCompatProvider {
         name: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
+        let pid = ProviderId::new(id);
+        // Fall back to a default reqwest::Client if the custom timeout
+        // builder fails (extremely rare TLS init issue). The fallback path
+        // is documented at crate::providers::http_util::build_default_http_client.
+        let http_client = crate::providers::http_util::build_default_http_client(&pid)
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    provider = %pid,
+                    error = %err,
+                    "OpenAiCompatProvider: timeout-customized HTTP client build \
+                     failed; using reqwest::Client default. Long-running streams \
+                     may time out earlier than 600s."
+                );
+                reqwest::Client::new()
+            });
         Self {
-            id: ProviderId::new(id),
+            id: pid,
             name: name.into(),
             base_url: base_url.into(),
             api_key: None,

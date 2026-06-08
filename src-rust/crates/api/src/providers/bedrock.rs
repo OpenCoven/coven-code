@@ -54,10 +54,8 @@ impl BedrockProvider {
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".to_string());
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
+        let id = ProviderId::new(ProviderId::AMAZON_BEDROCK);
+        let http_client = crate::providers::http_util::build_default_http_client(&id).ok()?;
 
         // Bearer token takes priority over SigV4 credentials.
         if let Ok(token) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {

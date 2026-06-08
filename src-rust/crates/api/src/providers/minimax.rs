@@ -29,27 +29,35 @@ pub struct MinimaxProvider {
 }
 
 impl MinimaxProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::MINIMAX);
         let api_base = std::env::var("MINIMAX_BASE_URL")
             .unwrap_or_else(|_| "https://api.minimax.io/anthropic".to_string());
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            "X-Api-Key",
-            header::HeaderValue::from_str(&api_key)
-                .expect("unable to parse api key for http header"),
-        );
+        let header_value =
+            header::HeaderValue::from_str(&api_key).map_err(|e| ProviderError::AuthFailed {
+                provider: id.clone(),
+                message: format!(
+                    "API key contains characters that cannot be sent in an HTTP header: {e}"
+                ),
+            })?;
+        headers.insert("X-Api-Key", header_value);
         let http_client = Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(600))
             .build()
-            .expect("MinimaxProvider: failed to build HTTP client");
-
-        Self {
+            .map_err(|e| ProviderError::Other {
+                provider: id.clone(),
+                message: format!("failed to build HTTP client: {e}"),
+                status: None,
+                body: None,
+            })?;
+        Ok(Self {
             http_client,
             api_key,
             api_base,
-            id: ProviderId::new(ProviderId::MINIMAX),
-        }
+            id,
+        })
     }
 
     fn build_request(request: &ProviderRequest) -> CreateMessageRequest {

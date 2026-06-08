@@ -50,21 +50,20 @@ pub struct CopilotProvider {
 }
 
 impl CopilotProvider {
-    pub fn new(token: String) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
-            id: ProviderId::new(ProviderId::GITHUB_COPILOT),
+    pub fn new(token: String) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::GITHUB_COPILOT);
+        let http_client = crate::providers::http_util::build_default_http_client(&id)?;
+        Ok(Self {
+            id,
             token,
             http_client,
-        }
+        })
     }
 
     pub fn from_env() -> Option<Self> {
-        std::env::var("GITHUB_TOKEN").ok().map(Self::new)
+        std::env::var("GITHUB_TOKEN")
+            .ok()
+            .and_then(|t| Self::new(t).ok())
     }
 
     fn base_url() -> &'static str {

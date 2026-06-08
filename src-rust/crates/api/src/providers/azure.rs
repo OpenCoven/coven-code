@@ -41,19 +41,16 @@ pub struct AzureProvider {
 }
 
 impl AzureProvider {
-    pub fn new(resource_name: String, api_key: String) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
-            id: ProviderId::new(ProviderId::AZURE),
+    pub fn new(resource_name: String, api_key: String) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::AZURE);
+        let http_client = crate::providers::http_util::build_default_http_client(&id)?;
+        Ok(Self {
+            id,
             resource_name,
             api_key,
             api_version: "2024-08-01-preview".to_string(),
             http_client,
-        }
+        })
     }
 
     pub fn with_api_version(mut self, version: String) -> Self {
@@ -66,7 +63,9 @@ impl AzureProvider {
         let resource = std::env::var("AZURE_RESOURCE_NAME").ok()?;
         let version =
             std::env::var("AZURE_API_VERSION").unwrap_or_else(|_| "2024-08-01-preview".to_string());
-        Some(Self::new(resource, key).with_api_version(version))
+        Self::new(resource, key)
+            .ok()
+            .map(|p| p.with_api_version(version))
     }
 
     fn endpoint_url(&self, deployment: &str) -> String {

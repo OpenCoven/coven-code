@@ -49,19 +49,16 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(api_key: String) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("failed to build reqwest client");
-
-        Self {
-            id: ProviderId::new(ProviderId::OPENAI),
+    pub fn new(api_key: String) -> Result<Self, ProviderError> {
+        let id = ProviderId::new(ProviderId::OPENAI);
+        let http_client = crate::providers::http_util::build_default_http_client(&id)?;
+        Ok(Self {
+            id,
             name: "OpenAI".to_string(),
             base_url: "https://api.openai.com".to_string(),
             api_key,
             http_client,
-        }
+        })
     }
 
     /// Override the API base URL (e.g. for Azure, Ollama, or other compatible
