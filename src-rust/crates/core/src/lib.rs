@@ -790,19 +790,15 @@ pub mod config {
     /// Budget allocation strategy between manager and executor agents.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
+    #[derive(Default)]
     pub enum BudgetSplitPolicy {
         /// Shared pool — no split (default).
+        #[default]
         SharedPool,
         /// Manager gets manager_pct% of total budget.
         Percentage { manager_pct: u8 },
         /// Hard USD caps per role.
         FixedCaps { manager_usd: f64, executor_usd: f64 },
-    }
-
-    impl Default for BudgetSplitPolicy {
-        fn default() -> Self {
-            BudgetSplitPolicy::SharedPool
-        }
     }
 
     /// Configuration for manager-executor agent architecture.
@@ -1236,7 +1232,7 @@ pub mod config {
     }
 
     /// Configuration for a file formatter tool.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct FormatterConfig {
         /// Command to run, e.g. `["prettier", "--write"]`.
         pub command: Vec<String>,
@@ -1245,16 +1241,6 @@ pub mod config {
         /// Whether this formatter is disabled.
         #[serde(default)]
         pub disabled: bool,
-    }
-
-    impl Default for FormatterConfig {
-        fn default() -> Self {
-            Self {
-                command: Vec::new(),
-                extensions: Vec::new(),
-                disabled: false,
-            }
-        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1374,7 +1360,7 @@ pub mod config {
         pub fn effective_output_style(&self) -> crate::system_prompt::OutputStyle {
             self.output_style
                 .as_deref()
-                .map(crate::system_prompt::OutputStyle::from_str)
+                .map(crate::system_prompt::OutputStyle::from_label)
                 .unwrap_or_default()
         }
 
@@ -2831,9 +2817,7 @@ pub mod permissions {
             match self.mode {
                 PermissionMode::BypassPermissions => PermissionDecision::Allow,
                 PermissionMode::AcceptEdits => {
-                    if request.tool_name == "Edit" {
-                        PermissionDecision::Allow
-                    } else if request.is_read_only {
+                    if request.tool_name == "Edit" || request.is_read_only {
                         PermissionDecision::Allow
                     } else {
                         PermissionDecision::Deny
@@ -3373,25 +3357,20 @@ pub mod history {
         }
 
         let mut sessions = vec![];
-        match tokio::fs::read_dir(&dir).await {
-            Ok(mut entries) => {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                            if let Ok(session) =
-                                serde_json::from_str::<ConversationSession>(&content)
-                            {
-                                sessions.push(session);
-                            }
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(session) = serde_json::from_str::<ConversationSession>(&content) {
+                            sessions.push(session);
                         }
                     }
                 }
             }
-            Err(_) => {}
         }
 
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         sessions
     }
 
@@ -3582,9 +3561,10 @@ pub mod cost {
         /// Pick pricing based on model name substring matching.
         pub fn for_model(model: &str) -> Self {
             // Check for free models first (those with "-free" suffix, "free/" prefix, or upstream-prefixed free model)
-            if model.ends_with("-free") || model.starts_with("free/") {
-                Self::FREE
-            } else if is_free_upstream_model(model) {
+            if model.ends_with("-free")
+                || model.starts_with("free/")
+                || is_free_upstream_model(model)
+            {
                 Self::FREE
             } else if model.contains("opus") {
                 Self::OPUS
@@ -4003,7 +3983,7 @@ pub mod oauth {
 
             let profile = AccountProfile {
                 id: id.clone(),
-                label: label.map(|l| slugify_profile_id(l)),
+                label: label.map(slugify_profile_id),
                 email: self.email.clone(),
                 account_id: self.account_uuid.clone(),
                 organization_uuid: self.organization_uuid.clone(),
@@ -4403,8 +4383,10 @@ mod tests {
 
     #[test]
     fn test_config_effective_model_override() {
-        let mut cfg = crate::config::Config::default();
-        cfg.model = Some("claude-haiku-4-5-20251001".to_string());
+        let cfg = crate::config::Config {
+            model: Some("claude-haiku-4-5-20251001".to_string()),
+            ..crate::config::Config::default()
+        };
         assert_eq!(cfg.effective_model(), "claude-haiku-4-5-20251001");
     }
 
@@ -4419,8 +4401,10 @@ mod tests {
 
     #[test]
     fn test_config_effective_max_tokens_override() {
-        let mut cfg = crate::config::Config::default();
-        cfg.max_tokens = Some(8192);
+        let cfg = crate::config::Config {
+            max_tokens: Some(8192),
+            ..crate::config::Config::default()
+        };
         assert_eq!(cfg.effective_max_tokens(), 8192);
     }
 
@@ -4431,8 +4415,10 @@ mod tests {
         let orig = std::env::var("ANTHROPIC_API_KEY").ok();
         std::env::remove_var("ANTHROPIC_API_KEY");
 
-        let mut cfg = crate::config::Config::default();
-        cfg.api_key = Some("sk-ant-config-key".to_string());
+        let cfg = crate::config::Config {
+            api_key: Some("sk-ant-config-key".to_string()),
+            ..crate::config::Config::default()
+        };
         assert_eq!(cfg.resolve_api_key(), Some("sk-ant-config-key".to_string()));
 
         if let Some(k) = orig {

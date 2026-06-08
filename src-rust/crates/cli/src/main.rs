@@ -1028,7 +1028,7 @@ async fn main() -> anyhow::Result<()> {
     // but we guard with a std::sync::OnceLock internally).
     {
         static SWARM_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        SWARM_INIT.get_or_init(|| claurst_query::init_team_swarm_runner());
+        SWARM_INIT.get_or_init(claurst_query::init_team_swarm_runner);
     }
 
     // Build the full tool list: built-ins from cc-tools plus AgentTool from cc-query
@@ -1266,14 +1266,14 @@ fn models_dev_cache_path() -> PathBuf {
 /// Implementation of the `coven-code models` subcommand.
 ///
 /// Flags:
-///   * `--refresh`   — force-fetch from models.dev (ignoring the 5-minute
-///                     freshness window), then list.
-///   * `--verbose`   — also print release date, status, modalities,
-///                     cache pricing, and capability flags.
-///   * `--json`      — emit the registry as a JSON object keyed by
-///                     `provider/model` (suitable for piping into `jq`).
-///   * `<provider>`  — first non-flag arg filters by provider id
-///                     (e.g. `coven-code models openai`).
+/// * `--refresh`   — force-fetch from models.dev (ignoring the 5-minute
+///   freshness window), then list.
+/// * `--verbose`   — also print release date, status, modalities,
+///   cache pricing, and capability flags.
+/// * `--json`      — emit the registry as a JSON object keyed by
+///   `provider/model` (suitable for piping into `jq`).
+/// * `<provider>`  — first non-flag arg filters by provider id
+///   (e.g. `coven-code models openai`).
 async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
     let mut refresh = false;
     let mut verbose = false;
@@ -1324,14 +1324,14 @@ async fn run_models_command(args: &[String]) -> anyhow::Result<()> {
     // Stable order: provider id, then by descending release_date so newest
     // models appear first.
     entries.sort_by(|a, b| {
-        (&*a.info.provider_id)
+        (*a.info.provider_id)
             .cmp(&*b.info.provider_id)
             .then_with(|| {
                 let rd_a = a.release_date.as_deref().unwrap_or("");
                 let rd_b = b.release_date.as_deref().unwrap_or("");
                 rd_b.cmp(rd_a)
             })
-            .then_with(|| (&*a.info.id).cmp(&*b.info.id))
+            .then_with(|| (*a.info.id).cmp(&*b.info.id))
     });
 
     if as_json {
@@ -2037,6 +2037,13 @@ fn permission_request_from_core(
     }
 }
 
+// Allowed: this is the main interactive-mode bootstrap. Its inputs are all
+// distinct, separately-constructed services (config, settings, HTTP client,
+// tool registry, tool execution context, query loop knobs, etc.) and
+// bundling them behind a struct would force every test and CLI mode to
+// construct that struct just to call this function. The count is a feature
+// of how the TUI is wired together, not a code-smell.
+#[allow(clippy::too_many_arguments)]
 async fn run_interactive(
     config: Config,
     settings: claurst_core::config::Settings,
@@ -3270,14 +3277,8 @@ async fn run_interactive(
                                             }
                                             Some('p') => {
                                                 let mut settings =
-                                                    match claurst_core::config::Settings::load_sync(
-                                                    ) {
-                                                        Ok(s) => s,
-                                                        Err(_) => {
-                                                            claurst_core::config::Settings::default(
-                                                            )
-                                                        }
-                                                    };
+                                                    claurst_core::config::Settings::load_sync(
+                                                    ).unwrap_or_default();
                                                 if let Some(path) = selected_path.as_deref() {
                                                     let pattern = format!("{}*", path);
                                                     let _ = manager.add_persistent_allow_path(
@@ -3342,13 +3343,13 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                     }
                 }
-                Event::Paste(data) => {
+                Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
                     if !app.is_streaming
                         && app.permission_request.is_none()
                         && !app.history_search_overlay.visible
                         && app.history_search.is_none()
-                    {
+                    => {
                         if app.key_input_dialog.visible {
                             // Paste into API key input dialog
                             for ch in data.chars() {
@@ -3359,7 +3360,6 @@ async fn run_interactive(
                             app.prompt_input.paste(&data);
                         }
                     }
-                }
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
@@ -3657,14 +3657,13 @@ async fn run_interactive(
                                         Ok(msgs) if !msgs.is_empty() => {
                                             for msg in &msgs {
                                                 since_id = Some(msg.id.clone());
-                                                if msg.role == "user" {
-                                                    if poll_tx
+                                                if msg.role == "user"
+                                                    && poll_tx
                                                         .send(msg.content.clone())
                                                         .await
                                                         .is_err()
-                                                    {
-                                                        return;
-                                                    }
+                                                {
+                                                    return;
                                                 }
                                             }
                                         }
@@ -3854,13 +3853,8 @@ async fn run_interactive(
 
         // Drain CLAUDE_STATUS_COMMAND results (most recent wins)
         if status_cmd_str.is_some() {
-            loop {
-                match status_cmd_rx.try_recv() {
-                    Ok(text) => {
-                        app.status_line_override = if text.is_empty() { None } else { Some(text) };
-                    }
-                    Err(_) => break,
-                }
+            while let Ok(text) = status_cmd_rx.try_recv() {
+                app.status_line_override = if text.is_empty() { None } else { Some(text) };
             }
         }
 

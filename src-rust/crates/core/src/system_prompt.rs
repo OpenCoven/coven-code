@@ -110,7 +110,13 @@ impl OutputStyle {
     }
 
     /// Parse from a string (case-insensitive).
-    pub fn from_str(s: &str) -> Self {
+    ///
+    /// Named `from_label` (not `from_str`) so clippy doesn't confuse this
+    /// with the `std::str::FromStr` trait method: this parser is infallible
+    /// and falls back to `Self::Default` for unknown inputs, which would be
+    /// a contract violation if it implemented `FromStr` (where the
+    /// associated `Err` type is supposed to surface parse failures).
+    pub fn from_label(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "explanatory" => Self::Explanatory,
             "learning" => Self::Learning,
@@ -250,20 +256,17 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
         SystemPromptPrefix::detect(opts.is_non_interactive, opts.has_append_system_prompt)
     });
 
-    let mut parts: Vec<String> = Vec::new();
-
     // ------------------------------------------------------------------ //
     // CACHEABLE sections (before the dynamic boundary)                   //
     // ------------------------------------------------------------------ //
-
-    // 1. Attribution header
-    parts.push(prefix.attribution_text().to_string());
-
-    // 2. Core capabilities
-    parts.push(CORE_CAPABILITIES.to_string());
-
-    // 3. Tool use guidelines
-    parts.push(TOOL_USE_GUIDELINES.to_string());
+    let mut parts: Vec<String> = vec![
+        // 1. Attribution header
+        prefix.attribution_text().to_string(),
+        // 2. Core capabilities
+        CORE_CAPABILITIES.to_string(),
+        // 3. Tool use guidelines
+        TOOL_USE_GUIDELINES.to_string(),
+    ];
 
     // 4. Executing actions with care
     parts.push(ACTIONS_SECTION.to_string());
@@ -634,9 +637,9 @@ mod tests {
 
     #[test]
     fn test_output_style_from_str() {
-        assert_eq!(OutputStyle::from_str("concise"), OutputStyle::Concise);
-        assert_eq!(OutputStyle::from_str("FORMAL"), OutputStyle::Formal);
-        assert_eq!(OutputStyle::from_str("unknown"), OutputStyle::Default);
+        assert_eq!(OutputStyle::from_label("concise"), OutputStyle::Concise);
+        assert_eq!(OutputStyle::from_label("FORMAL"), OutputStyle::Formal);
+        assert_eq!(OutputStyle::from_label("unknown"), OutputStyle::Default);
     }
 
     #[test]

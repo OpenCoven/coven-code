@@ -745,6 +745,15 @@ fn selected_model_for_query(config: &QueryConfig) -> String {
 /// during tool execution (e.g. by the UI or a command queue).  Each string is
 /// appended as a plain user message between turns.  Callers that do not need
 /// command queuing may pass `None` or an empty `Vec`.
+//
+// Allowed: the inputs here are intentionally separate domain values (HTTP
+// client, mutable message log, immutable tool set, tool execution context,
+// query knobs, cost accumulator, event channel, cancellation token, pending
+// messages). Bundling them behind a single config struct would mostly move
+// the parameter count from the signature into the struct without improving
+// clarity — and several of these arguments need separate lifetimes that a
+// struct can't easily express.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_query_loop(
     client: &claurst_api::AnthropicClient,
     messages: &mut Vec<Message>,
@@ -1120,10 +1129,12 @@ pub async fn run_query_loop(
 
                 // Rebuild providers using the unified base resolver so overrides
                 // from settings/env/defaults are applied consistently.
-                if let Some(_) = claurst_api::registry::resolve_provider_api_base(
+                if claurst_api::registry::resolve_provider_api_base(
                     &tool_ctx.config,
                     &provider_id_str,
-                ) {
+                )
+                .is_some()
+                {
                     if let Some(overridden) = claurst_api::registry::provider_from_config(
                         &tool_ctx.config,
                         &provider_id_str,
@@ -1137,7 +1148,7 @@ pub async fn run_query_loop(
                     // Notify TUI that we're calling the provider using a random spinner verb
                     if let Some(ref tx) = event_tx {
                         use claurst_core::sample_spinner_verb;
-                        let seed = (provider_id_str.len() ^ model_id_str.len()) as usize;
+                        let seed = provider_id_str.len() ^ model_id_str.len();
                         let verb = sample_spinner_verb(seed);
                         let _ = tx.send(QueryEvent::Status(format!("✳ {}…", verb)));
                     }
@@ -1207,8 +1218,7 @@ pub async fn run_query_loop(
                         top_k: None,
                         stop_sequences: vec![],
                         thinking: if caps.thinking {
-                            effective_thinking_budget
-                                .map(|b| claurst_api::ThinkingConfig::enabled(b))
+                            effective_thinking_budget.map(claurst_api::ThinkingConfig::enabled)
                         } else {
                             None
                         },
@@ -1285,10 +1295,15 @@ pub async fn run_query_loop(
                                                 usage.cache_read_input_tokens = u.cache_read_input_tokens;
                                                 usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
                                             }
-                                            claurst_api::StreamEvent::ContentBlockStart { index, content_block } => {
-                                                if let ContentBlock::ToolUse { id, name, .. } = content_block {
-                                                    tool_call_blocks.insert(*index, (id.clone(), name.clone(), String::new()));
-                                                }
+                                            claurst_api::StreamEvent::ContentBlockStart {
+                                                index,
+                                                content_block:
+                                                    ContentBlock::ToolUse { id, name, .. },
+                                            } => {
+                                                tool_call_blocks.insert(
+                                                    *index,
+                                                    (id.clone(), name.clone(), String::new()),
+                                                );
                                             }
                                             claurst_api::StreamEvent::TextDelta { text, .. } => {
                                                 text_chunks.push(text.clone());
@@ -1412,7 +1427,7 @@ pub async fn run_query_loop(
                         let tool_results = execute_tool_blocks_with_hooks(
                             tool_use_blocks,
                             tools,
-                            &tool_ctx,
+                            tool_ctx,
                             event_tx.as_ref(),
                         )
                         .await;
@@ -2137,7 +2152,7 @@ async fn execute_tool_blocks_with_hooks(
 
     // Phase 3: run post-hooks, emit completion events, and return result blocks.
     let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(prepared.len());
-    for (p, result) in prepared.iter().zip(exec_results.into_iter()) {
+    for (p, result) in prepared.iter().zip(exec_results) {
         let post_ctx = claurst_core::hooks::HookContext {
             event: "PostToolUse".to_string(),
             tool_name: Some(p.name.clone()),
@@ -2207,7 +2222,7 @@ fn build_todo_nudge(session_id: &str) -> String {
     let todos = claurst_tools::todo_write::load_todos(session_id);
     let incomplete_count = todos
         .iter()
-        .filter(|t| t["status"].as_str().map_or(true, |s| s != "completed"))
+        .filter(|t| t["status"].as_str() != Some("completed"))
         .count();
     if incomplete_count == 0 {
         String::new()
@@ -2348,6 +2363,51 @@ fn map_to_anthropic_event(
             message: message.clone(),
         }),
     }
+}
+
+/// Stream handler that forwards events to an unbounded channel.
+struct ChannelStreamHandler {
+    tx: mpsc::UnboundedSender<QueryEvent>,
+}
+
+impl StreamHandler for ChannelStreamHandler {
+    fn on_event(&self, event: &AnthropicStreamEvent) {
+        let _ = self.tx.send(QueryEvent::Stream(event.clone()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-shot query (non-looping, for simple one-off calls)
+// ---------------------------------------------------------------------------
+
+/// Run a single (non-agentic) query – no tool loop, just one API call.
+pub async fn run_single_query(
+    client: &claurst_api::AnthropicClient,
+    messages: Vec<Message>,
+    config: &QueryConfig,
+) -> Result<Message, ClaudeError> {
+    let api_messages: Vec<ApiMessage> = messages.iter().map(ApiMessage::from).collect();
+    let system = build_system_prompt(config);
+
+    let request = CreateMessageRequest::builder(&config.model, config.max_tokens)
+        .messages(api_messages)
+        .system(system)
+        .build();
+
+    let handler: Arc<dyn StreamHandler> = Arc::new(claurst_api::streaming::NullStreamHandler);
+
+    let mut rx = client.create_message_stream(request, handler).await?;
+    let mut acc = StreamAccumulator::new();
+
+    while let Some(evt) = rx.recv().await {
+        acc.on_event(&evt);
+        if matches!(evt, AnthropicStreamEvent::MessageStop) {
+            break;
+        }
+    }
+
+    let (msg, _usage, _stop) = acc.finish();
+    Ok(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -2617,49 +2677,4 @@ mod tests {
         assert!(should_emit_turn_complete("content_filtered", 0));
         assert!(should_emit_turn_complete("unknown_stop", 0));
     }
-}
-
-/// Stream handler that forwards events to an unbounded channel.
-struct ChannelStreamHandler {
-    tx: mpsc::UnboundedSender<QueryEvent>,
-}
-
-impl StreamHandler for ChannelStreamHandler {
-    fn on_event(&self, event: &AnthropicStreamEvent) {
-        let _ = self.tx.send(QueryEvent::Stream(event.clone()));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Single-shot query (non-looping, for simple one-off calls)
-// ---------------------------------------------------------------------------
-
-/// Run a single (non-agentic) query – no tool loop, just one API call.
-pub async fn run_single_query(
-    client: &claurst_api::AnthropicClient,
-    messages: Vec<Message>,
-    config: &QueryConfig,
-) -> Result<Message, ClaudeError> {
-    let api_messages: Vec<ApiMessage> = messages.iter().map(ApiMessage::from).collect();
-    let system = build_system_prompt(config);
-
-    let request = CreateMessageRequest::builder(&config.model, config.max_tokens)
-        .messages(api_messages)
-        .system(system)
-        .build();
-
-    let handler: Arc<dyn StreamHandler> = Arc::new(claurst_api::streaming::NullStreamHandler);
-
-    let mut rx = client.create_message_stream(request, handler).await?;
-    let mut acc = StreamAccumulator::new();
-
-    while let Some(evt) = rx.recv().await {
-        acc.on_event(&evt);
-        if matches!(evt, AnthropicStreamEvent::MessageStop) {
-            break;
-        }
-    }
-
-    let (msg, _usage, _stop) = acc.finish();
-    Ok(msg)
 }

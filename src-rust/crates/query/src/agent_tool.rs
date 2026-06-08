@@ -274,7 +274,7 @@ impl Tool for AgentTool {
                     if let Ok(entries) = std::fs::read_dir(&agent_dir) {
                         for entry in entries.flatten() {
                             let p = entry.path();
-                            if p.extension().map_or(false, |e| e == "md") {
+                            if p.extension().is_some_and(|e| e == "md") {
                                 if let Ok(content) = std::fs::read_to_string(&p) {
                                     let name =
                                         p.file_stem().and_then(|s| s.to_str()).unwrap_or("agent");
