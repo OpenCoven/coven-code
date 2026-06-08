@@ -28,6 +28,7 @@ async function init() {
 
   contentEl.innerHTML = html;
   processCodeBlocks(contentEl);
+  addHeadingAnchors(contentEl);
 
   // Register Alpine.data() factories for each demo, then start Alpine.
   // Alpine scans the DOM once on start; doing this after innerHTML is set
@@ -73,6 +74,40 @@ function setupScrollSpy() {
 
   for (const el of sectionEls) {
     observer.observe(el);
+  }
+}
+
+/**
+ * Walk every H2 / H3 inside a .doc-section, generate stable slug ids
+ * ("<section-id>-<slug>"), and attach an anchor-link button that reveals
+ * on hover. Lets readers deep-link into sub-sections.
+ */
+function addHeadingAnchors(container) {
+  const sections = container.querySelectorAll('.doc-section');
+  for (const sec of sections) {
+    const sectionId = sec.id;
+    const seen = new Set();
+    const headings = sec.querySelectorAll('h2, h3');
+    for (const h of headings) {
+      const text = h.textContent.trim();
+      let slug = text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      if (!slug) continue;
+      let id = `${sectionId}-${slug}`;
+      let n = 1;
+      while (seen.has(id)) id = `${sectionId}-${slug}-${++n}`;
+      seen.add(id);
+      h.id = id;
+
+      const link = document.createElement('a');
+      link.className = 'heading-anchor';
+      link.href = `#${id}`;
+      link.setAttribute('aria-label', `Link to ${text}`);
+      link.textContent = '#';
+      h.appendChild(link);
+    }
   }
 }
 

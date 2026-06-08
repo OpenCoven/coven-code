@@ -12,7 +12,7 @@ export function renderHero(starCount) {
         <div class="hero-copy">
           <div class="hero-kicker" style="animation: fade-up 0.7s cubic-bezier(0.16,1,0.3,1) both">Field manual / coven-code</div>
           <p class="hero-title" style="animation: fade-up 0.7s 0.1s cubic-bezier(0.16,1,0.3,1) both">Terminal Coding Familiar in Rust</p>
-          <p class="hero-subtitle" style="animation: fade-up 0.7s 0.2s cubic-bezier(0.16,1,0.3,1) both">Open-source agent for your terminal. 40+ tools, 15+ LLM providers, multi-account auth, plugin system, and native integration with the Coven daemon.</p>
+          <p class="hero-subtitle" style="animation: fade-up 0.7s 0.2s cubic-bezier(0.16,1,0.3,1) both">An open-source familiar for your terminal. 40+ tools, 15+ LLM providers, multi-account auth, a plugin system, and native integration with the Coven daemon.</p>
           <div class="hero-actions" style="animation: fade-up 0.7s 0.3s cubic-bezier(0.16,1,0.3,1) both">
             <a href="#getting-started" class="hero-btn-primary inline-flex items-center gap-2 px-7 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">Read the field manual</a>
             <a href="https://github.com/OpenCoven/coven-code" target="_blank" rel="noopener" class="hero-secondary-action inline-flex items-center gap-2 px-5 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">

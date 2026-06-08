@@ -388,6 +388,8 @@ a {
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text-primary);
   letter-spacing: -0.02em;
+  scroll-margin-top: 24px;
+  position: relative;
 }
 
 .content h3 {
@@ -397,6 +399,29 @@ a {
   margin: 36px 0 12px;
   color: var(--color-text-primary);
   letter-spacing: -0.01em;
+  scroll-margin-top: 24px;
+  position: relative;
+}
+
+.heading-anchor {
+  display: inline-block;
+  margin-left: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  font-weight: 400;
+  color: var(--color-text-dimmer);
+  opacity: 0;
+  text-decoration: none;
+  transition: color 0.15s ease-out, opacity 0.15s ease-out;
+  vertical-align: middle;
+}
+.content h2:hover .heading-anchor,
+.content h3:hover .heading-anchor,
+.heading-anchor:focus {
+  opacity: 1;
+}
+.heading-anchor:hover {
+  color: var(--color-accent) !important;
 }
 
 .content h4 {
