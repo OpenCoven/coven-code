@@ -242,3 +242,140 @@ pub fn get_success_color(theme_name: &str) -> Color {
 pub fn get_warning_color(theme_name: &str) -> Color {
     ColorPalette::for_theme(theme_name).warning
 }
+
+// ---------------------------------------------------------------------------
+// Diff viewer palette
+// ---------------------------------------------------------------------------
+
+/// Theme-aware colors for the unified diff viewer.
+///
+/// Built from a [`ColorPalette`] so each theme gets sensible diff colors.
+/// In particular the deuteranopia theme replaces the red/green removed/added
+/// distinction with orange/blue — matching how the rest of the palette
+/// handles error/success indicators — so users with red-green colour
+/// blindness can still read diffs.
+pub struct DiffPalette {
+    /// Dim background tint for removed (`-`) lines.
+    pub bg_removed: Color,
+    /// Dim background tint for added (`+`) lines.
+    pub bg_added: Color,
+    /// Bright background highlight for word-level deletions inside a row.
+    pub bg_word_del: Color,
+    /// Bright background highlight for word-level insertions inside a row.
+    pub bg_word_ins: Color,
+    /// Soft foreground for removed text and the leading `-` marker.
+    pub fg_removed: Color,
+    /// Soft foreground for added text and the leading `+` marker.
+    pub fg_added: Color,
+    /// Dim line-number gutter colour.
+    pub fg_gutter: Color,
+    /// Accent colour for hunk header lines (`@@ ... @@`).
+    pub fg_header: Color,
+    /// Subtle background band behind hunk headers.
+    pub bg_header: Color,
+}
+
+impl DiffPalette {
+    /// Get the diff palette for a given theme name.
+    pub fn for_theme(theme_name: &str) -> Self {
+        match theme_name {
+            "deuteranopia" => Self::deuteranopia(),
+            "light" => Self::light(),
+            _ => Self::default_dark(),
+        }
+    }
+
+    /// Default dark-theme diff palette — classic dim-red / dim-green tint.
+    /// Used by the OpenCoven default + coven-dark / dark / solarized / nord /
+    /// dracula / monokai themes.
+    fn default_dark() -> Self {
+        Self {
+            bg_removed: Color::Rgb(52, 18, 24),
+            bg_added: Color::Rgb(14, 44, 22),
+            bg_word_del: Color::Rgb(150, 38, 52),
+            bg_word_ins: Color::Rgb(34, 120, 52),
+            fg_removed: Color::Rgb(255, 168, 178),
+            fg_added: Color::Rgb(168, 240, 184),
+            fg_gutter: Color::Rgb(108, 108, 122),
+            fg_header: Color::Rgb(167, 139, 250),
+            bg_header: Color::Rgb(18, 18, 28),
+        }
+    }
+
+    /// Light-theme variant — lighter tints with darker foreground.
+    fn light() -> Self {
+        Self {
+            bg_removed: Color::Rgb(255, 224, 224),
+            bg_added: Color::Rgb(220, 255, 220),
+            bg_word_del: Color::Rgb(255, 170, 170),
+            bg_word_ins: Color::Rgb(170, 240, 170),
+            fg_removed: Color::Rgb(180, 30, 30),
+            fg_added: Color::Rgb(30, 110, 30),
+            fg_gutter: Color::Rgb(140, 140, 140),
+            fg_header: Color::Rgb(90, 60, 200),
+            bg_header: Color::Rgb(232, 232, 245),
+        }
+    }
+
+    /// Deuteranopia variant — orange/blue instead of red/green so red-green
+    /// colour-blind users can still distinguish removed and added rows.
+    fn deuteranopia() -> Self {
+        Self {
+            // Dim row tints
+            bg_removed: Color::Rgb(72, 36, 0), // dim orange
+            bg_added: Color::Rgb(0, 36, 68),   // dim blue
+            // Bright word highlights
+            bg_word_del: Color::Rgb(200, 110, 0), // saturated orange
+            bg_word_ins: Color::Rgb(0, 120, 200), // saturated blue
+            // Foreground markers
+            fg_removed: Color::Rgb(255, 196, 128), // soft orange text
+            fg_added: Color::Rgb(168, 218, 255),   // soft blue text
+            // Neutral gutter + violet header (shared)
+            fg_gutter: Color::Rgb(140, 140, 140),
+            fg_header: Color::Rgb(180, 140, 255),
+            bg_header: Color::Rgb(20, 18, 28),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deuteranopia_diff_palette_avoids_red_and_green() {
+        // The whole reason DiffPalette::deuteranopia exists is to drop the
+        // red/green encoding. The removed row background must not be a
+        // "more red than green" colour and the added row background must
+        // not be a "more green than red" colour — otherwise the user with
+        // red-green colour blindness cannot tell removed from added.
+        let p = DiffPalette::deuteranopia();
+        fn rgb(c: Color) -> (u8, u8, u8) {
+            match c {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => panic!("expected Rgb"),
+            }
+        }
+        let (rr, rg, _) = rgb(p.bg_removed);
+        let (ar, ag, _) = rgb(p.bg_added);
+        assert!(
+            rr > rg,
+            "removed bg in deuteranopia should lean orange (R>G), got R={rr} G={rg}"
+        );
+        assert!(
+            ag.saturating_sub(ar) > 10 || rgb(p.bg_added).2 > ar.max(ag),
+            "added bg in deuteranopia should lean blue, got {:?}",
+            p.bg_added
+        );
+    }
+
+    #[test]
+    fn for_theme_falls_back_to_default_dark_for_unknown() {
+        let unknown = DiffPalette::for_theme("totally-not-a-theme");
+        let default = DiffPalette::default_dark();
+        assert_eq!(
+            format!("{:?}", unknown.bg_removed),
+            format!("{:?}", default.bg_removed)
+        );
+    }
+}

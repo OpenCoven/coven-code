@@ -23,26 +23,22 @@ use crate::overlays::{
     begin_modal_buf, modal_header_line_area, render_modal_title_buf, COVEN_CODE_ACCENT,
     COVEN_CODE_MUTED, COVEN_CODE_PANEL_BG, COVEN_CODE_TEXT,
 };
+use crate::theme_colors::DiffPalette;
 
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 // ---------------------------------------------------------------------------
-// Diff palette — tuned to match Claude Code's terminal diff:
-//   • dim red/green tint across the entire row for removed/added lines
-//   • brighter highlight bg on inline word-level changes inside that row
-//   • soft red/green foreground for markers so they pop on the tint
-//   • subtle slate bg for hunk headers
+// Diff palette — pulled from [`crate::theme_colors::DiffPalette`] so each
+// theme can override the row colours.  The OpenCoven defaults match Claude
+// Code's terminal diff (dim red/green tints + bright word highlights). The
+// deuteranopia theme swaps red/green for orange/blue so red-green colour-
+// blind users can still distinguish removed from added rows.
 // ---------------------------------------------------------------------------
-const DIFF_BG_REMOVED: Color = Color::Rgb(52, 18, 24); // dim red row tint
-const DIFF_BG_ADDED: Color = Color::Rgb(14, 44, 22); // dim green row tint
-const DIFF_BG_WORD_DEL: Color = Color::Rgb(150, 38, 52); // bright red — changed word
-const DIFF_BG_WORD_INS: Color = Color::Rgb(34, 120, 52); // bright green — changed word
-const DIFF_FG_REMOVED: Color = Color::Rgb(255, 168, 178); // soft red text/marker
-const DIFF_FG_ADDED: Color = Color::Rgb(168, 240, 184); // soft green text/marker
-const DIFF_FG_GUTTER: Color = Color::Rgb(108, 108, 122); // dim line-number gutter
-const DIFF_FG_HEADER: Color = Color::Rgb(167, 139, 250); // hunk header (@@ lines)
-const DIFF_BG_HEADER: Color = Color::Rgb(18, 18, 28); // subtle slate band
+
+fn diff_palette_for(state: &DiffViewerState) -> DiffPalette {
+    DiffPalette::for_theme(&state.theme_name)
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -140,6 +136,10 @@ pub struct DiffViewerState {
     pub visible: bool,
     /// Per-file collapsed state (indexed by file position in `files`).
     pub collapsed: Vec<bool>,
+    /// Theme name used to derive the diff colour palette (so deuteranopia
+    /// users see orange/blue instead of red/green). Defaults to the
+    /// OpenCoven default and can be updated by callers via [`set_theme`].
+    pub theme_name: String,
 }
 
 impl DiffViewerState {
@@ -154,7 +154,15 @@ impl DiffViewerState {
             render_cache: HashMap::new(),
             visible: false,
             collapsed: Vec::new(),
+            theme_name: "coven".to_string(),
         }
+    }
+
+    /// Set the theme name used by the diff palette. Call this whenever the
+    /// active theme changes so deuteranopia users get the orange/blue diff
+    /// palette instead of the default red/green.
+    pub fn set_theme(&mut self, name: impl Into<String>) {
+        self.theme_name = name.into();
     }
 
     /// Toggle collapsed state for the currently selected file.
@@ -825,7 +833,8 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
     } else {
         inner.width
     };
-    let lines = build_diff_lines(file, text_width);
+    let palette = diff_palette_for(state);
+    let lines = build_diff_lines(file, text_width, &palette);
     let total_lines = lines.len();
     let scroll =
         (state.detail_scroll as usize).min(total_lines.saturating_sub(inner.height as usize));
@@ -920,7 +929,11 @@ fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_chars: usize) -> Vec<S
 
 /// Compute word-level inline diff spans for an adjacent (removed, added) line pair.
 /// Returns `(old_spans, new_spans)` where changed words have a highlighted background.
-fn build_inline_diff_spans(old: &str, new: &str) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+fn build_inline_diff_spans(
+    old: &str,
+    new: &str,
+    palette: &DiffPalette,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     use similar::{ChangeTag, TextDiff};
 
     let diff = TextDiff::from_words(old, new);
@@ -942,7 +955,7 @@ fn build_inline_diff_spans(old: &str, new: &str) -> (Vec<Span<'static>>, Vec<Spa
                     s,
                     Style::default()
                         .fg(Color::White)
-                        .bg(DIFF_BG_WORD_DEL)
+                        .bg(palette.bg_word_del)
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -951,7 +964,7 @@ fn build_inline_diff_spans(old: &str, new: &str) -> (Vec<Span<'static>>, Vec<Spa
                     s,
                     Style::default()
                         .fg(Color::White)
-                        .bg(DIFF_BG_WORD_INS)
+                        .bg(palette.bg_word_ins)
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -1018,7 +1031,7 @@ fn highlight_code_line(line: &str, path: &str, base_style: Style) -> Vec<Span<'s
     }
 }
 
-fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
+fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Gutter = 10 chars ("dddd dddd "), prefix marker = 3 chars ("+  " etc.)
     let gutter_width: usize = 10;
@@ -1036,49 +1049,54 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
             if diff_line.kind == DiffLineKind::Removed {
                 if let Some(next_line) = hunk_lines.get(i + 1) {
                     if next_line.kind == DiffLineKind::Added {
-                        let (old_spans, new_spans) =
-                            build_inline_diff_spans(&diff_line.content, &next_line.content);
+                        let (old_spans, new_spans) = build_inline_diff_spans(
+                            &diff_line.content,
+                            &next_line.content,
+                            palette,
+                        );
 
                         let mut removed_row = vec![
                             Span::styled(
                                 format_gutter(diff_line.old_line_no, None),
-                                Style::default().fg(DIFF_FG_GUTTER).bg(DIFF_BG_REMOVED),
+                                Style::default()
+                                    .fg(palette.fg_gutter)
+                                    .bg(palette.bg_removed),
                             ),
                             Span::styled(
                                 "- ",
                                 Style::default()
-                                    .fg(DIFF_FG_REMOVED)
-                                    .bg(DIFF_BG_REMOVED)
+                                    .fg(palette.fg_removed)
+                                    .bg(palette.bg_removed)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(" ", Style::default().bg(DIFF_BG_REMOVED)),
+                            Span::styled(" ", Style::default().bg(palette.bg_removed)),
                         ];
                         let mut old_clipped = truncate_spans_to_width(old_spans, avail);
-                        recolor_equal_spans(&mut old_clipped, DIFF_FG_REMOVED);
-                        apply_row_bg(&mut old_clipped, DIFF_BG_REMOVED);
+                        recolor_equal_spans(&mut old_clipped, palette.fg_removed);
+                        apply_row_bg(&mut old_clipped, palette.bg_removed);
                         removed_row.extend(old_clipped);
-                        pad_to_width(&mut removed_row, total_width, DIFF_BG_REMOVED);
+                        pad_to_width(&mut removed_row, total_width, palette.bg_removed);
                         lines.push(Line::from(removed_row));
 
                         let mut added_row = vec![
                             Span::styled(
                                 format_gutter(None, next_line.new_line_no),
-                                Style::default().fg(DIFF_FG_GUTTER).bg(DIFF_BG_ADDED),
+                                Style::default().fg(palette.fg_gutter).bg(palette.bg_added),
                             ),
                             Span::styled(
                                 "+ ",
                                 Style::default()
-                                    .fg(DIFF_FG_ADDED)
-                                    .bg(DIFF_BG_ADDED)
+                                    .fg(palette.fg_added)
+                                    .bg(palette.bg_added)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(" ", Style::default().bg(DIFF_BG_ADDED)),
+                            Span::styled(" ", Style::default().bg(palette.bg_added)),
                         ];
                         let mut new_clipped = truncate_spans_to_width(new_spans, avail);
-                        recolor_equal_spans(&mut new_clipped, DIFF_FG_ADDED);
-                        apply_row_bg(&mut new_clipped, DIFF_BG_ADDED);
+                        recolor_equal_spans(&mut new_clipped, palette.fg_added);
+                        apply_row_bg(&mut new_clipped, palette.bg_added);
                         added_row.extend(new_clipped);
-                        pad_to_width(&mut added_row, total_width, DIFF_BG_ADDED);
+                        pad_to_width(&mut added_row, total_width, palette.bg_added);
                         lines.push(Line::from(added_row));
 
                         i += 2;
@@ -1093,11 +1111,11 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
                 let mut row = vec![Span::styled(
                     format!(" {} ", content),
                     Style::default()
-                        .fg(DIFF_FG_HEADER)
-                        .bg(DIFF_BG_HEADER)
+                        .fg(palette.fg_header)
+                        .bg(palette.bg_header)
                         .add_modifier(Modifier::BOLD),
                 )];
-                pad_to_width(&mut row, total_width, DIFF_BG_HEADER);
+                pad_to_width(&mut row, total_width, palette.bg_header);
                 lines.push(Line::from(row));
                 i += 1;
                 continue;
@@ -1106,22 +1124,25 @@ fn build_diff_lines(file: &FileDiffStats, width: u16) -> Vec<Line<'static>> {
             // Added / Removed / Context rows.
             let (marker_text, marker_fg, row_bg, fallback_fg): (&str, Color, Option<Color>, Color) =
                 match diff_line.kind {
-                    DiffLineKind::Added => {
-                        ("+ ", DIFF_FG_ADDED, Some(DIFF_BG_ADDED), DIFF_FG_ADDED)
-                    }
+                    DiffLineKind::Added => (
+                        "+ ",
+                        palette.fg_added,
+                        Some(palette.bg_added),
+                        palette.fg_added,
+                    ),
                     DiffLineKind::Removed => (
                         "- ",
-                        DIFF_FG_REMOVED,
-                        Some(DIFF_BG_REMOVED),
-                        DIFF_FG_REMOVED,
+                        palette.fg_removed,
+                        Some(palette.bg_removed),
+                        palette.fg_removed,
                     ),
-                    DiffLineKind::Context => ("  ", DIFF_FG_GUTTER, None, COVEN_CODE_TEXT),
+                    DiffLineKind::Context => ("  ", palette.fg_gutter, None, COVEN_CODE_TEXT),
                     DiffLineKind::Header => unreachable!(),
                 };
 
             let gutter_style = match row_bg {
-                Some(bg) => Style::default().fg(DIFF_FG_GUTTER).bg(bg),
-                None => Style::default().fg(DIFF_FG_GUTTER),
+                Some(bg) => Style::default().fg(palette.fg_gutter).bg(bg),
+                None => Style::default().fg(palette.fg_gutter),
             };
             let marker_style = match row_bg {
                 Some(bg) => Style::default()
@@ -1272,7 +1293,8 @@ mod tests {
 
     #[test]
     fn build_inline_diff_spans_equal_content() {
-        let (old, new) = build_inline_diff_spans("hello world", "hello world");
+        let palette = DiffPalette::for_theme("coven");
+        let (old, new) = build_inline_diff_spans("hello world", "hello world", &palette);
         // All spans should have no background (equal, not highlighted)
         for span in &old {
             assert!(
@@ -1301,7 +1323,9 @@ mod tests {
 
     #[test]
     fn build_inline_diff_spans_highlights_changed_word() {
-        let (old_spans, new_spans) = build_inline_diff_spans("hello world", "hello earth");
+        let palette = DiffPalette::for_theme("coven");
+        let (old_spans, new_spans) =
+            build_inline_diff_spans("hello world", "hello earth", &palette);
         // "world" should be highlighted (deleted), "earth" should be highlighted (inserted)
         let has_highlighted_old = old_spans
             .iter()
@@ -1343,7 +1367,8 @@ mod tests {
                 ],
             }],
         };
-        let lines = build_diff_lines(&file, 80);
+        let palette = DiffPalette::for_theme("coven");
+        let lines = build_diff_lines(&file, 80, &palette);
         // Should produce 2 lines (one removed, one added)
         assert_eq!(
             lines.len(),
