@@ -61,6 +61,14 @@ async function init() {
   }
 }
 
+const BASE_TITLE = 'Coven Code — Terminal Coding Familiar in Rust';
+const SECTION_TITLES = new Map(); // id -> title
+for (const sec of sections) {
+  for (const page of sec.pages) {
+    SECTION_TITLES.set(page.path.slice(1), page.title);
+  }
+}
+
 function setupScrollSpy() {
   const sectionEls = document.querySelectorAll('.doc-section');
   const observer = new IntersectionObserver(
@@ -69,6 +77,7 @@ function setupScrollSpy() {
         if (entry.isIntersecting) {
           updateActiveSection(entry.target.id);
           updatePageToc(entry.target.id);
+          updateDocTitle(entry.target.id);
           break;
         }
       }
@@ -79,6 +88,11 @@ function setupScrollSpy() {
   for (const el of sectionEls) {
     observer.observe(el);
   }
+}
+
+function updateDocTitle(sectionId) {
+  const t = SECTION_TITLES.get(sectionId);
+  document.title = t ? `${t} · Coven Code` : BASE_TITLE;
 }
 
 // --- in-page (right-rail) table of contents --------------------------------

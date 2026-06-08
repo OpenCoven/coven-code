@@ -340,6 +340,54 @@ a {
 }
 
 /* ============================================
+   Sidebar search trigger
+   ============================================ */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  margin: 0 0 14px;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.sidebar-search:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+.sidebar-search:hover .sidebar-search-kbd {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.sidebar-search svg {
+  flex-shrink: 0;
+  color: var(--color-text-dim);
+}
+.sidebar-search:hover svg { color: var(--color-accent); }
+.sidebar-search-text {
+  flex: 1;
+  text-align: left;
+}
+.sidebar-search-kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 4px;
+  color: var(--color-text-dimmer);
+  background: var(--color-bg);
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+}
+
+/* ============================================
    Nav
    ============================================ */
 .nav-link {

@@ -19,7 +19,24 @@ export function updateActiveSection(sectionId) {
 }
 
 function renderNav(container) {
-  let html = '';
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+  const modKey = isMac ? '⌘' : 'Ctrl';
+
+  let html = `
+    <button
+      type="button"
+      class="sidebar-search"
+      onclick="window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ${isMac ? 'metaKey' : 'ctrlKey'}: true }))"
+      aria-label="Open command palette"
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"></circle>
+        <path d="m21 21-4.3-4.3"></path>
+      </svg>
+      <span class="sidebar-search-text">Search docs</span>
+      <span class="sidebar-search-kbd">${modKey} K</span>
+    </button>
+  `;
   for (const section of sections) {
     html += `<div class="mb-1.5">`;
     html += `<div class="py-2 font-[var(--font-display)] text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmer">${section.title}</div>`;
