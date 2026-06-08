@@ -522,6 +522,33 @@ a {
   color: var(--color-accent) !important;
 }
 
+/* "Edit on GitHub" link at the bottom of each section */
+.edit-link-wrap {
+  margin: 36px 0 4px;
+  display: flex;
+  justify-content: flex-end;
+}
+.edit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-dim);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  text-decoration: none;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.edit-link:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 /* ============================================
    Floating search FAB (mobile/tablet entry point)
    ============================================ */

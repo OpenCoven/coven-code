@@ -30,6 +30,7 @@ async function init() {
   contentEl.innerHTML = html;
   processCodeBlocks(contentEl);
   addHeadingAnchors(contentEl);
+  addEditLinks(contentEl);
 
   // Register Alpine.data() factories for each demo, then start Alpine.
   // Alpine scans the DOM once on start; doing this after innerHTML is set
@@ -227,6 +228,29 @@ function addHeadingAnchors(container) {
       link.textContent = '#';
       h.appendChild(link);
     }
+  }
+}
+
+/**
+ * Append an "Edit on GitHub" link to the bottom of each rendered section,
+ * pointing at the matching content module on main.
+ */
+function addEditLinks(container) {
+  const base = 'https://github.com/OpenCoven/coven-code/blob/main/docs/src/content';
+  for (const sec of container.querySelectorAll('.doc-section')) {
+    const id = sec.id;
+    if (!id) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'edit-link-wrap';
+    wrap.innerHTML = `
+      <a class="edit-link" href="${base}/${id}.js" target="_blank" rel="noopener" aria-label="Edit this page on GitHub">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+        </svg>
+        Edit on GitHub
+      </a>
+    `;
+    sec.appendChild(wrap);
   }
 }
 
