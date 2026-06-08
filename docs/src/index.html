@@ -85,9 +85,9 @@
             @mouseenter="cursor = idx"
           >
             <span class="palette-result-kind" x-text="item.kind"></span>
-            <span class="palette-result-label" x-text="item.label"></span>
-            <span class="palette-result-cat" x-text="item.category"></span>
-            <span class="palette-result-desc" x-text="item.desc"></span>
+            <span class="palette-result-label" x-html="mark(item.label)"></span>
+            <span class="palette-result-cat" x-html="mark(item.category)"></span>
+            <span class="palette-result-desc" x-html="mark(item.desc)"></span>
           </a>
         </template>
       </div>

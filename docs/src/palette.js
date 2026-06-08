@@ -15,6 +15,26 @@ function matches(item, q) {
   return hay.includes(q);
 }
 
+/** Escape HTML so user-supplied text never breaks markup. */
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Wrap case-insensitive substring matches of `q` in <mark>. */
+function highlight(text, q) {
+  const esc = escapeHtml(text);
+  if (!q) return esc;
+  const re = new RegExp(escapeRegex(escapeHtml(q.trim())), 'gi');
+  return esc.replace(re, (m) => `<mark>${m}</mark>`);
+}
+
 /**
  * Register the Alpine factory. `dynamicItems` is a function that returns
  * the section + sub-heading entries (built by main.js after content render).
@@ -86,6 +106,11 @@ export function registerPalette(Alpine, dynamicItems) {
     },
     get count() {
       return this.results.length;
+    },
+
+    /** Used by x-html in the modal so matches render with <mark>. */
+    mark(text) {
+      return highlight(text, this.query);
     },
 
     onInput() {

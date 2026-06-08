@@ -637,6 +637,18 @@ a {
   text-align: center;
   background: var(--color-bg-card);
 }
+.palette-result mark,
+.palette-result-label mark,
+.palette-result-cat mark,
+.palette-result-desc mark {
+  background: var(--color-accent);
+  color: var(--color-bg);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.palette-result.active mark {
+  background: var(--color-accent-light);
+}
 .palette-hint kbd {
   font-family: var(--font-mono);
   font-size: 10.5px;
