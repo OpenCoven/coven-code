@@ -68,7 +68,7 @@ coven-code agents use raven</code></pre>
     <ul>
       <li>The welcome panel shows a built-in glyph (default: <code>kitty</code>).</li>
       <li>The <code>/agents</code> overlay shows only workspace agents.</li>
-      <li><kbd>F2</kbd> opens a switcher with the bundled built-in familiars.</li>
+      <li><kbd>F2</kbd> opens a switcher only when a saved familiar roster exists.</li>
     </ul>
 
     <p>Install the daemon to unlock the full roster:</p>

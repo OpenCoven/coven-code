@@ -1,6 +1,6 @@
 {
   "name": "@opencoven/coven-code",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "description": "Open-source, multi-provider agentic coding TUI for the terminal \u2014 OpenCoven fork of Claurst",
   "license": "GPL-3.0-only",
   "repository": {

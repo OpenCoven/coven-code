@@ -1928,15 +1928,7 @@ impl App {
     }
 
     fn default_familiar_switcher_list() -> Vec<String> {
-        let mut ids: Vec<String> = vec![
-            "nova".to_string(),
-            "kitty".to_string(),
-            "cody".to_string(),
-            "charm".to_string(),
-            "sage".to_string(),
-            "astra".to_string(),
-            "echo".to_string(),
-        ];
+        let mut ids: Vec<String> = Vec::new();
         if let Some(familiars) = claurst_core::coven_shared::load_familiars() {
             for f in familiars {
                 if !ids.contains(&f.id) {
@@ -7454,6 +7446,39 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        old_home: Option<String>,
+        old_coven_home: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(home: &std::path::Path, coven_home: &std::path::Path) -> Self {
+            let old_home = std::env::var("HOME").ok();
+            let old_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_HOME", coven_home);
+            Self {
+                old_home,
+                old_coven_home,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_coven_home {
+                Some(value) => std::env::set_var("COVEN_HOME", value),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+        }
+    }
+
     fn make_app() -> App {
         let config = Config::default();
         let cost_tracker = claurst_core::cost::CostTracker::new();
@@ -7467,6 +7492,40 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn reset_agents_and_familiars_leaves_familiar_switcher_empty_without_roster() {
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.agents_menu.project_root = Some(project);
+        app.familiar_switcher_list = vec!["nova".to_string(), "kitty".to_string()];
+
+        app.reset_agents_and_familiars();
+
+        assert!(app.familiar_switcher_list.is_empty());
+    }
+
+    #[test]
+    fn startup_familiar_switcher_uses_saved_roster_only() {
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        assert!(App::default_familiar_switcher_list().is_empty());
     }
 
     #[test]
