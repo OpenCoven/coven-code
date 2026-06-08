@@ -10730,7 +10730,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             target_name: "agents",
             slash_aliases: &[],
             slash_description: "Manage and configure sub-agents",
-            slash_help: "Usage: /agents [list|create|edit|delete] [name]",
+            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]",
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "branch",

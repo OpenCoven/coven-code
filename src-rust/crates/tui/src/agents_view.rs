@@ -230,6 +230,7 @@ pub enum AgentsRoute {
     List,
     Detail(usize),         // index into definitions
     Editor(Option<usize>), // None = create new
+    ResetConfirm,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +278,7 @@ impl AgentsMenuState {
     }
 
     pub fn select_prev(&mut self) {
-        let row_count = self.definitions.len() + 1;
+        let row_count = self.definitions.len() + 2;
         if row_count == 0 {
             return;
         }
@@ -289,7 +290,7 @@ impl AgentsMenuState {
     }
 
     pub fn select_next(&mut self) {
-        let row_count = self.definitions.len() + 1;
+        let row_count = self.definitions.len() + 2;
         if row_count == 0 {
             return;
         }
@@ -309,7 +310,11 @@ impl AgentsMenuState {
                     self.open_editor(None);
                     return None;
                 }
-                let idx = self.selected_row - 1;
+                if self.selected_row == 1 {
+                    self.route = AgentsRoute::ResetConfirm;
+                    return None;
+                }
+                let idx = self.selected_row - 2;
                 if let Some(def) = self.definitions.get(idx) {
                     if let Some(id) = familiar_id_from_source(&def.source) {
                         return Some((id, def.name.clone()));
@@ -328,12 +333,13 @@ impl AgentsMenuState {
                 None
             }
             AgentsRoute::Editor(_) => None,
+            AgentsRoute::ResetConfirm => None,
         }
     }
 
     pub fn go_back(&mut self) {
         match &self.route {
-            AgentsRoute::Detail(_) | AgentsRoute::Editor(_) => {
+            AgentsRoute::Detail(_) | AgentsRoute::Editor(_) | AgentsRoute::ResetConfirm => {
                 self.route = AgentsRoute::List;
             }
             AgentsRoute::List => {
@@ -415,10 +421,13 @@ impl AgentsMenuState {
                 if self.selected_row == 0 {
                     return Err("Select a workspace agent to remove.".to_string());
                 }
-                self.selected_row - 1
+                if self.selected_row == 1 {
+                    return Err("Use Enter to open the reset confirmation.".to_string());
+                }
+                self.selected_row - 2
             }
             AgentsRoute::Detail(idx) => idx,
-            AgentsRoute::Editor(_) => {
+            AgentsRoute::Editor(_) | AgentsRoute::ResetConfirm => {
                 return Err("Leave the editor before removing an agent.".to_string());
             }
         };
@@ -453,13 +462,29 @@ impl AgentsMenuState {
         self.selected_row = if self.definitions.is_empty() {
             0
         } else {
-            (idx + 1).min(self.definitions.len())
+            (idx + 2).min(self.definitions.len() + 1)
         };
         self.list_scroll = self
             .list_scroll
             .min(self.definitions.len().saturating_sub(1));
         self.editor = AgentEditorState::new();
         Ok(format!("Removed agent {}.", def.name))
+    }
+
+    pub fn reset_saved_roster(&mut self) -> Result<claurst_core::ResetRosterSummary, String> {
+        let root = self.project_root.clone();
+        let summary = claurst_core::reset_familiars_and_agents(root.as_deref())
+            .map_err(|err| format!("Failed to reset agents and familiars: {err}"))?;
+        if let Some(root) = root {
+            self.definitions = load_agent_definitions(&root);
+        } else {
+            self.definitions.clear();
+        }
+        self.route = AgentsRoute::List;
+        self.selected_row = 0;
+        self.list_scroll = 0;
+        self.editor = AgentEditorState::new();
+        Ok(summary)
     }
 }
 
@@ -790,8 +815,8 @@ mod tests {
         let mut state = AgentsMenuState::new();
         state.definitions = vec![user_def("review"), familiar_def("cody", "Cody")];
         state.route = AgentsRoute::List;
-        // selected_row 0 = "Create new"; row 1 = first def (user); row 2 = second def (familiar).
-        state.selected_row = 2;
+        // selected_row 0 = "Create new"; row 1 = reset; row 2 = first def; row 3 = familiar.
+        state.selected_row = 3;
         let result = state.confirm_selection();
         assert_eq!(result, Some(("cody".to_string(), "Cody".to_string())));
         // List route is unchanged — caller is responsible for closing the menu.
@@ -803,10 +828,20 @@ mod tests {
         let mut state = AgentsMenuState::new();
         state.definitions = vec![user_def("review")];
         state.route = AgentsRoute::List;
-        state.selected_row = 1;
+        state.selected_row = 2;
         let result = state.confirm_selection();
         assert_eq!(result, None);
         assert!(matches!(state.route, AgentsRoute::Detail(0)));
+    }
+
+    #[test]
+    fn confirm_selection_opens_reset_confirm_route() {
+        let mut state = AgentsMenuState::new();
+        state.route = AgentsRoute::List;
+        state.selected_row = 1;
+        let result = state.confirm_selection();
+        assert_eq!(result, None);
+        assert!(matches!(state.route, AgentsRoute::ResetConfirm));
     }
 
     #[test]
@@ -832,7 +867,7 @@ mod tests {
 
         let mut state = AgentsMenuState::new();
         state.open(temp.path());
-        state.selected_row = 1;
+        state.selected_row = 2;
 
         let msg = state
             .delete_selected_definition()
@@ -852,7 +887,7 @@ mod tests {
         let mut state = AgentsMenuState::new();
         state.definitions = vec![familiar_def("nova", "Nova")];
         state.route = AgentsRoute::List;
-        state.selected_row = 1;
+        state.selected_row = 2;
 
         let err = state
             .delete_selected_definition()
@@ -973,6 +1008,11 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
             " Define a new reusable familiar for this workspace.".to_string(),
             " tab move  ·  ctrl+s save  ·  esc back".to_string(),
         ),
+        AgentsRoute::ResetConfirm => (
+            "Reset familiars and agents".to_string(),
+            " This removes saved user roster state from Coven Code and Coven.".to_string(),
+            " enter/y reset  ·  n/esc cancel".to_string(),
+        ),
     };
     render_modal_title_buf(buf, layout.header_area, &title, "esc");
     if let Some(subtitle_area) = modal_header_line_area(layout.header_area, 1) {
@@ -996,6 +1036,7 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
         AgentsRoute::Editor(None) => {
             render_agent_editor(state, layout.body_area, buf);
         }
+        AgentsRoute::ResetConfirm => render_reset_confirmation(layout.body_area, buf),
     }
     Paragraph::new(Line::from(vec![Span::styled(
         footer,
@@ -1035,6 +1076,13 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
         create_selected,
         area.width,
     ));
+    let reset_selected = state.selected_row == 1;
+    lines.push(agent_list_row(
+        "[Reset familiars and agents]".to_string(),
+        "Erase custom agent files, familiar roster, and agent settings".to_string(),
+        reset_selected,
+        area.width,
+    ));
     lines.push(Line::from(""));
 
     let max_visible = (area.height as usize).saturating_sub(lines.len() + 1);
@@ -1063,7 +1111,7 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
             break;
         }
         let abs_idx = start + abs_rel_idx;
-        let selected = state.selected_row == abs_idx + 1;
+        let selected = state.selected_row == abs_idx + 2;
         let model_str = def.model.as_deref().unwrap_or("default");
         let shadow_suffix = if def.shadowed_by.is_some() {
             " ⚠"
@@ -1096,7 +1144,7 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
             break;
         }
         let abs_idx = start + abs_rel_idx;
-        let selected = state.selected_row == abs_idx + 1;
+        let selected = state.selected_row == abs_idx + 2;
         // Extract emoji from description prefix if present.
         let desc_short = def
             .description
@@ -1114,6 +1162,34 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
         rendered += 1;
     }
     Paragraph::new(lines)
+        .style(Style::default().bg(COVEN_CODE_PANEL_BG))
+        .render(area, buf);
+}
+
+fn render_reset_confirmation(area: Rect, buf: &mut Buffer) {
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "This will erase saved custom familiars and agents.",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::default(),
+        Line::from("The reset removes:"),
+        Line::from("  - ~/.coven/familiars.toml"),
+        Line::from("  - ~/.coven-code/agents/*.md"),
+        Line::from("  - .coven-code/agents/*.md in this workspace"),
+        Line::from("  - agents, familiar, and managed_agents settings"),
+        Line::default(),
+        Line::from("It does not remove built-in agents, plugin packages, sessions, credentials, or history."),
+        Line::default(),
+        Line::from(vec![Span::styled(
+            "Press Enter or y to reset. Press n or Esc to cancel.",
+            Style::default().fg(COVEN_CODE_ACCENT),
+        )]),
+    ];
+    Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .style(Style::default().bg(COVEN_CODE_PANEL_BG))
         .render(area, buf);
 }

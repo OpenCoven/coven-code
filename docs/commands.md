@@ -623,14 +623,18 @@ Tools
 
 ### /agents
 
-Manage sub-agents. Sub-agents are parallel model instances that can be spawned to work on independent tasks simultaneously.
+Browse and manage saved workspace agents and Coven familiars.
 
 ```
-/agents
-/agents list
-/agents stop <agent-id>
-/agents output <agent-id>
+/agents                         — open the agents/familiars menu
+/agents reset                   — open reset confirmation
+coven-code agents reset         — erase saved user agents and familiar roster
 ```
+
+The reset action removes `~/.coven/familiars.toml`, custom `*.md` agent files
+from `~/.coven-code/agents/` and the current workspace's `.coven-code/agents/`,
+and clears `agents`, `familiar`, and `managed_agents` settings. It does not
+remove built-in agents, plugin packages, sessions, credentials, or history.
 
 ---
 

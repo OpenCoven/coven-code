@@ -299,6 +299,11 @@ coven-code config set familiar nova
 
 You can also press **F2** at any time to open the switcher popup and pick a familiar interactively.
 
+To erase custom familiars and reset the agent roster, open `/agents` and choose
+**Reset familiars and agents**, or run `coven-code agents reset`. This removes
+`~/.coven/familiars.toml`, custom agent markdown files, and saved
+agent/familiar settings. Built-in familiars remain available.
+
 ---
 
 ## See also

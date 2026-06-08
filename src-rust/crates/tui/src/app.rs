@@ -1922,28 +1922,29 @@ impl App {
                 .unwrap_or(false),
             daemon_last_checked: 0,
             familiar_switcher_open: false,
-            familiar_switcher_list: {
-                let mut ids: Vec<String> = vec![
-                    "nova".to_string(),
-                    "kitty".to_string(),
-                    "cody".to_string(),
-                    "charm".to_string(),
-                    "sage".to_string(),
-                    "astra".to_string(),
-                    "echo".to_string(),
-                ];
-                use claurst_core::coven_shared;
-                if let Some(familiars) = coven_shared::load_familiars() {
-                    for f in familiars {
-                        if !ids.contains(&f.id) {
-                            ids.push(f.id);
-                        }
-                    }
-                }
-                ids
-            },
+            familiar_switcher_list: Self::default_familiar_switcher_list(),
             familiar_switcher_idx: 0,
         }
+    }
+
+    fn default_familiar_switcher_list() -> Vec<String> {
+        let mut ids: Vec<String> = vec![
+            "nova".to_string(),
+            "kitty".to_string(),
+            "cody".to_string(),
+            "charm".to_string(),
+            "sage".to_string(),
+            "astra".to_string(),
+            "echo".to_string(),
+        ];
+        if let Some(familiars) = claurst_core::coven_shared::load_familiars() {
+            for f in familiars {
+                if !ids.contains(&f.id) {
+                    ids.push(f.id);
+                }
+            }
+        }
+        ids
     }
 
     /// Load token budget from environment or model defaults.
@@ -2504,6 +2505,11 @@ impl App {
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
         if cmd == "mcp" && !args.trim().is_empty() {
             return false;
+        }
+        if cmd == "agents" && args.trim() == "reset" {
+            self.open_agents_menu();
+            self.agents_menu.route = AgentsRoute::ResetConfirm;
+            return true;
         }
         if cmd == "handoff" {
             let familiar = args.trim().to_string();
@@ -5212,6 +5218,17 @@ impl App {
     }
 
     fn handle_agents_menu_key(&mut self, key: KeyEvent) {
+        if matches!(self.agents_menu.route, AgentsRoute::ResetConfirm) {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => self.reset_agents_and_familiars(),
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Backspace | KeyCode::Left => {
+                    self.agents_menu.go_back();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if matches!(self.agents_menu.route, AgentsRoute::Editor(_)) {
             match key.code {
                 KeyCode::Esc => self.agents_menu.go_back(),
@@ -5255,6 +5272,27 @@ impl App {
             }
             KeyCode::Left => self.agents_menu.go_back(),
             _ => {}
+        }
+    }
+
+    fn reset_agents_and_familiars(&mut self) {
+        match self.agents_menu.reset_saved_roster() {
+            Ok(summary) => {
+                self.config.agents.clear();
+                self.config.familiar = None;
+                self.config.managed_agents = None;
+                self.agent_mode = None;
+                self.agent_mode_changed = true;
+                self.accent_color = accent_for_mode(None);
+                self.plan_mode = false;
+                self.managed_agents_active = false;
+                self.familiar_switcher_list = Self::default_familiar_switcher_list();
+                self.familiar_switcher_idx = 0;
+                self.status_message = Some(summary.message());
+            }
+            Err(err) => {
+                self.status_message = Some(err);
+            }
         }
     }
 

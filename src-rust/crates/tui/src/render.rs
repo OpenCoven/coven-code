@@ -2370,8 +2370,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         // the daemon doesn't know this one.
         {
             let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
-            let daemon_familiars =
-                claurst_core::coven_shared::load_familiars().unwrap_or_default();
+            let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
             let daemon_emoji = daemon_familiars
                 .iter()
                 .find(|f| f.id == familiar_id)

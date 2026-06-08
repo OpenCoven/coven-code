@@ -105,6 +105,7 @@ pub use skill_discovery::{discover_skills, parse_skill_file, DiscoveredSkill};
 pub mod coven_shared;
 // Tier B IPC — blocking HTTP-over-Unix-socket client for the live daemon.
 pub mod coven_daemon;
+pub mod roster_reset;
 pub use cost::CostTracker;
 pub use feature_flags::FeatureFlagManager;
 pub use history::ConversationSession;
@@ -114,6 +115,7 @@ pub use permissions::{
     PermissionDecision, PermissionHandler, PermissionLevel, PermissionManager, PermissionRequest,
     PermissionRule, PermissionScope, SerializedPermissionRule,
 };
+pub use roster_reset::{reset_familiars_and_agents, ResetRosterSummary};
 
 // ---------------------------------------------------------------------------
 // error module

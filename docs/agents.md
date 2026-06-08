@@ -88,6 +88,12 @@ Output shows the agent name, description, access level, and max turn limit. Agen
 
 Define custom agents in `~/.coven-code/settings.json` under the `agents` key. Custom definitions override built-in agents of the same name.
 
+To erase saved user agents and return to the built-in roster, open `/agents`
+and choose **Reset familiars and agents**, or run `coven-code agents reset`.
+This removes custom agent markdown files, clears agent/familiar settings, and
+removes the Coven familiar roster without touching built-ins, plugins, sessions,
+credentials, or history.
+
 ```json
 {
   "agents": {

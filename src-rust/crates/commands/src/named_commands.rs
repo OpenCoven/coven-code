@@ -54,7 +54,7 @@ impl NamedCommand for AgentsCommand {
         "Manage and configure sub-agents and Coven familiars"
     }
     fn usage(&self) -> &str {
-        "coven-code agents [list|create|edit|delete|familiars] [name]"
+        "coven-code agents [list|create|edit|delete|familiars|reset] [name]"
     }
 
     fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
@@ -190,9 +190,15 @@ impl NamedCommand for AgentsCommand {
                     "Delete .coven-code/agents/{name}.md to remove the agent."
                 ))
             }
+            "reset" => match claurst_core::reset_familiars_and_agents(Some(&ctx.working_dir)) {
+                Ok(summary) => CommandResult::Message(summary.message()),
+                Err(err) => {
+                    CommandResult::Error(format!("Failed to reset agents and familiars: {err}"))
+                }
+            },
             sub => CommandResult::Error(format!(
                 "Unknown agents subcommand: '{sub}'\
-                \nValid: list, familiars, create, edit, delete"
+                \nValid: list, familiars, create, edit, delete, reset"
             )),
         }
     }
@@ -1421,6 +1427,8 @@ mod tests {
     use super::*;
     use claurst_core::cost::CostTracker;
 
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn make_ctx() -> CommandContext {
         CommandContext {
             config: claurst_core::config::Config::default(),
@@ -1432,6 +1440,44 @@ mod tests {
             remote_session_url: None,
             mcp_manager: None,
             mcp_auth_runner: None,
+        }
+    }
+
+    fn make_ctx_at(working_dir: std::path::PathBuf) -> CommandContext {
+        CommandContext {
+            working_dir,
+            ..make_ctx()
+        }
+    }
+
+    struct EnvGuard {
+        old_home: Option<String>,
+        old_coven_home: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(home: &std::path::Path, coven_home: &std::path::Path) -> Self {
+            let old_home = std::env::var("HOME").ok();
+            let old_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_HOME", coven_home);
+            Self {
+                old_home,
+                old_coven_home,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_coven_home {
+                Some(value) => std::env::set_var("COVEN_HOME", value),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
         }
     }
 
@@ -1489,6 +1535,46 @@ mod tests {
         } else {
             panic!("Expected Message");
         }
+    }
+
+    #[test]
+    fn test_agents_reset_removes_saved_roster_state() {
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        let project = temp.path().join("project");
+        let global_agents = home.join(".coven-code").join("agents");
+        let project_agents = project.join(".coven-code").join("agents");
+        std::fs::create_dir_all(&global_agents).expect("global agents dir");
+        std::fs::create_dir_all(&project_agents).expect("project agents dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let global_agent = global_agents.join("global.md");
+        let project_agent = project_agents.join("project.md");
+        let familiar_roster = coven_home.join("familiars.toml");
+        std::fs::write(&global_agent, "global").expect("global agent");
+        std::fs::write(&project_agent, "project").expect("project agent");
+        std::fs::write(&familiar_roster, "[[familiar]]\nid = \"nova\"\n").expect("familiar roster");
+
+        let mut settings = claurst_core::Settings::default();
+        settings.familiar = Some("nova".to_string());
+        settings.save_sync().expect("settings save");
+
+        let cmd = AgentsCommand;
+        let ctx = make_ctx_at(project);
+        let result = cmd.execute_named(&["reset"], &ctx);
+
+        let CommandResult::Message(msg) = result else {
+            panic!("Expected Message");
+        };
+        assert!(msg.contains("removed 2 agent files"), "{msg}");
+        assert!(!global_agent.exists());
+        assert!(!project_agent.exists());
+        assert!(!familiar_roster.exists());
+        let settings = claurst_core::Settings::load_sync().expect("settings load");
+        assert!(settings.familiar.is_none());
     }
 
     #[test]
