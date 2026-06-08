@@ -2326,6 +2326,8 @@ impl SlashCommand for DoctorCommand {
          - Disk space\n\
          - Config file integrity\n\
          - Tool permission summary\n\
+         - Session lock state\n\
+         - Coven Substrate (daemon health, api version, sessions, familiars)\n\
          - Coven Code version"
     }
 
@@ -2655,6 +2657,78 @@ impl SlashCommand for DoctorCommand {
         }
         lines.push(format!("  • Session ID: {}", ctx.session_id));
         lines.push(format!("  • Working dir: {}", ctx.working_dir.display()));
+        lines.push(String::new());
+
+        // ── Coven Substrate ────────────────────────────────────────────────
+        // The Coven daemon is optional — coven-code works standalone. This
+        // section reports whether the substrate is reachable and surfaces
+        // the api version + structured-error capability so users can tell
+        // at a glance whether `/coven` integration is fully wired up.
+        lines.push("Coven Substrate".to_string());
+        match claurst_core::coven_shared::DaemonClient::new() {
+            None => {
+                lines.push("  • Daemon not installed (no ~/.coven/coven.sock)".to_string());
+                lines.push(
+                    "    Install: npm install -g @opencoven/coven  →  coven daemon start"
+                        .to_string(),
+                );
+            }
+            Some(client) => {
+                if !client.is_online() {
+                    lines.push("  ✗ Daemon socket present but not responding".to_string());
+                    lines.push("    Try: coven daemon restart".to_string());
+                } else {
+                    match client.health() {
+                        Ok(h) => {
+                            let api_ok = h.api_version == COVEN_DAEMON_EXPECTED_API;
+                            let marker = if api_ok { "✓" } else { "⚠" };
+                            lines.push(format!(
+                                "  {} Daemon online ({}, coven {})",
+                                marker,
+                                if h.api_version.is_empty() {
+                                    "unknown api"
+                                } else {
+                                    h.api_version.as_str()
+                                },
+                                if h.coven_version.is_empty() {
+                                    "?"
+                                } else {
+                                    h.coven_version.as_str()
+                                },
+                            ));
+                            if !api_ok && !h.api_version.is_empty() {
+                                lines.push(format!(
+                                    "    Expected {COVEN_DAEMON_EXPECTED_API}; \
+                                     `/coven` features may not work."
+                                ));
+                            }
+                            match client.active_sessions() {
+                                Ok(sessions) => {
+                                    lines.push(format!(
+                                        "  • Active daemon sessions: {}",
+                                        sessions.len()
+                                    ));
+                                }
+                                Err(e) => {
+                                    lines.push(format!("  ⚠ Could not list sessions: {e}"));
+                                }
+                            }
+                            match client.familiar_statuses() {
+                                Ok(fams) => {
+                                    lines.push(format!("  • Familiars registered: {}", fams.len()));
+                                }
+                                Err(_) => {
+                                    // Familiar listing is best-effort.
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            lines.push(format!("  ⚠ Health check failed: {e}"));
+                        }
+                    }
+                }
+            }
+        }
 
         CommandResult::Message(lines.join("\n"))
     }
@@ -11134,6 +11208,48 @@ mod tests {
         let cmd = find_command("exit").unwrap();
         let result = cmd.execute("", &mut ctx).await;
         assert!(matches!(result, CommandResult::Exit));
+    }
+
+    #[tokio::test]
+    async fn test_doctor_command_reports_coven_substrate() {
+        // /doctor must surface a "Coven Substrate" section regardless of
+        // whether the daemon is online. This pins the Phase 7 diagnostics-
+        // coverage requirement so future doctor refactors don't accidentally
+        // drop the substrate report and silently regress the gap closure.
+        let mut ctx = make_ctx();
+        let cmd = find_command("doctor").expect("/doctor must be registered");
+        let result = cmd.execute("", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("Coven Substrate"),
+                    "/doctor output must include a 'Coven Substrate' section, got:\n{msg}"
+                );
+                // Either the daemon is installed and we report status/version,
+                // or it isn't and we point at the install hint. Both paths
+                // must produce a non-empty section.
+                let has_status = msg.contains("Daemon online")
+                    || msg.contains("Daemon socket present")
+                    || msg.contains("Daemon not installed");
+                assert!(
+                    has_status,
+                    "/doctor substrate section is empty, got:\n{msg}"
+                );
+            }
+            other => panic!("expected Message from /doctor, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_doctor_help_mentions_substrate() {
+        // The /doctor help text must document the substrate check so users
+        // can tell what `/doctor` covers without running it.
+        let cmd = find_command("doctor").expect("/doctor must be registered");
+        assert!(
+            cmd.help().contains("Coven Substrate"),
+            "/doctor help should mention Coven Substrate, got:\n{}",
+            cmd.help()
+        );
     }
 
     #[tokio::test]

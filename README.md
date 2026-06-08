@@ -145,9 +145,10 @@ Coven Code is designed to grow into the OpenCoven ecosystem. Key seams for futur
 | Plugin system | `src-rust/crates/plugins/` | Runtime plugin loading |
 | ACP server | `src-rust/crates/acp/` | JSON-RPC 2.0 over stdio — OpenCoven adapter entry point |
 | Command registry | `src-rust/crates/commands/` | Add `/slash` commands |
-| TUI theme | `src-rust/crates/tui/src/theme_colors.rs` | Color palette; OpenCoven violet theme pending |
+| TUI theme | `src-rust/crates/tui/src/theme_colors.rs` | OpenCoven violet/pink palette is the default; deuteranopia variant ships too. Diff viewer routes through `DiffPalette` so colour-blind users see orange/blue diffs. |
 | Memory / session | `src-rust/crates/core/src/memdir.rs`, `session_storage.rs` | Hook for Coven session/memory integration |
-| Companion mascot | `src-rust/crates/tui/src/rustle.rs` | ASCII mascot renderer; rename/skin pending |
+| Companion mascot | `src-rust/crates/tui/src/rustle.rs` | ASCII mascot renderer; seven archetypes ship (`kitty`, `nova`, `cody`, `charm`, `sage`, `astra`, `echo`). F2 opens the live switcher. |
+| Coven daemon client | `src-rust/crates/core/src/coven_daemon.rs` | Typed `DaemonClient` over `~/.coven/coven.sock` speaking `coven.daemon.v1`. Powers `/coven` + the welcome status block. |
 
 ---
 
