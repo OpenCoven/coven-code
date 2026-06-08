@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="og-glow" cx="50%" cy="35%" r="55%">
+      <stop offset="0%" stop-color="rgba(233,30,99,0.35)"/>
+      <stop offset="100%" stop-color="rgba(233,30,99,0)"/>
+    </radialGradient>
+    <linearGradient id="og-text" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f06292"/>
+      <stop offset="100%" stop-color="#e91e63"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#09090b"/>
+  <rect width="1200" height="630" fill="url(#og-glow)"/>
+  <text x="600" y="310" font-family="'IBM Plex Serif',Georgia,serif" font-weight="600" font-size="180" letter-spacing="-9" text-anchor="middle" fill="url(#og-text)">coven</text>
+  <text x="600" y="380" font-family="'JetBrains Mono','SF Mono',monospace" font-weight="500" font-size="28" letter-spacing="12" text-anchor="middle" fill="#dcdce0">CODE</text>
+  <text x="600" y="470" font-family="'DM Sans',sans-serif" font-weight="400" font-size="28" text-anchor="middle" fill="#a1a1aa">A terminal coding agent in Rust</text>
+</svg>

@@ -1,0 +1,19 @@
+{
+  "name": "coven-code-docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build && rm -rf client && cp -R src/dist/client client",
+    "preview": "vite build && vite preview",
+    "deploy": "vite build && wrangler deploy -c wrangler.json"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.25.1",
+    "@tailwindcss/vite": "4.1.18",
+    "tailwindcss": "4.1.18",
+    "vite": "6.4.2",
+    "wrangler": "4.66.0"
+  }
+}
