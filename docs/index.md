@@ -150,6 +150,28 @@ See [Providers](providers) for setup instructions for every supported provider.
 
 ---
 
+## The welcome screen
+
+When you launch `coven-code` interactively, the home screen opens with a single rounded panel titled `Coven Code v<version>`. It's the at-a-glance status surface — every value comes from another subsystem, so use it as a jumping-off point rather than a source of truth.
+
+**Left column** — your familiar's portrait (animated glyph for built-ins, static card for daemon-registered familiars) under a `Welcome back <user>!` greeting. The art is driven by the `"familiar"` field in your settings; see [Coven Familiars](familiars).
+
+**Right column** — a rotating getting-started tip, then a **Status** block:
+
+| Field | What it shows | Configured in |
+|-------|---------------|---------------|
+| `Model` | Active model id, or the effective default if unset | `model` in [settings.json](configuration), `/model` |
+| `Provider` | Active provider id (`anthropic` when unset) | `provider` in [settings.json](configuration), see [Providers](providers) |
+| `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/coven` to bring it online |
+| `Familiar` | Current familiar id, with an `(F2 to switch)` hint | `familiar` in settings, `/familiar`, or **F2** |
+| `Goal` | Active autonomous goal (only shown when one is set) | `/goal <objective>` |
+
+Press **F2** at any time to open the familiar switcher popup.
+
+On terminals narrower than ~30 columns or shorter than 11 rows, the panel collapses to a single line — `Coven Code v… · <model> · <daemon> · <familiar>` — so the essentials stay visible even in a tiny pane.
+
+---
+
 ## Slash commands
 
 Inside the interactive TUI, type `/` to see all available commands. Common ones:
