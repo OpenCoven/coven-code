@@ -34,30 +34,30 @@ export function renderHero(starCount) {
         </div>
         <aside class="hero-manual" aria-label="Coven Code quickstart" style="animation: fade-up 0.7s 0.18s cubic-bezier(0.16,1,0.3,1) both">
           <div class="manual-topline">
-            <span>coven-code / live ops</span>
-            <span>docs online</span>
+            <span>coven-code / what's inside</span>
+            <span>v0.0.15</span>
           </div>
           <div class="manual-window">
-            <div class="manual-row manual-row-active">
-              <span class="manual-index">01</span>
-              <span>Install with npm or cargo</span>
-            </div>
-            <div class="manual-row">
-              <span class="manual-index">02</span>
-              <span>Authenticate or set an API key</span>
-            </div>
-            <div class="manual-row">
-              <span class="manual-index">03</span>
-              <span>Pick a provider, model, familiar</span>
-            </div>
-            <div class="manual-row">
-              <span class="manual-index">04</span>
-              <span>Run a goal or chat in the TUI</span>
-            </div>
+            <a class="manual-row manual-row-link" href="#commands">
+              <span class="manual-index">60+</span>
+              <span>slash commands</span>
+            </a>
+            <a class="manual-row manual-row-link" href="#providers">
+              <span class="manual-index">18</span>
+              <span>LLM providers</span>
+            </a>
+            <a class="manual-row manual-row-link" href="#tools">
+              <span class="manual-index">40+</span>
+              <span>built-in tools</span>
+            </a>
+            <a class="manual-row manual-row-link" href="#hooks">
+              <span class="manual-index">22</span>
+              <span>hook events</span>
+            </a>
           </div>
           <div class="manual-doc-links">
             <a href="#welcome-screen">Welcome screen</a>
-            <a href="#providers">Providers</a>
+            <a href="#agents">Agents</a>
             <a href="#familiars">Familiars</a>
           </div>
           <div class="manual-command">
