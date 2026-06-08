@@ -196,6 +196,22 @@ export function registerDemos(Alpine) {
       countIn(cat) {
         return this.items.filter((it) => it.category === cat).length;
       },
+      /** Wrap case-insensitive substrings of `query` in <mark>. HTML-escapes
+       *  the source first so weird characters can't break the markup. */
+      mark(text) {
+        const esc = String(text ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+        const q = this.query.trim();
+        if (!q) return esc;
+        const re = new RegExp(
+          q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+          'gi'
+        );
+        return esc.replace(re, (m) => `<mark>${m}</mark>`);
+      },
     });
   }
 

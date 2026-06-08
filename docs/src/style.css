@@ -1451,6 +1451,17 @@ a {
   background: var(--color-bg-card);
 }
 
+/* Match highlighting (free-text filter) in the explorer cards */
+.explorer-item mark {
+  background: var(--color-accent);
+  color: var(--color-bg);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.explorer-item:hover mark {
+  background: var(--color-accent-light);
+}
+
 /* Key-style ID for keybinding explorer items */
 .explorer-item-id.key-id {
   display: inline-flex;

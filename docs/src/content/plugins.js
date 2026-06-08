@@ -108,10 +108,10 @@ marketplace_id = "you/my-plugin"</code></pre>
           <template x-for="item in filtered" :key="item.id">
             <div class="explorer-item">
               <div class="explorer-item-head">
-                <span class="explorer-item-id" x-text="item.id"></span>
-                <span class="explorer-item-cat" x-text="item.category"></span>
+                <span class="explorer-item-id" x-html="mark(item.id)"></span>
+                <span class="explorer-item-cat" x-html="mark(item.category)"></span>
               </div>
-              <div class="explorer-item-desc" x-text="item.desc"></div>
+              <div class="explorer-item-desc" x-html="mark(item.desc)"></div>
             </div>
           </template>
         </div>
