@@ -351,7 +351,7 @@ mod tests {
     use claurst_core::types::{ContentBlock, Role, ToolResultContent};
     use dialogs::PermissionRequest;
     use notifications::NotificationKind;
-    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -810,6 +810,20 @@ mod tests {
 
         assert!(rendered.contains("Coven Code"));
         assert!(rendered.contains("hello"));
+    }
+
+    #[test]
+    fn test_render_app_uses_explicit_rgb_background() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = make_app();
+
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+
+        let background_cell = terminal.backend().buffer().cell((10, 20)).unwrap();
+        assert_eq!(background_cell.bg, Color::Rgb(0, 0, 0));
     }
 
     #[test]

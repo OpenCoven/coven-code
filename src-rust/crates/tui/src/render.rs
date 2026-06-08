@@ -77,6 +77,7 @@ const SPINNER: &[char] = &[
     '\u{2736}', '\u{2733}', '\u{2722}', '\u{00b7}',
 ];
 const CLAUDE_ORANGE: Color = Color::Rgb(233, 30, 99);
+const APP_BACKGROUND: Color = Color::Rgb(0, 0, 0);
 const WELCOME_BOX_HEIGHT: u16 = 9;
 const STATUS_THINKING: &str = "thinking";
 const STATUS_THINKING_ELLIPSIS: &str = "thinking\u{2026}";
@@ -441,10 +442,10 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     let size = frame.area();
     app.last_selectable_area.set(size);
 
-    // Fill the entire frame with a black background so the terminal's default
-    // color (blue on Windows) doesn't bleed through cells not covered by widgets.
+    // Fill the entire frame with explicit RGB black so terminal palette remaps
+    // and default colors do not tint cells not covered by widgets.
     frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Black).fg(Color::White)),
+        Block::default().style(Style::default().bg(APP_BACKGROUND).fg(Color::White)),
         size,
     );
 
