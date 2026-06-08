@@ -78,7 +78,11 @@ const SPINNER: &[char] = &[
 ];
 const CLAUDE_ORANGE: Color = Color::Rgb(233, 30, 99);
 const APP_BACKGROUND: Color = Color::Rgb(0, 0, 0);
-const WELCOME_BOX_HEIGHT: u16 = 9;
+// 11 rows: 1 (top border) + 1 (Welcome) + 1 (blank) + 4 (familiar card) +
+// 1 (Status header in right column) + 4 (Model/Provider/Daemon/Familiar) +
+// 1 (bottom border) ≈ 11 rows. The right column packs Tips above Status;
+// the box fits all of it cleanly.
+const WELCOME_BOX_HEIGHT: u16 = 11;
 const STATUS_THINKING: &str = "thinking";
 const STATUS_THINKING_ELLIPSIS: &str = "thinking\u{2026}";
 

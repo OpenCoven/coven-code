@@ -11553,6 +11553,157 @@ mod tests {
         }
     }
 
+    /// End-to-end integration test for `/coven` against a mock daemon
+    /// running on a real Unix socket. We boot a `UnixListener` in a
+    /// scratch tempdir, point `COVEN_HOME` at it, and exercise the two
+    /// structured-error scenarios from the daemon's HTTP contract:
+    /// 409 `session_not_live` (live-control endpoints) and 404
+    /// `session_not_found` (per-session reads). The assertions pin
+    /// that the daemon's error code reaches the user-visible
+    /// `CommandResult::Error` payload instead of being collapsed to a
+    /// generic "daemon offline" fallback.
+    //
+    // The MutexGuard is held across `.await` on purpose: `COVEN_HOME`
+    // is a process-global env var that the synchronous DaemonClient
+    // reads each time, and we must keep it pinned to our tempdir for
+    // the entire test. The lock only serializes tests in this same
+    // file, so there is no real deadlock risk — only a clippy
+    // false-positive.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn coven_command_integrates_with_daemon_mock() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        // Spawn a single thread that serves `responses` sequentially —
+        // one connection per response, in order. Each connection reads
+        // the HTTP request and writes the canned body. Returns when all
+        // responses have been delivered.
+        fn serve_sequence(
+            listener: UnixListener,
+            responses: Vec<&'static str>,
+        ) -> std::thread::JoinHandle<()> {
+            std::thread::spawn(move || {
+                for response in responses {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(_) => return,
+                    };
+                    let mut buf = [0_u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    // Best-effort write: the client may have hung up
+                    // already on a 4xx/5xx scenario, so a broken pipe
+                    // here is not the test's failure mode.
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            })
+        }
+
+        let _guard = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("COVEN_HOME").ok();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_HOME", dir.path());
+
+        let sock_path = dir.path().join("coven.sock");
+        let coven = find_command("coven").expect("/coven command must be registered");
+
+        // ---- /coven send against 409 session_not_live ----
+        {
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            let server = serve_sequence(
+                listener,
+                vec![
+                    "HTTP/1.0 409 Conflict\r\nContent-Type: application/json\r\n\r\n\
+                     {\"error\":{\"code\":\"session_not_live\",\
+                     \"message\":\"Session is not running.\"}}",
+                ],
+            );
+            let mut ctx = make_ctx();
+            let result = coven.execute("send dead-session hello", &mut ctx).await;
+            let _ = server.join();
+            match result {
+                CommandResult::Error(msg) => {
+                    assert!(
+                        msg.contains("session_not_live"),
+                        "expected session_not_live code, got: {msg}"
+                    );
+                    assert!(msg.contains("409"), "expected status, got: {msg}");
+                    assert!(
+                        !msg.contains("daemon offline"),
+                        "structured 409 must not be reported as 'daemon offline': {msg}"
+                    );
+                }
+                other => panic!("expected Error from /coven send, got {other:?}"),
+            }
+            std::fs::remove_file(&sock_path).ok();
+        }
+
+        // ---- /coven info <missing> against 404 session_not_found ----
+        {
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            let server = serve_sequence(
+                listener,
+                vec![
+                    "HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n\
+                     {\"error\":{\"code\":\"session_not_found\",\
+                     \"message\":\"Session was not found.\"}}",
+                ],
+            );
+            let mut ctx = make_ctx();
+            let result = coven.execute("info ghost", &mut ctx).await;
+            let _ = server.join();
+            match result {
+                CommandResult::Error(msg) => {
+                    assert!(
+                        msg.contains("session_not_found"),
+                        "expected session_not_found code, got: {msg}"
+                    );
+                    assert!(msg.contains("404"), "expected status, got: {msg}");
+                }
+                other => panic!("expected Error from /coven info, got {other:?}"),
+            }
+            std::fs::remove_file(&sock_path).ok();
+        }
+
+        // ---- /coven sessions against a healthy daemon ----
+        {
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            let server = serve_sequence(
+                listener,
+                vec![
+                    "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n\
+                     [{\"id\":\"abc-123\",\"harness\":\"openclaw\",\
+                     \"title\":\"hello world\",\"status\":\"running\",\
+                     \"project_root\":\"/tmp/p\"}]",
+                ],
+            );
+            let mut ctx = make_ctx();
+            let result = coven.execute("sessions", &mut ctx).await;
+            let _ = server.join();
+            match result {
+                CommandResult::Message(msg) => {
+                    assert!(
+                        msg.contains("abc-123"),
+                        "expected session id in list, got: {msg}"
+                    );
+                    assert!(msg.contains("openclaw"), "expected harness, got: {msg}");
+                    assert!(msg.contains("hello world"), "expected title, got: {msg}");
+                }
+                other => panic!("expected Message from /coven sessions, got {other:?}"),
+            }
+            std::fs::remove_file(&sock_path).ok();
+        }
+
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_HOME", v);
+        } else {
+            std::env::remove_var("COVEN_HOME");
+        }
+    }
+
     #[test]
     fn test_split_command_args_preserves_quoted_segments() {
         assert_eq!(

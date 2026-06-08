@@ -21,7 +21,9 @@ This document is the reference for the visible slash commands available in Coven
 13. [Diagnostics & Info](#diagnostics--info) — `/doctor`, `/version`, `/update`
 14. [Export & Sharing](#export--sharing) — `/export`, `/copy`
 15. [Advanced & Internal](#advanced--internal) — `/thinking`, `/connect`, `/fork`, `/effort`, `/summary`, `/brief`, `/sandbox-toggle`, `/think-back`, `/thinkback-play`
-16. [Command Availability](#command-availability)
+16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`, `/familiar`
+17. [Additional Commands](#additional-commands) — diagnostics, snapshots, parallel-work, remote-control, etc.
+18. [Command Availability](#command-availability)
 
 ---
 
@@ -1163,6 +1165,203 @@ Replay a previous extended-thinking trace as a formatted, step-numbered walkthro
 /thinkback-play         — replay the most recent thinking trace
 /thinkback-play 2       — replay the second most recent thinking trace
 ```
+
+---
+
+## Coven Substrate
+
+These commands integrate Coven Code with the local Coven daemon
+(`~/.coven/coven.sock`, contract `coven.daemon.v1`). They degrade
+gracefully when the daemon is absent — the daemon makes coven-code
+richer; it is not required.
+
+### /coven
+
+Drive the local Coven daemon (sessions, harness runs, rituals,
+familiars, capability discovery) without leaving the TUI. The
+top-level `/coven` (or `/coven status`) prints daemon health and the
+active session count.
+
+```
+/coven                                   show daemon health
+/coven status                            same as /coven
+/coven capabilities                      daemon capability catalog
+/coven familiars                         list familiar statuses
+/coven doctor                            detect installed harness CLIs
+/coven daemon start|status|stop|restart  daemon lifecycle
+```
+
+#### Sessions — read-only
+
+```
+/coven sessions [--all]                  list active (or all) sessions
+/coven info <session-id>                 full session record
+/coven log <session-id>                  redacted log preview
+/coven events <id> [--after N] [--limit M]
+                                          paginate session events
+```
+
+`/coven events` defaults to `--limit 50` and prints
+`End of events stream.` when there are no more events. Pass
+`--limit 0` to fall back to the daemon's default cap.
+
+#### Sessions — live control
+
+```
+/coven run <harness> <prompt>            launch a new harness session
+/coven send <session-id> <text>          forward input to a live session
+/coven kill <session-id>                 terminate a live session
+/coven attach <session-id>               replay/follow a running session
+```
+
+`send` and `kill` surface the daemon's structured error codes — when
+a session is missing or no longer running you'll see
+`Session is not running (409 session_not_live)` or
+`Session not found (404 session_not_found)` rather than a generic
+"daemon offline" message.
+
+#### Session rituals
+
+```
+/coven summon <session-id>               restore an archived session
+/coven archive <session-id>              archive a non-running session
+/coven sacrifice <session-id>            permanently delete a session
+```
+
+Sacrifice is irreversible. `/coven sacrifice` automatically passes
+`--yes` to the underlying `coven sacrifice` command (mirroring how
+the slash invocation acts as the confirmation).
+
+#### Control plane and integrations
+
+```
+/coven actions <action> [json-args]      POST /api/v1/actions
+/coven calls [--limit N]                 read the Coven Calls
+                                          delegation ledger
+                                          (~/.coven/cave-coven-calls.json)
+/coven claim acquire|release|status|heartbeat|canary [args]
+                                          parallel-work claim protocol
+/coven hooks-install                     install pre-commit/pre-push
+                                          hooks for the claim protocol
+/coven adapter list|doctor [id]          inspect harness adapters
+/coven logs prune [--days N]             prune session logs
+/coven wt <branch> | --list | --doctor | --prune-merged | --prune-stale [DAYS]
+                                          worktree management
+/coven patch [name] [issue]              open the OpenClaw repair flow
+/coven pc [status|top|disk|...]          macOS system diagnostics
+```
+
+#### Offline behaviour
+
+When `~/.coven/coven.sock` is missing, every `/coven` subcommand
+returns the same hint:
+`Coven daemon offline. Try /coven daemon start.`
+The rest of coven-code keeps working — you just lose substrate
+integration.
+
+#### Error surfacing
+
+Non-2xx responses from the daemon are parsed for the
+`{ "error": { "code", "message" } }` envelope and surfaced as
+`<message> (<status> <code>)`. See
+[`docs/API-CONTRACT.md` in OpenCoven/coven](https://github.com/OpenCoven/coven/blob/main/docs/API-CONTRACT.md)
+for the canonical error code list.
+
+---
+
+### /handoff
+
+Hand off the current session context to a Coven familiar. Sends the
+recent transcript to `~/.coven/coven.sock` as a new session under
+the named familiar, returning the session id.
+
+```
+/handoff <familiar-id>
+```
+
+Requires the Coven daemon to be running and the familiar id to be
+defined in `~/.coven/familiars.toml`. See
+[familiars.md](./familiars.md) for the full familiar concept.
+
+---
+
+### /familiar
+
+Set your active familiar — changes the TUI mascot live and updates
+the persona that gets injected into the system prompt when launched
+with `--agent <familiar-id>`.
+
+```
+/familiar               show current familiar
+/familiar <id>          switch to a familiar by id
+```
+
+Press **F2** at any time to open the familiar switcher popup
+interactively (the welcome screen's status block hints at this).
+
+---
+
+## Additional Commands
+
+The following commands ship with Coven Code but were not previously
+documented in this reference. They are grouped by purpose.
+
+### Diagnostics
+
+| Command | Description |
+|---------|-------------|
+| `/btw` | Side-channel note to the model (does not consume an assistant turn). |
+| `/ctx-viz` | Visualize the current context window as a stacked breakdown by section. |
+| `/extra-usage` | Detailed per-call token usage with cache hit/miss columns. |
+| `/heapdump` | Print process memory and diagnostic information. |
+| `/rate-limit-options` | Configure rate-limit handling (retry budget, backoff). |
+| `/release-notes` | View Coven Code release notes / changelog. |
+
+### Snapshots & file recovery
+
+| Command | Description |
+|---------|-------------|
+| `/checkpoints` | Browse session snapshots and restore from any point. |
+| `/snapshot` | Manage filesystem snapshots taken before destructive edits. |
+| `/revert` | Revert a specific file to its pre-session state. `/undo` reverts the most recent edit; `/revert` reverts a chosen file. |
+
+### Parallel work & remote control
+
+| Command | Description |
+|---------|-------------|
+| `/tasks` (alias `bashes`) | Manage tracked background tasks — list, fetch output, stop. |
+| `/branch` | Create or switch session branches. |
+| `/remote-control` | Drive a remote session via the IDE bridge. |
+| `/remote-env` | Configure the remote-control environment. |
+| `/teleport` | Bundle the session state for teleporting to another machine. |
+| `/reload-plugins` | Reload the active session plugin registry, hooks, agents, skills, and MCP definitions. |
+
+### GitHub integration
+
+| Command | Description |
+|---------|-------------|
+| `/pr-comments` | Read or post comments on the active GitHub PR. |
+| `/install-github-app` | Install the Coven Code GitHub App. |
+
+### Workspace navigation
+
+| Command | Description |
+|---------|-------------|
+| `/add-dir` | Add an extra workspace root to the active session. |
+| `/files` | List files read or written this session. |
+| `/ide` | Connect to the active IDE integration. |
+| `/desktop` | Computer-use desktop control. |
+| `/web-setup` | Open the web-setup proxy assistant. |
+| `/links` | Open URLs from this session in your browser. |
+| `/mobile` | Show a QR code / links for the mobile companion app. |
+| `/passes` | Inspect per-turn pass history. |
+
+### Other
+
+| Command | Description |
+|---------|-------------|
+| `/color` | Set the prompt bar color for the current session. |
+| `/tag` | Tag the current session with a label. |
 
 ---
 

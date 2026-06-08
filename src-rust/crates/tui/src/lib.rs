@@ -796,6 +796,80 @@ mod tests {
         assert_eq!(app.prompt_input.text, "src/main.rs:42");
     }
 
+    /// Welcome-screen status block snapshot test. Confirms that the
+    /// "Model:", "Provider:", "Daemon:", "Familiar: <id> (F2 to switch)"
+    /// lines all reach the rendered buffer. These are the audit-flagged
+    /// first-screen affordances that prove a user can see, in under a
+    /// second, what model/provider/familiar they have configured and
+    /// whether the daemon is reachable.
+    #[test]
+    fn welcome_screen_renders_status_block_with_key_affordances() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Fresh app, no transcript — the welcome box owns the top of
+        // the screen.
+        let app = make_app();
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        for needle in [
+            "Status",
+            "Model:",
+            "Provider:",
+            "Daemon:",
+            "Familiar:",
+            "F2",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "welcome status block is missing {needle:?}.\n--- rendered buffer ---\n{rendered}"
+            );
+        }
+    }
+
+    /// Small-terminal fallback: when the welcome area is too short for
+    /// the full box, the single-line fallback still includes the model,
+    /// daemon, and familiar context strip. We test with a "wide-but-
+    /// short" geometry (100 cols × 8 rows) so the fallback row has room
+    /// to render every segment rather than truncating on width.
+    #[test]
+    fn welcome_small_terminal_fallback_carries_status_signals() {
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = make_app();
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            rendered.contains("Coven Code"),
+            "fallback should include Coven Code header. buffer: {rendered}"
+        );
+        assert!(
+            rendered.contains("Daemon"),
+            "fallback should include daemon hint. buffer: {rendered}"
+        );
+        assert!(
+            rendered.contains("Familiar"),
+            "fallback should include familiar hint. buffer: {rendered}"
+        );
+    }
+
     #[test]
     fn test_render_app_keeps_logo_header_after_first_message() {
         let backend = TestBackend::new(120, 40);
