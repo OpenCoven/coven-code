@@ -2096,13 +2096,22 @@ impl App {
             blocks.push(ContentBlock::Text { text });
         }
 
-        let msg = match blocks.len() {
-            0 => return,
-            1 => match blocks.pop().unwrap() {
-                ContentBlock::Text { text } => Message::assistant(text),
-                block => Message::assistant_blocks(vec![block]),
-            },
-            _ => Message::assistant_blocks(blocks),
+        // Pattern-match the Vec exhaustively instead of `pop().unwrap()`
+        // after a length check. The single-block case unwraps the Option
+        // by pattern (no `.unwrap()`); the unreachable `None` arm returns
+        // gracefully if a future refactor breaks the invariant.
+        if blocks.is_empty() {
+            return;
+        }
+        let msg = if blocks.len() == 1 {
+            match blocks.into_iter().next() {
+                Some(ContentBlock::Text { text }) => Message::assistant(text),
+                Some(block) => Message::assistant_blocks(vec![block]),
+                // Unreachable when len == 1, but a graceful no-op beats a panic.
+                None => return,
+            }
+        } else {
+            Message::assistant_blocks(blocks)
         };
 
         self.messages.push(msg);
