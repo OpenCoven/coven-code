@@ -2364,10 +2364,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw("  "));
         }
 
-        // Current familiar emoji + name
+        // Current familiar emoji + name. Prefer the user's daemon roster
+        // (~/.coven/familiars.toml) so custom familiars get their configured
+        // emoji; fall back to the bundled glyph table for built-in ids when
+        // the daemon doesn't know this one.
         {
             let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
-            let emoji = match familiar_id {
+            let daemon_familiars =
+                claurst_core::coven_shared::load_familiars().unwrap_or_default();
+            let daemon_emoji = daemon_familiars
+                .iter()
+                .find(|f| f.id == familiar_id)
+                .and_then(|f| f.emoji.as_deref());
+            let emoji = daemon_emoji.unwrap_or_else(|| match familiar_id {
                 "nova" => "\u{1f451}",
                 "kitty" => "\u{1f431}",
                 "cody" => "\u{1f4bb}",
@@ -2376,7 +2385,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 "astra" => "\u{1f319}",
                 "echo" => "\u{1f47b}",
                 _ => "\u{2b50}",
-            };
+            });
             spans.push(Span::styled(
                 format!("{} {}  ", emoji, familiar_id),
                 Style::default().fg(Color::DarkGray),
