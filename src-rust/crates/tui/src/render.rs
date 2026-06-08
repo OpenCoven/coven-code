@@ -1573,13 +1573,58 @@ fn render_message_items(app: &App, width: u16) -> Vec<RenderedLineItem> {
 // â”€â”€ Welcome / startup screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Render the two-column orange round-bordered welcome box (matches TS LogoV2).
+/// Short, user-facing label for the active model. Falls back to the
+/// configured default when no override is set.
+fn welcome_model_label(app: &App) -> String {
+    app.config
+        .model
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| app.config.effective_model().to_string())
+}
+
+/// Short label for the active provider id (or "default" when no override).
+fn welcome_provider_label(app: &App) -> String {
+    app.config
+        .provider
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "anthropic".to_string())
+}
+
+/// One-glance daemon status: "Daemon: online" / "Daemon: offline". Cheap —
+/// just a socket-existence check, no RPC.
+fn welcome_daemon_label() -> String {
+    if claurst_core::coven_shared::DaemonClient::new()
+        .map(|c| c.is_online())
+        .unwrap_or(false)
+    {
+        "Daemon: online".to_string()
+    } else {
+        "Daemon: offline".to_string()
+    }
+}
+
+/// Familiar display name with the F2 switcher hint appended.
+fn welcome_familiar_label(app: &App) -> String {
+    let id = app.config.familiar.as_deref().unwrap_or("kitty");
+    format!("Familiar: {id}")
+}
+
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // --- Box dimensions ---
     // The box should be at most the full area width, and a fixed height.
     let box_width = area.width;
     let box_height: u16 = WELCOME_BOX_HEIGHT;
     if area.height < box_height || box_width < 30 {
-        // Too small: fall back to a single line
+        // Too small: collapse to a single-line status that still surfaces
+        // the model, daemon, and familiar so a user on a 24×9 terminal
+        // doesn't see a content-less "Coven Code v0.0.13" header.
+        let model = welcome_model_label(app);
+        let daemon = welcome_daemon_label();
+        let familiar = welcome_familiar_label(app);
         let line = Line::from(vec![
             Span::styled(
                 "Coven Code ",
@@ -1589,6 +1634,12 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 format!("v{}", APP_VERSION),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(format!(" · {model}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!(" · {daemon}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" · {familiar}"),
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
@@ -1710,13 +1761,47 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     }
     right_lines.push(Line::from(""));
     right_lines.push(Line::from(Span::styled(
-        "Recent activity",
+        "Status",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )));
+    let model = welcome_model_label(app);
+    let provider = welcome_provider_label(app);
+    let daemon = welcome_daemon_label();
+    let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
     right_lines.push(Line::from(Span::styled(
-        "No recent activity",
-        Style::default().fg(Color::DarkGray),
+        format!("Model:    {model}"),
+        Style::default().fg(Color::Gray),
     )));
+    right_lines.push(Line::from(Span::styled(
+        format!("Provider: {provider}"),
+        Style::default().fg(Color::Gray),
+    )));
+    let daemon_style = if daemon.contains("online") {
+        Style::default().fg(accent)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    right_lines.push(Line::from(Span::styled(daemon, daemon_style)));
+    right_lines.push(Line::from(vec![
+        Span::styled(
+            format!("Familiar: {familiar_id} "),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled("(F2 to switch)", Style::default().fg(Color::DarkGray)),
+    ]));
+    if let Some(goal) = app.active_goal_badge.as_deref().filter(|s| !s.is_empty()) {
+        let truncated = if goal.chars().count() > right_w_usize.saturating_sub(8) {
+            let take = right_w_usize.saturating_sub(9).max(8);
+            let s: String = goal.chars().take(take).collect();
+            format!("{s}…")
+        } else {
+            goal.to_string()
+        };
+        right_lines.push(Line::from(Span::styled(
+            format!("Goal:     {truncated}"),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+    }
 
     frame.render_widget(
         Paragraph::new(right_lines).wrap(Wrap { trim: false }),
@@ -3299,4 +3384,67 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.familiar_switcher_idx));
     frame.render_stateful_widget(list, popup_area, &mut state);
+}
+
+#[cfg(test)]
+mod welcome_tests {
+    use super::*;
+
+    fn make_test_app_with_model_and_familiar(
+        model: Option<&str>,
+        provider: Option<&str>,
+        familiar: Option<&str>,
+        goal: Option<&str>,
+    ) -> App {
+        let config = claurst_core::config::Config {
+            model: model.map(str::to_string),
+            provider: provider.map(str::to_string),
+            familiar: familiar.map(str::to_string),
+            ..claurst_core::config::Config::default()
+        };
+        let mut app = App::new(config, claurst_core::cost::CostTracker::new());
+        app.active_goal_badge = goal.map(str::to_string);
+        app
+    }
+
+    #[test]
+    fn welcome_model_label_prefers_config_override() {
+        let app = make_test_app_with_model_and_familiar(
+            Some("claude-haiku-4-5-20251001"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(welcome_model_label(&app), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn welcome_provider_label_falls_back_to_anthropic() {
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        assert_eq!(welcome_provider_label(&app), "anthropic");
+    }
+
+    #[test]
+    fn welcome_familiar_label_uses_kitty_by_default() {
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        assert_eq!(welcome_familiar_label(&app), "Familiar: kitty");
+    }
+
+    #[test]
+    fn welcome_familiar_label_reflects_config_override() {
+        let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
+        assert_eq!(welcome_familiar_label(&app), "Familiar: sage");
+    }
+
+    #[test]
+    fn welcome_daemon_label_is_one_of_two_strings() {
+        // Either string is acceptable — the test machine may or may not have
+        // the daemon socket. The label MUST be a stable, non-empty
+        // human-readable hint, not a raw IO error.
+        let label = welcome_daemon_label();
+        assert!(
+            label == "Daemon: online" || label == "Daemon: offline",
+            "unexpected daemon label: {label}"
+        );
+    }
 }
