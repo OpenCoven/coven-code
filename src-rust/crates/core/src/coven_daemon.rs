@@ -11,7 +11,9 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 use std::path::PathBuf;
-#[cfg(unix)]
+// `Duration` appears in the public `check_reachability(timeout)` signature,
+// so its import can't be gated on `cfg(unix)` even though the only real
+// implementation lives there.
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
