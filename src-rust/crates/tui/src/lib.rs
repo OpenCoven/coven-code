@@ -1625,4 +1625,71 @@ mod tests {
         }
         assert_eq!(app.permission_request.as_ref().unwrap().selected_option, 3);
     }
+
+    /// Regression for issue #49: with a voice recorder attached, pressing
+    /// plain `v` must NOT start recording. Plain-V used to be a broken
+    /// hold-to-talk that ate every literal `v` character (typing
+    /// "/coven", "review", etc.). Recording now toggles exclusively
+    /// through Alt+V.
+    #[test]
+    fn issue_49_plain_v_does_not_start_voice_recording() {
+        let mut app = make_app();
+        assert!(
+            !app.voice_recording,
+            "fresh app must not be recording at startup"
+        );
+
+        // Simulate a voice recorder being attached as if voice_enabled were
+        // true in ui-settings.json. The previous behaviour was to start
+        // recording on the first plain-`v` keystroke once voice_recorder
+        // was Some — we override the field directly to isolate the input
+        // path from the env-var/file resolution.
+        app.voice_recorder = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            claurst_core::voice::VoiceRecorder::new(claurst_core::voice::VoiceConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+        )));
+
+        // Type "voice" — every plain `v` press must hit the prompt buffer
+        // instead of starting a recording.
+        app.handle_key_event(key(KeyCode::Char('v')));
+        app.handle_key_event(key(KeyCode::Char('o')));
+        app.handle_key_event(key(KeyCode::Char('i')));
+        app.handle_key_event(key(KeyCode::Char('c')));
+        app.handle_key_event(key(KeyCode::Char('e')));
+
+        assert!(
+            !app.voice_recording,
+            "plain `v` must not trigger voice recording (issue #49)"
+        );
+        assert!(
+            app.prompt_input.text.contains("voice"),
+            "plain `v` must reach the prompt buffer, got: {:?}",
+            app.prompt_input.text
+        );
+    }
+
+    /// Regression for issue #49: `COVEN_CODE_VOICE=0` (or `=false`) must
+    /// be a hard opt-out that ignores `voice_enabled: true` in
+    /// ui-settings.json.
+    #[test]
+    fn issue_49_coven_code_voice_env_opt_out_is_respected() {
+        // SAFETY: env vars are process-global; the surrounding test
+        // suite is single-threaded by default for this binary.
+        let prev = std::env::var("COVEN_CODE_VOICE").ok();
+
+        std::env::set_var("COVEN_CODE_VOICE", "0");
+        assert!(crate::app::voice_explicitly_disabled());
+        std::env::set_var("COVEN_CODE_VOICE", "false");
+        assert!(crate::app::voice_explicitly_disabled());
+        std::env::set_var("COVEN_CODE_VOICE", "1");
+        assert!(!crate::app::voice_explicitly_disabled());
+        std::env::remove_var("COVEN_CODE_VOICE");
+        assert!(!crate::app::voice_explicitly_disabled());
+
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_CODE_VOICE", v);
+        }
+    }
 }

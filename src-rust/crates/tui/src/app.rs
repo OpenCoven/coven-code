@@ -253,6 +253,57 @@ fn help_overlay_entries() -> Vec<HelpEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Voice mode bootstrap
+// ---------------------------------------------------------------------------
+
+/// `true` when the launcher should treat voice mode as opted out for this
+/// run regardless of what `ui-settings.json` says. Set
+/// `COVEN_CODE_VOICE=0` (or `false`) to disable voice without editing the
+/// stored UI settings — useful when the persistent flag has been turned on
+/// and the user wants a one-shot launch where slash-command keystrokes
+/// aren't routed through the voice pipeline.
+pub(crate) fn voice_explicitly_disabled() -> bool {
+    matches!(
+        std::env::var("COVEN_CODE_VOICE").as_deref(),
+        Ok("0") | Ok("false")
+    )
+}
+
+/// Resolve the voice recorder Arc for this `App` instance.
+///
+/// Returns `Some(recorder)` only when voice mode is opted in via:
+///   * `COVEN_CODE_VOICE_ENABLED=1` (per-launch override), OR
+///   * `voice_enabled: true` in `~/.coven-code/ui-settings.json`
+///
+/// `COVEN_CODE_VOICE=0` (or `=false`) hard-overrides the persistent
+/// setting and forces the recorder to `None` for the launch.
+fn voice_recorder_from_env_and_settings(
+) -> Option<std::sync::Arc<std::sync::Mutex<claurst_core::voice::VoiceRecorder>>> {
+    if voice_explicitly_disabled() {
+        return None;
+    }
+    let voice_on = std::env::var("COVEN_CODE_VOICE_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || {
+            let path = claurst_core::config::Settings::config_dir().join("ui-settings.json");
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["voice_enabled"].as_bool())
+                .unwrap_or(false)
+        };
+    if !voice_on {
+        return None;
+    }
+    let recorder = claurst_core::voice::global_voice_recorder();
+    if let Ok(mut r) = recorder.lock() {
+        r.set_enabled(true);
+    }
+    Some(recorder)
+}
+
+// ---------------------------------------------------------------------------
 // Provider connection helpers
 // ---------------------------------------------------------------------------
 
@@ -1825,32 +1876,7 @@ impl App {
             completion_toast_enabled: true,
             bell_on_complete: false,
             completion_toast_min_secs: 8,
-            voice_recorder: {
-                // Check whether voice input has been enabled via the /voice command
-                // (stored in ~/.coven-code/ui-settings.json).  We also accept
-                // COVEN_CODE_VOICE_ENABLED=1 as an override for easier testing.
-                let voice_on = std::env::var("COVEN_CODE_VOICE_ENABLED")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false)
-                    || {
-                        let path =
-                            claurst_core::config::Settings::config_dir().join("ui-settings.json");
-                        std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                            .and_then(|v| v["voice_enabled"].as_bool())
-                            .unwrap_or(false)
-                    };
-                if voice_on {
-                    let recorder = claurst_core::voice::global_voice_recorder();
-                    if let Ok(mut r) = recorder.lock() {
-                        r.set_enabled(true);
-                    }
-                    Some(recorder)
-                } else {
-                    None
-                }
-            },
+            voice_recorder: voice_recorder_from_env_and_settings(),
             voice_recording: false,
             voice_event_rx: None,
             pending_key: None,
@@ -4638,22 +4664,18 @@ impl App {
             return false;
         }
 
-        // ---- Voice PTT: plain V press starts recording when voice is on ----
-        // This is the "hold to talk" variant.  The user presses V to begin
-        // recording; releasing V (handled in the run loop) or pressing Enter
-        // stops the capture and triggers transcription.
-        // Only active when voice mode is enabled (voice_recorder is Some) and
-        // the prompt input is in default (non-vim) mode so 'v' doesn't conflict
-        // with vim keybindings.
-        if key.code == KeyCode::Char('v')
-            && key.modifiers == KeyModifiers::NONE
-            && self.voice_recorder.is_some()
-            && !self.voice_recording
-            && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
-        {
-            self.handle_voice_ptt_start();
-            return false;
-        }
+        // Plain-letter `v` is NEVER intercepted as voice PTT.  Earlier
+        // versions tried to make plain V a "hold-to-talk" key (press to
+        // start, release to stop), but the release event is only delivered
+        // on platforms with the kitty keyboard enhancement (mostly Windows
+        // with the right terminal). On the rest, the press half fires and
+        // the release never does — recording sticks on and eats every
+        // subsequent keystroke.  Even on platforms where release works,
+        // the press handler was gated on Insert mode, which is exactly
+        // when the user is typing and so means literal `v` characters
+        // ("review", "version", "verify", `/coven`, …) all trigger voice.
+        // Issue #49 fixes this by routing PTT exclusively through Alt+V
+        // (handled above) — there is no plain-V intercept anymore.
 
         // ---- Ctrl+V / Cmd+V — clipboard paste (image first, then text fallback) ----
         // Only fires when NOT in vim Normal/Visual/VisualBlock mode (where \x16 is
@@ -7167,20 +7189,15 @@ impl App {
                 };
                 match event {
                     Event::Key(key) => {
-                        // On Windows crossterm fires both Press and Release events.
-                        // We normally skip non-press events, but when voice PTT mode
-                        // is active we need the Release event for the `V` key so we
-                        // can stop recording as soon as the user lifts the key.
+                        // crossterm fires both Press and Release events on
+                        // platforms that support the kitty keyboard
+                        // enhancement (Windows + some Linux terminals). We
+                        // only ever act on Press: voice PTT was previously
+                        // hold-to-talk on plain `v`, which broke typing —
+                        // see Issue #49. Recording now toggles exclusively
+                        // through Alt+V (a press-only chord), so the
+                        // dedicated `v`-release handler is gone.
                         if key.kind != crossterm::event::KeyEventKind::Press {
-                            // Handle V-key release to stop PTT recording.
-                            if key.kind == crossterm::event::KeyEventKind::Release
-                                && key.code == KeyCode::Char('v')
-                                && key.modifiers == KeyModifiers::NONE
-                                && self.voice_recording
-                                && self.voice_recorder.is_some()
-                            {
-                                self.handle_voice_ptt_stop();
-                            }
                             continue;
                         }
 
