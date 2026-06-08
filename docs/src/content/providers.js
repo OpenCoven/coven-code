@@ -21,31 +21,62 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
 
     <p>When no provider is specified, Coven Code defaults to <strong>Anthropic</strong>.</p>
 
-    <h2>Supported providers</h2>
+    <h2>Browse providers</h2>
 
-    <table>
-      <thead><tr><th>Provider</th><th>ID</th><th>Auth</th></tr></thead>
-      <tbody>
-        <tr><td>Anthropic Claude</td><td><code>anthropic</code></td><td><code>ANTHROPIC_API_KEY</code> or OAuth</td></tr>
-        <tr><td>OpenAI</td><td><code>openai</code></td><td><code>OPENAI_API_KEY</code></td></tr>
-        <tr><td>Google Gemini</td><td><code>google</code></td><td><code>GOOGLE_API_KEY</code></td></tr>
-        <tr><td>AWS Bedrock</td><td><code>bedrock</code></td><td>AWS credentials chain</td></tr>
-        <tr><td>Azure OpenAI</td><td><code>azure</code></td><td><code>AZURE_OPENAI_API_KEY</code> + endpoint</td></tr>
-        <tr><td>Ollama (local)</td><td><code>ollama</code></td><td>none (local socket)</td></tr>
-        <tr><td>Groq</td><td><code>groq</code></td><td><code>GROQ_API_KEY</code></td></tr>
-        <tr><td>Mistral</td><td><code>mistral</code></td><td><code>MISTRAL_API_KEY</code></td></tr>
-        <tr><td>DeepSeek</td><td><code>deepseek</code></td><td><code>DEEPSEEK_API_KEY</code></td></tr>
-        <tr><td>xAI</td><td><code>xai</code></td><td><code>XAI_API_KEY</code></td></tr>
-        <tr><td>Cohere</td><td><code>cohere</code></td><td><code>COHERE_API_KEY</code></td></tr>
-        <tr><td>OpenRouter</td><td><code>openrouter</code></td><td><code>OPENROUTER_API_KEY</code></td></tr>
-        <tr><td>Together AI</td><td><code>together</code></td><td><code>TOGETHER_API_KEY</code></td></tr>
-        <tr><td>Perplexity</td><td><code>perplexity</code></td><td><code>PERPLEXITY_API_KEY</code></td></tr>
-        <tr><td>GitHub Copilot</td><td><code>copilot</code></td><td>Copilot OAuth</td></tr>
-        <tr><td>Cerebras</td><td><code>cerebras</code></td><td><code>CEREBRAS_API_KEY</code></td></tr>
-        <tr><td>LM Studio</td><td><code>lmstudio</code></td><td>none (local HTTP)</td></tr>
-        <tr><td>LLaMA.cpp</td><td><code>llamacpp</code></td><td>none (local HTTP)</td></tr>
-      </tbody>
-    </table>
+    <p>Type to filter by id, env var, or model family. Use the chips to narrow to cloud, aggregator, or local providers.</p>
+
+    <div class="demo" x-data="providerExplorer">
+      <div class="demo-header">
+        <span>provider explorer · <span x-text="count"></span> / <span x-text="total"></span> shown</span>
+      </div>
+      <div class="demo-body">
+        <div class="explorer-controls">
+          <input
+            type="text"
+            class="explorer-input"
+            placeholder="Search providers — try 'gemini', 'local', 'bedrock', 'API_KEY'…"
+            x-model="query"
+            aria-label="Search providers"
+          />
+          <span class="explorer-count">
+            <span x-text="count"></span> matches
+          </span>
+        </div>
+        <div class="explorer-chips">
+          <template x-for="cat in categories" :key="cat">
+            <button
+              type="button"
+              class="explorer-chip"
+              :aria-pressed="category === cat"
+              @click="pick(cat)"
+            >
+              <span x-text="cat"></span>
+              <span class="explorer-chip-count" x-text="countIn(cat)"></span>
+            </button>
+          </template>
+          <button
+            type="button"
+            class="explorer-clear"
+            x-show="query || category"
+            @click="clear()"
+          >Clear</button>
+        </div>
+        <div class="explorer-results" x-show="count > 0">
+          <template x-for="item in filtered" :key="item.id">
+            <div class="explorer-item">
+              <div class="explorer-item-head">
+                <span class="explorer-item-id" x-text="item.id"></span>
+                <span class="explorer-item-cat" x-text="item.category"></span>
+              </div>
+              <div class="explorer-item-desc" x-text="item.desc"></div>
+            </div>
+          </template>
+        </div>
+        <div class="explorer-empty" x-show="count === 0">
+          No providers match. <a href="#" @click.prevent="clear()" style="color: var(--color-accent);">Clear filters</a>
+        </div>
+      </div>
+    </div>
 
     <h2>Anthropic (default)</h2>
 

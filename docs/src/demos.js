@@ -341,6 +341,35 @@ export function registerDemos(Alpine) {
     })
   );
 
+  // ----- Provider explorer -----------------------------------------------
+  Alpine.data(
+    'providerExplorer',
+    makeExplorer({
+      categories: ['Cloud', 'Aggregator', 'Local'],
+      search: ['id', 'desc', 'keywords'],
+      items: [
+        { id: 'anthropic',  category: 'Cloud',      desc: 'Default. ANTHROPIC_API_KEY or OAuth. /v1/messages streaming. Default model: claude-sonnet-4-6.', keywords: 'claude opus sonnet haiku' },
+        { id: 'openai',     category: 'Cloud',      desc: 'OPENAI_API_KEY. Chat Completions + Responses API. GPT-4o, o-series, gpt-4.1.' },
+        { id: 'google',     category: 'Cloud',      desc: 'GOOGLE_API_KEY. Gemini 1.5/2.0/2.5 — Pro, Flash, Flash-8B.',                                  keywords: 'gemini palm' },
+        { id: 'bedrock',    category: 'Cloud',      desc: 'AWS credentials chain (env, profile, IAM). Claude, Llama, Titan, Mistral via AWS region.', keywords: 'aws amazon' },
+        { id: 'azure',      category: 'Cloud',      desc: 'AZURE_OPENAI_API_KEY + endpoint URL + deployment id. OpenAI models through Azure.', keywords: 'microsoft openai' },
+        { id: 'groq',       category: 'Cloud',      desc: 'GROQ_API_KEY. Fastest hosted inference — Llama, Mixtral, Whisper.' },
+        { id: 'mistral',    category: 'Cloud',      desc: 'MISTRAL_API_KEY. Mistral Large/Medium/Small, Codestral, Pixtral.' },
+        { id: 'deepseek',   category: 'Cloud',      desc: 'DEEPSEEK_API_KEY. V3, R1 — reasoning models with strong math/code.', keywords: 'r1' },
+        { id: 'xai',        category: 'Cloud',      desc: 'XAI_API_KEY. Grok family.',                                                                  keywords: 'grok x' },
+        { id: 'cohere',     category: 'Cloud',      desc: 'COHERE_API_KEY. Command R/R+, Aya.' },
+        { id: 'perplexity', category: 'Cloud',      desc: 'PERPLEXITY_API_KEY. Sonar models with built-in web search.' },
+        { id: 'copilot',    category: 'Cloud',      desc: 'GitHub Copilot OAuth (run /login --copilot). Uses your GitHub subscription.', keywords: 'github' },
+        { id: 'cerebras',   category: 'Cloud',      desc: 'CEREBRAS_API_KEY. Very high TPS on Llama via wafer-scale silicon.' },
+        { id: 'openrouter', category: 'Aggregator', desc: 'OPENROUTER_API_KEY. Single key, 200+ models from many providers.' },
+        { id: 'together',   category: 'Aggregator', desc: 'TOGETHER_API_KEY. Llama, Mixtral, DeepSeek, Qwen — hosted at TogetherAI.' },
+        { id: 'ollama',     category: 'Local',      desc: 'Local socket — no auth. Set base_url (default http://localhost:11434). Bring your own GGUF.' },
+        { id: 'lmstudio',   category: 'Local',      desc: 'Local HTTP server. Point base_url at LM Studio (default http://localhost:1234).', keywords: 'lm studio' },
+        { id: 'llamacpp',   category: 'Local',      desc: 'Local HTTP from llama.cpp server. Set base_url to your server endpoint.', keywords: 'llama.cpp' },
+      ],
+    })
+  );
+
   // ----- Demo 4: Tools grid ----------------------------------------------
   Alpine.data('toolsGrid', () => ({
     expanded: null,
