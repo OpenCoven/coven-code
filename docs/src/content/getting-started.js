@@ -46,7 +46,7 @@ cargo install --path crates/cli</code></pre>
         <span>five run modes · pick the one that fits the situation</span>
       </div>
       <div class="demo-body">
-        <div class="compare">
+        <div class="compare compare-5">
           <div class="compare-card">
             <div class="compare-card-name">interactive</div>
             <span class="compare-card-tag">day-to-day</span>

@@ -1604,6 +1604,21 @@ a {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
+/* Variant: 5 cards laid out as 3 on top, 2 spanning 50/50 on bottom
+   instead of the orphan 2-card-then-empty third column the auto-fit
+   default produces. Falls back to one card per row below 720px. */
+@media (min-width: 720px) {
+  .compare-5 {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .compare-5 > .compare-card {
+    grid-column: span 2;
+  }
+  .compare-5 > .compare-card:nth-child(4),
+  .compare-5 > .compare-card:nth-child(5) {
+    grid-column: span 3;
+  }
+}
 .compare-card {
   display: flex;
   flex-direction: column;
