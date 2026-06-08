@@ -370,6 +370,47 @@ export function registerDemos(Alpine) {
     })
   );
 
+  // ----- Hook event explorer ---------------------------------------------
+  Alpine.data(
+    'hookEventExplorer',
+    makeExplorer({
+      categories: ['Tool', 'Turn', 'Session', 'Subagent', 'Compaction', 'Permissions', 'Tasks', 'Elicitation', 'Other'],
+      search: ['id', 'desc', 'keywords'],
+      items: [
+        // Tool lifecycle
+        { id: 'PreToolUse',         category: 'Tool',         desc: 'Fires before any tool executes. Matcher compares against tool_name. Exit 0 = allow, 1 = block + report, 2 = block and rewake the model with stderr.', keywords: 'before pre tool' },
+        { id: 'PostToolUse',        category: 'Tool',         desc: 'Fires after a tool completes successfully. Receives tool_input + tool_response.',                                                                       keywords: 'after post tool success' },
+        { id: 'PostToolUseFailure', category: 'Tool',         desc: 'Fires when a tool errors. Receives tool_input + error message.',                                                                                       keywords: 'after post tool error' },
+        // Turn lifecycle
+        { id: 'UserPromptSubmit',   category: 'Turn',         desc: 'Fires when the user submits a new prompt. Exit 2 returns stderr as a system message instead of running the prompt.',                                  keywords: 'prompt user input' },
+        { id: 'Stop',               category: 'Turn',         desc: 'Fires when the model finishes a turn cleanly.',                                                                                                        keywords: 'turn end finish' },
+        { id: 'StopFailure',        category: 'Turn',         desc: 'Fires when a turn ends due to error (rate limit, max turns, network).',                                                                                keywords: 'turn end failure error' },
+        { id: 'Notification',       category: 'Turn',         desc: 'Fires for user-facing notifications (e.g., waiting on permission, idle).',                                                                              keywords: 'notify alert' },
+        // Session lifecycle
+        { id: 'SessionStart',       category: 'Session',      desc: 'Fires once when the session starts.',                                                                                                                  keywords: 'init begin' },
+        { id: 'SessionEnd',         category: 'Session',      desc: 'Fires once when the session ends (exit, crash, signal).',                                                                                              keywords: 'shutdown close exit' },
+        // Subagent lifecycle
+        { id: 'SubagentStart',      category: 'Subagent',     desc: 'Fires when a sub-agent is spawned (e.g., coordinator worker, /agents launch).',                                                                         keywords: 'agent spawn worker' },
+        { id: 'SubagentStop',       category: 'Subagent',     desc: 'Fires when a sub-agent completes. Receives the final result payload.',                                                                                  keywords: 'agent stop worker' },
+        // Compaction
+        { id: 'PreCompact',         category: 'Compaction',   desc: 'Fires before context compaction. Exit 2 blocks the compaction.',                                                                                       keywords: 'before compact summary' },
+        { id: 'PostCompact',        category: 'Compaction',   desc: 'Fires after context compaction. Receives the new summary text.',                                                                                       keywords: 'after compact summary' },
+        // Permissions
+        { id: 'PermissionRequest',  category: 'Permissions',  desc: 'Fires when a tool requests permission. Lets you auto-approve or deny via custom logic.',                                                                keywords: 'permission ask prompt' },
+        { id: 'PermissionDenied',   category: 'Permissions',  desc: 'Fires when the user denies a permission request.',                                                                                                     keywords: 'permission deny reject' },
+        // Tasks
+        { id: 'TaskCreated',        category: 'Tasks',        desc: 'Fires when a task is added via TaskCreate or /tasks.',                                                                                                  keywords: 'task new' },
+        { id: 'TaskCompleted',      category: 'Tasks',        desc: 'Fires when a task is marked completed.',                                                                                                                keywords: 'task done finish' },
+        // Elicitation
+        { id: 'Elicitation',        category: 'Elicitation',  desc: 'Fires when Coven Code asks the user a structured question (via AskUserQuestion / MCP elicitation).',                                                    keywords: 'ask question prompt' },
+        { id: 'ElicitationResult',  category: 'Elicitation',  desc: 'Fires when the user responds to an elicitation. Receives the answers.',                                                                                  keywords: 'answer reply' },
+        // Other
+        { id: 'ConfigChange',       category: 'Other',        desc: 'Fires when settings change at runtime (e.g., /config edit, model switch).',                                                                            keywords: 'settings change' },
+        { id: 'WorktreeCreate',     category: 'Other',        desc: 'Fires when a git worktree is created via the WorktreeCreate tool.',                                                                                    keywords: 'git worktree' },
+      ],
+    })
+  );
+
   // ----- Demo 4: Tools grid ----------------------------------------------
   Alpine.data('toolsGrid', () => ({
     expanded: null,

@@ -76,22 +76,60 @@ export function render() {
 
     <h2>Hook events</h2>
 
-    <p>The full event set, organised by phase:</p>
+    <p>Type to filter by event name or behaviour. Use the chips to scope to a lifecycle phase.</p>
 
-    <table>
-      <thead><tr><th>Phase</th><th>Events</th></tr></thead>
-      <tbody>
-        <tr><td>Tool lifecycle</td><td><code>PreToolUse</code>, <code>PostToolUse</code>, <code>PostToolUseFailure</code></td></tr>
-        <tr><td>Turn lifecycle</td><td><code>UserPromptSubmit</code>, <code>Stop</code>, <code>StopFailure</code>, <code>Notification</code></td></tr>
-        <tr><td>Session lifecycle</td><td><code>SessionStart</code>, <code>SessionEnd</code></td></tr>
-        <tr><td>Subagent lifecycle</td><td><code>SubagentStart</code>, <code>SubagentStop</code></td></tr>
-        <tr><td>Compaction</td><td><code>PreCompact</code>, <code>PostCompact</code></td></tr>
-        <tr><td>Permissions</td><td><code>PermissionRequest</code>, <code>PermissionDenied</code></td></tr>
-        <tr><td>Tasks</td><td><code>TaskCreated</code>, <code>TaskCompleted</code></td></tr>
-        <tr><td>Elicitation</td><td><code>Elicitation</code>, <code>ElicitationResult</code></td></tr>
-        <tr><td>Other</td><td><code>ConfigChange</code>, <code>WorktreeCreate</code></td></tr>
-      </tbody>
-    </table>
+    <div class="demo" x-data="hookEventExplorer">
+      <div class="demo-header">
+        <span>hook event explorer · <span x-text="count"></span> / <span x-text="total"></span> shown</span>
+      </div>
+      <div class="demo-body">
+        <div class="explorer-controls">
+          <input
+            type="text"
+            class="explorer-input"
+            placeholder="Search events — try 'tool', 'permission', 'before', 'compact'…"
+            x-model="query"
+            aria-label="Search hook events"
+          />
+          <span class="explorer-count">
+            <span x-text="count"></span> matches
+          </span>
+        </div>
+        <div class="explorer-chips">
+          <template x-for="cat in categories" :key="cat">
+            <button
+              type="button"
+              class="explorer-chip"
+              :aria-pressed="category === cat"
+              @click="pick(cat)"
+            >
+              <span x-text="cat"></span>
+              <span class="explorer-chip-count" x-text="countIn(cat)"></span>
+            </button>
+          </template>
+          <button
+            type="button"
+            class="explorer-clear"
+            x-show="query || category"
+            @click="clear()"
+          >Clear</button>
+        </div>
+        <div class="explorer-results" x-show="count > 0">
+          <template x-for="item in filtered" :key="item.id">
+            <div class="explorer-item">
+              <div class="explorer-item-head">
+                <span class="explorer-item-id" x-text="item.id"></span>
+                <span class="explorer-item-cat" x-text="item.category"></span>
+              </div>
+              <div class="explorer-item-desc" x-text="item.desc"></div>
+            </div>
+          </template>
+        </div>
+        <div class="explorer-empty" x-show="count === 0">
+          No events match. <a href="#" @click.prevent="clear()" style="color: var(--color-accent);">Clear filters</a>
+        </div>
+      </div>
+    </div>
 
     <p>Most events use exit code <code>0</code> for success, <code>1</code> for failure (block + report), and <code>2</code> for "rewake the model with this stderr as feedback."</p>
 
