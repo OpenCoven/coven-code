@@ -249,10 +249,10 @@ Or check the [Coven documentation](https://opencoven.ai/docs) for installation i
 
 ## Familiar cards in the TUI
 
-Every familiar — built-in or user-defined — renders as a **static themed card** in three places:
+Every saved familiar from `~/.coven/familiars.toml` renders as a **static themed card** in three places:
 
 1. The **welcome panel** (top-left of the home screen): glyph, name, access tier dot, and on wider terminals the role and an accent rule.
-2. The **F2 switcher popup**: one row per familiar, each painted in that familiar's accent palette with a coloured tier dot.
+2. The **F2 switcher popup**: one row per saved familiar, each painted in that familiar's accent palette with a coloured tier dot.
 3. The **`/agents` detail view**: the card appears above the persona preview when you select a familiar-sourced agent.
 
 The glyph itself does **not** animate. The only motion is a quarter-block eye spinner that kicks in when the assistant has gone quiet for ~3 seconds, so you still get a "thinking" signal without a walking mascot pulling attention from the work area.
@@ -297,13 +297,21 @@ Or run:
 coven-code config set familiar nova
 ```
 
-You can also press **F2** at any time to open the switcher popup and pick a familiar interactively.
+When `~/.coven/familiars.toml` contains saved familiars, you can also press
+**F2** to open the switcher popup and pick a familiar interactively.
+The welcome panel and footer only show a familiar when the selected id exists
+in `~/.coven/familiars.toml`; stale or reset familiar settings render as
+`Familiar: none`.
 
 To erase custom familiars and reset the agent roster, open `/agents` and choose
 **Reset familiars and agents**, or run `coven-code agents reset`. This removes
 `~/.coven/familiars.toml`, custom agent markdown files, and saved
-agent/familiar settings. The F2 familiar switcher stays empty until a saved
-familiar roster exists again.
+agent/familiar settings. After reset the welcome panel renders
+`Familiar: none`, the footer shows no familiar label, and the F2 familiar
+switcher does not open until a saved familiar roster exists again. The
+`/familiar` command only lists and selects familiars from
+`~/.coven/familiars.toml`; stale settings or built-in names are ignored when
+the roster file is absent.
 
 ---
 

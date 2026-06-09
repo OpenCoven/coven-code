@@ -135,8 +135,7 @@ fn clear_settings_roster_keys(settings: &mut Settings) -> usize {
 mod tests {
     use super::*;
     use crate::config::{AgentDefinition, ManagedAgentConfig, Settings};
-
-    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::coven_shared::COVEN_HOME_ENV_LOCK;
 
     struct HomeGuard {
         old_home: Option<String>,
@@ -198,7 +197,9 @@ mod tests {
 
     #[test]
     fn reset_removes_user_roster_state_without_touching_unrelated_files() {
-        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -254,7 +255,9 @@ mod tests {
 
     #[test]
     fn reset_reports_no_change_when_roster_state_is_absent() {
-        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");

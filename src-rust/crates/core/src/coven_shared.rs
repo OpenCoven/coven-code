@@ -568,6 +568,87 @@ role = "Code"
     }
 
     #[test]
+    fn merge_keeps_plan_reserved_when_config_agent_collides() {
+        let _g = with_coven_home(|_| {});
+        let mut config_agents = std::collections::HashMap::new();
+        config_agents.insert(
+            "plan".to_string(),
+            crate::config::AgentDefinition {
+                description: Some("Project-controlled plan".to_string()),
+                model: None,
+                temperature: None,
+                prompt: Some("shadow plan".to_string()),
+                access: "full".to_string(),
+                visible: true,
+                max_turns: None,
+                color: None,
+            },
+        );
+
+        let merged = default_agents_with_familiars_and_config(&config_agents);
+        let plan = merged.get("plan").expect("plan agent should be present");
+        assert_eq!(plan.access, "read-only");
+        let prompt = plan.prompt.as_deref().unwrap_or_default();
+        assert!(prompt.contains("You are the plan agent"));
+        assert!(!prompt.contains("shadow plan"));
+    }
+
+    #[test]
+    fn merge_keeps_plan_reserved_when_familiar_collides() {
+        let _g = with_coven_home(|home| {
+            fs::write(
+                home.join("familiars.toml"),
+                r#"
+[[familiar]]
+id = "plan"
+display_name = "Plan Shadow"
+role = "unsafe"
+description = "unsafe familiar details"
+access = "full"
+"#,
+            )
+            .unwrap();
+        });
+
+        let config_agents = std::collections::HashMap::new();
+        let merged = default_agents_with_familiars_and_config(&config_agents);
+        let plan = merged.get("plan").expect("plan agent should be present");
+        assert_eq!(plan.access, "read-only");
+        let prompt = plan.prompt.as_deref().unwrap_or_default();
+        assert!(prompt.contains("You are the plan agent"));
+        assert!(!prompt.contains("Plan Shadow"));
+        assert!(!prompt.contains("unsafe"));
+        assert_ne!(
+            plan.description.as_deref(),
+            Some("✨ unsafe — unsafe familiar details")
+        );
+    }
+
+    #[test]
+    fn merge_includes_saved_non_reserved_familiars() {
+        let _g = with_coven_home(|home| {
+            fs::write(
+                home.join("familiars.toml"),
+                r#"
+[[familiar]]
+id = "sage"
+display_name = "Sage"
+role = "Research"
+access = "read-only"
+"#,
+            )
+            .unwrap();
+        });
+
+        let config_agents = std::collections::HashMap::new();
+        let merged = default_agents_with_familiars_and_config(&config_agents);
+        let sage = merged.get("sage").expect("sage familiar should be present");
+        assert_eq!(sage.access, "read-only");
+        let prompt = sage.prompt.as_deref().unwrap_or_default();
+        assert!(prompt.contains("Research"));
+    }
+
+    #[test]
     fn canonicalize_access_tier_accepts_canonical_lowercase() {
         assert_eq!(canonicalize_access_tier("full"), Some("full"));
         assert_eq!(canonicalize_access_tier("read-only"), Some("read-only"));

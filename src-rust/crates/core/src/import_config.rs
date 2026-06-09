@@ -624,6 +624,9 @@ mod tests {
 
     #[test]
     fn build_import_preview_maps_settings_and_doc() {
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let claude_dir = home.join(".claude");

@@ -1425,9 +1425,8 @@ pub fn find_named_command(name: &str) -> Option<&'static dyn NamedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::CommandEnvGuard;
     use claurst_core::cost::CostTracker;
-
-    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_ctx() -> CommandContext {
         CommandContext {
@@ -1447,37 +1446,6 @@ mod tests {
         CommandContext {
             working_dir,
             ..make_ctx()
-        }
-    }
-
-    struct EnvGuard {
-        old_home: Option<String>,
-        old_coven_home: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(home: &std::path::Path, coven_home: &std::path::Path) -> Self {
-            let old_home = std::env::var("HOME").ok();
-            let old_coven_home = std::env::var("COVEN_HOME").ok();
-            std::env::set_var("HOME", home);
-            std::env::set_var("COVEN_HOME", coven_home);
-            Self {
-                old_home,
-                old_coven_home,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_coven_home {
-                Some(value) => std::env::set_var("COVEN_HOME", value),
-                None => std::env::remove_var("COVEN_HOME"),
-            }
         }
     }
 
@@ -1539,7 +1507,6 @@ mod tests {
 
     #[test]
     fn test_agents_reset_removes_saved_roster_state() {
-        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -1549,7 +1516,7 @@ mod tests {
         std::fs::create_dir_all(&global_agents).expect("global agents dir");
         std::fs::create_dir_all(&project_agents).expect("project agents dir");
         std::fs::create_dir_all(&coven_home).expect("coven home");
-        let _guard = EnvGuard::set(&home, &coven_home);
+        let _guard = CommandEnvGuard::set(&home, &coven_home, None);
 
         let global_agent = global_agents.join("global.md");
         let project_agent = project_agents.join("project.md");
@@ -1558,8 +1525,10 @@ mod tests {
         std::fs::write(&project_agent, "project").expect("project agent");
         std::fs::write(&familiar_roster, "[[familiar]]\nid = \"nova\"\n").expect("familiar roster");
 
-        let mut settings = claurst_core::Settings::default();
-        settings.familiar = Some("nova".to_string());
+        let settings = claurst_core::Settings {
+            familiar: Some("nova".to_string()),
+            ..Default::default()
+        };
         settings.save_sync().expect("settings save");
 
         let cmd = AgentsCommand;

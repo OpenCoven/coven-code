@@ -303,6 +303,68 @@ fn voice_recorder_from_env_and_settings(
     Some(recorder)
 }
 
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct EnvGuard {
+        old_home: Option<String>,
+        old_coven_home: Option<String>,
+        old_user: Option<String>,
+        old_username: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        pub(crate) fn set(home: &Path, coven_home: &Path) -> Self {
+            Self::set_with_user(home, coven_home, None)
+        }
+
+        pub(crate) fn set_with_user(home: &Path, coven_home: &Path, user: Option<&str>) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            let guard = Self {
+                old_home: std::env::var("HOME").ok(),
+                old_coven_home: std::env::var("COVEN_HOME").ok(),
+                old_user: std::env::var("USER").ok(),
+                old_username: std::env::var("USERNAME").ok(),
+                _lock: lock,
+            };
+            std::env::set_var("HOME", PathBuf::from(home));
+            std::env::set_var("COVEN_HOME", PathBuf::from(coven_home));
+            match user {
+                Some(value) => std::env::set_var("USER", value),
+                None => std::env::remove_var("USER"),
+            }
+            std::env::remove_var("USERNAME");
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_coven_home {
+                Some(value) => std::env::set_var("COVEN_HOME", value),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match &self.old_user {
+                Some(value) => std::env::set_var("USER", value),
+                None => std::env::remove_var("USER"),
+            }
+            match &self.old_username {
+                Some(value) => std::env::set_var("USERNAME", value),
+                None => std::env::remove_var("USERNAME"),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider connection helpers
 // ---------------------------------------------------------------------------
@@ -2288,11 +2350,8 @@ impl App {
         self.context_used_tokens = 0;
     }
 
-    /// Update the Rune pose for this frame — handles temporary poses, random blinks,
-    /// Infer a familiar from the system username.
-    /// Checks the Coven daemon's familiars.toml for an id or display_name
-    /// matching the current OS username. Falls back to None so the caller
-    /// can apply its own default.
+    /// Infer a familiar from the system username using the saved Coven roster.
+    /// Returns None when no saved familiar id or display_name matches.
     pub fn infer_familiar_from_env() -> Option<String> {
         use claurst_core::coven_shared;
         let user = std::env::var("USER")
@@ -2300,8 +2359,6 @@ impl App {
             .ok()?;
         let user_lc = user.to_lowercase();
 
-        // First: check if any configured familiar id or display_name
-        // matches (or contains) the system username.
         if let Some(familiars) = coven_shared::load_familiars() {
             for fam in &familiars {
                 if user_lc.contains(&fam.id.to_lowercase()) {
@@ -2312,17 +2369,6 @@ impl App {
                         return Some(fam.id.clone());
                     }
                 }
-            }
-        }
-
-        // Second: if the username itself matches a built-in glyph id,
-        // use it — this works even without the daemon installed.
-        // Built-in glyph ids are the ones that rustle.rs has pixel art for;
-        // unknown ids fall back to the kitty default so any value is safe.
-        let builtin_ids = ["kitty", "nova", "cody", "charm", "sage", "astra", "echo"];
-        for id in &builtin_ids {
-            if user_lc.contains(id) {
-                return Some(id.to_string());
             }
         }
 
@@ -4833,6 +4879,9 @@ impl App {
             KeyCode::F(2) => {
                 if self.familiar_switcher_open {
                     self.familiar_switcher_open = false;
+                } else if self.familiar_switcher_list.is_empty() {
+                    self.status_message =
+                        Some("No saved familiars. Add ~/.coven/familiars.toml first.".to_string());
                 } else {
                     self.familiar_switcher_open = true;
                     let current = self.config.familiar.as_deref().unwrap_or("kitty");
@@ -5277,8 +5326,12 @@ impl App {
                 self.agent_mode_changed = true;
                 self.accent_color = accent_for_mode(None);
                 self.plan_mode = false;
+                if self.config.permission_mode == claurst_core::config::PermissionMode::Plan {
+                    self.config.permission_mode = claurst_core::config::PermissionMode::Default;
+                }
                 self.managed_agents_active = false;
-                self.familiar_switcher_list = Self::default_familiar_switcher_list();
+                self.familiar_switcher_open = false;
+                self.familiar_switcher_list.clear();
                 self.familiar_switcher_idx = 0;
                 self.status_message = Some(summary.message());
             }
@@ -7443,41 +7496,9 @@ fn windows_system_root() -> std::ffi::OsString {
 
 #[cfg(test)]
 mod tests {
+    use super::test_env::EnvGuard;
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-
-    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct EnvGuard {
-        old_home: Option<String>,
-        old_coven_home: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(home: &std::path::Path, coven_home: &std::path::Path) -> Self {
-            let old_home = std::env::var("HOME").ok();
-            let old_coven_home = std::env::var("COVEN_HOME").ok();
-            std::env::set_var("HOME", home);
-            std::env::set_var("COVEN_HOME", coven_home);
-            Self {
-                old_home,
-                old_coven_home,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_coven_home {
-                Some(value) => std::env::set_var("COVEN_HOME", value),
-                None => std::env::remove_var("COVEN_HOME"),
-            }
-        }
-    }
 
     fn make_app() -> App {
         let config = Config::default();
@@ -7494,9 +7515,156 @@ mod tests {
         }
     }
 
+    fn test_agent_definition() -> claurst_core::AgentDefinition {
+        claurst_core::AgentDefinition {
+            description: Some("custom".to_string()),
+            prompt: Some("custom prompt".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn test_managed_agents() -> claurst_core::ManagedAgentConfig {
+        claurst_core::ManagedAgentConfig {
+            enabled: true,
+            manager_model: "anthropic/claude-opus-4-6".to_string(),
+            executor_model: "anthropic/claude-sonnet-4-6".to_string(),
+            executor_max_turns: 10,
+            max_concurrent_executors: 2,
+            budget_split: Default::default(),
+            total_budget_usd: Some(5.0),
+            preset_name: Some("test".to_string()),
+            executor_isolation: true,
+        }
+    }
+
     #[test]
-    fn reset_agents_and_familiars_leaves_familiar_switcher_empty_without_roster() {
-        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    fn reset_agents_and_familiars_clears_runtime_roster_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"nova\"\n",
+        )
+        .expect("familiar roster");
+        let guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.agents_menu.project_root = Some(project);
+        app.config
+            .agents
+            .insert("custom".to_string(), test_agent_definition());
+        app.config.familiar = Some("nova".to_string());
+        app.config.managed_agents = Some(test_managed_agents());
+        app.config.permission_mode = claurst_core::config::PermissionMode::Plan;
+        app.agent_mode = Some("nova".to_string());
+        app.agent_mode_changed = false;
+        app.accent_color = ACCENT_PLAN;
+        app.plan_mode = true;
+        app.managed_agents_active = true;
+        app.familiar_switcher_open = true;
+        app.familiar_switcher_list = vec!["nova".to_string(), "kitty".to_string()];
+        app.familiar_switcher_idx = 1;
+
+        app.reset_agents_and_familiars();
+
+        assert!(app.config.familiar.is_none());
+        assert!(app.config.agents.is_empty());
+        assert!(app.config.managed_agents.is_none());
+        assert_eq!(
+            app.config.permission_mode,
+            claurst_core::config::PermissionMode::Default
+        );
+        assert!(app.agent_mode.is_none());
+        assert!(app.agent_mode_changed);
+        assert_eq!(app.accent_color, ACCENT_BUILD);
+        assert!(!app.plan_mode);
+        assert!(!app.managed_agents_active);
+        assert!(!app.familiar_switcher_open);
+        assert!(app.familiar_switcher_list.is_empty());
+        assert_eq!(app.familiar_switcher_idx, 0);
+        assert!(!coven_home.join("familiars.toml").exists());
+        drop(guard);
+    }
+
+    #[test]
+    fn startup_familiar_switcher_uses_saved_roster_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let list = App::default_familiar_switcher_list();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn app_does_not_infer_builtin_familiar_without_saved_roster() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("sage"));
+
+        let app = make_app();
+
+        assert_eq!(app.config.familiar, None);
+        assert!(app.familiar_switcher_list.is_empty());
+    }
+
+    #[test]
+    fn app_infers_familiar_only_from_saved_roster() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            r#"
+[[familiar]]
+id = "sage"
+display_name = "Sage"
+role = "Research"
+"#,
+        )
+        .expect("familiars file");
+        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("sage"));
+
+        let app = make_app();
+
+        assert_eq!(app.config.familiar.as_deref(), Some("sage"));
+        assert_eq!(app.familiar_switcher_list, vec!["sage".to_string()]);
+    }
+
+    #[test]
+    fn f2_does_not_open_familiar_switcher_without_saved_roster() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.handle_key_event(press_key(KeyCode::F(2), KeyModifiers::NONE));
+
+        assert!(!app.familiar_switcher_open);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No saved familiars. Add ~/.coven/familiars.toml first.")
+        );
+    }
+
+    #[test]
+    fn reset_agents_and_familiars_preserves_non_plan_permission_mode() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -7508,24 +7676,14 @@ mod tests {
 
         let mut app = make_app();
         app.agents_menu.project_root = Some(project);
-        app.familiar_switcher_list = vec!["nova".to_string(), "kitty".to_string()];
+        app.config.permission_mode = claurst_core::config::PermissionMode::AcceptEdits;
 
         app.reset_agents_and_familiars();
 
-        assert!(app.familiar_switcher_list.is_empty());
-    }
-
-    #[test]
-    fn startup_familiar_switcher_uses_saved_roster_only() {
-        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home = temp.path().join("home");
-        let coven_home = temp.path().join("coven");
-        std::fs::create_dir_all(&home).expect("home dir");
-        std::fs::create_dir_all(&coven_home).expect("coven home dir");
-        let _guard = EnvGuard::set(&home, &coven_home);
-
-        assert!(App::default_familiar_switcher_list().is_empty());
+        assert_eq!(
+            app.config.permission_mode,
+            claurst_core::config::PermissionMode::AcceptEdits
+        );
     }
 
     #[test]

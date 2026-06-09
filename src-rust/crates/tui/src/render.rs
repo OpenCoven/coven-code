@@ -1617,10 +1617,18 @@ fn welcome_daemon_label() -> String {
     }
 }
 
-/// Familiar display name with the F2 switcher hint appended.
+/// Familiar display name for the welcome panel.
 fn welcome_familiar_label(app: &App) -> String {
-    let id = app.config.familiar.as_deref().unwrap_or("kitty");
-    format!("Familiar: {id}")
+    visible_familiar(app)
+        .map(|familiar| format!("Familiar: {}", familiar.id))
+        .unwrap_or_else(|| "Familiar: none".to_string())
+}
+
+fn visible_familiar(app: &App) -> Option<claurst_core::coven_shared::CovenFamiliar> {
+    let id = app.config.familiar.as_deref()?;
+    claurst_core::coven_shared::load_familiars()?
+        .into_iter()
+        .find(|familiar| familiar.id == id)
 }
 
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
@@ -1723,9 +1731,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Welcome back!".to_string()
     };
-    let familiar_name = app.config.familiar.as_deref().unwrap_or("kitty");
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
-    let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
     let card_size = familiar_card::pick_size(left_w);
     let loading_frame = match app.rustle_current_pose {
         RustlePose::Loading { frame } => Some(frame),
@@ -1740,10 +1746,14 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     )));
     left_lines.push(Line::from(""));
-    if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
-        left_lines.push(Line::from(Span::raw(seq)));
-    } else {
-        left_lines.extend(familiar_card::render_card(&theme, card_size, loading_frame));
+    if let Some(familiar) = visible_familiar(app) {
+        let familiar_name = familiar.id.as_str();
+        let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
+        if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
+            left_lines.push(Line::from(Span::raw(seq)));
+        } else {
+            left_lines.extend(familiar_card::render_card(&theme, card_size, loading_frame));
+        }
     }
     frame.render_widget(
         Paragraph::new(left_lines).wrap(Wrap { trim: false }),
@@ -1777,7 +1787,6 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     let model = welcome_model_label(app);
     let provider = welcome_provider_label(app);
     let daemon = welcome_daemon_label();
-    let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
     right_lines.push(Line::from(Span::styled(
         format!("Model:    {model}"),
         Style::default().fg(Color::Gray),
@@ -1792,13 +1801,20 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     right_lines.push(Line::from(Span::styled(daemon, daemon_style)));
-    right_lines.push(Line::from(vec![
-        Span::styled(
-            format!("Familiar: {familiar_id} "),
-            Style::default().fg(Color::Gray),
-        ),
-        Span::styled("(F2 to switch)", Style::default().fg(Color::DarkGray)),
-    ]));
+    if let Some(familiar) = visible_familiar(app) {
+        right_lines.push(Line::from(vec![
+            Span::styled(
+                format!("Familiar: {} ", familiar.id),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled("(F2 to switch)", Style::default().fg(Color::DarkGray)),
+        ]));
+    } else {
+        right_lines.push(Line::from(Span::styled(
+            "Familiar: none",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     if let Some(goal) = app.active_goal_badge.as_deref().filter(|s| !s.is_empty()) {
         let truncated = if goal.chars().count() > right_w_usize.saturating_sub(8) {
             let take = right_w_usize.saturating_sub(9).max(8);
@@ -2364,29 +2380,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw("  "));
         }
 
-        // Current familiar emoji + name. Prefer the user's daemon roster
-        // (~/.coven/familiars.toml) so custom familiars get their configured
-        // emoji; fall back to the bundled glyph table for built-in ids when
-        // the daemon doesn't know this one.
-        {
-            let familiar_id = app.config.familiar.as_deref().unwrap_or("kitty");
-            let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
-            let daemon_emoji = daemon_familiars
-                .iter()
-                .find(|f| f.id == familiar_id)
-                .and_then(|f| f.emoji.as_deref());
-            let emoji = daemon_emoji.unwrap_or_else(|| match familiar_id {
-                "nova" => "\u{1f451}",
-                "kitty" => "\u{1f431}",
-                "cody" => "\u{1f4bb}",
-                "charm" => "\u{2728}",
-                "sage" => "\u{1f33f}",
-                "astra" => "\u{1f319}",
-                "echo" => "\u{1f47b}",
-                _ => "\u{2b50}",
-            });
+        // Current familiar emoji + name, only when it still exists in the
+        // user's saved daemon roster. Reset must not leave stale/default
+        // familiars visible in the footer.
+        if let Some(familiar) = visible_familiar(app) {
+            let emoji = familiar.emoji.as_deref().unwrap_or("\u{2b50}");
             spans.push(Span::styled(
-                format!("{} {}  ", emoji, familiar_id),
+                format!("{} {}  ", emoji, familiar.id),
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -3452,6 +3452,7 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod welcome_tests {
     use super::*;
+    use crate::app::test_env::EnvGuard;
 
     fn make_test_app_with_model_and_familiar(
         model: Option<&str>,
@@ -3488,13 +3489,45 @@ mod welcome_tests {
     }
 
     #[test]
-    fn welcome_familiar_label_uses_kitty_by_default() {
+    fn welcome_familiar_label_uses_none_by_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
         let app = make_test_app_with_model_and_familiar(None, None, None, None);
-        assert_eq!(welcome_familiar_label(&app), "Familiar: kitty");
+        assert_eq!(welcome_familiar_label(&app), "Familiar: none");
     }
 
     #[test]
-    fn welcome_familiar_label_reflects_config_override() {
+    fn welcome_familiar_label_hides_stale_config_without_roster() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
+        assert_eq!(welcome_familiar_label(&app), "Familiar: none");
+    }
+
+    #[test]
+    fn welcome_familiar_label_reflects_saved_roster_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"sage\"\nemoji = \"🌿\"\n",
+        )
+        .expect("familiar roster");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
         let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
         assert_eq!(welcome_familiar_label(&app), "Familiar: sage");
     }

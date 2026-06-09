@@ -681,30 +681,39 @@ mod tests {
         assert_eq!(loaded.len(), 0, "tombstoned entry should be excluded");
     }
 
-    #[tokio::test]
-    async fn list_sessions_returns_sorted() {
-        let tmp = tempdir().unwrap();
-        let project_root = tmp.path().join("myproject");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
+    #[test]
+    fn list_sessions_returns_sorted() {
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let tmp = tempdir().unwrap();
+            let project_root = tmp.path().join("myproject");
+            tokio::fs::create_dir_all(&project_root).await.unwrap();
 
-        let tdir = transcript_dir(&project_root);
-        tokio::fs::create_dir_all(&tdir).await.unwrap();
+            let tdir = transcript_dir(&project_root);
+            tokio::fs::create_dir_all(&tdir).await.unwrap();
 
-        for id in ["aaaa", "bbbb"] {
-            let p = tdir.join(format!("{}.jsonl", id));
-            let msg = make_msg(Role::User);
-            let uuid_val = uuid::Uuid::new_v4().to_string();
-            let entry = make_user_entry(msg, &uuid_val, None, id, "/proj");
-            write_transcript_entry(&p, &entry).await.unwrap();
-            // Small sleep to ensure different mtimes.
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+            for id in ["aaaa", "bbbb"] {
+                let p = tdir.join(format!("{}.jsonl", id));
+                let msg = make_msg(Role::User);
+                let uuid_val = uuid::Uuid::new_v4().to_string();
+                let entry = make_user_entry(msg, &uuid_val, None, id, "/proj");
+                write_transcript_entry(&p, &entry).await.unwrap();
+                // Small sleep to ensure different mtimes.
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
 
-        let sessions = list_sessions(&project_root).await.unwrap();
-        assert_eq!(sessions.len(), 2);
-        // Newest first.
-        assert_eq!(sessions[0].session_id, "bbbb");
-        assert_eq!(sessions[1].session_id, "aaaa");
+            let sessions = list_sessions(&project_root).await.unwrap();
+            assert_eq!(sessions.len(), 2);
+            // Newest first.
+            assert_eq!(sessions[0].session_id, "bbbb");
+            assert_eq!(sessions[1].session_id, "aaaa");
+        });
     }
 
     #[test]

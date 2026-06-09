@@ -9370,59 +9370,17 @@ impl SlashCommand for AgentCommand {
 //
 // Usage:
 //   /familiar          — show current familiar + roster
-//   /familiar kitty    — switch to Kitty (persists to settings.json)
-//   /familiar reset    — clear setting (revert to default kitty)
+//   /familiar <id>     — switch to a saved familiar (persists to settings.json)
+//   /familiar reset    — clear setting
 
-const FAMILIAR_ROSTER: &[(&str, &str)] = &[
-    (
-        "kitty",
-        "🐱 Cat familiar — ears, whiskers, square eyes (default)",
-    ),
-    (
-        "nova",
-        "✦  Starry initiator — 4-point star with orbiting sparks",
-    ),
-    (
-        "cody",
-        "🤖 Code familiar  — robot face, bracket [ ] eyes, antenna",
-    ),
-    (
-        "charm",
-        "💜 Social familiar — heart, sparkle dots, speech bubble",
-    ),
-    (
-        "sage",
-        "🧙 Research familiar — wizard hat, star, open spellbook",
-    ),
-    (
-        "astra",
-        "🌙 Navigator familiar — crescent moon, compass star, orbit",
-    ),
-    (
-        "echo",
-        "👻 Memory familiar — round ghost, mirror eyes, echo trail",
-    ),
-];
-
-/// Merge daemon-declared familiars (`~/.coven/familiars.toml`) with the
-/// hardcoded TUI roster. Daemon entries take precedence; hardcoded entries
-/// for names not declared by the daemon remain selectable so the bundled
-/// mascot art keeps working when the daemon isn't installed.
+/// Return daemon-declared familiars from `~/.coven/familiars.toml`.
 fn current_familiar_roster() -> Vec<(String, String)> {
-    let mut seen = std::collections::HashSet::new();
     let mut out: Vec<(String, String)> = Vec::new();
 
     if let Some(daemon) = claurst_core::coven_shared::load_familiars() {
         for f in daemon {
             let desc = format_daemon_familiar(&f);
-            seen.insert(f.id.clone());
             out.push((f.id, desc));
-        }
-    }
-
-    for (name, desc) in FAMILIAR_ROSTER {
-        if !seen.contains(*name) {
-            out.push(((*name).to_string(), (*desc).to_string()));
         }
     }
     out
@@ -9446,30 +9404,35 @@ fn format_daemon_familiar(f: &claurst_core::coven_shared::CovenFamiliar) -> Stri
     parts.join(" ")
 }
 
-/// Infer a familiar from the system username — maps known coven member names
-/// to their canonical familiar. Falls back to None (kitty default).
+fn current_familiar_display<'a>(
+    configured: Option<&'a str>,
+    roster: &'a [(String, String)],
+) -> &'a str {
+    match configured {
+        Some(current) if roster.iter().any(|(name, _)| name == current) => current,
+        _ => "none",
+    }
+}
+
+/// Infer a familiar from the system username using the saved Coven roster.
 fn infer_familiar_from_env() -> Option<String> {
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .ok()?;
     let user_lc = user.to_lowercase();
-    // Coven member → familiar mapping.
-    // Add entries here as the coven grows.
-    let mapping: &[(&str, &str)] = &[
-        ("buns", "nova"),
-        ("valentina", "nova"),
-        ("nova", "nova"),
-        ("kitty", "kitty"),
-        ("cody", "cody"),
-        ("charm", "charm"),
-        ("sage", "sage"),
-        ("astra", "astra"),
-        ("echo", "echo"),
-    ];
-    mapping
-        .iter()
-        .find(|(name, _)| user_lc.contains(name))
-        .map(|(_, fam)| fam.to_string())
+    claurst_core::coven_shared::load_familiars().and_then(|familiars| {
+        familiars.into_iter().find_map(|fam| {
+            if user_lc.contains(&fam.id.to_lowercase()) {
+                return Some(fam.id);
+            }
+            if let Some(display_name) = &fam.display_name {
+                if user_lc.contains(&display_name.to_lowercase()) {
+                    return Some(fam.id);
+                }
+            }
+            None
+        })
+    })
 }
 
 #[async_trait]
@@ -9486,11 +9449,11 @@ impl SlashCommand for FamiliarCommand {
     fn help(&self) -> &str {
         "Usage: /familiar [name|reset|auto]\n\n\
          Without arguments, shows the current familiar and roster.\n\
-         With a name (kitty, nova, cody, charm, sage, astra, echo),\n\
+         With a saved familiar name,\n\
          switches immediately and persists to settings.json.\n\n\
-         /familiar reset  — revert to default (kitty)\n\
+         /familiar reset  — clear the familiar setting\n\
          /familiar auto   — infer from your system username\n\n\
-         Or set \"familiar\": \"nova\" directly in ~/.coven-code/settings.json."
+         Or set \"familiar\" to a saved roster id directly in ~/.coven-code/settings.json."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -9501,7 +9464,7 @@ impl SlashCommand for FamiliarCommand {
 
         if arg.is_empty() {
             // Show current + roster.
-            let current = ctx.config.familiar.as_deref().unwrap_or("kitty");
+            let current = current_familiar_display(ctx.config.familiar.as_deref(), &roster);
             let auto_hint = infer_familiar_from_env()
                 .map(|f| format!(" (auto-detect suggests: {})", f))
                 .unwrap_or_default();
@@ -9527,7 +9490,15 @@ impl SlashCommand for FamiliarCommand {
         let target = if arg == "reset" {
             None
         } else if arg == "auto" {
-            infer_familiar_from_env()
+            match infer_familiar_from_env() {
+                Some(familiar) => Some(familiar),
+                None => {
+                    return CommandResult::Error(
+                        "Could not infer a familiar from USER/USERNAME and the saved roster."
+                            .to_string(),
+                    );
+                }
+            }
         } else if roster.iter().any(|(n, _)| n == &arg) {
             Some(arg.clone())
         } else {
@@ -9559,7 +9530,7 @@ impl SlashCommand for FamiliarCommand {
                     .map(|(_, d)| d.as_str())
                     .unwrap_or("")
             ),
-            None => "Familiar reset to default (kitty).".to_string(),
+            None => "Familiar reset to none.".to_string(),
         };
 
         CommandResult::ConfigChangeMessage(new_config, msg)
@@ -11057,6 +11028,83 @@ pub mod named_commands;
 // ---------------------------------------------------------------------------
 pub mod stats;
 
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct CommandEnvGuard {
+        old_home: Option<String>,
+        old_coven_home: Option<String>,
+        old_user: Option<String>,
+        old_username: Option<String>,
+        coven_home: PathBuf,
+        _tmp: Option<tempfile::TempDir>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl CommandEnvGuard {
+        pub(crate) fn set(home: &Path, coven_home: &Path, user: Option<&str>) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            let guard = Self {
+                old_home: std::env::var("HOME").ok(),
+                old_coven_home: std::env::var("COVEN_HOME").ok(),
+                old_user: std::env::var("USER").ok(),
+                old_username: std::env::var("USERNAME").ok(),
+                coven_home: coven_home.to_path_buf(),
+                _tmp: None,
+                _lock: lock,
+            };
+            std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_HOME", coven_home);
+            match user {
+                Some(value) => std::env::set_var("USER", value),
+                None => std::env::remove_var("USER"),
+            }
+            std::env::remove_var("USERNAME");
+            guard
+        }
+
+        pub(crate) fn with_coven_home(user: Option<&str>) -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let home = tmp.path().join("home");
+            let coven_home = tmp.path().join("coven");
+            std::fs::create_dir_all(&home).expect("home dir");
+            std::fs::create_dir_all(&coven_home).expect("coven home dir");
+            let mut guard = Self::set(&home, &coven_home, user);
+            guard._tmp = Some(tmp);
+            guard
+        }
+
+        pub(crate) fn coven_home(&self) -> &Path {
+            &self.coven_home
+        }
+    }
+
+    impl Drop for CommandEnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_coven_home {
+                Some(value) => std::env::set_var("COVEN_HOME", value),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match &self.old_user {
+                Some(value) => std::env::set_var("USER", value),
+                None => std::env::remove_var("USER"),
+            }
+            match &self.old_username {
+                Some(value) => std::env::set_var("USERNAME", value),
+                None => std::env::remove_var("USERNAME"),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -11064,6 +11112,7 @@ pub mod stats;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::CommandEnvGuard;
     use claurst_core::cost::CostTracker;
 
     fn make_ctx() -> CommandContext {
@@ -11336,6 +11385,44 @@ mod tests {
         let result = cmd.execute("", &mut ctx).await;
         // Should return a Message regardless of registry contents.
         assert!(matches!(result, CommandResult::Message(_)));
+    }
+
+    #[tokio::test]
+    async fn familiar_empty_args_uses_saved_roster_only() {
+        let _guard = CommandEnvGuard::with_coven_home(Some("kitty"));
+        let mut ctx = make_ctx();
+        ctx.config.familiar = Some("kitty".to_string());
+
+        assert!(current_familiar_roster().is_empty());
+
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("", &mut ctx).await;
+
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Current familiar: none"), "{msg}");
+                assert!(!msg.contains("kitty"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn familiar_auto_without_saved_roster_returns_error() {
+        let _guard = CommandEnvGuard::with_coven_home(Some("sage"));
+        let mut ctx = make_ctx();
+        ctx.config.familiar = Some("existing".to_string());
+
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("auto", &mut ctx).await;
+
+        match result {
+            CommandResult::Error(msg) => assert_eq!(
+                msg,
+                "Could not infer a familiar from USER/USERNAME and the saved roster."
+            ),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -11616,37 +11703,19 @@ mod tests {
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
-    // `COVEN_HOME` is process-global, so the two ledger tests must not race.
-    static COVEN_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn coven_calls_ledger_returns_message_when_file_missing() {
-        let _guard = COVEN_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("COVEN_HOME").ok();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("COVEN_HOME", dir.path());
+        let _guard = CommandEnvGuard::with_coven_home(None);
         let msg = coven_read_calls_ledger(20);
         assert!(
             msg.contains("No delegation ledger yet") || msg.contains("Could not"),
             "expected friendly message, got: {msg}"
         );
-        if let Some(v) = prev {
-            std::env::set_var("COVEN_HOME", v);
-        } else {
-            std::env::remove_var("COVEN_HOME");
-        }
     }
 
     #[test]
     fn coven_calls_ledger_renders_recent_entries() {
-        let _guard = COVEN_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("COVEN_HOME").ok();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("COVEN_HOME", dir.path());
+        let guard = CommandEnvGuard::with_coven_home(None);
         let ledger = r#"{
           "version": 1,
           "calls": [
@@ -11656,17 +11725,12 @@ mod tests {
              "request":"second task","status":"running","createdAt":"2026-06-07T00:01:00Z"}
           ]
         }"#;
-        std::fs::write(dir.path().join("cave-coven-calls.json"), ledger).unwrap();
+        std::fs::write(guard.coven_home().join("cave-coven-calls.json"), ledger).unwrap();
         let out = coven_read_calls_ledger(20);
         assert!(out.contains("nova"));
         assert!(out.contains("sage"));
         assert!(out.contains("kitty"));
         assert!(out.contains("running"));
-        if let Some(v) = prev {
-            std::env::set_var("COVEN_HOME", v);
-        } else {
-            std::env::remove_var("COVEN_HOME");
-        }
     }
 
     /// End-to-end integration test for `/coven` against a mock daemon
@@ -11716,14 +11780,10 @@ mod tests {
             })
         }
 
-        let _guard = COVEN_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("COVEN_HOME").ok();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("COVEN_HOME", dir.path());
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let dir = guard.coven_home().to_path_buf();
 
-        let sock_path = dir.path().join("coven.sock");
+        let sock_path = dir.join("coven.sock");
         let coven = find_command("coven").expect("/coven command must be registered");
 
         // ---- /coven send against 409 session_not_live ----
@@ -11811,12 +11871,6 @@ mod tests {
                 other => panic!("expected Message from /coven sessions, got {other:?}"),
             }
             std::fs::remove_file(&sock_path).ok();
-        }
-
-        if let Some(v) = prev {
-            std::env::set_var("COVEN_HOME", v);
-        } else {
-            std::env::remove_var("COVEN_HOME");
         }
     }
 

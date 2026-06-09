@@ -574,7 +574,7 @@ mod tests {
         let mut app = make_app();
         app.config.project_dir = Some(temp.path().to_path_buf());
         assert!(app.intercept_slash_command("agents"));
-        app.agents_menu.selected_row = 1;
+        app.agents_menu.selected_row = 2;
 
         app.handle_key_event(key(KeyCode::Char('d')));
 
@@ -827,7 +827,7 @@ mod tests {
     }
 
     /// Welcome-screen status block snapshot test. Confirms that the
-    /// "Model:", "Provider:", "Daemon:", "Familiar: <id> (F2 to switch)"
+    /// "Model:", "Provider:", "Daemon:", and "Familiar: <id>"
     /// lines all reach the rendered buffer. These are the audit-flagged
     /// first-screen affordances that prove a user can see, in under a
     /// second, what model/provider/familiar they have configured and
@@ -850,14 +850,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("");
-        for needle in [
-            "Status",
-            "Model:",
-            "Provider:",
-            "Daemon:",
-            "Familiar:",
-            "F2",
-        ] {
+        for needle in ["Status", "Model:", "Provider:", "Daemon:", "Familiar:"] {
             assert!(
                 rendered.contains(needle),
                 "welcome status block is missing {needle:?}.\n--- rendered buffer ---\n{rendered}"
