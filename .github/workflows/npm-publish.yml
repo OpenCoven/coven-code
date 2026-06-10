@@ -211,7 +211,7 @@ jobs:
 
           const packageName = process.argv[2];
           const version = process.argv[3];
-          const supportedPackageNames = new Set(['@opencoven/coven-code', 'coven-code']);
+          const supportedPackageNames = new Set(['@opencoven/coven-code']);
 
           if (!supportedPackageNames.has(packageName)) {
             console.error(`::error::Unsupported npm package name: ${packageName}`);
@@ -251,7 +251,10 @@ jobs:
           NODE
           }
 
-          packages=("@opencoven/coven-code" "coven-code")
+          # Only the scoped package is published. The unscoped `coven-code`
+          # mirror has no trusted publisher configured for this repo and no
+          # NPM_TOKEN fallback, so its publish always fails with ENEEDAUTH.
+          packages=("@opencoven/coven-code")
           for package_name in "${packages[@]}"; do
             if npm view "${package_name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${package_name}@${VERSION} is already published; skipping."
