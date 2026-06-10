@@ -1631,6 +1631,47 @@ async fn refresh_provider_runtime_state(
     })
 }
 
+/// Non-destructive sibling of [`refresh_provider_runtime_state`]: rebuild the
+/// Anthropic client and provider registry from the credentials currently on
+/// disk, **without** clearing any stored tokens or settings. Used after an
+/// in-session OAuth login or CLI credential import so the new credential takes
+/// effect immediately instead of requiring a restart.
+async fn reload_anthropic_runtime_state(
+    current_config: &Config,
+) -> anyhow::Result<RefreshedProviderRuntime> {
+    let mut config = current_config.clone();
+    config.api_key = None;
+    config.provider = Some("anthropic".to_string());
+
+    let (api_key, use_bearer_auth) = config
+        .resolve_anthropic_auth_async()
+        .await
+        .unwrap_or((String::new(), false));
+    let client_config = claurst_api::client::ClientConfig {
+        api_key,
+        api_base: config.resolve_anthropic_api_base(),
+        use_bearer_auth,
+        ..Default::default()
+    };
+    let client = Arc::new(
+        claurst_api::AnthropicClient::new(client_config.clone())
+            .context("Failed to rebuild Anthropic client")?,
+    );
+    let provider_registry = Arc::new(claurst_api::ProviderRegistry::from_config(
+        &config,
+        client_config,
+    ));
+    let model_registry = load_cached_model_registry();
+
+    Ok(RefreshedProviderRuntime {
+        config,
+        client,
+        provider_registry,
+        model_registry,
+        auth_store: claurst_core::AuthStore::load(),
+    })
+}
+
 fn normalize_provider_from_model(config: &mut Config) {
     if let Some(model) = config.model.as_deref() {
         if let Some((provider, _)) = model.split_once('/') {
@@ -4018,14 +4059,44 @@ async fn run_interactive(
                         }
                     });
                 }
-                "anthropic" => {
+                "anthropic" | "anthropic-oauth" => {
                     let tx2 = device_auth_tx.clone();
-                    // Anthropic OAuth requires a registered Coven Code application.
+                    // Anthropic subscription OAuth needs a registered Coven Code
+                    // OAuth client id. When configured, run the Claude.ai browser
+                    // flow (Bearer token); otherwise guide the user to the
+                    // alternatives.
+                    let client_id_configured = std::env::var(
+                        claurst_core::oauth::CLIENT_ID_ENV,
+                    )
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
                     tokio::spawn(async move {
-                        let _ = tx2.send(DeviceAuthEvent::Error(
-                            "Anthropic OAuth requires COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID.\n\
-                             Configure a Coven Code OAuth client, or use an API key for now: console.anthropic.com/settings/keys".to_string()
-                        )).await;
+                        if !client_id_configured {
+                            let _ = tx2.send(DeviceAuthEvent::Error(
+                                "Anthropic subscription login needs COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID.\n\
+                                 Configure a Coven Code OAuth client, choose \"Anthropic CLI\" to import an existing\n\
+                                 `claude`/`ant` login, or use an API key: console.anthropic.com/settings/keys".to_string()
+                            )).await;
+                            return;
+                        }
+                        // Claude.ai subscription flow (Bearer token). Tokens are
+                        // persisted to disk by the flow; the TUI activates
+                        // Anthropic and rebuilds the runtime on success.
+                        match oauth_flow::run_oauth_login_flow(true).await {
+                            Ok(result) => {
+                                let _ = tx2
+                                    .send(DeviceAuthEvent::TokenReceived(result.credential))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = tx2
+                                    .send(DeviceAuthEvent::Error(format!(
+                                        "Anthropic OAuth failed: {}",
+                                        e
+                                    )))
+                                    .await;
+                            }
+                        }
                     });
                 }
                 "codex" | "openai-codex" => {
@@ -4103,6 +4174,71 @@ async fn run_interactive(
                 }
                 DeviceAuthEvent::Error(msg) => {
                     app.device_auth_dialog.set_error(msg);
+                }
+            }
+        }
+
+        // ---- Anthropic CLI credential import (from /connect → "Anthropic CLI") ----
+        if std::mem::take(&mut app.pending_anthropic_cli_import) {
+            match claurst_core::anthropic_cli_import::import().await {
+                Ok((source, profile_id)) => {
+                    app.notifications.push(
+                        claurst_tui::NotificationKind::Info,
+                        format!(
+                            "Imported Anthropic login from {} (profile {}).",
+                            source.label(),
+                            profile_id
+                        ),
+                        Some(5),
+                    );
+                    // Rebuild the runtime so the imported credential is live now.
+                    app.pending_provider_refresh = true;
+                }
+                Err(e) => {
+                    app.notifications.push(
+                        claurst_tui::NotificationKind::Error,
+                        format!("Anthropic CLI import failed: {}", e),
+                        None,
+                    );
+                }
+            }
+        }
+
+        // ---- Apply newly-established Anthropic credentials without a restart ----
+        // Set after an in-session OAuth login or CLI import; rebuilds the client
+        // and provider registry from disk (non-destructively).
+        if std::mem::take(&mut app.pending_provider_refresh) {
+            match reload_anthropic_runtime_state(&cmd_ctx.config).await {
+                Ok(refreshed) => {
+                    cmd_ctx.config = refreshed.config.clone();
+                    tool_ctx.config = refreshed.config.clone();
+                    base_query_config.provider_registry = Some(refreshed.provider_registry.clone());
+                    base_query_config.model_registry = Some(refreshed.model_registry.clone());
+                    base_query_config.model = claurst_api::effective_model_for_config(
+                        &cmd_ctx.config,
+                        refreshed.model_registry.as_ref(),
+                    );
+                    client = refreshed.client;
+                    model_registry = refreshed.model_registry;
+                    session.model = claurst_api::effective_model_for_config(
+                        &cmd_ctx.config,
+                        model_registry.as_ref(),
+                    );
+                    session.updated_at = chrono::Utc::now();
+                    app.apply_provider_refresh(
+                        refreshed.config,
+                        Some(refreshed.provider_registry),
+                        refreshed.auth_store,
+                        true,
+                        "Anthropic credentials applied.".to_string(),
+                    );
+                }
+                Err(err) => {
+                    app.notifications.push(
+                        claurst_tui::NotificationKind::Error,
+                        format!("Failed to apply Anthropic credentials: {}", err),
+                        None,
+                    );
                 }
             }
         }
@@ -4484,6 +4620,23 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
             }
         }
 
+        Some("import") => {
+            // Import an existing Anthropic OAuth credential from another
+            // first-party CLI (Claude Code or `ant`) into a Coven Code profile.
+            println!("Importing Anthropic credentials from local CLI...");
+            match claurst_core::anthropic_cli_import::import().await {
+                Ok((source, profile_id)) => {
+                    println!("Imported credentials from {}.", source.label());
+                    println!("  Profile: {}", profile_id);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Import failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Some("logout") => {
             auth_logout().await;
         }
@@ -4530,6 +4683,7 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
     eprintln!("  login [--console] [--label <name>]   Authenticate with a configured Coven Code OAuth client");
+    eprintln!("  import                                Import Anthropic OAuth creds from Claude Code / ant CLI");
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
     eprintln!("  list                                  List all stored Anthropic accounts");

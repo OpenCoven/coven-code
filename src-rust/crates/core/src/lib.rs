@@ -4173,6 +4173,7 @@ pub mod analytics;
 pub mod bash_classifier;
 pub mod codex_oauth;
 pub mod context_collapse;
+pub mod anthropic_cli_import;
 pub mod effort;
 pub mod feature_gates;
 pub mod import_config;

@@ -519,6 +519,20 @@ fn provider_picker_items() -> Vec<SelectItem> {
             badge: None,
         },
         SelectItem {
+            id: "anthropic-oauth".into(),
+            title: "Anthropic (Claude subscription)".into(),
+            description: "(Sign in with Claude.ai — browser login)".into(),
+            category: "Popular".into(),
+            badge: None,
+        },
+        SelectItem {
+            id: "anthropic-cli".into(),
+            title: "Anthropic CLI".into(),
+            description: "(Import login from Claude Code / ant CLI)".into(),
+            category: "Popular".into(),
+            badge: None,
+        },
+        SelectItem {
             id: "custom-openai".into(),
             title: "Custom OpenAI-Compatible".into(),
             description: "Custom URL + API key".into(),
@@ -1436,6 +1450,12 @@ pub struct App {
     pub device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState,
     /// When set, the main loop should spawn the async auth task for this provider.
     pub device_auth_pending: Option<String>,
+    /// When true, the main loop should import Anthropic OAuth credentials from a
+    /// local CLI (Claude Code / `ant`) and, on success, activate Anthropic.
+    pub pending_anthropic_cli_import: bool,
+    /// When true, the main loop should rebuild the provider runtime from disk
+    /// (same as `/refresh`) so newly-established credentials take effect live.
+    pub pending_provider_refresh: bool,
     /// Shared provider registry for dynamic model fetching.
     pub provider_registry: Option<std::sync::Arc<claurst_api::ProviderRegistry>>,
     /// Model registry populated from models.dev — single source of truth for
@@ -1878,6 +1898,8 @@ impl App {
             free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState::new(),
             device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState::new(),
             device_auth_pending: None,
+            pending_anthropic_cli_import: false,
+            pending_provider_refresh: false,
             provider_registry: None,
             model_registry: {
                 let mut reg = claurst_api::ModelRegistry::new();
@@ -3748,6 +3770,21 @@ impl App {
                         let provider_id = self.device_auth_dialog.provider_id.clone();
                         let provider_name = self.device_auth_dialog.provider_name.clone();
                         let token = token.clone();
+                        // Anthropic OAuth persists its tokens to disk itself; the
+                        // returned access token is a Bearer credential, not an API
+                        // key, so don't stash it in the key-based auth store. Just
+                        // activate Anthropic and rebuild the runtime from disk.
+                        if provider_id == "anthropic-oauth" {
+                            self.device_auth_pending = None;
+                            self.device_auth_dialog.close();
+                            self.pending_provider_refresh = true;
+                            self.activate_provider(
+                                "anthropic".into(),
+                                "Anthropic".into(),
+                                "Connected to",
+                            );
+                            return false;
+                        }
                         let credential = if provider_id == "github-copilot" {
                             claurst_core::StoredCredential::OAuthToken {
                                 access: token.clone(),
@@ -4021,10 +4058,24 @@ impl App {
                                 self.free_mode_dialog.open(&existing);
                             }
                             "anthropic" => {
-                                // Anthropic: use API key from console.anthropic.com
-                                // (OAuth requires a registered app which Coven Code doesn't have)
+                                // Anthropic: API key from console.anthropic.com.
                                 self.key_input_dialog
                                     .open(selected.id.clone(), selected.title.clone());
+                            }
+                            "anthropic-oauth" => {
+                                // Anthropic subscription: browser OAuth flow
+                                // (spawned by the main loop, like OpenAI Codex).
+                                self.device_auth_dialog
+                                    .open("anthropic-oauth".into(), selected.title.clone());
+                                self.device_auth_pending = Some("anthropic-oauth".to_string());
+                            }
+                            "anthropic-cli" => {
+                                // Import an existing OAuth login from a local
+                                // Anthropic CLI (Claude Code / ant). Handled by
+                                // the main loop (it's an async disk read).
+                                self.pending_anthropic_cli_import = true;
+                                self.status_message =
+                                    Some("Importing Anthropic credentials from local CLI…".into());
                             }
                             "custom-openai" => {
                                 let current_url = Settings::load_sync().ok().and_then(|settings| {
