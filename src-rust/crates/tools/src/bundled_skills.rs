@@ -327,9 +327,10 @@ $ARGUMENTS
 
 ## Default Models
 
-- Most capable: claude-opus-4-6
-- Balanced:     claude-sonnet-4-6
-- Fast:         claude-haiku-4-5-20251001
+- Most powerful: claude-fable-5
+- Most capable:  claude-opus-4-8
+- Balanced:      claude-sonnet-4-6
+- Fast:          claude-haiku-4-5-20251001
 
 ## SDK Quickstart
 

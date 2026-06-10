@@ -85,6 +85,8 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
     <table>
       <thead><tr><th>Model ID</th><th>Context</th><th>Max Output</th><th>Input ($/1M)</th><th>Output ($/1M)</th></tr></thead>
       <tbody>
+        <tr><td><code>claude-fable-5</code></td><td>1,000,000</td><td>128,000</td><td>$10.00</td><td>$50.00</td></tr>
+        <tr><td><code>claude-opus-4-8</code></td><td>1,000,000</td><td>128,000</td><td>$5.00</td><td>$25.00</td></tr>
         <tr><td><code>claude-opus-4-6</code></td><td>200,000</td><td>32,000</td><td>$15.00</td><td>$75.00</td></tr>
         <tr><td><code>claude-sonnet-4-6</code></td><td>200,000</td><td>16,000</td><td>$3.00</td><td>$15.00</td></tr>
         <tr><td><code>claude-haiku-4-5-20251001</code></td><td>200,000</td><td>8,096</td><td>$0.80</td><td>$4.00</td></tr>

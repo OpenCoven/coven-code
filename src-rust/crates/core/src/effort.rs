@@ -8,6 +8,28 @@
 // exactly because they are passed to the Anthropic API.
 
 // ---------------------------------------------------------------------------
+// Adaptive-thinking model detection
+// ---------------------------------------------------------------------------
+
+/// Returns `true` for Anthropic models that use *adaptive* extended thinking
+/// and have removed the manual `budget_tokens` and sampling parameters
+/// (`temperature` / `top_p` / `top_k`).
+///
+/// On these models (Claude Opus 4.7, Opus 4.8, and Fable 5) sending
+/// `thinking: {type: "enabled", budget_tokens: N}` or a `temperature` returns
+/// a 400 error. Callers must instead send `thinking: {type: "adaptive"}` and
+/// control reasoning depth with the `effort` parameter. See the Anthropic
+/// model-migration guide for the full breaking-change list.
+pub fn model_uses_adaptive_thinking(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("fable")
+        || m.contains("claude-opus-4-7")
+        || m.contains("opus-4-7")
+        || m.contains("claude-opus-4-8")
+        || m.contains("opus-4-8")
+}
+
+// ---------------------------------------------------------------------------
 // EffortLevel enum
 // ---------------------------------------------------------------------------
 
@@ -23,7 +45,7 @@ pub enum EffortLevel {
     Medium,
     /// Comprehensive implementation with extensive testing and documentation.
     High,
-    /// Maximum capability with deepest reasoning (Opus 4.6 only).
+    /// Maximum capability with deepest reasoning (Opus-tier and Fable models).
     Max,
 }
 
@@ -184,6 +206,19 @@ mod tests {
         assert_eq!(EffortLevel::Medium.glyph(), "◐");
         assert_eq!(EffortLevel::High.glyph(), "●");
         assert_eq!(EffortLevel::Max.glyph(), "◉");
+    }
+
+    #[test]
+    fn adaptive_thinking_models_detected() {
+        // Models that removed budget_tokens / sampling params.
+        assert!(model_uses_adaptive_thinking("claude-opus-4-8"));
+        assert!(model_uses_adaptive_thinking("claude-opus-4-7"));
+        assert!(model_uses_adaptive_thinking("claude-fable-5"));
+        assert!(model_uses_adaptive_thinking("anthropic/claude-opus-4-8"));
+        // Models that still accept manual budget_tokens.
+        assert!(!model_uses_adaptive_thinking("claude-opus-4-6"));
+        assert!(!model_uses_adaptive_thinking("claude-sonnet-4-6"));
+        assert!(!model_uses_adaptive_thinking("claude-haiku-4-5"));
     }
 
     #[test]

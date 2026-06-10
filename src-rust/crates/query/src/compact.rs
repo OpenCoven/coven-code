@@ -490,6 +490,7 @@ pub fn context_window_for_model(model: &str) -> u64 {
     if model.contains("opus-4")
         || model.contains("sonnet-4")
         || model.contains("haiku-4")
+        || model.contains("fable")
         || model.contains("claude-3-5")
         || model.contains("claude-3.5")
     {

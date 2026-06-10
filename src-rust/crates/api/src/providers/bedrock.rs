@@ -294,10 +294,12 @@ impl BedrockProvider {
         }
 
         if let Some(thinking) = &request.thinking {
-            body["reasoningConfig"] = json!({
-                "type": "enabled",
-                "budgetTokens": thinking.budget_tokens,
-            });
+            if let Some(budget) = thinking.budget_tokens {
+                body["reasoningConfig"] = json!({
+                    "type": "enabled",
+                    "budgetTokens": budget,
+                });
+            }
         }
 
         merge_bedrock_options(&mut body, &request.provider_options);
