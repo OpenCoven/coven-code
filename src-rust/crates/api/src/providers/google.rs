@@ -453,7 +453,7 @@ impl GoogleProvider {
             let budget = request
                 .thinking
                 .as_ref()
-                .map(|t| t.budget_tokens)
+                .and_then(|t| t.budget_tokens)
                 .unwrap_or(8192);
             gen_config.insert(
                 "thinkingConfig".to_string(),

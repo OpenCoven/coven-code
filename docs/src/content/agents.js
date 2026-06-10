@@ -87,7 +87,7 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
   "agents": {
     "review": {
       "description": "Senior code reviewer focused on correctness and security",
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-4-8",
       "temperature": 0.3,
       "access": "read-only",
       "max_turns": 30,

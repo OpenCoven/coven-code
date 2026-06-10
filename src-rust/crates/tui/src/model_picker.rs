@@ -103,11 +103,12 @@ pub fn model_supports_effort(id: &str) -> bool {
     id.starts_with("claude-3-7")
         || id.starts_with("claude-opus-4")
         || id.starts_with("claude-sonnet-4")
+        || id.starts_with("claude-fable")
 }
 
 /// Returns `true` for models that support the maximum effort tier.
 pub fn model_supports_max_effort(id: &str) -> bool {
-    id.starts_with("claude-opus-4")
+    id.starts_with("claude-opus-4") || id.starts_with("claude-fable")
 }
 
 /// Returns a short description string based on the model family inferred from
@@ -666,14 +667,30 @@ impl ModelPickerState {
         }
     }
 
-    /// Hardcoded list of Claude models available as of 2025.
+    /// Hardcoded list of Claude models available as of 2026.
+    ///
+    /// Used as a fallback when the live `GET /v1/models` lookup fails; the live
+    /// list is preferred at runtime and includes the newest models
+    /// automatically.
     pub fn default_models() -> Vec<ModelEntry> {
         vec![
             ModelEntry {
+                id: "claude-fable-5".to_string(),
+                display_name: "Claude Fable 5".to_string(),
+                description: "Most powerful model — deepest reasoning, 1M context".to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-opus-4-8".to_string(),
+                display_name: "Claude Opus 4.8".to_string(),
+                description: "Most capable Opus — long-horizon agentic work and analysis"
+                    .to_string(),
+                is_current: false,
+            },
+            ModelEntry {
                 id: "claude-opus-4-6".to_string(),
                 display_name: "Claude Opus 4.6".to_string(),
-                description: "Most capable model — best for complex reasoning and analysis"
-                    .to_string(),
+                description: "Previous Opus generation — strong complex reasoning".to_string(),
                 is_current: false,
             },
             ModelEntry {

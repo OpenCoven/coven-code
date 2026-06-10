@@ -22,7 +22,7 @@ use crate::provider_types::{
     StreamEvent, SystemPromptStyle,
 };
 use crate::streaming::{AnthropicStreamEvent, ContentDelta, NullStreamHandler};
-use crate::types::{ApiMessage, ApiToolDefinition, CreateMessageRequest};
+use crate::types::{ApiMessage, ApiToolDefinition, CreateMessageRequest, ThinkingConfig};
 
 use super::message_normalization::normalize_anthropic_messages;
 
@@ -86,20 +86,30 @@ impl AnthropicProvider {
         if let Some(tools) = api_tools {
             builder = builder.tools(tools);
         }
-        if let Some(t) = request.temperature {
-            builder = builder.temperature(t as f32);
-        }
-        if let Some(p) = request.top_p {
-            builder = builder.top_p(p as f32);
-        }
-        if let Some(k) = request.top_k {
-            builder = builder.top_k(k);
-        }
         if !request.stop_sequences.is_empty() {
             builder = builder.stop_sequences(request.stop_sequences.clone());
         }
-        if let Some(tc) = request.thinking.clone() {
-            builder = builder.thinking(tc);
+
+        // Opus 4.7+, Opus 4.8, and Fable 5 reject sampling params and manual
+        // `budget_tokens` with a 400. Send adaptive thinking instead and drop
+        // temperature / top_p / top_k.
+        if claurst_core::effort::model_uses_adaptive_thinking(&request.model) {
+            if request.thinking.is_some() {
+                builder = builder.thinking(ThinkingConfig::adaptive());
+            }
+        } else {
+            if let Some(t) = request.temperature {
+                builder = builder.temperature(t as f32);
+            }
+            if let Some(p) = request.top_p {
+                builder = builder.top_p(p as f32);
+            }
+            if let Some(k) = request.top_k {
+                builder = builder.top_k(k);
+            }
+            if let Some(tc) = request.thinking.clone() {
+                builder = builder.thinking(tc);
+            }
         }
 
         builder.build()
@@ -341,6 +351,20 @@ impl LlmProvider for AnthropicProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let anthropic_id = ProviderId::new(ProviderId::ANTHROPIC);
         Ok(vec![
+            ModelInfo {
+                id: ModelId::new("claude-fable-5"),
+                provider_id: anthropic_id.clone(),
+                name: "Claude Fable 5".to_string(),
+                context_window: 1_000_000,
+                max_output_tokens: 128_000,
+            },
+            ModelInfo {
+                id: ModelId::new("claude-opus-4-8"),
+                provider_id: anthropic_id.clone(),
+                name: "Claude Opus 4.8".to_string(),
+                context_window: 1_000_000,
+                max_output_tokens: 128_000,
+            },
             ModelInfo {
                 id: ModelId::new("claude-opus-4-6"),
                 provider_id: anthropic_id.clone(),

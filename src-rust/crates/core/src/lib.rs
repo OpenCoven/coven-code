@@ -848,8 +848,8 @@ pub mod config {
             ManagedAgentPreset {
                 name: "anthropic-tiered",
                 label: "Anthropic Tiered",
-                description: "Opus 4.6 manages, Sonnet 4.6 executes (best quality)",
-                manager_model: "anthropic/claude-opus-4-6",
+                description: "Opus 4.8 manages, Sonnet 4.6 executes (best quality)",
+                manager_model: "anthropic/claude-opus-4-8",
                 executor_model: "anthropic/claude-sonnet-4-6",
                 executor_max_turns: 10,
                 max_concurrent_executors: 4,
@@ -876,7 +876,7 @@ pub mod config {
                 name: "cross-opus-flash",
                 label: "Cross: Opus + Flash",
                 description: "Anthropic Opus manages, Google Flash executes (cheapest executors)",
-                manager_model: "anthropic/claude-opus-4-6",
+                manager_model: "anthropic/claude-opus-4-8",
                 executor_model: "google/gemini-2.5-flash",
                 executor_max_turns: 10,
                 max_concurrent_executors: 6,
@@ -2078,10 +2078,11 @@ pub mod constants {
     pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
     // Models
-    pub const DEFAULT_MODEL: &str = "claude-opus-4-6";
+    pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
     pub const SONNET_MODEL: &str = "claude-sonnet-4-6";
     pub const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
-    pub const OPUS_MODEL: &str = "claude-opus-4-6";
+    pub const OPUS_MODEL: &str = "claude-opus-4-8";
+    pub const FABLE_MODEL: &str = "claude-fable-5";
 
     // Token limits
     pub const DEFAULT_MAX_TOKENS: u32 = 32_000;

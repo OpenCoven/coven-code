@@ -133,20 +133,57 @@ pub mod types {
         pub stream: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub thinking: Option<ThinkingConfig>,
+        /// Output configuration — carries the `effort` control on models that
+        /// use adaptive thinking (Opus 4.7+, Opus 4.8, Fable 5).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub output_config: Option<OutputConfig>,
+    }
+
+    /// `output_config` request field. Currently only carries `effort`, which
+    /// replaces `budget_tokens` as the reasoning-depth control on models with
+    /// adaptive thinking.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct OutputConfig {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub effort: Option<String>,
+    }
+
+    impl OutputConfig {
+        /// Build an `output_config` with the given effort level
+        /// (`"low" | "medium" | "high" | "max"`).
+        pub fn with_effort(effort: impl Into<String>) -> Self {
+            Self {
+                effort: Some(effort.into()),
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ThinkingConfig {
         #[serde(rename = "type")]
         pub thinking_type: String,
-        pub budget_tokens: u32,
+        /// Manual extended-thinking budget. Omitted for adaptive thinking,
+        /// which is required on Claude Opus 4.7+, Opus 4.8, and Fable 5
+        /// (those models reject `budget_tokens` with a 400).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub budget_tokens: Option<u32>,
     }
 
     impl ThinkingConfig {
         pub fn enabled(budget: u32) -> Self {
             Self {
                 thinking_type: "enabled".to_string(),
-                budget_tokens: budget,
+                budget_tokens: Some(budget),
+            }
+        }
+
+        /// Adaptive thinking — the model decides when and how much to think.
+        /// Reasoning depth is controlled via the `effort` parameter instead of
+        /// a fixed `budget_tokens`. Required on Opus 4.7+, Opus 4.8, Fable 5.
+        pub fn adaptive() -> Self {
+            Self {
+                thinking_type: "adaptive".to_string(),
+                budget_tokens: None,
             }
         }
     }
@@ -459,6 +496,25 @@ pub mod client {
             self.config.use_bearer_auth
         }
 
+        /// Compute the `anthropic-beta` header value for an outbound request.
+        ///
+        /// On the subscription-OAuth (Bearer) path the `oauth-2025-04-20`
+        /// flag is required by `/v1/messages`; it is appended to the
+        /// configured beta features (unless already present).
+        pub(crate) fn anthropic_beta_header(&self) -> String {
+            const OAUTH_BETA: &str = "oauth-2025-04-20";
+            let base = &self.config.beta_features;
+            if self.config.use_bearer_auth && !base.contains(OAUTH_BETA) {
+                if base.is_empty() {
+                    OAUTH_BETA.to_string()
+                } else {
+                    format!("{},{}", OAUTH_BETA, base)
+                }
+            } else {
+                base.clone()
+            }
+        }
+
         /// Build a new client.  Panics if `config.api_key` is empty.
         pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
             // Allow empty key at construction — validation is deferred to
@@ -752,7 +808,10 @@ pub mod client {
                 // Use Bearer auth when explicitly configured; otherwise use x-api-key.
                 let use_oauth = self.config.use_bearer_auth;
 
-                let anthropic_beta = self.config.beta_features.clone();
+                // Subscription OAuth (Bearer) requests to /v1/messages require the
+                // `oauth-2025-04-20` beta flag; without it the API rejects the
+                // request. Append it only on the Bearer path.
+                let anthropic_beta = self.anthropic_beta_header();
 
                 let mut req = self
                     .http
@@ -999,6 +1058,7 @@ impl CreateMessageRequest {
             top_k: None,
             stop_sequences: None,
             thinking: None,
+            output_config: None,
         }
     }
 }
@@ -1014,6 +1074,7 @@ pub struct CreateMessageRequestBuilder {
     top_k: Option<u32>,
     stop_sequences: Option<Vec<String>>,
     thinking: Option<ThinkingConfig>,
+    output_config: Option<OutputConfig>,
 }
 
 impl CreateMessageRequestBuilder {
@@ -1067,6 +1128,14 @@ impl CreateMessageRequestBuilder {
         self
     }
 
+    /// Set the `effort` level (`"low" | "medium" | "high" | "max"`), sent via
+    /// `output_config.effort`. Used in place of `budget_tokens` on models with
+    /// adaptive thinking (Opus 4.7+, Opus 4.8, Fable 5).
+    pub fn effort(mut self, effort: impl Into<String>) -> Self {
+        self.output_config = Some(OutputConfig::with_effort(effort));
+        self
+    }
+
     pub fn build(self) -> CreateMessageRequest {
         CreateMessageRequest {
             model: self.model,
@@ -1080,6 +1149,7 @@ impl CreateMessageRequestBuilder {
             stop_sequences: self.stop_sequences,
             stream: true,
             thinking: self.thinking,
+            output_config: self.output_config,
         }
     }
 }
@@ -1275,6 +1345,59 @@ mod tests {
         assert_eq!(req.model, "claude-opus-4-6");
         assert_eq!(req.max_tokens, 4096);
         assert!(req.stream);
+    }
+
+    #[test]
+    fn oauth_bearer_appends_oauth_beta_flag() {
+        let cfg = client::ClientConfig {
+            api_key: "oauth-token".to_string(),
+            use_bearer_auth: true,
+            beta_features: "effort-2025-11-24".to_string(),
+            ..Default::default()
+        };
+        let client = AnthropicClient::new(cfg).expect("client");
+        let header = client.anthropic_beta_header();
+        assert!(header.contains("oauth-2025-04-20"), "header={header}");
+        assert!(header.contains("effort-2025-11-24"), "header={header}");
+    }
+
+    #[test]
+    fn api_key_path_omits_oauth_beta_flag() {
+        let cfg = client::ClientConfig {
+            api_key: "sk-ant-xyz".to_string(),
+            use_bearer_auth: false,
+            beta_features: "effort-2025-11-24".to_string(),
+            ..Default::default()
+        };
+        let client = AnthropicClient::new(cfg).expect("client");
+        let header = client.anthropic_beta_header();
+        assert!(!header.contains("oauth-2025-04-20"), "header={header}");
+        assert_eq!(header, "effort-2025-11-24");
+    }
+
+    #[test]
+    fn adaptive_thinking_serializes_without_budget_tokens() {
+        let req = CreateMessageRequest::builder("claude-opus-4-8", 8192)
+            .thinking(ThinkingConfig::adaptive())
+            .effort("high")
+            .build();
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        // budget_tokens must be omitted for adaptive thinking (the API 400s on it).
+        assert!(body["thinking"].get("budget_tokens").is_none());
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn enabled_thinking_keeps_budget_tokens() {
+        let req = CreateMessageRequest::builder("claude-opus-4-6", 8192)
+            .thinking(ThinkingConfig::enabled(10_000))
+            .build();
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 10_000);
+        // No effort/output_config unless explicitly set.
+        assert!(body.get("output_config").is_none());
     }
 
     #[test]

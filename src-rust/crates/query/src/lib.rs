@@ -944,10 +944,6 @@ pub async fn run_query_loop(
                 .and_then(|el| el.thinking_budget_tokens())
         });
 
-        if let Some(budget) = effective_thinking_budget {
-            req_builder = req_builder.thinking(ThinkingConfig::enabled(budget));
-        }
-
         // Apply temperature: explicit config value takes precedence, then agent override,
         // then effort-level override.
         let effective_temperature = config
@@ -960,8 +956,29 @@ pub async fn run_query_loop(
                     .map(|t| t as f32)
             })
             .or_else(|| config.effort_level.and_then(|el| el.temperature()));
-        if let Some(t) = effective_temperature {
-            req_builder = req_builder.temperature(t);
+
+        // Newer Anthropic models (Opus 4.7+, Opus 4.8, Fable 5) use *adaptive*
+        // thinking: they reject `budget_tokens`, `temperature`, `top_p`, and
+        // `top_k` with a 400. For those, send `thinking: {type: "adaptive"}`
+        // and steer reasoning depth via `output_config.effort` instead.
+        if claurst_core::effort::model_uses_adaptive_thinking(&effective_model) {
+            // Enable adaptive thinking whenever the user expressed any
+            // reasoning intent (an explicit budget or a chosen effort level).
+            if effective_thinking_budget.is_some() || config.effort_level.is_some() {
+                req_builder = req_builder.thinking(ThinkingConfig::adaptive());
+            }
+            if let Some(level) = config.effort_level {
+                req_builder = req_builder.effort(level.as_str());
+            }
+            // Deliberately omit temperature / budget_tokens — rejected by these
+            // models.
+        } else {
+            if let Some(budget) = effective_thinking_budget {
+                req_builder = req_builder.thinking(ThinkingConfig::enabled(budget));
+            }
+            if let Some(t) = effective_temperature {
+                req_builder = req_builder.temperature(t);
+            }
         }
 
         let request = req_builder.build();

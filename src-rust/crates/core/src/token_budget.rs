@@ -96,6 +96,7 @@ pub fn context_window_for_model(model: &str) -> Option<u64> {
     if model_lower.contains("claude-opus-4")
         || model_lower.contains("claude-sonnet-4")
         || model_lower.contains("claude-haiku-4")
+        || model_lower.contains("fable")
     {
         return Some(200_000);
     }

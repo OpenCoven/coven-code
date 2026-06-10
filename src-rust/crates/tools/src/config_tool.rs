@@ -17,7 +17,7 @@ struct ConfigInput {
 }
 
 static SUPPORTED_SETTINGS: &[(&str, &str)] = &[
-    ("model", "LLM model to use (e.g. 'claude-opus-4-6')"),
+    ("model", "LLM model to use (e.g. 'claude-opus-4-8')"),
     ("max_tokens", "Maximum output tokens per response"),
     ("verbose", "Enable verbose logging (true/false)"),
     (
