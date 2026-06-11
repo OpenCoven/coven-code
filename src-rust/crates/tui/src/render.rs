@@ -39,7 +39,7 @@ use crate::onboarding_dialog::render_onboarding_dialog;
 use crate::overage_upsell::render_overage_upsell;
 use crate::overlays::{
     render_global_search, render_help_overlay, render_history_search_overlay, render_rewind_flow,
-    COVEN_CODE_ACCENT,
+    COVEN_CODE_ACCENT, COVEN_CODE_MUTED,
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
@@ -77,6 +77,7 @@ const SPINNER: &[char] = &[
 ];
 const COVEN_VIOLET: Color = Color::Rgb(184, 175, 220);
 const APP_BACKGROUND: Color = Color::Rgb(0, 0, 0);
+const SPINNER_FRAME_DIVISOR: u64 = 2;
 // 11 rows: 1 (top border) + 1 (Welcome) + 1 (blank) + 4 (familiar card) +
 // 1 (Status header in right column) + 4 (Model/Provider/Daemon/Familiar) +
 // 1 (bottom border) ≈ 11 rows. The right column packs Tips above Status;
@@ -86,7 +87,7 @@ const STATUS_THINKING: &str = "thinking";
 const STATUS_THINKING_ELLIPSIS: &str = "thinking\u{2026}";
 
 fn spinner_char(frame_count: u64) -> char {
-    SPINNER[(frame_count as usize) % SPINNER.len()]
+    SPINNER[((frame_count / SPINNER_FRAME_DIVISOR) as usize) % SPINNER.len()]
 }
 
 /// Returns the colour to use for the streaming spinner.
@@ -2049,7 +2050,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
         };
 
         let pink = app.accent_color;
-        let dim = Color::Rgb(110, 110, 124);
+        let dim = COVEN_CODE_MUTED;
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -3590,6 +3591,15 @@ mod welcome_tests {
             input_json: String::new(),
         });
         assert_eq!(streaming_status_label(&app), "Thinking");
+    }
+
+    #[test]
+    fn spinner_advances_no_faster_than_every_two_render_ticks() {
+        // The main render loop ticks at roughly 50ms, so each visible spinner
+        // glyph must stay stable across at least two ticks to avoid a 20fps
+        // flash cadence.
+        assert_eq!(spinner_char(0), spinner_char(1));
+        assert_ne!(spinner_char(1), spinner_char(2));
     }
 
     #[test]

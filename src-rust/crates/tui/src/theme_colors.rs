@@ -72,7 +72,7 @@ impl ColorPalette {
             warning: Color::Rgb(251, 191, 36), // #FBBF24 amber-400
             error: Color::Rgb(248, 113, 113),  // #F87171 red-400
             // Text / disabled
-            disabled: Color::Rgb(109, 40, 217), // #6D28D9 violet-700 (muted)
+            disabled: Color::Rgb(161, 161, 170), // #A1A1AA zinc-400 (AA muted)
             text_light: Color::White,
             text_dark: Color::Black,
         }
@@ -89,7 +89,7 @@ impl ColorPalette {
             success: Color::Rgb(52, 211, 153),          // #34D399 emerald-400
             warning: Color::Rgb(251, 191, 36),          // #FBBF24 amber-400
             error: Color::Rgb(248, 113, 113),           // #F87171 red-400
-            disabled: Color::Rgb(76, 29, 149),          // #4C1D95 violet-900 (dimmer)
+            disabled: Color::Rgb(161, 161, 170),        // #A1A1AA zinc-400 (AA muted)
             text_light: Color::Rgb(237, 233, 254),      // #EDE9FE violet-100
             text_dark: Color::Rgb(15, 5, 40),           // near-black with violet tint
         }
@@ -103,7 +103,7 @@ impl ColorPalette {
             warning: Color::Rgb(255, 171, 64),  // Light orange
             info: Color::Rgb(100, 181, 246),    // Light blue
             action: Color::Rgb(100, 181, 246),
-            disabled: Color::Rgb(97, 97, 97),
+            disabled: Color::Rgb(156, 163, 175),
             accent: Color::Rgb(100, 181, 246),
             secondary_accent: Color::Rgb(229, 57, 53),
             text_light: Color::Rgb(229, 229, 229),
@@ -120,7 +120,7 @@ impl ColorPalette {
             warning: Color::Rgb(230, 124, 13), // Dark orange
             info: Color::Rgb(13, 71, 161),     // Dark blue
             action: Color::Blue,
-            disabled: Color::Rgb(189, 189, 189),
+            disabled: Color::Rgb(89, 89, 89),
             accent: Color::Blue,
             secondary_accent: Color::Rgb(194, 24, 91),
             text_light: Color::White,
@@ -137,7 +137,7 @@ impl ColorPalette {
             warning: Color::Rgb(181, 137, 0), // Solarized yellow
             info: Color::Rgb(38, 139, 210),   // Solarized blue
             action: Color::Rgb(38, 139, 210),
-            disabled: Color::Rgb(88, 110, 117),
+            disabled: Color::Rgb(147, 161, 161),
             accent: Color::Rgb(38, 139, 210),
             secondary_accent: Color::Rgb(108, 113, 196),
             text_light: Color::Rgb(131, 148, 150),
@@ -154,7 +154,7 @@ impl ColorPalette {
             warning: Color::Rgb(235, 203, 139), // Nord yellow
             info: Color::Rgb(136, 192, 208),    // Nord blue
             action: Color::Rgb(136, 192, 208),
-            disabled: Color::Rgb(76, 86, 106),
+            disabled: Color::Rgb(216, 222, 233),
             accent: Color::Rgb(136, 192, 208),
             secondary_accent: Color::Rgb(191, 97, 106),
             text_light: Color::Rgb(236, 239, 244),
@@ -171,7 +171,7 @@ impl ColorPalette {
             warning: Color::Rgb(241, 250, 140), // Dracula yellow
             info: Color::Rgb(139, 233, 253),    // Dracula blue
             action: Color::Rgb(139, 233, 253),
-            disabled: Color::Rgb(98, 114, 164),
+            disabled: Color::Rgb(192, 198, 216),
             accent: Color::Rgb(139, 233, 253),
             secondary_accent: Color::Rgb(189, 147, 249),
             text_light: Color::Rgb(248, 248, 242),
@@ -188,7 +188,7 @@ impl ColorPalette {
             warning: Color::Rgb(253, 151, 31), // Monokai orange
             info: Color::Rgb(102, 217, 239), // Monokai cyan
             action: Color::Rgb(102, 217, 239),
-            disabled: Color::Rgb(117, 113, 94),
+            disabled: Color::Rgb(207, 201, 176),
             accent: Color::Rgb(102, 217, 239),
             secondary_accent: Color::Rgb(249, 38, 114),
             text_light: Color::Rgb(248, 248, 242),
@@ -206,7 +206,7 @@ impl ColorPalette {
             warning: Color::Rgb(255, 180, 0), // Gold/Yellow
             info: Color::Cyan,
             action: Color::Rgb(0, 150, 200), // Blue action buttons
-            disabled: Color::Rgb(120, 120, 120), // Neutral gray
+            disabled: Color::Rgb(184, 184, 184), // Neutral gray
             accent: Color::Rgb(0, 150, 200), // Blue accent
             secondary_accent: Color::Rgb(180, 140, 255), // Purple accent
             text_light: Color::Rgb(220, 220, 220),
@@ -341,6 +341,62 @@ impl DiffPalette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Black => (0, 0, 0),
+            Color::White => (255, 255, 255),
+            _ => panic!("expected concrete RGB color, got {c:?}"),
+        }
+    }
+
+    fn channel_to_linear(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn luminance(color: Color) -> f64 {
+        let (r, g, b) = rgb(color);
+        0.2126 * channel_to_linear(r)
+            + 0.7152 * channel_to_linear(g)
+            + 0.0722 * channel_to_linear(b)
+    }
+
+    fn contrast_ratio(fg: Color, bg: Color) -> f64 {
+        let fg = luminance(fg);
+        let bg = luminance(bg);
+        let (lighter, darker) = if fg >= bg { (fg, bg) } else { (bg, fg) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn disabled_theme_text_meets_aa_contrast_on_theme_backgrounds() {
+        let cases = [
+            ("coven", Color::Black),
+            ("coven-dark", Color::Rgb(15, 5, 40)),
+            ("dark", Color::Rgb(33, 33, 33)),
+            ("light", Color::White),
+            ("solarized", Color::Rgb(0, 43, 54)),
+            ("nord", Color::Rgb(46, 52, 64)),
+            ("dracula", Color::Rgb(40, 42, 54)),
+            ("monokai", Color::Rgb(39, 40, 34)),
+            ("deuteranopia", Color::Rgb(40, 40, 40)),
+        ];
+
+        for (theme, bg) in cases {
+            let disabled = ColorPalette::for_theme(theme).disabled;
+            let contrast = contrast_ratio(disabled, bg);
+            assert!(
+                contrast >= 4.5,
+                "{theme} disabled text contrast should meet WCAG AA; got {contrast:.2}:1 for {disabled:?} on {bg:?}"
+            );
+        }
+    }
 
     #[test]
     fn deuteranopia_diff_palette_avoids_red_and_green() {
