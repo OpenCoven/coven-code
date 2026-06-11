@@ -15,7 +15,7 @@ The original Claurst license is preserved in full in `LICENSE.md`.
 - System prompt identity updated to reflect OpenCoven fork
 - Repository and homepage URLs updated to OpenCoven GitHub
 - Landing page (`index.html`), docs, and installer scripts rebranded
-- Mascot renamed from "Rustle" to "Rune" (doc comments; internal Rust identifiers `RustlePose`/`rustle_lines` intentionally preserved for merge-friendliness)
+- Mascot renamed from "Rustle" to "Rune" (internal Rust module and pose names now use companion/mascot terminology)
 - ACP server identity updated to `coven-code`
 - Share viewer URL updated to `opencoven.github.io/coven-code/session/`
 - `CNAME` file removed (upstream pointed to `claurst.kuber.studio`)

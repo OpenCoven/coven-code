@@ -97,6 +97,8 @@ pub mod invalid_config_dialog;
 pub mod key_input_dialog;
 /// Inline image rendering via the Kitty graphics protocol (with text fallback).
 pub mod kitty_image;
+/// Rune mascot rendering.
+pub mod mascot;
 /// MCP server management UI.
 pub mod mcp_view;
 /// Memory file selector overlay (AGENTS.md browser).
@@ -125,8 +127,6 @@ pub mod plugin_views;
 pub mod prompt_input;
 /// All ratatui rendering logic.
 pub mod render;
-/// Rune mascot rendering.
-pub mod rustle;
 /// Session branching overlay (Ctrl+B) — create and switch between conversation branches.
 pub mod session_branching;
 /// Session browser overlay (/session, /resume, /rename, /export).

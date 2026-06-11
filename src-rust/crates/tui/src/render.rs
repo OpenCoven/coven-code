@@ -25,6 +25,7 @@ use crate::hooks_config_menu::render_hooks_config_menu;
 use crate::import_config_dialog::render_import_config_dialog;
 use crate::invalid_config_dialog::render_invalid_config_dialog;
 use crate::key_input_dialog::render_key_input_dialog;
+use crate::mascot::CompanionPose;
 use crate::mcp_view::render_mcp_view;
 use crate::memory_file_selector::render_memory_file_selector;
 use crate::memory_update_notification::render_memory_update_notification;
@@ -43,7 +44,6 @@ use crate::overlays::{
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
-use crate::rustle::RustlePose;
 use crate::session_branching::render_session_branching;
 use crate::session_browser::render_session_browser;
 use crate::settings_screen::render_settings_screen;
@@ -1733,9 +1733,9 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     };
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
     let card_size = familiar_card::pick_size(left_w);
-    let loading_frame = match app.rustle_current_pose {
-        RustlePose::Loading { frame } => Some(frame),
-        RustlePose::Static => None,
+    let loading_frame = match app.companion_current_pose {
+        CompanionPose::Loading { frame } => Some(frame),
+        CompanionPose::Static => None,
     };
 
     let mut left_lines: Vec<Line> = Vec::new();

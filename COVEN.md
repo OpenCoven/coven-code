@@ -78,10 +78,10 @@ Target OpenCoven brand palette:
 
 Replace `default_theme()` return values when brand assets are finalized.
 
-### 6. Companion mascot — `src-rust/crates/tui/src/rustle.rs`
+### 6. Companion mascot — `src-rust/crates/tui/src/mascot.rs`
 
 ASCII mascot renderer. Currently "Rune" (renamed from "Rustle" upstream).  
-To rebrand: rename `RustlePose` → `CompanionPose` (pending — "Rune" is the mascot name), update art in `rustle_lines()`, update call-sites in `render.rs` and `app.rs`.
+The internal module and pose naming now use companion/mascot terminology; update art in `mascot_lines_for()` and call-sites in `render.rs` / `app.rs`.
 
 ### 7. Memory / session hooks — `src-rust/crates/core/src/memdir.rs`, `session_storage.rs`
 
