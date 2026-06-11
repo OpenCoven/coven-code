@@ -16,7 +16,7 @@ Important current identifiers:
 | Item | Current value |
 |---|---|
 | Workspace path | `src-rust/` |
-| Workspace version | `0.0.24` |
+| Workspace version | see `src-rust/Cargo.toml` `[workspace.package]` (not stamped by `scripts/bump-version.py`) |
 | Binary package | `claurst` |
 | Installed binary | `coven-code` |
 | Runtime config dir | `~/.coven-code/` |
