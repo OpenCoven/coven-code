@@ -39,6 +39,9 @@ pub struct OnboardingDialogState {
     pub visible: bool,
     /// Current page.
     pub page: OnboardingPage,
+    /// Whether the flow was entered via the provider-setup page (no
+    /// credentials found). Controls page count labels and back-navigation.
+    entered_via_provider_setup: bool,
 }
 
 impl OnboardingDialogState {
@@ -50,22 +53,43 @@ impl OnboardingDialogState {
     pub fn show(&mut self) {
         self.visible = true;
         self.page = OnboardingPage::Welcome;
+        self.entered_via_provider_setup = false;
     }
 
-    /// Show the provider setup page (no credentials configured).
+    /// Show the provider setup page (no credentials configured). The flow
+    /// continues through Welcome and KeyBindings afterwards.
     pub fn show_provider_setup(&mut self) {
         self.visible = true;
         self.page = OnboardingPage::ProviderSetup;
+        self.entered_via_provider_setup = true;
     }
 
     pub fn dismiss(&mut self) {
         self.visible = false;
     }
 
+    /// `(current, total)` page label for the active flow.
+    fn page_progress(&self) -> (usize, usize) {
+        let total = if self.entered_via_provider_setup {
+            3
+        } else {
+            2
+        };
+        let current = match (self.page, self.entered_via_provider_setup) {
+            (OnboardingPage::ProviderSetup, _) => 1,
+            (OnboardingPage::Welcome, true) => 2,
+            (OnboardingPage::Welcome, false) => 1,
+            (OnboardingPage::KeyBindings, true) => 3,
+            (OnboardingPage::KeyBindings, false) => 2,
+            (OnboardingPage::Done, _) => total,
+        };
+        (current, total)
+    }
+
     /// Advance to the next page; returns true if we've reached Done and should dismiss.
     pub fn next_page(&mut self) -> bool {
         self.page = match self.page {
-            OnboardingPage::ProviderSetup => OnboardingPage::Done,
+            OnboardingPage::ProviderSetup => OnboardingPage::Welcome,
             OnboardingPage::Welcome => OnboardingPage::KeyBindings,
             OnboardingPage::KeyBindings => OnboardingPage::Done,
             OnboardingPage::Done => OnboardingPage::Done,
@@ -77,6 +101,9 @@ impl OnboardingDialogState {
     pub fn prev_page(&mut self) {
         self.page = match self.page {
             OnboardingPage::ProviderSetup => OnboardingPage::ProviderSetup,
+            OnboardingPage::Welcome if self.entered_via_provider_setup => {
+                OnboardingPage::ProviderSetup
+            }
             OnboardingPage::Welcome => OnboardingPage::Welcome,
             OnboardingPage::KeyBindings => OnboardingPage::Welcome,
             OnboardingPage::Done => OnboardingPage::KeyBindings,
@@ -105,11 +132,56 @@ pub fn render_onboarding_dialog(frame: &mut Frame, state: &OnboardingDialogState
 
     match state.page {
         OnboardingPage::ProviderSetup => render_provider_setup_page(frame, dialog_area),
-        OnboardingPage::Welcome => render_welcome_page(frame, dialog_area),
-        OnboardingPage::KeyBindings => render_keybindings_page(frame, dialog_area),
+        OnboardingPage::Welcome => render_welcome_page(frame, state, dialog_area),
+        OnboardingPage::KeyBindings => render_keybindings_page(frame, state, dialog_area),
         OnboardingPage::Done => {} // should not be visible
     }
 }
+
+/// A provider entry on the setup page.
+///
+/// Ordering is deliberately neutral: Coven Code is multi-provider, so no
+/// vendor is privileged. Free Mode leads (zero-friction), then providers
+/// that need no API key, then key-based providers alphabetically.
+struct ProviderEntry {
+    name: &'static str,
+    tagline: &'static str,
+    setup: &'static str,
+    setup_suffix: &'static str,
+}
+
+const PROVIDER_ENTRIES: &[ProviderEntry] = &[
+    ProviderEntry {
+        name: "Ollama",
+        tagline: "  Local models · No key needed",
+        setup: "coven-code --provider ollama",
+        setup_suffix: "",
+    },
+    ProviderEntry {
+        name: "Anthropic",
+        tagline: "  Claude Opus · Sonnet · Haiku",
+        setup: "ANTHROPIC_API_KEY",
+        setup_suffix: "  or configured OAuth",
+    },
+    ProviderEntry {
+        name: "Google",
+        tagline: "  Gemini 2.5 Pro · Flash",
+        setup: "set GOOGLE_API_KEY=<key>",
+        setup_suffix: "  then restart",
+    },
+    ProviderEntry {
+        name: "Groq",
+        tagline: "  Fast inference · Free tier · groq.com/keys",
+        setup: "set GROQ_API_KEY=<key>",
+        setup_suffix: "  then restart",
+    },
+    ProviderEntry {
+        name: "OpenAI",
+        tagline: "  GPT-4o · o3 · o4-mini",
+        setup: "set OPENAI_API_KEY=<key>",
+        setup_suffix: "  then restart",
+    },
+];
 
 fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
     // Theme pink — matches the header and mascot
@@ -133,7 +205,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
 
     let sep = "  ─────────────────────────────────────────────────";
 
-    let lines: Vec<Line<'static>> = vec![
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(
@@ -146,144 +218,72 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
             ),
         ]),
         Line::from(""),
-        // ── 1. Anthropic ──────────────────────────────────────
+        // ── Free Mode — zero-friction entry point ─────────────
         Line::from(vec![
             Span::styled(
-                "  1  ",
+                "  ★  ",
                 Style::default().fg(pink).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Anthropic",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Claude Opus · Sonnet · Haiku", Style::default().fg(dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled(
-                "ANTHROPIC_API_KEY",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  or configured OAuth", Style::default().fg(dim)),
-        ]),
-        Line::from(Span::styled(
-            sep,
-            Style::default().fg(Color::Rgb(45, 45, 55)),
-        )),
-        // ── 2. OpenAI ─────────────────────────────────────────
-        Line::from(vec![
-            Span::styled(
-                "  2  ",
-                Style::default().fg(pink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "OpenAI",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  GPT-4o · o3 · o4-mini", Style::default().fg(dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled(
-                "set OPENAI_API_KEY=<key>",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  then restart", Style::default().fg(dim)),
-        ]),
-        Line::from(Span::styled(
-            sep,
-            Style::default().fg(Color::Rgb(45, 45, 55)),
-        )),
-        // ── 3. Google ─────────────────────────────────────────
-        Line::from(vec![
-            Span::styled(
-                "  3  ",
-                Style::default().fg(pink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Google",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Gemini 2.5 Pro · Flash", Style::default().fg(dim)),
-        ]),
-        Line::from(vec![
-            Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled(
-                "set GOOGLE_API_KEY=<key>",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  then restart", Style::default().fg(dim)),
-        ]),
-        Line::from(Span::styled(
-            sep,
-            Style::default().fg(Color::Rgb(45, 45, 55)),
-        )),
-        // ── 4. Groq ───────────────────────────────────────────
-        Line::from(vec![
-            Span::styled(
-                "  4  ",
-                Style::default().fg(pink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Groq",
+                "Free Mode",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Fast inference · Free tier · groq.com/keys",
+                "  Agentic coding · No API key (experimental)",
                 Style::default().fg(dim),
             ),
         ]),
         Line::from(vec![
             Span::styled("     › ", Style::default().fg(pink)),
             Span::styled(
-                "set GROQ_API_KEY=<key>",
+                "/connect",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  then restart", Style::default().fg(dim)),
+            Span::styled("  then pick \"Free\"", Style::default().fg(dim)),
         ]),
         Line::from(Span::styled(
             sep,
             Style::default().fg(Color::Rgb(45, 45, 55)),
         )),
-        // ── 5. Ollama ─────────────────────────────────────────
-        Line::from(vec![
+    ];
+
+    for (i, entry) in PROVIDER_ENTRIES.iter().enumerate() {
+        lines.push(Line::from(vec![
             Span::styled(
-                "  5  ",
+                format!("  {}  ", i + 1),
                 Style::default().fg(pink).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Ollama",
+                entry.name,
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Local models · No key needed", Style::default().fg(dim)),
-        ]),
-        Line::from(vec![
+            Span::styled(entry.tagline, Style::default().fg(dim)),
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("     › ", Style::default().fg(pink)),
             Span::styled(
-                "coven-code --provider ollama",
+                entry.setup,
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
+            Span::styled(entry.setup_suffix, Style::default().fg(dim)),
+        ]));
+        if i + 1 < PROVIDER_ENTRIES.len() {
+            lines.push(Line::from(Span::styled(
+                sep,
+                Style::default().fg(Color::Rgb(45, 45, 55)),
+            )));
+        }
+    }
+
+    lines.extend([
         Line::from(""),
         Line::from(vec![
             Span::styled("  + ", Style::default().fg(Color::Rgb(120, 120, 120))),
@@ -298,29 +298,20 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Esc", Style::default().fg(pink)),
+            Span::styled("  enter", Style::default().fg(pink)),
+            Span::styled(" next · ", Style::default().fg(dim)),
+            Span::styled("esc", Style::default().fg(pink)),
             Span::styled(" dismiss · configure later with ", Style::default().fg(dim)),
             Span::styled("/providers", Style::default().fg(Color::Rgb(150, 150, 150))),
         ]),
-        Line::from(vec![Span::styled(
-            "  → 20+ more providers: coven-code --help",
-            Style::default().fg(Color::DarkGray),
-        )]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Esc: dismiss  (you can configure later with /providers)",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )]),
-    ];
+    ]);
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(inner, frame.buffer_mut());
 }
 
-fn render_welcome_page(frame: &mut Frame, area: Rect) {
+fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: Rect) {
     use crate::overlays::{render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
     let pink = Color::Rgb(139, 92, 246);
@@ -344,6 +335,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
         ])
     };
 
+    let (page_n, page_total) = state.page_progress();
     let lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled(
@@ -355,7 +347,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
             Span::styled(
                 format!(
                     "{:>width$}",
-                    "1/2 ",
+                    format!("{}/{} ", page_n, page_total),
                     width = inner.width.saturating_sub(21) as usize
                 ),
                 Style::default().fg(dim),
@@ -408,7 +400,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
         .render(inner, frame.buffer_mut());
 }
 
-fn render_keybindings_page(frame: &mut Frame, area: Rect) {
+fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, area: Rect) {
     use crate::overlays::{render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
     let pink = Color::Rgb(139, 92, 246);
@@ -432,6 +424,7 @@ fn render_keybindings_page(frame: &mut Frame, area: Rect) {
         ])
     };
 
+    let (page_n, page_total) = state.page_progress();
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled(
@@ -443,7 +436,7 @@ fn render_keybindings_page(frame: &mut Frame, area: Rect) {
             Span::styled(
                 format!(
                     "{:>width$}",
-                    "2/2 ",
+                    format!("{}/{} ", page_n, page_total),
                     width = inner.width.saturating_sub(21) as usize
                 ),
                 Style::default().fg(dim),
@@ -467,6 +460,7 @@ fn render_keybindings_page(frame: &mut Frame, area: Rect) {
         kb("PgUp/PgDn", "scroll transcript"),
         kb("Ctrl+K", "command palette"),
         kb("Ctrl+Shift+A", "model picker"),
+        kb("F1", "toggle help overlay"),
         kb("F2", "switch familiar"),
         kb("Alt+H", "open help"),
         kb("Ctrl+B", "create / switch branch"),
@@ -544,6 +538,69 @@ mod tests {
         state.next_page();
         state.prev_page();
         assert_eq!(state.page, OnboardingPage::Welcome);
+        // Without provider-setup entry, Welcome is the first page.
+        state.prev_page();
+        assert_eq!(state.page, OnboardingPage::Welcome);
+    }
+
+    #[test]
+    fn onboarding_provider_setup_flow() {
+        let mut state = OnboardingDialogState::new();
+        state.show_provider_setup();
+        assert_eq!(state.page, OnboardingPage::ProviderSetup);
+        assert_eq!(state.page_progress(), (1, 3));
+
+        assert!(!state.next_page()); // ProviderSetup → Welcome
+        assert_eq!(state.page, OnboardingPage::Welcome);
+        assert_eq!(state.page_progress(), (2, 3));
+
+        // Back-navigation returns to provider setup in this flow.
+        state.prev_page();
+        assert_eq!(state.page, OnboardingPage::ProviderSetup);
+        state.next_page();
+
+        assert!(!state.next_page()); // Welcome → KeyBindings
+        assert_eq!(state.page, OnboardingPage::KeyBindings);
+        assert_eq!(state.page_progress(), (3, 3));
+
+        assert!(state.next_page()); // KeyBindings → Done
+        assert!(state.is_done());
+    }
+
+    #[test]
+    fn provider_setup_renders_free_mode_first_and_neutral_order() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut state = OnboardingDialogState::new();
+        state.show_provider_setup();
+        terminal
+            .draw(|frame| {
+                render_onboarding_dialog(frame, &state, frame.area());
+            })
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .clone()
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        // Free Mode hint is present and precedes every provider.
+        let free = content.find("Free Mode").expect("Free Mode hint missing");
+        assert!(content.contains("/connect"));
+        // Neutral ordering: no-key local provider first, then alphabetical.
+        let positions: Vec<usize> = ["Ollama", "Anthropic", "Google", "Groq", "OpenAI"]
+            .iter()
+            .map(|name| {
+                content
+                    .find(name)
+                    .unwrap_or_else(|| panic!("{name} missing"))
+            })
+            .collect();
+        assert!(free < positions[0], "Free Mode should lead the page");
+        let mut sorted = positions.clone();
+        sorted.sort_unstable();
+        assert_eq!(positions, sorted, "providers out of neutral order");
     }
 
     #[test]

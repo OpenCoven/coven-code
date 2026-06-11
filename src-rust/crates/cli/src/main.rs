@@ -2267,7 +2267,10 @@ async fn run_interactive(
         // Bypass dialog is a mandatory security gate and takes absolute priority.
         if !has_credentials {
             if !settings.has_completed_onboarding {
-                app.onboarding_dialog.show();
+                // No credentials: lead with the provider-setup page (Free
+                // Mode + provider list), then continue into the regular
+                // welcome / keybindings pages.
+                app.onboarding_dialog.show_provider_setup();
             } else {
                 app.status_message =
                     Some("No provider configured. Run /connect to set one up.".to_string());
@@ -4065,11 +4068,9 @@ async fn run_interactive(
                     // OAuth client id. When configured, run the Claude.ai browser
                     // flow (Bearer token); otherwise guide the user to the
                     // alternatives.
-                    let client_id_configured = std::env::var(
-                        claurst_core::oauth::CLIENT_ID_ENV,
-                    )
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false);
+                    let client_id_configured = std::env::var(claurst_core::oauth::CLIENT_ID_ENV)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false);
                     tokio::spawn(async move {
                         if !client_id_configured {
                             let _ = tx2.send(DeviceAuthEvent::Error(
