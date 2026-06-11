@@ -226,9 +226,6 @@ pub struct DoctorCommand;
 pub struct LoginCommand;
 pub struct LogoutCommand;
 pub struct RefreshCommand;
-pub struct CavemanCommand;
-pub struct RockyCommand;
-pub struct NormalCommand;
 pub struct InitCommand;
 pub struct ReviewCommand;
 pub struct HooksCommand;
@@ -242,51 +239,36 @@ pub struct ThinkingCommand;
 // New commands
 pub struct ExportCommand;
 pub struct ShareCommand;
-pub struct LinksCommand;
 pub struct SkillsCommand;
 pub struct RewindCommand;
 pub struct StatsCommand;
-pub struct FilesCommand;
 pub struct RenameCommand;
 pub struct EffortCommand;
-pub struct SummaryCommand;
 pub struct CommitCommand;
 pub struct PluginCommand;
 pub struct ReloadPluginsCommand;
 pub struct ThemeCommand;
 pub struct OutputStyleCommand;
 pub struct KeybindingsCommand;
-pub struct PrivacySettingsCommand;
 // Batch-1 new commands
-pub struct RemoteControlCommand;
-pub struct RemoteEnvCommand;
 pub struct ContextCommand;
 pub struct CopyCommand;
 pub struct ChromeCommand;
 pub struct VimCommand;
 pub struct VoiceCommand;
 pub struct UpgradeCommand;
-pub struct ReleaseNotesCommand;
-pub struct RateLimitOptionsCommand;
 pub struct StatuslineCommand;
 pub struct SecurityReviewCommand;
 pub struct TerminalSetupCommand;
-pub struct ExtraUsageCommand;
 pub struct FastCommand;
 pub struct ThinkBackCommand;
 pub struct ThinkBackPlayCommand;
-pub struct FeedbackCommand;
-pub struct ColorSetCommand;
 // New commands: teleport, btw, ctx-viz, sandbox-toggle
-pub struct TeleportCommand;
 pub struct BtwCommand;
-pub struct CtxVizCommand;
+pub struct IncantCommand;
 pub struct SandboxToggleCommand;
-pub struct HeapdumpCommand;
-pub struct InsightsCommand;
 pub struct UltrareviewCommand;
 pub struct AdvisorCommand;
-pub struct InstallSlackAppCommand;
 pub struct UndoCommand;
 pub struct RevertCommand;
 pub struct CheckpointsCommand;
@@ -497,24 +479,23 @@ fn execute_named_command_from_slash(
 /// Category labels for help grouping.
 fn command_category(name: &str) -> &'static str {
     match name {
-        "clear" | "compact" | "rewind" | "summary" | "export" | "rename" | "branch" | "fork" => {
+        "clear" | "compact" | "rewind" | "undo" | "revert" | "export" | "branch" | "fork" => {
             "Conversation"
         }
         "model" | "config" | "theme" | "color" | "vim" | "fast" | "effort" | "voice"
-        | "statusline" | "output-style" | "keybindings" | "privacy-settings"
-        | "rate-limit-options" | "sandbox-toggle" => "Settings",
-        "cost" | "stats" | "usage" | "extra-usage" | "context" | "ctx-viz" => "Usage & Cost",
-        "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade"
-        | "release-notes" => "System",
-        "login" | "logout" | "refresh" | "permissions" => "Auth & Permissions",
-        "memory" | "files" | "diff" | "init" | "commit" | "review" | "security-review"
-        | "import-config" => "Project",
+        | "statusline" | "output-style" | "keybindings" | "sandbox" => "Settings",
+        "cost" | "usage" | "context" => "Usage & Cost",
+        "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
+        "login" | "logout" | "switch" | "refresh" | "permissions" => "Auth & Permissions",
+        "memory" | "diff" | "init" | "commit" | "review" | "import-config" => "Project",
         "mcp" | "hooks" | "ide" | "chrome" => "Integrations",
-        "session" | "resume" | "remote-control" | "remote-env" | "teleport" => "Sessions & Remote",
+        "session" | "resume" | "search" | "share" => "Sessions & Remote",
         "help" | "exit" | "feedback" | "bug" => "General",
-        "think-back" | "thinkback-play" | "thinking" | "plan" | "tasks" => "AI & Thinking",
-        "copy" | "skills" | "agents" | "plugin" | "reload-plugins" | "stickers" | "passes"
-        | "desktop" | "mobile" | "btw" => "Tools & Extras",
+        "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
+        "copy" | "skills" | "agents" | "plugin" | "reload-plugins" | "whisper" | "incant" => {
+            "Tools & Extras"
+        }
+        "coven" | "familiar" | "agent" | "managed-agents" => "Coven",
         _ => "Other",
     }
 }
@@ -684,7 +665,7 @@ impl SlashCommand for CostCommand {
          Shows per-category token counts and the estimated cost for this session.\n\
          Cache write tokens are priced slightly higher than input; cache read tokens\n\
          are ~10x cheaper — caching reduces cost significantly in long sessions.\n\
-         For per-call breakdown use /extra-usage. For account quotas use /usage."
+         For account quotas use /usage."
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -738,7 +719,7 @@ impl SlashCommand for CostCommand {
              ─────────────────────────────\n\
                Total tokens:   {total:>10}\n\
                Total cost:              ${cost:.4}{savings}\n\n\
-             Use /usage for quota info · /extra-usage for per-call breakdown",
+             Use /usage for quota info",
             model = model,
             pricing_line = pricing_line,
             input = input,
@@ -1246,27 +1227,6 @@ impl SlashCommand for KeybindingsCommand {
                     err
                 )
             }),
-        }
-    }
-}
-
-// ---- /privacy-settings ---------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for PrivacySettingsCommand {
-    fn name(&self) -> &str {
-        "privacy-settings"
-    }
-    fn description(&self) -> &str {
-        "Open Coven Code privacy settings"
-    }
-
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let url = "https://claude.ai/settings/data-privacy-controls";
-        let fallback = format!("Review and manage your privacy settings at {}", url);
-        match open_with_system(url) {
-            Ok(_) => CommandResult::Message(format!("Opened privacy settings: {}", url)),
-            Err(_) => CommandResult::Message(fallback),
         }
     }
 }
@@ -1952,12 +1912,12 @@ impl SlashCommand for BugCommand {
         let report = args.trim();
         if report.is_empty() {
             CommandResult::Message(
-                "To submit feedback or report a bug, visit: https://github.com/anthropics/claude-code/issues"
+                "To submit feedback or report a bug, visit: https://github.com/OpenCoven/coven-code/issues"
                     .to_string(),
             )
         } else {
             CommandResult::Message(format!(
-                "To submit feedback or report a bug, visit: https://github.com/anthropics/claude-code/issues\nSuggested report summary: {}",
+                "To submit feedback or report a bug, visit: https://github.com/OpenCoven/coven-code/issues\nSuggested report summary: {}",
                 report
             ))
         }
@@ -1977,7 +1937,6 @@ impl SlashCommand for UsageCommand {
     fn help(&self) -> &str {
         "Usage: /usage\n\n\
          Shows current session API usage and account quota information.\n\
-         For detailed per-call breakdown, use /extra-usage.\n\
          For cost details, use /cost."
     }
 
@@ -2016,8 +1975,7 @@ impl SlashCommand for UsageCommand {
                Cache read:   {cache_read:>10}\n\
                Total:        {total:>10}\n\n\
              Estimated cost: ${cost:.4}\n\n\
-             Use /extra-usage for per-call breakdown.\n\
-             Use /rate-limit-options to see your plan limits.",
+             Use /cost for session cost details.",
             account_info = account_info,
             model = ctx.config.effective_model(),
             input = input,
@@ -2934,11 +2892,15 @@ impl SlashCommand for SwitchCommand {
     fn help(&self) -> &str {
         "Usage: /switch [--codex] <profile-id>\n\n\
          Make a stored account active. Defaults to Anthropic; pass `--codex`\n\
-         to switch the Codex account instead. Run /accounts first to see\n\
-         available profile ids."
+         to switch the Codex account instead. Run /switch with no arguments\n\
+         to list stored accounts and see available profile ids."
     }
 
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /switch with no arguments lists accounts (absorbs the former /accounts).
+        if args.trim().is_empty() {
+            return AccountsCommand.execute("", ctx).await;
+        }
         let tokens: Vec<&str> = args.split_whitespace().collect();
         let use_codex = tokens.contains(&"--codex");
         let provider = if use_codex {
@@ -3006,70 +2968,45 @@ fn parse_speech_level(args: &str) -> String {
 }
 
 #[async_trait]
-impl SlashCommand for CavemanCommand {
+impl SlashCommand for IncantCommand {
     fn name(&self) -> &str {
-        "caveman"
+        "incant"
     }
     fn description(&self) -> &str {
-        "Caveman speech mode — why use many token when few token do trick"
+        "Cast a speech incantation — change the model's voice (caveman, rocky) or lift it"
     }
     fn help(&self) -> &str {
-        "Usage: /caveman [lite|full|ultra]\n\n\
-         Activates caveman speech mode that cuts ~75% of output tokens.\n\
-         - lite:  Remove pleasantries and hedging only (~40% reduction)\n\
-         - full:  Drop articles, compress sentences (default, ~75% reduction)\n\
-         - ultra: Maximum compression, imperative phrases only (~85% reduction)\n\n\
-         Use /normal to deactivate."
+        "Usage: /incant <voice> [lite|full|ultra] | /incant off\n\n\
+         Incantations change how the model speaks, trading flourish for tokens.\n\
+         Voices:\n\
+         - caveman: why use many token when few token do trick (~75% reduction)\n\
+         - rocky:   Eridian engineer from Project Hail Mary. Save big token. Good good good.\n\
+         Intensity:\n\
+         - lite:  light touch (~40% reduction)\n\
+         - full:  the default (~75% reduction)\n\
+         - ultra: maximum compression\n\n\
+         /incant off lifts the active incantation and returns to normal speech."
     }
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let level = parse_speech_level(args);
-        CommandResult::SpeechMode {
-            mode: Some("caveman".to_string()),
-            level,
-        }
-    }
-}
-
-#[async_trait]
-impl SlashCommand for RockyCommand {
-    fn name(&self) -> &str {
-        "rocky"
-    }
-    fn description(&self) -> &str {
-        "Rocky speech mode — Eridian alien engineer from Project Hail Mary. Save big token. Good good good."
-    }
-    fn help(&self) -> &str {
-        "Usage: /rocky [lite|full|ultra]\n\n\
-         Speak like Rocky from Project Hail Mary. Saves big token. Amaze amaze amaze.\n\
-         - lite:  Grammar rules only, minimal emphasis (~40% reduction)\n\
-         - full:  Full Rocky grammar + regular emphasis (default, ~75% reduction)\n\
-         - ultra: Maximum Rocky personality, frequent emphasis, alien observations\n\n\
-         Use /normal to deactivate."
-    }
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let level = parse_speech_level(args);
-        CommandResult::SpeechMode {
-            mode: Some("rocky".to_string()),
-            level,
-        }
-    }
-}
-
-#[async_trait]
-impl SlashCommand for NormalCommand {
-    fn name(&self) -> &str {
-        "normal"
-    }
-    fn description(&self) -> &str {
-        "Deactivate speech mode (caveman/rocky)"
-    }
-    fn help(&self) -> &str {
-        "Usage: /normal\n\nDeactivate any active speech mode and return to normal output."
-    }
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        CommandResult::SpeechMode {
-            mode: None,
-            level: "full".to_string(),
+        let mut words = args.split_whitespace();
+        let voice = words.next().unwrap_or("");
+        let rest = words.next().unwrap_or("");
+        match voice {
+            "" => CommandResult::Error(
+                "Usage: /incant <caveman|rocky> [lite|full|ultra] | /incant off".to_string(),
+            ),
+            "off" | "none" | "normal" => CommandResult::SpeechMode {
+                mode: None,
+                level: "full".to_string(),
+            },
+            "caveman" | "rocky" => CommandResult::SpeechMode {
+                mode: Some(voice.to_string()),
+                level: parse_speech_level(rest),
+            },
+            other => CommandResult::Error(format!(
+                "Unknown incantation '{}'. Known voices: caveman, rocky. Use /incant off to lift.",
+                other
+            )),
         }
     }
 }
@@ -3119,10 +3056,13 @@ impl SlashCommand for ReviewCommand {
         "Review code changes via LLM and optionally post to GitHub PR"
     }
     fn help(&self) -> &str {
-        "Usage: /review [base-ref]\n\n\
+        "Usage: /review [base-ref] | /review security [path] | /review ultra [path]\n\n\
          Runs `git diff <base>...HEAD` (or `git diff --cached` when no base is given),\n\
          sends the diff to the LLM for a structured review, then optionally posts the\n\
          review as a comment to the associated GitHub PR.\n\n\
+         Variants:\n\
+           /review security  — security-focused review (vulnerabilities, secrets, injection)\n\
+           /review ultra     — exhaustive multi-dimensional review\n\n\
          GitHub posting requires:\n\
            GITHUB_TOKEN  — a personal access token with repo scope\n\
            CLAUDE_PR_NUMBER — the PR number (auto-detected from `git remote` if absent)\n\n\
@@ -3133,7 +3073,19 @@ impl SlashCommand for ReviewCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let base = args.trim();
+        let trimmed = args.trim();
+        // /review security and /review ultra absorb the former standalone
+        // /security-review and /ultrareview commands.
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "security" => return SecurityReviewCommand.execute(rest, ctx).await,
+            "ultra" | "ultrareview" => return UltrareviewCommand.execute(rest, ctx).await,
+            _ => {}
+        }
+        let base = trimmed;
 
         // ------------------------------------------------------------------
         // 1. Collect the diff
@@ -4425,7 +4377,12 @@ impl SlashCommand for SessionCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        match args.trim() {
+        let trimmed = args.trim();
+        // /session rename [...] absorbs the former standalone /rename command.
+        if let Some(rest) = trimmed.strip_prefix("rename") {
+            return RenameCommand.execute(rest.trim(), ctx).await;
+        }
+        match trimmed {
             "list" => {
                 let sessions = claurst_core::history::list_sessions().await;
                 if sessions.is_empty() {
@@ -5032,133 +4989,6 @@ impl SlashCommand for ShareCommand {
     }
 }
 
-// ---- /links --------------------------------------------------------------
-
-/// Detect URLs in plain text. Mirrors the styling regex in tui::messages::markdown
-/// so the user sees the same links the renderer highlights.
-fn links_url_regex() -> &'static regex::Regex {
-    static URL_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"(?:https?|ftp)://\S+|www\.\S+").expect("links URL regex")
-    });
-    &URL_RE
-}
-
-fn strip_trailing_punct(url: &str) -> String {
-    let mut s = url.to_string();
-    while let Some(c) = s.chars().last() {
-        if matches!(
-            c,
-            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '>'
-        ) {
-            s.pop();
-        } else {
-            break;
-        }
-    }
-    s
-}
-
-/// Walk messages (oldest → newest), pulling text out of each block and
-/// returning unique URLs in *most-recent-first* order.
-fn extract_session_urls(messages: &[Message]) -> Vec<String> {
-    let re = links_url_regex();
-    let mut ordered: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for msg in messages {
-        let text: String = match &msg.content {
-            claurst_core::types::MessageContent::Text(t) => t.clone(),
-            claurst_core::types::MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
-        for m in re.find_iter(&text) {
-            let url = strip_trailing_punct(m.as_str());
-            if !url.is_empty() && seen.insert(url.clone()) {
-                ordered.push(url);
-            }
-        }
-    }
-    // Most-recent first.
-    ordered.reverse();
-    ordered
-}
-
-#[async_trait]
-impl SlashCommand for LinksCommand {
-    fn name(&self) -> &str {
-        "links"
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec!["link"]
-    }
-    fn description(&self) -> &str {
-        "List URLs in this session and open them in your browser"
-    }
-    fn help(&self) -> &str {
-        "Usage: /links [N | last | list]\n\n\
-         /links            Open the most recent URL in your browser.\n\
-         /links list       Print a numbered list of URLs (most recent first).\n\
-         /links <N>        Open the Nth URL from /links list.\n\
-         /links last       Same as /links (open most recent).\n\n\
-         URLs are detected in user/assistant message text. Set\n\
-         COVEN_CODE_SHARE_NO_OPEN=1 to disable the auto-open behavior in /share."
-    }
-
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let urls = extract_session_urls(&ctx.messages);
-        if urls.is_empty() {
-            return CommandResult::Message("No URLs found in this session yet.".to_string());
-        }
-
-        let arg = args.trim();
-
-        // /links list -> print numbered list, don't open anything.
-        if arg.eq_ignore_ascii_case("list") {
-            let mut out = format!("URLs in this session ({}):\n", urls.len());
-            for (i, u) in urls.iter().enumerate() {
-                out.push_str(&format!("  {}. {}\n", i + 1, u));
-            }
-            out.push_str("\nRun /links <N> to open one in your browser.");
-            return CommandResult::Message(out);
-        }
-
-        // Resolve which URL to open.
-        let target = if arg.is_empty() || arg.eq_ignore_ascii_case("last") {
-            &urls[0]
-        } else {
-            match arg.parse::<usize>() {
-                Ok(n) if (1..=urls.len()).contains(&n) => &urls[n - 1],
-                Ok(_) => {
-                    return CommandResult::Error(format!(
-                        "Index out of range. There are {} URLs — try /links list.",
-                        urls.len()
-                    ));
-                }
-                Err(_) => {
-                    return CommandResult::Error(
-                        "Usage: /links [N | last | list]. Run /links list to see indices."
-                            .to_string(),
-                    );
-                }
-            }
-        };
-
-        match open::that(target) {
-            Ok(_) => CommandResult::Message(format!("Opening {} in your browser…", target)),
-            Err(e) => CommandResult::Error(format!(
-                "Could not open {}: {}. Copy it manually:\n{}",
-                target, e, target
-            )),
-        }
-    }
-}
-
 // ---- /skills -------------------------------------------------------------
 
 #[async_trait]
@@ -5375,7 +5205,7 @@ impl SlashCommand for StatsCommand {
              \n\
              Estimated cost:   ${cost:.4}\n\
              \n\
-             Use /usage for quota info · /cost for quick cost · /extra-usage for per-call breakdown",
+             Use /usage for quota info · /cost for quick cost",
             model = model,
             user_turns = user_turns,
             assistant_turns = assistant_turns,
@@ -5385,57 +5215,6 @@ impl SlashCommand for StatsCommand {
             total = total,
             cache_note = cache_note,
             cost = cost,
-        ))
-    }
-}
-
-// ---- /files --------------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for FilesCommand {
-    fn name(&self) -> &str {
-        "files"
-    }
-    fn description(&self) -> &str {
-        "List files referenced in the current conversation"
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        use std::collections::HashSet;
-        // Scan message content for file paths (simple heuristic)
-        let mut files: HashSet<String> = HashSet::new();
-        let path_re =
-            regex::Regex::new(r#"(?m)([A-Za-z]:[\\/][^\s,;:"'<>]+|/[^\s,;:"'<>]{3,})"#).ok();
-
-        for msg in &ctx.messages {
-            let text = msg.get_all_text();
-            if let Some(ref re) = path_re {
-                for cap in re.captures_iter(&text) {
-                    let path = cap[1].trim().to_string();
-                    if std::path::Path::new(&path).exists() {
-                        files.insert(path);
-                    }
-                }
-            }
-        }
-
-        if files.is_empty() {
-            return CommandResult::Message(
-                "No referenced files detected in the conversation.".to_string(),
-            );
-        }
-
-        let mut sorted: Vec<String> = files.into_iter().collect();
-        sorted.sort();
-
-        CommandResult::Message(format!(
-            "Referenced files ({}):\n{}",
-            sorted.len(),
-            sorted
-                .iter()
-                .map(|f| format!("  {}", f))
-                .collect::<Vec<_>>()
-                .join("\n")
         ))
     }
 }
@@ -5611,32 +5390,6 @@ impl SlashCommand for EffortCommand {
     }
 }
 
-// ---- /summary ------------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for SummaryCommand {
-    fn name(&self) -> &str {
-        "summary"
-    }
-    fn description(&self) -> &str {
-        "Generate a brief summary of the conversation so far"
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let count = ctx.messages.len();
-        if count == 0 {
-            return CommandResult::Message("No messages in conversation yet.".to_string());
-        }
-
-        // Ask the model to summarize by injecting a hidden user message
-        CommandResult::UserMessage(
-            "Please provide a brief (3-5 sentence) summary of our conversation so far, \
-             focusing on what has been accomplished and the current state."
-                .to_string(),
-        )
-    }
-}
-
 // ---- /commit -------------------------------------------------------------
 
 #[async_trait]
@@ -5729,264 +5482,6 @@ where
     f(&mut s);
     save_ui_settings(&s)?;
     Ok(s)
-}
-
-// ---- /remote-control (/rc) -----------------------------------------------
-
-#[async_trait]
-impl SlashCommand for RemoteControlCommand {
-    fn name(&self) -> &str {
-        "remote-control"
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec!["rc"]
-    }
-    fn description(&self) -> &str {
-        "Show or manage the remote control (Bridge) connection"
-    }
-    fn help(&self) -> &str {
-        "Usage: /remote-control [start|stop|status]\n\n\
-         The Bridge feature lets you connect your local Coven Code CLI to the\n\
-         claude.ai web UI or mobile app.\n\n\
-         Subcommands:\n\
-         /remote-control          Show current bridge status and connection URL\n\
-         /remote-control start    Start the remote-control bridge listener\n\
-         /remote-control stop     Stop the bridge listener\n\
-         /remote-control status   Show bridge status"
-    }
-
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let settings = match claurst_core::config::Settings::load().await {
-            Ok(s) => s,
-            Err(e) => return CommandResult::Error(format!("Failed to load settings: {}", e)),
-        };
-
-        let remote_at_startup = settings.remote_control_at_startup;
-
-        match args.trim() {
-            "" | "status" => {
-                let hostname = hostname::get()
-                    .map(|h| h.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "(unknown host)".to_string());
-
-                let bridge_url = std::env::var("COVEN_CODE_BRIDGE_URL")
-                    .unwrap_or_else(|_| "https://claude.ai".to_string());
-
-                let token_status = if std::env::var("COVEN_CODE_BRIDGE_TOKEN").is_ok()
-                    || std::env::var("CLAUDE_BRIDGE_OAUTH_TOKEN").is_ok()
-                {
-                    "configured via environment variable"
-                } else {
-                    "not set (required to connect)"
-                };
-
-                let startup_status = if remote_at_startup {
-                    "enabled at startup"
-                } else {
-                    "disabled"
-                };
-
-                // Active session info from context
-                let session_section = if let Some(ref url) = ctx.remote_session_url {
-                    format!(
-                        "\nActive Session\n\
-                         ──────────────\n\
-                         Session URL:  {url}\n\
-                         Share this URL or QR code with others to let them connect\n\
-                         to this Coven Code session from the claude.ai web UI.\n",
-                        url = url
-                    )
-                } else {
-                    "\nNo active bridge session in this process.\n".to_string()
-                };
-
-                // Device fingerprint (first 12 chars are enough for display)
-                let fingerprint = claurst_bridge::device_fingerprint();
-                let fp_short = &fingerprint[..fingerprint.len().min(12)];
-
-                CommandResult::Message(format!(
-                    "Remote Control (Bridge)\n\
-                     ═══════════════════════\n\
-                     What it does: lets you connect the claude.ai web UI or mobile app\n\
-                     to this running Coven Code CLI session on your local machine.\n\
-                     All prompts and responses are relayed bidirectionally.\n\
-                     \n\
-                     Local Machine\n\
-                     ─────────────\n\
-                     Hostname:     {hostname}\n\
-                     Device ID:    {fp_short}… (SHA-256 fingerprint)\n\
-                     \n\
-                     Bridge Configuration\n\
-                     ────────────────────\n\
-                     Bridge server:   {bridge_url}\n\
-                     Session token:   {token_status}\n\
-                     Startup mode:    {startup_status}\n\
-                     {session_section}\n\
-                     How to connect\n\
-                     ──────────────\n\
-                     1. Obtain a session token from claude.ai (Settings → Remote Control)\n\
-                     2. Set it:  export COVEN_CODE_BRIDGE_TOKEN=<your-token>\n\
-                     3. Enable:  /remote-control start\n\
-                     4. Restart Coven Code — the bridge will connect automatically\n\
-                     5. Open {bridge_url}/claude-code in your browser\n\
-                     \n\
-                     Note: Full bridge polling requires server-side session infrastructure.\n\
-                     The cc-bridge crate implements the complete protocol (register → poll\n\
-                     → events) and is ready to use once a valid session token is provided.\n\
-                     \n\
-                     Use /remote-control start   to enable bridge at next startup\n\
-                     Use /remote-control stop    to disable bridge at startup",
-                    hostname = hostname,
-                    fp_short = fp_short,
-                    bridge_url = bridge_url,
-                    token_status = token_status,
-                    startup_status = startup_status,
-                    session_section = session_section,
-                ))
-            }
-            "start" => {
-                if let Err(e) = save_settings_mutation(|s| s.remote_control_at_startup = true) {
-                    return CommandResult::Error(format!("Failed to save settings: {}", e));
-                }
-                let bridge_url = std::env::var("COVEN_CODE_BRIDGE_URL")
-                    .unwrap_or_else(|_| "https://claude.ai".to_string());
-                let token_note = if std::env::var("COVEN_CODE_BRIDGE_TOKEN").is_ok()
-                    || std::env::var("CLAUDE_BRIDGE_OAUTH_TOKEN").is_ok()
-                {
-                    "Session token detected in environment — bridge will connect on next start."
-                        .to_string()
-                } else {
-                    format!(
-                        "No session token found.\n\
-                         Get a token from {bridge_url} (Settings → Remote Control)\n\
-                         then run:  export COVEN_CODE_BRIDGE_TOKEN=<token>",
-                        bridge_url = bridge_url
-                    )
-                };
-                CommandResult::Message(format!(
-                    "Remote control bridge enabled at startup.\n\
-                     Restart Coven Code to activate the bridge connection.\n\n\
-                     {token_note}",
-                    token_note = token_note
-                ))
-            }
-            "stop" => {
-                if let Err(e) = save_settings_mutation(|s| s.remote_control_at_startup = false) {
-                    return CommandResult::Error(format!("Failed to save settings: {}", e));
-                }
-                CommandResult::Message(
-                    "Remote control bridge disabled.\n\
-                     The bridge will not start on next launch."
-                        .to_string(),
-                )
-            }
-            other => CommandResult::Error(format!(
-                "Unknown subcommand: '{}'\nUsage: /remote-control [start|stop|status]",
-                other
-            )),
-        }
-    }
-}
-
-// ---- /remote-env ---------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for RemoteEnvCommand {
-    fn name(&self) -> &str {
-        "remote-env"
-    }
-    fn description(&self) -> &str {
-        "Show and manage environment variables for remote sessions"
-    }
-    fn help(&self) -> &str {
-        "Usage: /remote-env [set <KEY> <VALUE> | unset <KEY> | list]\n\n\
-         Manages env vars stored in config that are forwarded to remote Coven Code sessions.\n\
-         These are persisted to settings under the 'env' key."
-    }
-
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let args = args.trim();
-
-        if args.is_empty() || args == "list" {
-            if ctx.config.env.is_empty() {
-                return CommandResult::Message(
-                    "No remote environment variables configured.\n\
-                     Use /remote-env set <KEY> <VALUE> to add one."
-                        .to_string(),
-                );
-            }
-            let mut lines = vec!["Remote environment variables:".to_string()];
-            let mut keys: Vec<_> = ctx.config.env.keys().collect();
-            keys.sort();
-            for key in keys {
-                let val = &ctx.config.env[key];
-                // Mask values that look like secrets
-                let display = if key.to_uppercase().contains("KEY")
-                    || key.to_uppercase().contains("TOKEN")
-                    || key.to_uppercase().contains("SECRET")
-                    || key.to_uppercase().contains("PASSWORD")
-                {
-                    format!("{}***", &val[..val.len().min(4)])
-                } else {
-                    val.clone()
-                };
-                lines.push(format!("  {} = {}", key, display));
-            }
-            return CommandResult::Message(lines.join("\n"));
-        }
-
-        let mut parts = args.splitn(3, ' ');
-        let sub = parts.next().unwrap_or("").trim();
-        let key = parts.next().unwrap_or("").trim();
-        let val = parts.next().unwrap_or("").trim();
-
-        match sub {
-            "set" => {
-                if key.is_empty() || val.is_empty() {
-                    return CommandResult::Error(
-                        "Usage: /remote-env set <KEY> <VALUE>".to_string(),
-                    );
-                }
-                let key_owned = key.to_string();
-                let val_owned = val.to_string();
-                if let Err(e) = save_settings_mutation(|s| {
-                    s.config.env.insert(key_owned.clone(), val_owned.clone());
-                }) {
-                    return CommandResult::Error(format!("Failed to save: {}", e));
-                }
-                let mut new_config = ctx.config.clone();
-                new_config.env.insert(key.to_string(), val.to_string());
-                CommandResult::ConfigChangeMessage(
-                    new_config,
-                    format!("Set remote env: {} = {}", key, val),
-                )
-            }
-            "unset" | "remove" | "delete" => {
-                if key.is_empty() {
-                    return CommandResult::Error("Usage: /remote-env unset <KEY>".to_string());
-                }
-                if !ctx.config.env.contains_key(key) {
-                    return CommandResult::Message(format!("Key '{}' is not set.", key));
-                }
-                let key_owned = key.to_string();
-                if let Err(e) = save_settings_mutation(|s| {
-                    s.config.env.remove(&key_owned);
-                }) {
-                    return CommandResult::Error(format!("Failed to save: {}", e));
-                }
-                let mut new_config = ctx.config.clone();
-                new_config.env.remove(key);
-                CommandResult::ConfigChangeMessage(
-                    new_config,
-                    format!("Removed remote env var: {}", key),
-                )
-            }
-            other => CommandResult::Error(format!(
-                "Unknown subcommand: '{}'\nUsage: /remote-env [list|set <K> <V>|unset <K>]",
-                other
-            )),
-        }
-    }
 }
 
 // ---- /context ------------------------------------------------------------
@@ -6881,159 +6376,6 @@ impl SlashCommand for UpgradeCommand {
     }
 }
 
-// ---- /release-notes ------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for ReleaseNotesCommand {
-    fn name(&self) -> &str {
-        "release-notes"
-    }
-    fn description(&self) -> &str {
-        "Show release notes for the current version"
-    }
-    fn help(&self) -> &str {
-        "Usage: /release-notes [version]\n\n\
-         Fetches and displays release notes from GitHub.\n\
-         Without an argument, shows notes for the current version."
-    }
-
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let current = claurst_core::constants::APP_VERSION;
-        let version = args.trim();
-
-        let tag = if version.is_empty() {
-            format!("v{}", current)
-        } else if version.starts_with('v') {
-            version.to_string()
-        } else {
-            format!("v{}", version)
-        };
-
-        let client = reqwest::Client::builder()
-            .user_agent(format!("coven-code/{}", current))
-            .timeout(std::time::Duration::from_secs(8))
-            .build();
-
-        let client = match client {
-            Ok(c) => c,
-            Err(_) => {
-                return CommandResult::Message(format!(
-                    "Coven Code {tag} release notes:\n\
-                     Visit https://github.com/OpenCoven/coven-code/releases/tag/{tag}"
-                ))
-            }
-        };
-
-        let url = format!(
-            "https://api.github.com/repos/OpenCoven/coven-code/releases/tags/{}",
-            tag
-        );
-
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => {
-                let json: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
-
-                let body = json
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("No release notes found.");
-
-                let published = json
-                    .get("published_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown date");
-
-                let html_url = json.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
-
-                CommandResult::Message(format!(
-                    "Release Notes: Coven Code {tag}\n\
-                     Published: {published}\n\
-                     URL: {html_url}\n\
-                     ─────────────────────────────────\n\
-                     {body}"
-                ))
-            }
-            Ok(r) if r.status().as_u16() == 404 => CommandResult::Message(format!(
-                "No release found for {tag}.\n\
-                 View all releases: https://github.com/OpenCoven/coven-code/releases"
-            )),
-            Ok(r) => CommandResult::Message(format!(
-                "Could not fetch release notes (HTTP {}).\n\
-                 View at: https://github.com/OpenCoven/coven-code/releases/tag/{}",
-                r.status(),
-                tag
-            )),
-            Err(e) => CommandResult::Message(format!(
-                "Could not fetch release notes: {e}\n\
-                 View at: https://github.com/OpenCoven/coven-code/releases/tag/{tag}"
-            )),
-        }
-    }
-}
-
-// ---- /rate-limit-options -------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for RateLimitOptionsCommand {
-    fn name(&self) -> &str {
-        "rate-limit-options"
-    }
-    fn description(&self) -> &str {
-        "Show rate limit tiers and current rate limit status"
-    }
-    fn help(&self) -> &str {
-        "Usage: /rate-limit-options\n\n\
-         Displays available rate limit tiers and the current tier for your account.\n\
-         Rate limits depend on your Coven Code plan (Free, Pro, Max, API)."
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        // Try to read from OAuth tokens file to get subscription/tier info
-        let tier_info = match claurst_core::oauth::OAuthTokens::load().await {
-            Some(tokens) => {
-                let sub_type = tokens.subscription_type.as_deref().unwrap_or("unknown");
-                format!(
-                    "Account type:    {}\n\
-                     Scopes:          {}",
-                    sub_type,
-                    if tokens.scopes.is_empty() {
-                        "none".to_string()
-                    } else {
-                        tokens.scopes.join(", ")
-                    }
-                )
-            }
-            None => {
-                // Check for API key auth
-                if ctx.config.resolve_api_key().is_some() {
-                    "Account type:    API key (Console)\n\
-                     Rate limit tier: Depends on your API plan tier"
-                        .to_string()
-                } else {
-                    "Not logged in. Run /login to see your rate limit tier.".to_string()
-                }
-            }
-        };
-
-        CommandResult::Message(format!(
-            "Rate Limit Status\n\
-             ─────────────────\n\
-             {tier_info}\n\n\
-             Available tiers:\n\
-             ┌─────────────────────────────────────────────────┐\n\
-             │ Free          │ Limited daily usage             │\n\
-             │ Pro           │ Higher limits, faster resets    │\n\
-             │ Max (5x)      │ 5× Pro limits                   │\n\
-             │ Max (20x)     │ 20× Pro limits (highest tier)   │\n\
-             │ API / Console │ Usage-billed, no hard cap       │\n\
-             └─────────────────────────────────────────────────┘\n\n\
-             To upgrade: /upgrade\n\
-             Manage billing: https://claude.ai/settings/billing",
-            tier_info = tier_info,
-        ))
-    }
-}
-
 // ---- /statusline ---------------------------------------------------------
 
 #[async_trait]
@@ -7300,99 +6642,6 @@ impl SlashCommand for TerminalSetupCommand {
     }
 }
 
-// ---- /extra-usage --------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for ExtraUsageCommand {
-    fn name(&self) -> &str {
-        "extra-usage"
-    }
-    fn description(&self) -> &str {
-        "Show detailed usage statistics: calls, cache, tools"
-    }
-    fn help(&self) -> &str {
-        "Usage: /extra-usage\n\n\
-         Displays extended usage statistics beyond /cost:\n\
-         - API call count\n\
-         - Cache hit/miss ratio\n\
-         - Token breakdown by type\n\
-         - Effective cost per call"
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let input = ctx.cost_tracker.input_tokens();
-        let output = ctx.cost_tracker.output_tokens();
-        let cache_creation = ctx.cost_tracker.cache_creation_tokens();
-        let cache_read = ctx.cost_tracker.cache_read_tokens();
-        let total = ctx.cost_tracker.total_tokens();
-        let cost = ctx.cost_tracker.total_cost_usd();
-
-        // Estimate API calls from messages (each assistant message ~ 1 API call)
-        let api_calls = ctx
-            .messages
-            .iter()
-            .filter(|m| m.role == claurst_core::types::Role::Assistant)
-            .count();
-        let api_calls = api_calls.max(1); // at least 1 if we have any data
-
-        // Cache efficiency
-        let cache_total = cache_creation + cache_read;
-        let cache_hit_pct = if cache_total > 0 {
-            (cache_read as f64 / cache_total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let cost_per_call = if api_calls > 0 {
-            cost / api_calls as f64
-        } else {
-            0.0
-        };
-
-        CommandResult::Message(format!(
-            "Detailed Usage Statistics\n\
-             ─────────────────────────\n\
-             API calls:           {api_calls}\n\
-             Avg cost/call:       ${cost_per_call:.4}\n\n\
-             Token Breakdown:\n\
-               Input tokens:      {input:>10}\n\
-               Output tokens:     {output:>10}\n\
-               Cache creation:    {cache_creation:>10}\n\
-               Cache read:        {cache_read:>10}\n\
-               Total tokens:      {total:>10}\n\n\
-             Cache Performance:\n\
-               Cache hit rate:    {cache_hit_pct:.1}%\n\
-               Cache efficiency:  {cache_eff}\n\n\
-             Cost:\n\
-               Total cost:        ${cost:.4}\n\
-               Cost/1k tokens:    ${cost_per_k:.4}",
-            api_calls = api_calls,
-            cost_per_call = cost_per_call,
-            input = input,
-            output = output,
-            cache_creation = cache_creation,
-            cache_read = cache_read,
-            total = total,
-            cache_hit_pct = cache_hit_pct,
-            cache_eff = if cache_hit_pct > 70.0 {
-                "Excellent"
-            } else if cache_hit_pct > 40.0 {
-                "Good"
-            } else if cache_total > 0 {
-                "Low — prompts may not be stable enough to cache"
-            } else {
-                "No cache activity"
-            },
-            cost = cost,
-            cost_per_k = if total > 0 {
-                cost / (total as f64 / 1000.0)
-            } else {
-                0.0
-            },
-        ))
-    }
-}
-
 // ---- /advisor ------------------------------------------------------------
 
 #[async_trait]
@@ -7458,33 +6707,6 @@ impl SlashCommand for AdvisorCommand {
                 }
             }
         }
-    }
-}
-
-// ---- /install-slack-app --------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for InstallSlackAppCommand {
-    fn name(&self) -> &str {
-        "install-slack-app"
-    }
-    fn description(&self) -> &str {
-        "Show Slack integration availability"
-    }
-    fn hidden(&self) -> bool {
-        true
-    }
-    fn help(&self) -> &str {
-        "Usage: /install-slack-app\n\n\
-         The Slack integration installer is not available in this build."
-    }
-
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        CommandResult::Error(
-            "Slack integration setup is not available in this build. \
-             Configure Slack through a maintained plugin or external MCP server instead."
-                .to_string(),
-        )
     }
 }
 
@@ -7575,13 +6797,19 @@ impl SlashCommand for ThinkBackCommand {
         "Show thinking traces from previous responses in this session"
     }
     fn help(&self) -> &str {
-        "Usage: /think-back [n]\n\n\
+        "Usage: /think-back [n] | /think-back play [n]\n\n\
          Displays the thinking/reasoning traces from the most recent model responses.\n\
-         Pass a number to show the Nth most recent thinking block."
+         Pass a number to show the Nth most recent thinking block.\n\
+         `/think-back play` replays a trace as an animated walkthrough."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let n: usize = args.trim().parse().unwrap_or(1).max(1);
+        let trimmed = args.trim();
+        // /think-back play absorbs the former standalone /thinkback-play command.
+        if let Some(rest) = trimmed.strip_prefix("play") {
+            return ThinkBackPlayCommand.execute(rest.trim(), ctx).await;
+        }
+        let n: usize = trimmed.parse().unwrap_or(1).max(1);
 
         // Scan messages for thinking blocks
         let thinking_blocks: Vec<(usize, String)> = ctx
@@ -7719,102 +6947,6 @@ impl SlashCommand for ThinkBackPlayCommand {
     }
 }
 
-// ---- /feedback (standalone, supplements BugCommand alias) ----------------
-
-#[async_trait]
-impl SlashCommand for FeedbackCommand {
-    fn name(&self) -> &str {
-        "report"
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec![]
-    }
-    fn description(&self) -> &str {
-        "Open the GitHub issues page to report a bug or request a feature"
-    }
-    fn hidden(&self) -> bool {
-        true
-    } // surfaced via BugCommand alias; hidden to avoid duplicate
-    fn help(&self) -> &str {
-        "Usage: /report [description]\n\n\
-         Opens the GitHub issues tracker. If a description is provided,\n\
-         it is shown as a suggested pre-fill for the issue body."
-    }
-
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let url = "https://github.com/anthropics/claude-code/issues/new";
-        let report = args.trim();
-        let display_url = if report.is_empty() {
-            url.to_string()
-        } else {
-            // Append as a body query param
-            format!("{}?body={}", url, urlencoding::encode(report))
-        };
-
-        match open_with_system(&display_url) {
-            Ok(_) => CommandResult::Message(format!("Opened issue tracker: {}", url)),
-            Err(_) => CommandResult::Message(format!("Please visit {} to submit a report.", url)),
-        }
-    }
-}
-
-// ---- /color (full implementation) ----------------------------------------
-
-#[async_trait]
-impl SlashCommand for ColorSetCommand {
-    fn name(&self) -> &str {
-        "color-set"
-    }
-    fn hidden(&self) -> bool {
-        true
-    }
-    fn description(&self) -> &str {
-        "Internal: set prompt color — use /color instead"
-    }
-
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let color = args.trim();
-        if color.is_empty() {
-            let current = load_ui_settings();
-            return CommandResult::Message(format!(
-                "Current prompt color: {}\n\
-                 Use /color <name|#RRGGBB|default> to change it.\n\n\
-                 Named colors: red, green, blue, yellow, cyan, magenta, white, orange, purple",
-                current.prompt_color.as_deref().unwrap_or("default"),
-            ));
-        }
-
-        let normalized = if color == "default" {
-            None
-        } else {
-            // Validate hex or named color
-            let known_colors = [
-                "red", "green", "blue", "yellow", "cyan", "magenta", "white", "orange", "purple",
-                "pink", "gray", "grey",
-            ];
-            let is_hex = color.starts_with('#')
-                && (color.len() == 4 || color.len() == 7)
-                && color[1..].chars().all(|c| c.is_ascii_hexdigit());
-            if !is_hex && !known_colors.contains(&color.to_lowercase().as_str()) {
-                return CommandResult::Error(format!(
-                    "Unknown color '{}'. Use a color name (red, green, …) or a hex code (#RGB or #RRGGBB).",
-                    color
-                ));
-            }
-            Some(color.to_string())
-        };
-
-        match mutate_ui_settings(|s| s.prompt_color = normalized.clone()) {
-            Ok(_) => CommandResult::Message(format!(
-                "Prompt color set to {}.\n\
-                 Restart the REPL for the change to take effect.",
-                normalized.as_deref().unwrap_or("default")
-            )),
-            Err(e) => CommandResult::Error(format!("Failed to save color: {}", e)),
-        }
-    }
-}
-
 // ---- /search -------------------------------------------------------------
 
 #[async_trait]
@@ -7886,473 +7018,33 @@ impl SlashCommand for SearchCommand {
     }
 }
 
-// ---- /teleport -----------------------------------------------------------
-
-/// Serialisable bundle written to / read from a `.teleport` file.
-mod teleport_bundle {
-    use claurst_core::permissions::{PermissionAction, SerializedPermissionRule};
-    use claurst_core::types::Message;
-    use serde::{Deserialize, Serialize};
-
-    pub const BUNDLE_VERSION: &str = "1";
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct TeleportBundle {
-        /// Always `"1"`.
-        pub version: String,
-        pub session_id: String,
-        pub messages: Vec<Message>,
-        pub working_dir: String,
-        pub permissions: TeleportPermissions,
-        pub model: Option<String>,
-        pub effort: Option<String>,
-        /// Recently accessed file paths extracted from tool-use blocks.
-        pub files: Vec<String>,
-        /// Environment variables — configured provider API key env vars are excluded for security.
-        pub env: std::collections::HashMap<String, String>,
-        pub exported_at: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-    pub struct TeleportPermissions {
-        pub allowed: Vec<String>,
-        pub denied: Vec<String>,
-        pub rules: Vec<SerializedPermissionRule>,
-    }
-
-    impl TeleportPermissions {
-        #[allow(dead_code)]
-        pub fn from_rules(rules: &[SerializedPermissionRule]) -> Self {
-            let mut allowed = Vec::new();
-            let mut denied = Vec::new();
-            for r in rules {
-                let name = r.tool_name.clone().unwrap_or_else(|| "*".to_string());
-                match r.action {
-                    PermissionAction::Allow => allowed.push(name),
-                    PermissionAction::Deny => denied.push(name),
-                }
-            }
-            TeleportPermissions {
-                allowed,
-                denied,
-                rules: rules.to_vec(),
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl SlashCommand for TeleportCommand {
-    fn name(&self) -> &str {
-        "teleport"
-    }
-    fn description(&self) -> &str {
-        "Export/import/link session context as a portable bundle"
-    }
-    fn help(&self) -> &str {
-        "Usage:\n\
-         \n\
-         /teleport export [--output <file>]\n\
-         \x20 Serialize the current session to a .teleport JSON bundle.\n\
-         \x20 Defaults to ~/.coven-code/teleport_<session_id>.json\n\
-         \n\
-         /teleport import <file>\n\
-         \x20 Load a .teleport bundle and restore messages, working dir, and\n\
-         \x20 tool permissions into the current session.\n\
-         \n\
-         /teleport link\n\
-         \x20 Generate a teleport:// deep link (base64-encoded bundle) for sharing."
-    }
-
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        use teleport_bundle::{TeleportBundle, TeleportPermissions, BUNDLE_VERSION};
-
-        let args = args.trim();
-
-        // Dispatch on first token.
-        let (sub, rest) = match args.split_once(|c: char| c.is_whitespace()) {
-            Some((s, r)) => (s, r.trim()),
-            None => (args, ""),
-        };
-
-        match sub {
-            "export" => {
-                // ---- determine output path --------------------------------
-                let output_path: std::path::PathBuf = {
-                    // Parse --output <file>
-                    let explicit = if let Some(stripped) = rest.strip_prefix("--output") {
-                        let path_str = stripped.trim();
-                        if !path_str.is_empty() {
-                            Some(std::path::PathBuf::from(path_str))
-                        } else {
-                            None
-                        }
-                    } else if !rest.is_empty() {
-                        // Bare path without --output flag is also accepted.
-                        Some(std::path::PathBuf::from(rest))
-                    } else {
-                        None
-                    };
-
-                    if let Some(p) = explicit {
-                        p
-                    } else {
-                        // Default: ~/.coven-code/teleport_<session_id>.json
-                        let base = dirs::home_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join(".coven-code");
-                        let _ = std::fs::create_dir_all(&base);
-                        base.join(format!("teleport_{}.json", ctx.session_id))
-                    }
-                };
-
-                // ---- collect recently accessed file paths from messages ----
-                let files: Vec<String> = {
-                    use claurst_core::types::{ContentBlock, MessageContent};
-                    let mut seen: Vec<String> = Vec::new();
-                    for msg in &ctx.messages {
-                        if let MessageContent::Blocks(blocks) = &msg.content {
-                            for block in blocks {
-                                match block {
-                                    ContentBlock::ToolUse { input, .. } => {
-                                        // Read/Write/Edit/Glob/Grep all take a
-                                        // "path" or "file_path" argument.
-                                        let candidates = ["path", "file_path", "filePath"];
-                                        for key in &candidates {
-                                            if let Some(v) = input.get(key) {
-                                                if let Some(s) = v.as_str() {
-                                                    if !s.is_empty()
-                                                        && !seen.contains(&s.to_string())
-                                                    {
-                                                        seen.push(s.to_string());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    ContentBlock::CollapsedReadSearch { paths, .. } => {
-                                        for p in paths {
-                                            if !seen.contains(p) {
-                                                seen.push(p.clone());
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    seen.into_iter().take(50).collect()
-                };
-
-                // ---- collect env vars (exclude configured provider secrets) --
-                let mut redacted_env_vars: std::collections::HashSet<String> = ctx
-                    .config
-                    .provider_configs
-                    .keys()
-                    .flat_map(|provider_id| {
-                        claurst_core::config::api_key_env_vars_for_provider(provider_id)
-                            .iter()
-                            .copied()
-                    })
-                    .map(str::to_string)
-                    .collect();
-                redacted_env_vars.extend(
-                    claurst_core::config::api_key_env_vars_for_provider(
-                        ctx.config.selected_provider_id(),
-                    )
-                    .iter()
-                    .copied()
-                    .map(str::to_string),
-                );
-                let env: std::collections::HashMap<String, String> = std::env::vars()
-                    .filter(|(k, _)| !redacted_env_vars.contains(k))
-                    .collect();
-
-                // ---- build permissions snapshot from config ----------------
-                // The config holds allowed_tools / disallowed_tools as plain
-                // tool-name strings; we also pull any serialized permission rules
-                // from the settings if accessible.
-                let permissions = {
-                    let allowed: Vec<String> = ctx.config.allowed_tools.clone();
-                    let denied: Vec<String> = ctx.config.disallowed_tools.clone();
-                    // Build minimal SerializedPermissionRule list from config lists.
-                    let mut rules = Vec::new();
-                    use claurst_core::permissions::{PermissionAction, SerializedPermissionRule};
-                    for name in &allowed {
-                        rules.push(SerializedPermissionRule {
-                            tool_name: Some(name.clone()),
-                            path_pattern: None,
-                            action: PermissionAction::Allow,
-                        });
-                    }
-                    for name in &denied {
-                        rules.push(SerializedPermissionRule {
-                            tool_name: Some(name.clone()),
-                            path_pattern: None,
-                            action: PermissionAction::Deny,
-                        });
-                    }
-                    TeleportPermissions {
-                        allowed,
-                        denied,
-                        rules,
-                    }
-                };
-
-                // ---- build bundle -----------------------------------------
-                let bundle = TeleportBundle {
-                    version: BUNDLE_VERSION.to_string(),
-                    session_id: ctx.session_id.clone(),
-                    messages: ctx.messages.clone(),
-                    working_dir: ctx.working_dir.to_string_lossy().into_owned(),
-                    permissions,
-                    model: ctx.config.model.clone(),
-                    effort: None, // EffortLevel not stored in CommandContext directly
-                    files,
-                    env,
-                    exported_at: chrono::Utc::now().to_rfc3339(),
-                };
-
-                // ---- serialize and write ----------------------------------
-                let json = match serde_json::to_string_pretty(&bundle) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        return CommandResult::Error(format!("Failed to serialize bundle: {}", e))
-                    }
-                };
-
-                if let Err(e) = std::fs::write(&output_path, &json) {
-                    return CommandResult::Error(format!(
-                        "Failed to write teleport bundle to {}: {}",
-                        output_path.display(),
-                        e
-                    ));
-                }
-
-                CommandResult::Message(format!(
-                    "Teleport bundle exported.\n\
-                     File:     {}\n\
-                     Session:  {}\n\
-                     Messages: {}\n\
-                     Files:    {}\n\
-                     Model:    {}\n\
-                     Time:     {}",
-                    output_path.display(),
-                    bundle.session_id,
-                    bundle.messages.len(),
-                    bundle.files.len(),
-                    bundle.model.as_deref().unwrap_or("(default)"),
-                    bundle.exported_at,
-                ))
-            }
-
-            "import" => {
-                if rest.is_empty() {
-                    return CommandResult::Error("Usage: /teleport import <file>".to_string());
-                }
-
-                let path = std::path::PathBuf::from(rest);
-
-                let data = match std::fs::read_to_string(&path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return CommandResult::Error(format!(
-                            "Cannot read teleport bundle '{}': {}",
-                            path.display(),
-                            e
-                        ))
-                    }
-                };
-
-                let bundle: TeleportBundle = match serde_json::from_str(&data) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return CommandResult::Error(format!(
-                            "Failed to parse teleport bundle: {}",
-                            e
-                        ))
-                    }
-                };
-
-                // ---- validate version ------------------------------------
-                if bundle.version != BUNDLE_VERSION {
-                    return CommandResult::Error(format!(
-                        "Unsupported teleport bundle version '{}' (expected '{}').",
-                        bundle.version, BUNDLE_VERSION
-                    ));
-                }
-
-                // ---- restore working directory ---------------------------
-                let restored_dir = std::path::PathBuf::from(&bundle.working_dir);
-                if restored_dir.exists() {
-                    ctx.working_dir = restored_dir.clone();
-                    let _ = std::env::set_current_dir(&restored_dir);
-                }
-
-                // ---- restore tool permissions ----------------------------
-                let mut new_config = ctx.config.clone();
-                new_config.allowed_tools = bundle.permissions.allowed.clone();
-                new_config.disallowed_tools = bundle.permissions.denied.clone();
-                if let Some(ref model) = bundle.model {
-                    new_config.model = Some(model.clone());
-                }
-                ctx.config = new_config.clone();
-
-                // ---- restore messages ------------------------------------
-                // Capture summary fields before moving bundle.messages.
-                let msg_count = bundle.messages.len();
-                let files_count = bundle.files.len();
-                let working_dir_display = bundle.working_dir.clone();
-                let session_id = bundle.session_id.clone();
-                let exported_at = bundle.exported_at.clone();
-                let allowed_count = bundle.permissions.allowed.len();
-                let denied_count = bundle.permissions.denied.len();
-                let dir_restored = restored_dir.exists();
-
-                // Directly replace messages in the live context; the caller's
-                // REPL will see the updated ctx.messages on the next turn.
-                ctx.messages = bundle.messages;
-
-                CommandResult::Message(format!(
-                    "Teleport bundle imported.\n\
-                     Source session: {}\n\
-                     Exported at:    {}\n\
-                     Messages:       {} restored\n\
-                     Working dir:    {}{}\n\
-                     Permissions:    {} allowed, {} denied\n\
-                     Files tracked:  {}",
-                    session_id,
-                    exported_at,
-                    msg_count,
-                    working_dir_display,
-                    if dir_restored {
-                        " (restored)"
-                    } else {
-                        " (path not found, skipped)"
-                    },
-                    allowed_count,
-                    denied_count,
-                    files_count,
-                ))
-            }
-
-            "link" => {
-                // ---- build a minimal bundle for the link (no env vars) ---
-                use base64::Engine as _;
-                use teleport_bundle::TeleportBundle;
-
-                let permissions = {
-                    let allowed = ctx.config.allowed_tools.clone();
-                    let denied = ctx.config.disallowed_tools.clone();
-                    use claurst_core::permissions::{PermissionAction, SerializedPermissionRule};
-                    let mut rules = Vec::new();
-                    for name in &allowed {
-                        rules.push(SerializedPermissionRule {
-                            tool_name: Some(name.clone()),
-                            path_pattern: None,
-                            action: PermissionAction::Allow,
-                        });
-                    }
-                    for name in &denied {
-                        rules.push(SerializedPermissionRule {
-                            tool_name: Some(name.clone()),
-                            path_pattern: None,
-                            action: PermissionAction::Deny,
-                        });
-                    }
-                    TeleportPermissions {
-                        allowed,
-                        denied,
-                        rules,
-                    }
-                };
-
-                let bundle = TeleportBundle {
-                    version: BUNDLE_VERSION.to_string(),
-                    session_id: ctx.session_id.clone(),
-                    messages: ctx.messages.clone(),
-                    working_dir: ctx.working_dir.to_string_lossy().into_owned(),
-                    permissions,
-                    model: ctx.config.model.clone(),
-                    effort: None,
-                    files: Vec::new(),                     // keep link compact
-                    env: std::collections::HashMap::new(), // omit env for security
-                    exported_at: chrono::Utc::now().to_rfc3339(),
-                };
-
-                let json = match serde_json::to_string(&bundle) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        return CommandResult::Error(format!("Failed to serialize bundle: {}", e))
-                    }
-                };
-
-                let encoded =
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
-                let link = format!("teleport://{}", encoded);
-
-                // Warn if the link is very long.
-                let size_hint = if link.len() > 8192 {
-                    format!(
-                        "\n(Link is {} bytes — consider /teleport export for large sessions)",
-                        link.len()
-                    )
-                } else {
-                    String::new()
-                };
-
-                CommandResult::Message(format!(
-                    "Teleport link generated for session {}:\n\n{}{}\n\n\
-                     Share this link or use: /teleport import <link-url>",
-                    ctx.session_id, link, size_hint,
-                ))
-            }
-
-            "" => {
-                // No subcommand — show usage.
-                CommandResult::Message(
-                    "Usage:\n\
-                     \x20 /teleport export [--output <file>]   export session to .teleport bundle\n\
-                     \x20 /teleport import <file>              restore a .teleport bundle\n\
-                     \x20 /teleport link                       generate a teleport:// deep link\n\
-                     \nSee /help teleport for details."
-                        .to_string(),
-                )
-            }
-
-            other => CommandResult::Error(format!(
-                "Unknown /teleport subcommand '{}'. Valid: export, import, link",
-                other
-            )),
-        }
-    }
-}
-
 // ---- /btw ----------------------------------------------------------------
 
 #[async_trait]
 impl SlashCommand for BtwCommand {
     fn name(&self) -> &str {
-        "btw"
+        "whisper"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["btw"]
     }
     fn description(&self) -> &str {
-        "Ask a side question without adding it to conversation history"
+        "Whisper a side question to your familiar without adding it to history"
     }
     fn help(&self) -> &str {
-        "Usage: /btw <question>\n\n\
-         Submits a background question to the model without it becoming part of\n\
+        "Usage: /whisper <question>\n\n\
+         Whispers a background question to the model without it becoming part of\n\
          the main conversation context. The response is shown inline but not\n\
          stored in the message history.\n\n\
          Example:\n\
-           /btw what is the capital of France?"
+           /whisper what is the capital of France?"
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
         let question = args.trim();
         if question.is_empty() {
             return CommandResult::Error(
-                "Usage: /btw <question>  — provide a question after /btw".to_string(),
+                "Usage: /whisper <question>  — provide a question after /whisper".to_string(),
             );
         }
 
@@ -8366,95 +7058,15 @@ impl SlashCommand for BtwCommand {
     }
 }
 
-// ---- /ctx-viz (context visualizer) ---------------------------------------
-
-#[async_trait]
-impl SlashCommand for CtxVizCommand {
-    fn name(&self) -> &str {
-        "ctx-viz"
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec!["context-visualizer", "ctx"]
-    }
-    fn description(&self) -> &str {
-        "Visualize context window usage breakdown by category"
-    }
-    fn help(&self) -> &str {
-        "Usage: /ctx-viz\n\n\
-         Shows a detailed breakdown of how the context window is being used:\n\
-         - System prompt token estimate\n\
-         - Conversation messages token estimate\n\
-         - Tool results token estimate\n\
-         - Total vs context window limit"
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let model = ctx.config.effective_model().to_string();
-        let context_window: u64 = 200_000; // all current Claude models
-
-        // Estimate system prompt tokens: rough chars/4 approximation
-        // Build a minimal system prompt to estimate its size.
-        let sys_prompt_chars: usize = ctx
-            .config
-            .custom_system_prompt
-            .as_deref()
-            .map(|s| s.len())
-            .unwrap_or(2400 * 4); // fallback: ~2400 tokens worth
-        let sys_prompt_tokens = (sys_prompt_chars / 4).max(1) as u64;
-
-        // Estimate conversation tokens from messages
-        let (conv_chars, tool_chars): (usize, usize) =
-            ctx.messages.iter().fold((0, 0), |(conv, tool), msg| {
-                let text = msg.get_all_text();
-                // Heuristic: if the message looks like a tool result, count separately
-                if msg.role == claurst_core::types::Role::User && text.starts_with('[') {
-                    (conv, tool + text.len())
-                } else {
-                    (conv + text.len(), tool)
-                }
-            });
-
-        let conv_tokens = (conv_chars / 4) as u64;
-        let tool_tokens = (tool_chars / 4) as u64;
-        let total_tokens = sys_prompt_tokens + conv_tokens + tool_tokens;
-        let pct = (total_tokens as f64 / context_window as f64) * 100.0;
-
-        let bar_width = 40usize;
-        let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
-        let bar = "█".repeat(filled) + &"░".repeat(bar_width.saturating_sub(filled));
-
-        CommandResult::Message(format!(
-            "Context Window Usage\n\
-             ────────────────────────────────────────\n\
-             Model:            {model}\n\
-             System prompt:    ~{sys:>7} tokens\n\
-             Conversation:     ~{conv:>7} tokens\n\
-             Tool results:     ~{tool:>7} tokens\n\
-             ────────────────────────────────────────\n\
-             Total:            ~{total:>7} / {window} tokens ({pct:.1}%)\n\
-             [{bar}] {pct:.1}%\n\n\
-             Use /compact to reduce context usage.",
-            model = model,
-            sys = sys_prompt_tokens,
-            conv = conv_tokens,
-            tool = tool_tokens,
-            total = total_tokens,
-            window = context_window,
-            pct = pct,
-            bar = bar,
-        ))
-    }
-}
-
 // ---- /sandbox-toggle -----------------------------------------------------
 
 #[async_trait]
 impl SlashCommand for SandboxToggleCommand {
     fn name(&self) -> &str {
-        "sandbox-toggle"
+        "sandbox"
     }
     fn aliases(&self) -> Vec<&str> {
-        vec!["sandbox"]
+        vec!["sandbox-toggle"]
     }
     fn description(&self) -> &str {
         "Enable or disable sandboxed execution of shell commands"
@@ -8606,161 +7218,6 @@ impl SlashCommand for SandboxToggleCommand {
             }
             Err(e) => CommandResult::Error(format!("Failed to save sandbox setting: {}", e)),
         }
-    }
-}
-
-// ---- /heapdump -----------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for HeapdumpCommand {
-    fn name(&self) -> &str {
-        "heapdump"
-    }
-    fn description(&self) -> &str {
-        "Show process memory and diagnostic information"
-    }
-    fn help(&self) -> &str {
-        "Usage: /heapdump\n\n\
-         Displays a diagnostic snapshot of the current process:\n\
-         process ID, platform, architecture, and available memory info.\n\
-         On Linux, reads /proc/self/status for RSS/VmPeak figures.\n\
-         On other platforms, reports what is available from the OS."
-    }
-
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let pid = std::process::id();
-        let platform = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
-
-        let mut lines: Vec<String> = Vec::new();
-        lines.push(format!("  Process ID : {}", pid));
-        lines.push(format!("  Platform   : {}", platform));
-        lines.push(format!("  Arch       : {}", arch));
-
-        // On Linux, pull memory figures from /proc/self/status
-        #[cfg(target_os = "linux")]
-        {
-            match std::fs::read_to_string("/proc/self/status") {
-                Ok(status) => {
-                    for line in status.lines() {
-                        let key = line.split(':').next().unwrap_or("").trim();
-                        if matches!(key, "VmPeak" | "VmRSS" | "VmSize" | "VmData" | "Threads") {
-                            let value = line.split(':').nth(1).unwrap_or("").trim();
-                            lines.push(format!("  {:10} : {}", key, value));
-                        }
-                    }
-                }
-                Err(e) => {
-                    lines.push(format!("  (could not read /proc/self/status: {})", e));
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            lines.push("  Memory stats: not available on this platform".to_string());
-            lines.push("  (Linux /proc/self/status required for detailed figures)".to_string());
-        }
-
-        let body = lines.join("\n");
-        CommandResult::Message(format!(
-            "Heap Diagnostic\n\
-             ─────────────────────────────\n\
-             {body}"
-        ))
-    }
-}
-
-// ---- /insights -----------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for InsightsCommand {
-    fn name(&self) -> &str {
-        "insights"
-    }
-    fn description(&self) -> &str {
-        "Generate a session analysis report with conversation statistics"
-    }
-    fn help(&self) -> &str {
-        "Usage: /insights\n\n\
-         Analyses the current conversation and prints a statistics report:\n\
-         turn count, token usage, tools invoked, most-used tool, and more."
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let messages = &ctx.messages;
-
-        // Count turns (user / assistant pairs)
-        let user_turns: usize = messages
-            .iter()
-            .filter(|m| matches!(m.role, claurst_core::types::Role::User))
-            .count();
-        let assistant_turns: usize = messages
-            .iter()
-            .filter(|m| matches!(m.role, claurst_core::types::Role::Assistant))
-            .count();
-        let total_turns = user_turns.min(assistant_turns);
-
-        // Count tool_use blocks and track frequency
-        let mut tool_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for msg in messages {
-            for block in msg.get_tool_use_blocks() {
-                if let claurst_core::types::ContentBlock::ToolUse { name, .. } = block {
-                    *tool_counts.entry(name.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-        let total_tool_calls: usize = tool_counts.values().sum();
-        let most_frequent_tool = tool_counts
-            .iter()
-            .max_by_key(|(_, &v)| v)
-            .map(|(k, v)| format!("{} ({} calls)", k, v))
-            .unwrap_or_else(|| "none".to_string());
-
-        // Token stats from cost_tracker
-        let input_tokens = ctx.cost_tracker.input_tokens();
-        let output_tokens = ctx.cost_tracker.output_tokens();
-        let total_tokens = ctx.cost_tracker.total_tokens();
-        let total_cost = ctx.cost_tracker.total_cost_usd();
-
-        let avg_tokens_per_turn = if total_turns > 0 {
-            total_tokens / total_turns as u64
-        } else {
-            0
-        };
-
-        CommandResult::Message(format!(
-            "Session Insights\n\
-             ──────────────────────────────────────\n\
-             Conversation\n\
-             ├─ User turns          : {user_turns}\n\
-             ├─ Assistant turns     : {assistant_turns}\n\
-             └─ Completed exchanges : {total_turns}\n\
-             \n\
-             Tokens\n\
-             ├─ Input               : {input_tokens}\n\
-             ├─ Output              : {output_tokens}\n\
-             ├─ Total               : {total_tokens}\n\
-             └─ Avg per exchange    : {avg_tokens_per_turn}\n\
-             \n\
-             Cost\n\
-             └─ Estimated USD       : ${total_cost:.4}\n\
-             \n\
-             Tools\n\
-             ├─ Total calls         : {total_tool_calls}\n\
-             └─ Most used           : {most_frequent_tool}",
-            user_turns = user_turns,
-            assistant_turns = assistant_turns,
-            total_turns = total_turns,
-            input_tokens = input_tokens,
-            output_tokens = output_tokens,
-            total_tokens = total_tokens,
-            avg_tokens_per_turn = avg_tokens_per_turn,
-            total_cost = total_cost,
-            total_tool_calls = total_tool_calls,
-            most_frequent_tool = most_frequent_tool,
-        ))
     }
 }
 
@@ -8931,10 +7388,12 @@ impl SlashCommand for RevertCommand {
         "Revert file changes from an assistant turn back to pre-turn state"
     }
     fn help(&self) -> &str {
-        "Usage: /revert [<n>|<uuid>]\n\n\
+        "Usage: /revert [<n>|<uuid>] | /revert list | /revert diff [<n>]\n\n\
          Without args: revert the most recent assistant turn.\n\
          With a number n: revert the n-th most recent assistant turn (1 = latest).\n\
-         With a uuid: revert the turn whose message id starts with that string.\n\n\
+         With a uuid: revert the turn whose message id starts with that string.\n\
+         `/revert list` shows turns that have recorded file changes.\n\
+         `/revert diff` previews the shadow-git diff for a turn without reverting.\n\n\
          This uses the shadow-git snapshot to restore all files that were\n\
          changed during the target turn, and removes that turn (and any later\n\
          turns) from the session transcript.\n\n\
@@ -8945,6 +7404,15 @@ impl SlashCommand for RevertCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let trimmed = args.trim();
+        // /revert list and /revert diff absorb the former standalone
+        // /checkpoints and /snapshot commands.
+        if trimmed == "list" {
+            return CheckpointsCommand.execute("", ctx).await;
+        }
+        if let Some(rest) = trimmed.strip_prefix("diff") {
+            return SnapshotDiffCommand.execute(rest.trim(), ctx).await;
+        }
         let snap = match claurst_core::snapshot::get_or_create(&ctx.working_dir) {
             Some(s) => s,
             None => {
@@ -10656,12 +9124,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(DoctorCommand),
         Box::new(LoginCommand),
         Box::new(LogoutCommand),
-        Box::new(AccountsCommand),
         Box::new(SwitchCommand),
         Box::new(RefreshCommand),
-        Box::new(CavemanCommand),
-        Box::new(RockyCommand),
-        Box::new(NormalCommand),
+        Box::new(IncantCommand),
         Box::new(InitCommand),
         Box::new(ReviewCommand),
         Box::new(HooksCommand),
@@ -10676,18 +9141,12 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ThemeCommand),
         Box::new(OutputStyleCommand),
         Box::new(KeybindingsCommand),
-        Box::new(PrivacySettingsCommand),
         // New commands
         Box::new(ExportCommand),
         Box::new(ShareCommand),
-        Box::new(LinksCommand),
         Box::new(SkillsCommand),
         Box::new(RewindCommand),
-        Box::new(StatsCommand),
-        Box::new(FilesCommand),
-        Box::new(RenameCommand),
         Box::new(EffortCommand),
-        Box::new(SummaryCommand),
         Box::new(CommitCommand),
         Box::new(NamedCommandAdapter {
             slash_name: "add-dir",
@@ -10718,13 +9177,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_help: "Usage: /tag [list|add|remove] [tag]",
         }),
         Box::new(NamedCommandAdapter {
-            slash_name: "passes",
-            target_name: "passes",
-            slash_aliases: &[],
-            slash_description: "Share a free week of Coven Code with friends",
-            slash_help: "Usage: /passes",
-        }),
-        Box::new(NamedCommandAdapter {
             slash_name: "ide",
             target_name: "ide",
             slash_aliases: &[],
@@ -10738,78 +9190,25 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_description: "Get comments from a GitHub pull request",
             slash_help: "Usage: /pr-comments <PR-number>",
         }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "desktop",
-            target_name: "desktop",
-            slash_aliases: &[],
-            slash_description: "Open the Coven Code desktop app",
-            slash_help: "Usage: /desktop",
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "mobile",
-            target_name: "mobile",
-            slash_aliases: &[],
-            slash_description: "Set up Coven Code on mobile",
-            slash_help: "Usage: /mobile",
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "install-github-app",
-            target_name: "install-github-app",
-            slash_aliases: &[],
-            slash_description: "Set up Coven Code GitHub Actions for a repository",
-            slash_help: "Usage: /install-github-app",
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "web-setup",
-            target_name: "remote-setup",
-            slash_aliases: &["remote-setup"],
-            slash_description: "Configure a remote Coven Code environment",
-            slash_help: "Usage: /web-setup",
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "stickers",
-            target_name: "stickers",
-            slash_aliases: &[],
-            slash_description: "View collected stickers",
-            slash_help: "Usage: /stickers",
-        }),
         // Batch-1 new commands
-        Box::new(RemoteControlCommand),
-        Box::new(RemoteEnvCommand),
         Box::new(ContextCommand),
         Box::new(CopyCommand),
         Box::new(ChromeCommand),
         Box::new(VimCommand),
         Box::new(VoiceCommand),
         Box::new(UpgradeCommand),
-        Box::new(ReleaseNotesCommand),
-        Box::new(RateLimitOptionsCommand),
         Box::new(StatuslineCommand),
-        Box::new(SecurityReviewCommand),
         Box::new(TerminalSetupCommand),
-        Box::new(ExtraUsageCommand),
         Box::new(FastCommand),
         Box::new(ThinkBackCommand),
-        Box::new(ThinkBackPlayCommand),
-        Box::new(FeedbackCommand),
-        Box::new(ColorSetCommand),
-        // New commands: teleport, btw, ctx-viz, sandbox-toggle
-        Box::new(TeleportCommand),
+        // /whisper (BtwCommand) and /sandbox (SandboxToggleCommand)
         Box::new(BtwCommand),
-        Box::new(CtxVizCommand),
         Box::new(SandboxToggleCommand),
-        // Advisor and Slack integration
+        // Advisor
         Box::new(AdvisorCommand),
-        Box::new(InstallSlackAppCommand),
-        // Diagnostics / analysis
-        Box::new(HeapdumpCommand),
-        Box::new(InsightsCommand),
-        Box::new(UltrareviewCommand),
         // Snapshot / revert system
         Box::new(UndoCommand),
         Box::new(RevertCommand),
-        Box::new(CheckpointsCommand),
-        Box::new(SnapshotDiffCommand),
         // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
@@ -11177,7 +9576,8 @@ mod tests {
         assert!(find_command("bug").is_some());
         assert!(find_command("bashes").is_some());
         assert!(find_command("remote").is_some());
-        assert!(find_command("remote-setup").is_some());
+        assert!(find_command("sandbox-toggle").is_some());
+        assert!(find_command("btw").is_some());
     }
 
     #[test]
@@ -11215,14 +9615,15 @@ mod tests {
             "agents",
             "branch",
             "tag",
-            "passes",
             "ide",
             "pr-comments",
-            "desktop",
-            "mobile",
-            "install-github-app",
-            "web-setup",
-            "stickers",
+            "whisper",
+            "incant",
+            "sandbox",
+            "switch",
+            "review",
+            "coven",
+            "familiar",
         ];
         for name in &expected {
             assert!(
@@ -11379,11 +9780,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_accounts_command_returns_message() {
+    async fn test_switch_no_args_lists_accounts() {
         let mut ctx = make_ctx();
-        let cmd = find_command("accounts").unwrap();
+        let cmd = find_command("switch").unwrap();
         let result = cmd.execute("", &mut ctx).await;
-        // Should return a Message regardless of registry contents.
+        // /switch with no args lists stored accounts (absorbs old /accounts).
         assert!(matches!(result, CommandResult::Message(_)));
     }
 
@@ -11429,7 +9830,8 @@ mod tests {
     async fn test_switch_command_requires_id() {
         let mut ctx = make_ctx();
         let cmd = find_command("switch").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        // A flag with no profile id is still an error.
+        let result = cmd.execute("--codex", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
@@ -11446,11 +9848,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_web_setup_proxy_executes_named_command() {
-        let mut ctx = make_ctx();
-        let cmd = find_command("web-setup").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
-        assert!(matches!(result, CommandResult::Message(_)));
+    async fn test_removed_upsell_commands_are_gone() {
+        for name in [
+            "web-setup",
+            "passes",
+            "desktop",
+            "mobile",
+            "stickers",
+            "install-github-app",
+            "install-slack-app",
+            "privacy-settings",
+        ] {
+            assert!(find_command(name).is_none(), "'{}' should be removed", name);
+        }
     }
 
     #[tokio::test]

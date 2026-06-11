@@ -9,20 +9,20 @@ This document is the reference for the visible slash commands available in Coven
 1. [Command System Overview](#command-system-overview)
 2. [Session & Navigation](#session--navigation)
 3. [Model & Provider](#model--provider) — `/model`, `/providers`, `/connect`, `/thinking`, `/effort`, `/advisor`, `/fast`
-4. [Configuration & Settings](#configuration--settings) — `/config`, `/keybindings`, `/permissions`, `/hooks`, `/privacy-settings`, `/mcp`, `/output-style`, `/theme`, `/statusline`, `/vim`, `/voice`, `/terminal-setup`
-5. [Code & Git](#code--git) — `/commit`, `/diff`, `/undo`, `/review`, `/security-review`, `/init`, `/search`
-6. [Search & Files](#search--files) — `/files`, `/context`
-7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/cost`, `/stats`, `/status`, `/insights`
+4. [Configuration & Settings](#configuration--settings) — `/config`, `/keybindings`, `/permissions`, `/hooks`, `/mcp`, `/output-style`, `/theme`, `/statusline`, `/vim`, `/voice`, `/terminal-setup`
+5. [Code & Git](#code--git) — `/commit`, `/diff`, `/undo`, `/revert`, `/review`, `/init`, `/search`
+6. [Search & Files](#search--files) — `/context`
+7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/cost`, `/status`
 8. [Agents & Tasks](#agents--tasks) — `/agents`, `/tasks`, `/goal`, `/managed-agents`, `/agent`
-9. [Planning & Review](#planning--review) — `/plan`, `/ultraplan`, `/ultrareview`
+9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
 10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
-11. [Authentication](#authentication) — `/login`, `/logout`, `/accounts`, `/switch`, `/refresh`
-12. [Display & Terminal](#display--terminal) — `/theme`, `/output-style`, `/statusline`, `/vim`, `/terminal-setup`, `/caveman`, `/rocky`, `/normal`, `/mobile`, `/color`, `/stickers`
+11. [Authentication](#authentication) — `/login`, `/logout`, `/switch`, `/refresh`
+12. [Display & Terminal](#display--terminal) — `/theme`, `/output-style`, `/statusline`, `/vim`, `/terminal-setup`, `/incant`, `/color`
 13. [Diagnostics & Info](#diagnostics--info) — `/doctor`, `/version`, `/update`
-14. [Export & Sharing](#export--sharing) — `/export`, `/copy`
-15. [Advanced & Internal](#advanced--internal) — `/thinking`, `/connect`, `/fork`, `/effort`, `/summary`, `/brief`, `/sandbox-toggle`, `/think-back`, `/thinkback-play`
+14. [Export & Sharing](#export--sharing) — `/export`, `/copy`, `/share`
+15. [Advanced & Internal](#advanced--internal) — `/thinking`, `/connect`, `/fork`, `/effort`, `/whisper`, `/sandbox`, `/think-back`
 16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`, `/familiar`
-17. [Additional Commands](#additional-commands) — diagnostics, snapshots, parallel-work, remote-control, etc.
+17. [Additional Commands](#additional-commands) — feedback, config import, plugin reload, named CLI commands
 18. [Command Availability](#command-availability)
 
 ---
@@ -63,7 +63,7 @@ Display all available commands with their descriptions. Hidden and setup-only co
 ---
 
 ### /clear
-**Aliases:** `reset`, `new`
+**Aliases:** `c`, `reset`, `new`
 
 Clear the current conversation history and start a fresh session. The session file is retained on disk; only the in-memory message list is cleared.
 
@@ -74,7 +74,7 @@ Clear the current conversation history and start a fresh session. The session fi
 ---
 
 ### /exit
-**Aliases:** `quit`
+**Aliases:** `quit`, `q`
 
 Exit the Coven Code REPL. Equivalent to pressing `Ctrl+D`. Unsaved session state is flushed before exit.
 
@@ -86,7 +86,7 @@ Exit the Coven Code REPL. Equivalent to pressing `Ctrl+D`. Unsaved session state
 ---
 
 ### /resume
-**Aliases:** `continue`
+**Aliases:** `r`, `continue`
 
 Resume a previous session from the session store. Displays a list of recent sessions with timestamps and summaries. Select one to restore its message history and file state.
 
@@ -100,14 +100,15 @@ Resume a previous session from the session store. Displays a list of recent sess
 ### /session
 **Aliases:** `remote`
 
-Manage active and stored sessions. Subcommands allow listing, switching, deleting, and attaching to remote sessions.
+Show or manage conversation sessions. Without arguments, shows the current session status (including the remote session URL when a bridge is active).
 
 ```
-/session
-/session list
-/session delete <session-id>
-/session attach <session-id>
+/session                       — show current session status
+/session list                  — list recent sessions
+/session rename <new-name>     — rename the current session
 ```
+
+`/session rename` absorbs the former standalone `/rename` command. The new name is used in session listings and exports.
 
 ---
 
@@ -122,18 +123,7 @@ Fork the current session into a new independent session that begins from the cur
 
 ---
 
-### /rename
-
-Rename the current session. The new name is used in session listings and exports.
-
-```
-/rename <new-name>
-```
-
----
-
 ### /rewind
-**Aliases:** `checkpoint`
 
 Rewind the conversation to a previous message. Displays a numbered list of messages; enter a number to truncate history to that point and resume from there.
 
@@ -191,6 +181,7 @@ Connect to a remote AI provider or configure a custom provider endpoint. Support
 ---
 
 ### /thinking
+**Aliases:** `think`
 
 Configure extended thinking for the current session. Extended thinking allows the model to reason through problems before responding, at the cost of additional tokens.
 
@@ -294,7 +285,6 @@ See [keybindings.md](./keybindings.md) for the full keybindings reference.
 ---
 
 ### /permissions
-**Aliases:** `allowed-tools`
 
 View and manage tool permission rules. Permissions control which tools can run without prompting, which are blocked, and which always require confirmation.
 
@@ -320,16 +310,6 @@ Manage event hooks. Hooks are shell commands or scripts that execute when lifecy
 ```
 
 Available events: `pre-tool`, `post-tool`, `session-start`, `session-end`, `message-send`, `message-receive`.
-
----
-
-### /privacy-settings
-
-Open Coven Code privacy settings. Launches a browser to the Anthropic privacy portal where you can review data usage preferences, conversation retention, and account privacy options.
-
-```
-/privacy-settings
-```
 
 ---
 
@@ -391,6 +371,7 @@ Configure the status line displayed at the bottom of the TUI. Toggle individual 
 ---
 
 ### /vim
+**Aliases:** `vi`
 
 Toggle vim keybinding mode on or off. In vim mode the input field behaves like a vim editor (normal/insert/visual modes). Persisted to config.
 
@@ -461,26 +442,42 @@ Undo file changes made during the current session. Restores files to their state
 
 ---
 
-### /review
+### /revert
 
-Initiate a code review pass over recent changes. The model examines all modified files and produces inline comments and a summary of issues found.
+Revert file changes from an assistant turn back to their pre-turn state, using the shadow-git snapshot. `/undo` reverts the most recent edit; `/revert` reverts a chosen turn and removes that turn (and any later turns) from the session transcript.
 
 ```
-/review
-/review <file-path>
-/review --since HEAD~3
+/revert            — revert the most recent assistant turn
+/revert 2          — revert the second-to-last turn
+/revert abc123     — revert the turn whose message id starts with 'abc123'
+/revert list       — list turns that have recorded file changes
+/revert diff [n]   — preview the shadow-git diff for a turn without reverting
 ```
 
 ---
 
-### /security-review
+### /review
 
-Run a security-focused review pass. The model looks specifically for vulnerabilities, credential exposure, injection risks, and other security concerns in modified files.
+Review code changes via the model and optionally post the review to the associated GitHub PR. Runs `git diff <base>...HEAD` (or `git diff --cached` when no base is given) and sends the diff for a structured review.
 
 ```
-/security-review
-/security-review <file-path>
+/review                    — review staged changes
+/review main               — review the diff from main..HEAD
+/review origin/main        — review against a remote base ref
 ```
+
+Variants (the former `/security-review` and `/ultrareview` commands fold in here as subcommands):
+
+```
+/review security [path]    — security-focused review: vulnerabilities, credential
+                             exposure, injection risks, and other security concerns
+/review ultra [path]       — exhaustive multi-dimensional review covering security,
+                             performance, maintainability, error handling, test
+                             coverage, API design, and architecture; each finding
+                             is tagged by category and severity
+```
+
+GitHub posting requires `GITHUB_TOKEN` (a personal access token with repo scope); the PR number is auto-detected from `git remote` or supplied via `CLAUDE_PR_NUMBER`.
 
 ---
 
@@ -507,18 +504,6 @@ Search the codebase using natural language or regex patterns. Wraps the GrepTool
 ---
 
 ## Search & Files
-
-### /files
-
-List all files currently tracked (read or written) in the active session. Useful for reviewing what context the model has access to.
-
-```
-/files
-/files --written
-/files --read
-```
-
----
 
 ### /context
 
@@ -558,21 +543,13 @@ Display a detailed token usage breakdown for the current session. Shows input to
 
 ### /cost
 
-Show the total token usage and estimated cost for the current session. Provides a quick summary without the per-call breakdown of `/usage`.
+Show the total token usage and estimated cost for the current session. Provides a quick summary without the per-call breakdown of `/usage`. In the TUI, `/cost` opens the interactive stats dialog.
 
 ```
 /cost
 ```
 
----
-
-### /stats
-
-Display session statistics: number of messages, tool calls, files modified, tokens used, session duration, and model used.
-
-```
-/stats
-```
+For aggregate token / cost / tool statistics across saved sessions, use the `stats` CLI command: `coven-code stats [summary|sessions|tools|daily|session <id>]`.
 
 ---
 
@@ -582,39 +559,6 @@ Show the current session status. Includes active model, permission mode, thinkin
 
 ```
 /status
-```
-
----
-
-### /insights
-
-Generate an analytical report of the current session. Prints a structured breakdown of conversation statistics including turn count, token usage (input/output/total), average tokens per exchange, estimated cost, total tool calls, and the most frequently invoked tool.
-
-```
-/insights
-```
-
-Sample output:
-```
-Session Insights
-──────────────────────────────────────
-Conversation
-├─ User turns          : 12
-├─ Assistant turns     : 12
-└─ Completed exchanges : 12
-
-Tokens
-├─ Input               : 48320
-├─ Output              : 9140
-├─ Total               : 57460
-└─ Avg per exchange    : 4788
-
-Cost
-└─ Estimated USD       : $0.1823
-
-Tools
-├─ Total calls         : 34
-└─ Most used           : Bash (18 calls)
 ```
 
 ---
@@ -732,34 +676,15 @@ To exit plan mode, use `/plan off` or the `/exit-plan` internal action.
 
 ---
 
-### /ultraplan
+### ultraplan (CLI)
 
-Extended planning mode with deeper reasoning. Like `/plan` but with an elevated thinking budget to allow more thorough analysis before acting.
-
-```
-/ultraplan
-```
-
----
-
-### /ultrareview
-
-Run an exhaustive multi-dimensional code review over the current working directory or a specified path. Goes significantly beyond `/review` and `/security-review`, covering:
-
-- **Security** — OWASP Top 10, injection vulnerabilities, cryptographic weaknesses, path traversal, race conditions, dependency risks
-- **Performance** — algorithmic complexity, allocations, N+1 queries, blocking I/O, memory leaks
-- **Maintainability** — function length, nesting depth, DRY violations, naming, dead code
-- **Error handling** — swallowed errors, panic paths, missing input validation
-- **Test coverage** — missing tests, brittle tests, missing edge cases
-- **API design, documentation, accessibility, and architecture**
-
-Each finding is tagged by category and severity.
+Launch the Ultraplan agentic code planner with extended thinking. Like `/plan` but with an elevated thinking budget to allow more thorough analysis before acting. Ultraplan is a named CLI command — it has no slash form.
 
 ```
-/ultrareview
-/ultrareview <path>
-/ultrareview <PR-number>
+coven-code ultraplan [--effort=medium|high|maximum]
 ```
+
+For an exhaustive review pass, see [`/review ultra`](#review).
 
 ---
 
@@ -772,6 +697,7 @@ Documented above under [Configuration & Settings](#configuration--settings).
 ---
 
 ### /skills
+**Aliases:** `skill`
 
 List and manage skills. Skills are bundled prompt-commands that extend Coven Code's capabilities without writing code. They appear alongside built-in commands in the registry.
 
@@ -865,15 +791,17 @@ Remove credentials. By default removes only the **active** profile for the provi
 
 ---
 
-### /accounts
+### /switch
 
-List every stored account across providers. The active profile in each provider is marked with `*`.
+Switch the active account for a provider. Anthropic by default; pass `--codex` for Codex. Run `/switch` with no arguments to list every stored account and see available profile ids — the active profile in each provider is marked with `*`.
 
 ```
-/accounts
+/switch                          — list stored accounts across providers
+/switch work                     — set active Anthropic profile to "work"
+/switch --codex personal         — set active Codex profile to "personal"
 ```
 
-Sample output:
+Sample listing output:
 
 ```
 Anthropic:
@@ -881,17 +809,6 @@ Anthropic:
     work     [max]    kuber@company.example
 Codex:
     work              kuber@company.example
-```
-
----
-
-### /switch
-
-Switch the active account for a provider. Anthropic by default; pass `--codex` for Codex. Run `/accounts` first to see available profile ids.
-
-```
-/switch work                     — set active Anthropic profile to "work"
-/switch --codex personal         — set active Codex profile to "personal"
 ```
 
 ---
@@ -934,59 +851,38 @@ Documented above under [Configuration & Settings](#configuration--settings).
 
 ### /terminal-setup
 
-Documented above under [Code & Git](#code--git).
+Documented above under [Configuration & Settings](#configuration--settings).
 
 ---
 
-### /caveman
+### /incant
 
-Activate caveman speech mode. In caveman mode the model strips pleasantries, hedging, articles, and transitional phrases from its responses, producing dense, telegraphic output. Useful for reducing verbosity and saving tokens on long sessions.
-
-```
-/caveman             — activate full caveman mode (~75% token reduction)
-/caveman lite        — remove pleasantries only (~40% reduction)
-/caveman full        — compress sentences and drop articles (default, ~75% reduction)
-/caveman ultra       — maximum compression, imperative phrases only (~85% reduction)
-```
-
-Deactivate with `/normal`.
-
----
-
-### /rocky
-
-Activate Rocky speech mode. Rocky is the Eridian alien engineer from *Project Hail Mary* who communicates in a distinctive pidgin English with specific grammar rules and expressive emphasis. In rocky mode the model adopts Rocky's communication style.
+Cast a speech incantation — change the model's voice, trading flourish for tokens. The former `/caveman`, `/rocky`, and `/normal` commands fold in here: voices become arguments and `/incant off` replaces `/normal`.
 
 ```
-/rocky             — activate full Rocky mode (~75% token reduction)
-/rocky lite        — grammar rules only, minimal emphasis (~40% reduction)
-/rocky full        — full Rocky grammar + regular emphasis (default, ~75% reduction)
-/rocky ultra       — maximum Rocky personality, frequent emphasis, alien observations
+/incant <voice> [lite|full|ultra]    — cast an incantation at the given intensity
+/incant off                          — lift the active incantation, return to normal speech
 ```
 
-Deactivate with `/normal`.
+Voices:
 
----
+| Voice | Description |
+|-------|-------------|
+| `caveman` | Why use many token when few token do trick. Strips pleasantries, hedging, articles, and transitional phrases (~75% token reduction) |
+| `rocky` | Eridian engineer from *Project Hail Mary*. Save big token. Good good good. |
 
-### /normal
+Intensity:
 
-Deactivate any active speech mode (caveman or rocky) and return the model to its standard response style.
-
-```
-/normal
-```
-
----
-
-### /mobile
-
-Display a QR code and download links for the Claude mobile app. Supports a `session` subcommand that generates a QR code linking directly to an active remote Coven Code session.
+| Level | Description |
+|-------|-------------|
+| `lite` | Light touch (~40% reduction) |
+| `full` | The default (~75% reduction) |
+| `ultra` | Maximum compression |
 
 ```
-/mobile             — show QR code for claude.ai/mobile (works for both platforms)
-/mobile ios         — show QR code for the iOS App Store
-/mobile android     — show QR code for Google Play
-/mobile session     — show QR code linking to the active remote session (requires --remote)
+/incant caveman            — full caveman mode
+/incant rocky lite         — Rocky grammar, light touch
+/incant off                — back to normal speech
 ```
 
 ---
@@ -1000,16 +896,6 @@ Set the prompt bar color for the current session. Accepts standard color names o
 /color <name>        — set to a named color (e.g., blue, red, green)
 /color #ff6b6b       — set to a hex color value
 /color default       — reset to the theme default
-```
-
----
-
-### /stickers
-
-Opens the Coven Code sticker page (`stickermule.com/claudecode`) in your default browser. Falls back to printing the URL if no browser can be launched.
-
-```
-/stickers
 ```
 
 ---
@@ -1077,6 +963,18 @@ Copy the most recent assistant response to the system clipboard. Pass a number t
 
 ---
 
+### /share
+
+Upload the current session as a secret GitHub gist and return a shareable URL. The session is rendered as a single self-contained HTML file and uploaded via the `gh` CLI; a viewer URL of the form `https://opencoven.github.io/coven-code/session/#<gist-id>` is printed.
+
+```
+/share
+```
+
+Requires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). The viewer base URL can be overridden with `COVEN_CODE_SHARE_VIEWER_URL`. Secret gists are unlisted but readable by anyone who has the link.
+
+---
+
 ## Advanced & Internal
 
 ### /thinking
@@ -1103,43 +1001,35 @@ Documented above under [Model & Provider](#model--provider).
 
 ---
 
-### /summary
-
-Generate a summary of the current session. The model produces a condensed description of what was accomplished. Primarily used internally for session metadata.
-
-```
-/summary
-```
-
----
-
-### /brief
-
-Output a brief status message for use in non-interactive contexts. Renders minimal session info without the full TUI.
-
-```
-/brief
-```
-
----
-
 ### /context
 
 Documented above under [Search & Files](#search--files).
 
 ---
 
-### /sandbox-toggle
-**Aliases:** `sandbox`
+### /whisper
+**Aliases:** `btw`
+
+Whisper a side question to your familiar without adding it to history. The question goes to the model out-of-band — the response is shown inline but does not become part of the main conversation context. Replaces the former `/btw` command.
+
+```
+/whisper <question>
+/whisper what is the capital of France?
+```
+
+---
+
+### /sandbox
+**Aliases:** `sandbox-toggle`
 
 Enable or disable sandboxed execution of shell commands. When sandbox mode is on, bash/shell commands run in an isolated environment to limit unintended side effects. Supported on macOS, Linux, and WSL2.
 
 ```
-/sandbox-toggle                          — toggle sandbox mode on/off
-/sandbox-toggle on                       — enable sandbox mode
-/sandbox-toggle off                      — disable sandbox mode
-/sandbox-toggle status                   — show current state and excluded patterns
-/sandbox-toggle exclude <pattern>        — add a command pattern to the exclusion list
+/sandbox                          — toggle sandbox mode on/off
+/sandbox on                       — enable sandbox mode
+/sandbox off                      — disable sandbox mode
+/sandbox status                   — show current state and excluded patterns
+/sandbox exclude <pattern>        — add a command pattern to the exclusion list
 ```
 
 > A restart is recommended after toggling for full effect. On Windows (non-WSL), sandbox mode is not supported.
@@ -1154,21 +1044,12 @@ Display the extended-thinking traces from previous model responses in the curren
 ```
 /think-back         — show the most recent thinking trace
 /think-back 2       — show the second most recent thinking trace
+/think-back play    — replay the most recent trace as an animated walkthrough
+/think-back play 2  — replay the second most recent trace
 /thinkback          — alias
 ```
 
-Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Coven Code suggests enabling extended thinking.
-
----
-
-### /thinkback-play
-
-Replay a previous extended-thinking trace as a formatted, step-numbered walkthrough. Useful for reviewing the model’s reasoning path in detail.
-
-```
-/thinkback-play         — replay the most recent thinking trace
-/thinkback-play 2       — replay the second most recent thinking trace
-```
+`/think-back play` absorbs the former `/thinkback-play` command. Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Coven Code suggests enabling extended thinking.
 
 ---
 
@@ -1290,6 +1171,7 @@ defined in `~/.coven/familiars.toml`. See
 ---
 
 ### /familiar
+**Aliases:** `familiars`
 
 Set your active familiar — changes the TUI mascot live and updates
 the persona that gets injected into the system prompt when launched
@@ -1307,65 +1189,44 @@ interactively (the welcome screen's status block hints at this).
 
 ## Additional Commands
 
-The following commands ship with Coven Code but were not previously
-documented in this reference. They are grouped by purpose.
+The following commands ship with Coven Code but do not have a full
+section above. They are grouped by purpose.
 
-### Diagnostics
-
-| Command | Description |
-|---------|-------------|
-| `/btw` | Side-channel note to the model (does not consume an assistant turn). |
-| `/ctx-viz` | Visualize the current context window as a stacked breakdown by section. |
-| `/extra-usage` | Detailed per-call token usage with cache hit/miss columns. |
-| `/heapdump` | Print process memory and diagnostic information. |
-| `/rate-limit-options` | Configure rate-limit handling (retry budget, backoff). |
-| `/release-notes` | View Coven Code release notes / changelog. |
-
-### Snapshots & file recovery
+### Feedback & configuration
 
 | Command | Description |
 |---------|-------------|
-| `/checkpoints` | Browse session snapshots and restore from any point. |
-| `/snapshot` | Manage filesystem snapshots taken before destructive edits. |
-| `/revert` | Revert a specific file to its pre-session state. `/undo` reverts the most recent edit; `/revert` reverts a chosen file. |
-
-### Parallel work & remote control
-
-| Command | Description |
-|---------|-------------|
-| `/tasks` (alias `bashes`) | Manage tracked background tasks — list, fetch output, stop. |
-| `/branch` | Create or switch session branches. |
-| `/remote-control` | Drive a remote session via the IDE bridge. |
-| `/remote-env` | Configure the remote-control environment. |
-| `/teleport` | Bundle the session state for teleporting to another machine. |
+| `/feedback` (alias `bug`) | Submit feedback about Coven Code. `/feedback report` for a bug report. |
+| `/import-config` | Import user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. |
 | `/reload-plugins` | Reload the active session plugin registry, hooks, agents, skills, and MCP definitions. |
 
-### GitHub integration
+### Workspace & GitHub
 
 | Command | Description |
 |---------|-------------|
-| `/pr-comments` | Read or post comments on the active GitHub PR. |
-| `/install-github-app` | Install the Coven Code GitHub App. |
+| `/add-dir` | Add a directory to Coven Code's allowed workspace paths. |
+| `/branch` | Create a branch of the current conversation at this point. |
+| `/tag` | Toggle a searchable tag on the current session. |
+| `/ide` | Manage IDE integrations and show status. |
+| `/pr-comments` | Get comments from a GitHub pull request. |
 
-### Workspace navigation
+### Named CLI commands
 
-| Command | Description |
-|---------|-------------|
-| `/add-dir` | Add an extra workspace root to the active session. |
-| `/files` | List files read or written this session. |
-| `/ide` | Connect to the active IDE integration. |
-| `/desktop` | Computer-use desktop control. |
-| `/web-setup` | Open the web-setup proxy assistant. |
-| `/links` | Open URLs from this session in your browser. |
-| `/mobile` | Show a QR code / links for the mobile companion app. |
-| `/passes` | Inspect per-turn pass history. |
-
-### Other
+These run as `coven-code <name>` from the shell. Most have slash
+adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
+`/pr-comments`); `ultraplan` and `stats` are CLI-only.
 
 | Command | Description |
 |---------|-------------|
-| `/color` | Set the prompt bar color for the current session. |
-| `/tag` | Tag the current session with a label. |
+| `agents` | Manage and configure sub-agents. |
+| `agent` | List or inspect named agents. |
+| `add-dir` | Add a directory to the allowed workspace paths. |
+| `branch` | Branch the current conversation. |
+| `tag` | Toggle a searchable session tag. |
+| `ide` | Manage IDE integrations. |
+| `pr-comments` | Get comments from a GitHub PR. |
+| `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
+| `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/cost` opens the stats dialog). |
 
 ---
 
@@ -1383,7 +1244,7 @@ When running with `--remote`, only a restricted set of commands is available:
 
 Over the Remote Control bridge (used by IDE integrations), only `local`-type commands are forwarded:
 
-`compact`, `clear`, `cost`, `files`
+`compact`, `clear`, `cost`
 
 ### Availability-Restricted Commands
 
@@ -1392,8 +1253,6 @@ Some commands are available only under certain account or platform conditions:
 | Command | Restriction |
 |---------|-------------|
 | `/fast` | Available when a fast-mode model is configured for the active provider |
-| `/install-slack-app` | Hidden; Slack setup is unavailable in this build |
-| `/privacy-settings` | Opens the provider privacy portal where supported |
-| `/sandbox-toggle` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
+| `/sandbox` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
 | `/voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
 | `/chrome` | Requires a running Chrome/Chromium instance launched with remote debugging enabled |

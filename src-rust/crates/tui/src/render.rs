@@ -8,7 +8,6 @@ use crate::ask_user_dialog::render_ask_user_dialog;
 use crate::bypass_permissions_dialog::render_bypass_permissions_dialog;
 use crate::context_viz::render_context_viz;
 use crate::custom_provider_dialog::render_custom_provider_dialog;
-use crate::desktop_upsell_startup::render_desktop_upsell_startup;
 use crate::device_auth_dialog::render_device_auth_dialog;
 use crate::dialog_select::render_dialog_select;
 use crate::dialogs::{render_mcp_approval_dialog, render_permission_dialog};
@@ -643,11 +642,6 @@ pub fn render_app(frame: &mut Frame, app: &App) {
                 frame.buffer_mut(),
             );
         }
-    }
-
-    // Desktop upsell startup modal
-    if app.desktop_upsell.visible {
-        render_desktop_upsell_startup(&app.desktop_upsell, size, frame.buffer_mut());
     }
 
     // Import-config preview dialog

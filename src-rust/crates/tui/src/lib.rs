@@ -49,8 +49,6 @@ pub mod bypass_permissions_dialog;
 pub mod context_viz;
 /// Modal dialog for entering custom provider URL + API key.
 pub mod custom_provider_dialog;
-/// Desktop app upsell startup dialog (shown at startup on macOS/Windows x64).
-pub mod desktop_upsell_startup;
 /// Device code / browser-based auth overlay (GitHub Copilot, Anthropic OAuth).
 pub mod device_auth_dialog;
 /// Reusable fuzzy-search selection dialog widget.
@@ -164,9 +162,6 @@ pub use bypass_permissions_dialog::{
 };
 pub use custom_provider_dialog::{
     render_custom_provider_dialog, CustomProviderDialogState, CustomProviderField,
-};
-pub use desktop_upsell_startup::{
-    render_desktop_upsell_startup, DesktopUpsellSelection, DesktopUpsellStartupState,
 };
 pub use dialog_select::{render_dialog_select, DialogSelectState, SelectItem};
 pub use diff_viewer::{
