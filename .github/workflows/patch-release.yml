@@ -194,7 +194,7 @@ jobs:
              "stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}
@@ -210,7 +210,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
