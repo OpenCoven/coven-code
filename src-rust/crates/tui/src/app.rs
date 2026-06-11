@@ -52,7 +52,6 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("advisor", "Set or unset the server-side advisor model"),
     (
         "agent",
         "Browse, inspect, and manage familiars and sub-agents",
@@ -64,7 +63,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Stage and commit changes (model drafts the message)",
     ),
     ("compact", "Compact the conversation context"),
-    ("config", "Open settings"),
+    (
+        "config",
+        "Open settings (theme, keybindings, output-style, import, advisor)",
+    ),
     ("connect", "Connect an AI provider"),
     (
         "coven",
@@ -92,21 +94,15 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
     (
-        "import-config",
-        "Import CLAUDE.md and settings.json from ~/.claude",
-    ),
-    (
         "incant",
         "Cast a speech incantation (caveman, rocky) or lift it with off",
     ),
     ("init", "Initialize AGENTS.md for this project"),
-    ("keybindings", "Show keybinding configuration"),
     ("login", "Log in to Coven Code"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
-    ("output-style", "Toggle output style (auto/stream/verbose)"),
     ("permissions", "Manage tool permission rules"),
     ("plan", "Enter plan mode (read-only)"),
     ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
@@ -140,7 +136,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("status", "Show the current session status"),
     ("survey", "Open session feedback survey"),
     ("tasks", "Manage tracked background tasks"),
-    ("theme", "Open the theme picker"),
     (
         "think-back",
         "Show extended-thinking traces from previous responses",
@@ -2459,7 +2454,20 @@ impl App {
             }
             return false;
         }
-        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage" | "session") {
+        // /config subcommands that map to live TUI surfaces re-route to the
+        // intercepts the former standalone commands used; everything else
+        // (set/get/unset, color, vim on, theme dark, advisor …) renders via
+        // the command layer.
+        if matches!(cmd, "config" | "settings") && !args.trim().is_empty() {
+            return match args.trim() {
+                "theme" => self.intercept_slash_command("theme"),
+                "keybindings" => self.intercept_slash_command("keybindings"),
+                "output-style" => self.intercept_slash_command("output-style"),
+                "import" => self.intercept_slash_command("import-config"),
+                _ => false,
+            };
+        }
+        if !args.trim().is_empty() && matches!(cmd, "usage" | "session") {
             return false;
         }
         // /export copy reuses the live clipboard intercept; every other

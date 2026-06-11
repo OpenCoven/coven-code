@@ -826,7 +826,7 @@ impl SlashCommand for ConfigCommand {
         "Show or modify configuration settings"
     }
     fn help(&self) -> &str {
-        "Usage: /config [show|get|set|unset|color|vim|voice|statusline|terminal-setup] ...\n\n\
+        "Usage: /config [show|get|set|unset|<subcommand>] ...\n\n\
          Shows or modifies configuration settings.\n\n\
          Core settings:\n\
            /config\n\
@@ -835,6 +835,12 @@ impl SlashCommand for ConfigCommand {
            /config set model <model>\n\
            /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n\
            /config unset <model|output-style>\n\n\
+         Subcommands (absorbing the former standalone commands):\n\
+           /config theme [<name>]      — show, pick (TUI), or set the theme\n\
+           /config keybindings         — create or open keybindings.json\n\
+           /config output-style [...]  — show or switch the output style\n\
+           /config import              — import CLAUDE.md/settings from ~/.claude\n\
+           /config advisor [<model>|off] — set the server-side advisor model\n\n\
          UI settings:\n\
            /config color [<name|#RRGGBB|default>]\n\
            /config vim [on|off]\n\
@@ -875,6 +881,22 @@ impl SlashCommand for ConfigCommand {
                     return CommandResult::Error("Usage: /config terminal-setup".to_string());
                 }
                 return TerminalSetupCommand.execute("", ctx).await;
+            }
+            // Phase 3 folds — formerly standalone commands.
+            "theme" => {
+                return ThemeCommand.execute(subcommand_args, ctx).await;
+            }
+            "keybindings" | "keybinding" => {
+                return KeybindingsCommand.execute(subcommand_args, ctx).await;
+            }
+            "output-style" | "outputstyle" => {
+                return OutputStyleCommand.execute(subcommand_args, ctx).await;
+            }
+            "import" | "import-config" | "import_config" => {
+                return ImportConfigCommand.execute(subcommand_args, ctx).await;
+            }
+            "advisor" => {
+                return AdvisorCommand.execute(subcommand_args, ctx).await;
             }
             _ => {}
         }
@@ -1116,6 +1138,9 @@ impl SlashCommand for ThemeCommand {
     fn name(&self) -> &str {
         "theme"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /config theme; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Show or change the current theme"
     }
@@ -1156,6 +1181,9 @@ impl SlashCommand for ThemeCommand {
 impl SlashCommand for OutputStyleCommand {
     fn name(&self) -> &str {
         "output-style"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /config output-style; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Show or switch the current output style"
@@ -1218,6 +1246,9 @@ impl SlashCommand for OutputStyleCommand {
 impl SlashCommand for KeybindingsCommand {
     fn name(&self) -> &str {
         "keybindings"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /config keybindings; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Create or open ~/.coven-code/keybindings.json"
@@ -3476,6 +3507,9 @@ fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 impl SlashCommand for ImportConfigCommand {
     fn name(&self) -> &str {
         "import-config"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /config import; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Import CLAUDE.md and settings.json from ~/.claude"
@@ -6809,6 +6843,9 @@ impl SlashCommand for TerminalSetupCommand {
 impl SlashCommand for AdvisorCommand {
     fn name(&self) -> &str {
         "advisor"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /config advisor; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Set or unset the server-side advisor model"
