@@ -85,6 +85,9 @@ const SPINNER_FRAME_DIVISOR: u64 = 2;
 const WELCOME_BOX_HEIGHT: u16 = 11;
 const STATUS_THINKING: &str = "thinking";
 const STATUS_THINKING_ELLIPSIS: &str = "thinking\u{2026}";
+const STREAM_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(3);
+const STREAM_WAITING_LABEL: &str = "Waiting on network";
+const STREAM_STALLED_LABEL: &str = "Stalled — check connection, Ctrl+C to interrupt";
 
 fn spinner_char(frame_count: u64) -> char {
     SPINNER[((frame_count / SPINNER_FRAME_DIVISOR) as usize) % SPINNER.len()]
@@ -93,12 +96,15 @@ fn spinner_char(frame_count: u64) -> char {
 /// Returns the colour to use for the streaming spinner.
 /// Turns red when no stream data has arrived for more than 3 seconds.
 fn spinner_color(app: &App) -> Color {
-    if let Some(start) = app.stall_start {
-        if start.elapsed() > std::time::Duration::from_secs(3) {
-            return Color::Red;
-        }
+    if stream_is_stalled(app) {
+        return Color::Red;
     }
     Color::Yellow
+}
+
+fn stream_is_stalled(app: &App) -> bool {
+    app.stall_start
+        .is_some_and(|start| start.elapsed() > STREAM_STALL_THRESHOLD)
 }
 
 fn is_modal_open(app: &App) -> bool {
@@ -2161,8 +2167,14 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
 ///   3. Active streaming text — "Generating"
 ///   4. Active streaming thinking — "Reasoning"
 ///   5. App-level `spinner_verb` override
-///   6. Default — "Thinking"
+///   6. Default — "Waiting on network"
 fn streaming_status_label(app: &App) -> String {
+    if app.is_streaming && stream_is_stalled(app) {
+        return STREAM_STALLED_LABEL.to_string();
+    }
+    if app.is_streaming && app.permission_request.is_some() {
+        return "Permission pending".to_string();
+    }
     // 1. adapter-set message wins (unless it's the placeholder)
     if let Some(custom) = app.status_message.as_deref() {
         let trimmed = custom.trim();
@@ -2195,7 +2207,7 @@ fn streaming_status_label(app: &App) -> String {
         return v.to_string();
     }
     // 6. default
-    "Thinking".to_string()
+    STREAM_WAITING_LABEL.to_string()
 }
 
 fn should_render_status_row(app: &App) -> bool {
@@ -2213,7 +2225,8 @@ fn should_render_status_row(app: &App) -> bool {
     app.voice_recording
         || app.last_turn_elapsed.is_some()
         || (!app.is_streaming && app.status_message.is_some())
-        || (app.is_streaming && interesting_stream_status)
+        || app.is_streaming
+        || interesting_stream_status
 }
 
 fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -2236,7 +2249,7 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         //   1. tool call in progress  →  "Running <tool>…"
         //   2. streaming text         →  "Generating…"
         //   3. streaming thinking     →  "Reasoning…"
-        //   4. fallback               →  custom status / spinner_verb / "Thinking"
+        //   4. fallback               →  custom status / spinner_verb / waiting status
         //
         // A custom `status_message` set by the model adapter (e.g. extended
         // thinking budgets) still wins so adapters can override.
@@ -3557,7 +3570,9 @@ mod welcome_tests {
     #[test]
     fn streaming_status_label_falls_back_through_text_then_thinking() {
         let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
-        assert_eq!(streaming_status_label(&app), "Thinking");
+        app.is_streaming = true;
+        assert_eq!(streaming_status_label(&app), "Waiting on network");
+        assert!(should_render_status_row(&app));
         app.streaming_thinking = "let me think".to_string();
         assert_eq!(streaming_status_label(&app), "Reasoning");
         app.streaming_text = "let me think".to_string();
@@ -3603,7 +3618,21 @@ mod welcome_tests {
             output_preview: None,
             input_json: String::new(),
         });
-        assert_eq!(streaming_status_label(&app), "Thinking");
+        assert_eq!(streaming_status_label(&app), "Waiting on network");
+    }
+
+    #[test]
+    fn streaming_status_label_explains_stalled_streams() {
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        app.is_streaming = true;
+        app.stall_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
+
+        assert_eq!(
+            streaming_status_label(&app),
+            "Stalled — check connection, Ctrl+C to interrupt"
+        );
+        assert!(should_render_status_row(&app));
+        assert_eq!(spinner_color(&app), Color::Red);
     }
 
     #[test]
