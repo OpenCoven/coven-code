@@ -52,16 +52,11 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    (
-        "add-dir",
-        "Add an extra workspace root to the active session",
-    ),
     ("advisor", "Set or unset the server-side advisor model"),
     (
         "agent",
         "Browse, inspect, and manage familiars and sub-agents",
     ),
-    ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -87,7 +82,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
-    ("fork", "Fork session into a new branch"),
     ("goal", "Set or view the current session goal"),
     (
         "handoff",
@@ -133,7 +127,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
-    ("session", "Browse and manage sessions"),
+    (
+        "session",
+        "Browse and manage sessions (rename, fork, branch, tag, add-dir)",
+    ),
     ("settings", "Open settings"),
     (
         "share",
@@ -143,7 +140,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("status", "Show the current session status"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
-    ("tag", "Tag the current session with a label"),
     ("tasks", "Manage tracked background tasks"),
     ("theme", "Open the theme picker"),
     (
@@ -2464,7 +2460,7 @@ impl App {
             }
             return false;
         }
-        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage") {
+        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage" | "session") {
             return false;
         }
         if cmd == "mcp" && !args.trim().is_empty() {

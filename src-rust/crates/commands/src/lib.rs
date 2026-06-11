@@ -4441,14 +4441,34 @@ impl SlashCommand for SessionCommand {
         vec!["remote"]
     }
     fn description(&self) -> &str {
-        "Show or manage conversation sessions"
+        "Browse and manage sessions (rename, fork, branch, tag, add-dir)"
+    }
+    fn help(&self) -> &str {
+        "Usage: /session [list|rename|fork|branch|tag|add-dir] [...]\n\n\
+         Without arguments, shows the current session and recent sessions.\n\n\
+         Subcommands (absorbing the former standalone commands):\n\
+           /session list                       — list saved sessions\n\
+           /session rename <title>             — rename the current session\n\
+           /session fork [message_index]       — fork into a new session\n\
+           /session branch [create|switch|list] [name]\n\
+           /session tag [list|add|remove] [tag]\n\
+           /session add-dir <path>             — add a workspace root"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let trimmed = args.trim();
-        // /session rename [...] absorbs the former standalone /rename command.
-        if let Some(rest) = trimmed.strip_prefix("rename") {
-            return RenameCommand.execute(rest.trim(), ctx).await;
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            // Each arm absorbs a former standalone command.
+            "rename" => return RenameCommand.execute(rest, ctx).await,
+            "fork" => return ForkCommand.execute(rest, ctx).await,
+            "branch" => return execute_named_command_from_slash("branch", rest, ctx),
+            "tag" => return execute_named_command_from_slash("tag", rest, ctx),
+            "add-dir" => return execute_named_command_from_slash("add-dir", rest, ctx),
+            _ => {}
         }
         match trimmed {
             "list" => {
@@ -4534,7 +4554,7 @@ impl SlashCommand for SessionCommand {
                 }
             }
             _ => CommandResult::Error(format!(
-                "Unknown subcommand: {}\n\nUsage: /session [list]",
+                "Unknown subcommand: {}\n\nUsage: /session [list|rename|fork|branch|tag|add-dir]",
                 args
             )),
         }
@@ -4548,11 +4568,14 @@ impl SlashCommand for ForkCommand {
     fn name(&self) -> &str {
         "fork"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /session fork; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Fork the current session into a new branch"
     }
     fn help(&self) -> &str {
-        "Usage: /fork [message_index]\n\n\
+        "Usage: /session fork [message_index]\n\n\
          Fork the current session at the specified message index (or at the\n\
          current point if no index is given).  Creates a new session containing\n\
          messages up to the fork point.\n\n\
@@ -9259,7 +9282,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(CommitCommand),
         Box::new(NamedCommandAdapter {
             slash_name: "add-dir",
-            slash_hidden: false,
+            slash_hidden: true,
             target_name: "add-dir",
             slash_aliases: &[],
             slash_description: "Add a directory to Coven Code's allowed workspace paths",
@@ -9275,7 +9298,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "branch",
-            slash_hidden: false,
+            slash_hidden: true,
             target_name: "branch",
             slash_aliases: &[],
             slash_description: "Create a branch of the current conversation at this point",
@@ -9283,7 +9306,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "tag",
-            slash_hidden: false,
+            slash_hidden: true,
             target_name: "tag",
             slash_aliases: &[],
             slash_description: "Toggle a searchable tag on the current session",
