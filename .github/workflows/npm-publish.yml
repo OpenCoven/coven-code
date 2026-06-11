@@ -54,13 +54,13 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_ref=refs/tags/v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: github.event_name == 'workflow_dispatch'
         with:
           ref: ${{ steps.requested_version.outputs.tag_ref }}
           fetch-depth: 0
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: github.event_name == 'workflow_run'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}

@@ -82,7 +82,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ── 2. Checkout with full tag history (needed for forward-only check) ─
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.marker.outputs.found == 'true'
         with:
           fetch-depth: 0
@@ -123,7 +123,7 @@ jobs:
       # ── 4. Run the bump script ────────────────────────────────────────
       - name: Set up Python
         if: steps.marker.outputs.found == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -224,7 +224,7 @@ jobs:
           echo "Found --patch marker."
           echo "found=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.marker.outputs.found == 'true'
 
       # Build the patch bullet:
