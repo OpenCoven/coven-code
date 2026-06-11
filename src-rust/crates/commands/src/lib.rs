@@ -287,6 +287,8 @@ pub struct NamedCommandAdapter {
     pub slash_aliases: &'static [&'static str],
     pub slash_description: &'static str,
     pub slash_help: &'static str,
+    /// One-release compatibility aliases for folded commands (issue #73).
+    pub slash_hidden: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -824,7 +826,7 @@ impl SlashCommand for ConfigCommand {
         "Show or modify configuration settings"
     }
     fn help(&self) -> &str {
-        "Usage: /config [show|get|set|unset|color|vim|voice|statusline|terminal-setup] ...\n\n\
+        "Usage: /config [show|get|set|unset|<area>] ...\n\n\
          Shows or modifies configuration settings.\n\n\
          Core settings:\n\
            /config\n\
@@ -833,12 +835,17 @@ impl SlashCommand for ConfigCommand {
            /config set model <model>\n\
            /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n\
            /config unset <model|output-style>\n\n\
-         UI settings:\n\
+         Areas:\n\
            /config color [<name|#RRGGBB|default>]\n\
            /config vim [on|off]\n\
            /config voice [on|off|status]\n\
            /config statusline [show|hide] [cost|tokens|model|time|all]\n\
-           /config terminal-setup"
+           /config terminal-setup\n\
+           /config theme [name]      — theme picker / set theme\n\
+           /config keybindings       — open keybindings.json\n\
+           /config output-style [s]  — show or set the output style\n\
+           /config import            — import settings from ~/.claude\n\
+           /config advisor [model]   — set the advisor model"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -873,6 +880,23 @@ impl SlashCommand for ConfigCommand {
                     return CommandResult::Error("Usage: /config terminal-setup".to_string());
                 }
                 return TerminalSetupCommand.execute("", ctx).await;
+            }
+            // Folded in Phase 3 (issue #73); the old top-level names stay
+            // hidden one-release aliases.
+            "keybindings" | "keybinding" => {
+                return KeybindingsCommand.execute(subcommand_args, ctx).await;
+            }
+            "theme" => {
+                return ThemeCommand.execute(subcommand_args, ctx).await;
+            }
+            "output-style" | "output_style" => {
+                return OutputStyleCommand.execute(subcommand_args, ctx).await;
+            }
+            "import" | "import-config" | "import_config" => {
+                return ImportConfigCommand.execute(subcommand_args, ctx).await;
+            }
+            "advisor" => {
+                return AdvisorCommand.execute(subcommand_args, ctx).await;
             }
             _ => {}
         }
@@ -1114,6 +1138,9 @@ impl SlashCommand for ThemeCommand {
     fn name(&self) -> &str {
         "theme"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Show or change the current theme"
     }
@@ -1154,6 +1181,9 @@ impl SlashCommand for ThemeCommand {
 impl SlashCommand for OutputStyleCommand {
     fn name(&self) -> &str {
         "output-style"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Show or switch the current output style"
@@ -1216,6 +1246,9 @@ impl SlashCommand for OutputStyleCommand {
 impl SlashCommand for KeybindingsCommand {
     fn name(&self) -> &str {
         "keybindings"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Create or open ~/.coven-code/keybindings.json"
@@ -1350,8 +1383,20 @@ impl SlashCommand for StatusCommand {
     fn description(&self) -> &str {
         "Show comprehensive system and session status"
     }
+    fn help(&self) -> &str {
+        "Usage: /status [doctor]\n\n\
+         Shows authentication, MCP, hook, and session status.\n\
+         /status doctor runs the full diagnostic suite (absorbing the\n\
+         former /doctor command)."
+    }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /status doctor absorbs the former standalone /doctor command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("doctor") {
+            return DoctorCommand.execute(rest.trim(), ctx).await;
+        }
         // Auth status
         let auth_status = match claurst_core::oauth::OAuthTokens::load().await {
             Some(tokens) => {
@@ -1530,6 +1575,9 @@ fn parse_token_budget(s: &str) -> Option<u64> {
 impl SlashCommand for GoalCommand {
     fn name(&self) -> &str {
         "goal"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /coven goal (issue #73); one-release alias
     }
     fn description(&self) -> &str {
         "Set or manage a durable long-running goal for autonomous work"
@@ -1984,10 +2032,13 @@ impl SlashCommand for UsageCommand {
         "Show API usage, quotas, and rate limit status"
     }
     fn help(&self) -> &str {
-        "Usage: /usage [cost|context]\n\n\
+        "Usage: /usage [cost|context|stats]\n\n\
          Shows current session API usage and account quota information.\n\
-         Use /usage cost for the session cost breakdown or /usage context for context-window details.\n\
-         The legacy /cost and /context commands remain hidden compatibility aliases."
+         Use /usage cost for the session cost breakdown, /usage context for\n\
+         context-window details, or /usage stats for the detailed statistics\n\
+         view (opens the stats dialog in the TUI).\n\
+         The legacy /cost, /context, and /stats commands remain hidden\n\
+         compatibility aliases."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1998,9 +2049,10 @@ impl SlashCommand for UsageCommand {
             "" | "summary" | "quota" | "status" => {}
             "cost" | "costs" => return CostCommand.execute(rest, ctx).await,
             "context" | "window" => return ContextCommand.execute(rest, ctx).await,
+            "stats" => return StatsCommand.execute(rest, ctx).await,
             other => {
                 return CommandResult::Error(format!(
-                    "Unknown usage view '{}'. Use: /usage [cost|context]",
+                    "Unknown usage view '{}'. Use: /usage [cost|context|stats]",
                     other
                 ))
             }
@@ -2224,6 +2276,9 @@ impl SlashCommand for ReloadPluginsCommand {
     fn name(&self) -> &str {
         "reload-plugins"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Reload all plugins without restarting"
     }
@@ -2336,6 +2391,9 @@ impl SlashCommand for PluginSlashCommandAdapter {
 impl SlashCommand for DoctorCommand {
     fn name(&self) -> &str {
         "doctor"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Check system health and diagnose issues"
@@ -2773,10 +2831,25 @@ impl SlashCommand for LoginCommand {
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
          add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
-         you can `switch` to it later by that name."
+         you can switch to it later by that name.\n\n\
+         Subcommands (absorbing the former /switch and /refresh):\n\
+           /login switch [name]  — switch the active account for a provider\n\
+           /login refresh        — clear saved provider auth and model caches"
     }
 
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // Subcommands absorbed from the former /switch and /refresh commands
+        // (issue #73); both stay as hidden one-release aliases.
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "switch" => return SwitchCommand.execute(rest, ctx).await,
+            "refresh" => return RefreshCommand.execute(rest, ctx).await,
+            _ => {}
+        }
         let tokens: Vec<&str> = args.split_whitespace().collect();
         let use_codex = tokens.contains(&"--codex");
         let login_with_claude_ai = !tokens.contains(&"--console");
@@ -2951,6 +3024,9 @@ impl SlashCommand for SwitchCommand {
     fn name(&self) -> &str {
         "switch"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Switch the active account for a provider"
     }
@@ -2999,6 +3075,9 @@ impl SlashCommand for SwitchCommand {
 impl SlashCommand for RefreshCommand {
     fn name(&self) -> &str {
         "refresh"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Clear saved provider auth and model caches"
@@ -3127,7 +3206,8 @@ impl SlashCommand for ReviewCommand {
          review as a comment to the associated GitHub PR.\n\n\
          Variants:\n\
            /review security  — security-focused review (vulnerabilities, secrets, injection)\n\
-           /review ultra     — exhaustive multi-dimensional review\n\n\
+           /review ultra     — exhaustive multi-dimensional review\n\
+           /review comments  — read comments on the active GitHub PR\n\n\
          GitHub posting requires:\n\
            GITHUB_TOKEN  — a personal access token with repo scope\n\
            CLAUDE_PR_NUMBER — the PR number (auto-detected from `git remote` if absent)\n\n\
@@ -3148,6 +3228,11 @@ impl SlashCommand for ReviewCommand {
         match head {
             "security" => return SecurityReviewCommand.execute(rest, ctx).await,
             "ultra" | "ultrareview" => return UltrareviewCommand.execute(rest, ctx).await,
+            // /review comments absorbs the former standalone /pr-comments
+            // command (issue #73); the old name stays a hidden alias.
+            "comments" | "pr-comments" => {
+                return execute_named_command_from_slash("pr-comments", rest, ctx)
+            }
             _ => {}
         }
         let base = trimmed;
@@ -3459,6 +3544,9 @@ fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 impl SlashCommand for ImportConfigCommand {
     fn name(&self) -> &str {
         "import-config"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Import CLAUDE.md and settings.json from ~/.claude"
@@ -4440,12 +4528,38 @@ impl SlashCommand for SessionCommand {
     fn description(&self) -> &str {
         "Show or manage conversation sessions"
     }
+    fn help(&self) -> &str {
+        "Usage: /session [list|rename <name>|fork [name]|branch ...|tag ...|add-dir <path>]\n\n\
+         Without arguments, shows the current session (or the active remote URL).\n\n\
+         Subcommands:\n\
+           /session list           — list saved sessions\n\
+           /session rename <name>  — rename the current session\n\
+           /session fork [name]    — fork the session into a new branch\n\
+           /session branch ...     — create/switch/list conversation branches\n\
+           /session tag ...        — toggle searchable session tags\n\
+           /session add-dir <path> — add a workspace root to the session\n\n\
+         The legacy /fork, /branch, /tag, and /add-dir commands remain hidden\n\
+         one-release compatibility aliases."
+    }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let trimmed = args.trim();
         // /session rename [...] absorbs the former standalone /rename command.
         if let Some(rest) = trimmed.strip_prefix("rename") {
             return RenameCommand.execute(rest.trim(), ctx).await;
+        }
+        // Subcommands absorbed from the former /fork, /branch, /tag, and
+        // /add-dir commands (issue #73).
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "fork" => return ForkCommand.execute(rest, ctx).await,
+            "branch" => return execute_named_command_from_slash("branch", rest, ctx),
+            "tag" => return execute_named_command_from_slash("tag", rest, ctx),
+            "add-dir" => return execute_named_command_from_slash("add-dir", rest, ctx),
+            _ => {}
         }
         match trimmed {
             "list" => {
@@ -4545,6 +4659,9 @@ impl SlashCommand for ForkCommand {
     fn name(&self) -> &str {
         "fork"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Fork the current session into a new branch"
     }
@@ -4601,7 +4718,20 @@ impl SlashCommand for ThinkingCommand {
         vec!["think"]
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    fn help(&self) -> &str {
+        "Usage: /thinking [back ...]\n\n\
+         Shows extended-thinking availability for the active model.\n\
+         /thinking back [play] shows extended-thinking traces from previous\n\
+         responses (absorbing the former /think-back command)."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /thinking back absorbs the former standalone /think-back command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("back") {
+            return ThinkBackCommand.execute(rest.trim(), ctx).await;
+        }
         // Extended thinking is configured through the model; just inform the user
         let model = ctx.config.effective_model();
         if model.contains("claude-3-5") || model.contains("claude-3.5") {
@@ -4787,15 +4917,21 @@ impl SlashCommand for ExportCommand {
         "Export conversation to markdown or JSON"
     }
     fn help(&self) -> &str {
-        "Usage: /export [--format markdown|json] [--output <file>]\n\n\
+        "Usage: /export [copy [n]|share] [--format markdown|json] [--output <file>]\n\n\
          Export the current conversation.\n\n\
+         Subcommands:\n\
+           copy [n]            Copy the (n-th most recent) assistant response\n\
+                               to the clipboard (absorbs the former /copy)\n\
+           share               Upload the session as a secret gist and return\n\
+                               a shareable URL (absorbs the former /share)\n\n\
          Flags:\n\
            --format markdown   Render as readable Markdown (default for .md files)\n\
            --format json       Full structured JSON export (default)\n\
            --output <path>     Write to file; if omitted, prints to the terminal\n\n\
          Examples:\n\
            /export\n\
-           /export --format markdown\n\
+           /export copy\n\
+           /export share\n\
            /export --format json --output chat.json\n\
            /export --output conversation.md"
     }
@@ -4803,6 +4939,17 @@ impl SlashCommand for ExportCommand {
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         // ── Parse flags ────────────────────────────────────────────────────
         let args = args.trim();
+        // Subcommands absorbed from the former /copy and /share commands
+        // (issue #73); both stay as hidden one-release aliases.
+        let (head, rest) = match args.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (args, ""),
+        };
+        match head {
+            "copy" => return CopyCommand.execute(rest, ctx).await,
+            "share" => return ShareCommand.execute(rest, ctx).await,
+            _ => {}
+        }
         let mut format: Option<&str> = None; // "markdown" | "json"
         let mut output_path: Option<String> = None;
 
@@ -4928,6 +5075,9 @@ impl SlashCommand for ExportCommand {
 impl SlashCommand for ShareCommand {
     fn name(&self) -> &str {
         "share"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Upload the current session as a secret GitHub gist and return a shareable URL"
@@ -5442,12 +5592,20 @@ impl SlashCommand for EffortCommand {
         "Set the model's thinking effort (low | normal | high)"
     }
     fn help(&self) -> &str {
-        "Usage: /effort [low|normal|high]\n\
+        "Usage: /effort [low|normal|high|fast [on|off]]\n\
          Sets how much computation the model uses for reasoning.\n\
-         'high' enables extended thinking with a larger budget."
+         'high' enables extended thinking with a larger budget.\n\
+         /effort fast toggles fast mode (smaller, quicker model),\n\
+         absorbing the former /fast command."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /effort fast absorbs the former standalone /fast command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("fast") {
+            return FastCommand.execute(rest.trim(), ctx).await;
+        }
         match args.trim() {
             "" => CommandResult::Message(
                 "Current effort: normal\nUse /effort [low|normal|high] to change.".to_string(),
@@ -5637,6 +5795,9 @@ impl SlashCommand for ContextCommand {
 impl SlashCommand for CopyCommand {
     fn name(&self) -> &str {
         "copy"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Copy the last assistant response to the clipboard"
@@ -6747,6 +6908,9 @@ impl SlashCommand for AdvisorCommand {
     fn name(&self) -> &str {
         "advisor"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Set or unset the server-side advisor model"
     }
@@ -6814,6 +6978,9 @@ impl SlashCommand for AdvisorCommand {
 impl SlashCommand for FastCommand {
     fn name(&self) -> &str {
         "fast"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["speed"]
@@ -6887,6 +7054,9 @@ impl SlashCommand for FastCommand {
 impl SlashCommand for ThinkBackCommand {
     fn name(&self) -> &str {
         "think-back"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["thinkback"]
@@ -7447,6 +7617,10 @@ impl SlashCommand for NamedCommandAdapter {
         self.slash_help
     }
 
+    fn hidden(&self) -> bool {
+        self.slash_hidden
+    }
+
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         execute_named_command_from_slash(self.target_name, args, ctx)
     }
@@ -7868,11 +8042,33 @@ impl SlashCommand for AgentCommand {
         "List available agents or get info about a specific agent"
     }
     fn help(&self) -> &str {
-        "Usage: /agent [name]\n\nWithout arguments, lists all available named agents.\nWith a name, shows details for that agent.\n\nTo use an agent, start Coven Code with: --agent <name>"
+        "Usage: /agent [name] | /agent [list|create|edit|delete|reset] [name] | /agent managed ...\n\n\
+         Without arguments, lists all available named agents.\n\
+         With a name, shows details for that agent.\n\n\
+         Management subcommands (absorbing the former /agents):\n\
+           /agent list|create|edit|delete|reset [name]\n\
+         Managed-agent architecture (absorbing the former /managed-agents):\n\
+           /agent managed ...\n\n\
+         To use an agent, start Coven Code with: --agent <name>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use std::collections::HashMap;
+
+        // Subcommands absorbed from the former /agents and /managed-agents
+        // commands (issue #73); both stay as hidden one-release aliases.
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "list" | "create" | "edit" | "delete" | "reset" => {
+                return execute_named_command_from_slash("agents", trimmed, ctx);
+            }
+            "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
+            _ => {}
+        }
 
         // Merge built-in defaults with user-defined agents (user wins on collision).
         let mut all_agents: HashMap<String, claurst_core::AgentDefinition> =
@@ -8115,6 +8311,9 @@ impl SlashCommand for FamiliarCommand {
 impl SlashCommand for ManagedAgentsCommand {
     fn name(&self) -> &str {
         "managed-agents"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Configure and manage the manager-executor agent architecture"
@@ -8485,6 +8684,7 @@ fn coven_help_text() -> &'static str {
      Status & lifecycle\n\
        /coven                          Daemon health + active session count\n\
        /coven status                   Same as /coven\n\
+       /coven goal <objective>         Set or manage a durable autonomous goal\n\
        /coven capabilities             Daemon capability catalog (harness manifests)\n\
        /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
@@ -8760,13 +8960,19 @@ impl SlashCommand for CovenCommand {
     fn help(&self) -> &str {
         coven_help_text()
     }
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use claurst_core::coven_shared::DaemonClient;
 
         let trimmed = args.trim();
         let mut parts = trimmed.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("").trim();
         let rest = parts.next().unwrap_or("").trim();
+
+        // /coven goal absorbs the former standalone /goal command
+        // (issue #73); /goal stays as a hidden one-release alias.
+        if sub == "goal" {
+            return GoalCommand.execute(rest, ctx).await;
+        }
 
         // No subcommand → status. Matches `coven` (default) UX in coven-cli.
         if sub.is_empty() || sub == "status" {
@@ -9211,11 +9417,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(HelpCommand),
         Box::new(ClearCommand),
         Box::new(CompactCommand),
-        Box::new(CostCommand),
         Box::new(ExitCommand),
         Box::new(ModelCommand),
         Box::new(ConfigCommand),
-        Box::new(ColorCommand),
         Box::new(PluginCommand),
         Box::new(VersionCommand),
         Box::new(ResumeCommand),
@@ -9258,13 +9462,15 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Add a directory to Coven Code's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "agents",
             target_name: "agents",
             slash_aliases: &[],
             slash_description: "Manage and configure sub-agents",
-            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]",
+            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]\nDeprecated: use /agent [list|create|edit|delete|reset|managed]",
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "branch",
@@ -9272,6 +9478,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Create a branch of the current conversation at this point",
             slash_help: "Usage: /branch [create|switch|list] [name]",
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "tag",
@@ -9279,6 +9486,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Toggle a searchable tag on the current session",
             slash_help: "Usage: /tag [list|add|remove] [tag]",
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
@@ -9286,16 +9494,12 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",
             slash_help: "Usage: /pr-comments <PR-number>",
+            slash_hidden: true,
         }),
         // Batch-1 new commands
-        Box::new(ContextCommand),
         Box::new(CopyCommand),
         Box::new(ChromeCommand),
-        Box::new(VimCommand),
-        Box::new(VoiceCommand),
         Box::new(UpgradeCommand),
-        Box::new(StatuslineCommand),
-        Box::new(TerminalSetupCommand),
         Box::new(FastCommand),
         Box::new(ThinkBackCommand),
         // /whisper (BtwCommand) and /sandbox (SandboxToggleCommand)
@@ -9304,8 +9508,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         // Advisor
         Box::new(AdvisorCommand),
         // Snapshot / revert system
-        Box::new(UndoCommand),
-        Box::new(RevertCommand),
         // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
@@ -9662,8 +9864,12 @@ mod tests {
     }
 
     #[test]
-    fn phase_two_legacy_commands_are_hidden_but_callable() {
-        let hidden_legacy = [
+    fn phase_two_legacy_aliases_are_removed() {
+        // The Phase 2 hidden aliases' one-release grace period ended with
+        // this release (issue #73 housekeeping): the names no longer resolve.
+        // Their functionality lives on as subcommands of /config, /usage,
+        // and /rewind.
+        for name in [
             "color",
             "context",
             "cost",
@@ -9673,6 +9879,37 @@ mod tests {
             "undo",
             "vim",
             "voice",
+        ] {
+            assert!(
+                find_command(name).is_none(),
+                "{name} should be fully removed after its alias grace period"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_three_legacy_commands_are_hidden_but_callable() {
+        let hidden_legacy = [
+            "agents",
+            "managed-agents",
+            "fork",
+            "branch",
+            "tag",
+            "add-dir",
+            "copy",
+            "share",
+            "switch",
+            "refresh",
+            "think-back",
+            "fast",
+            "keybindings",
+            "theme",
+            "output-style",
+            "import-config",
+            "advisor",
+            "doctor",
+            "reload-plugins",
+            "pr-comments",
         ];
 
         for name in hidden_legacy {
@@ -9682,18 +9919,131 @@ mod tests {
                 "{name} should stay callable as a hidden one-release compatibility alias"
             );
         }
+    }
 
-        let visible_names: std::collections::HashSet<&str> = all_commands()
-            .iter()
-            .filter(|command| !command.hidden())
-            .map(|command| command.name())
-            .collect();
-        for name in hidden_legacy {
-            assert!(
-                !visible_names.contains(name),
-                "{name} should not be a visible primary command"
-            );
+    #[tokio::test]
+    async fn usage_stats_subcommand_routes_to_stats() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let command = find_command("usage").unwrap();
+        let result = command.execute("stats", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.contains("Session Statistics") || message.contains("oken"))
+            }
+            other => panic!("expected stats message, got {:?}", other),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_and_export_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /session list still works and fork/branch/tag/add-dir route to
+        // their absorbed implementations (never an unknown-subcommand error).
+        let session = find_command("session").unwrap();
+        for sub in ["tag list", "branch list", "add-dir"] {
+            let result = session.execute(sub, &mut ctx).await;
+            if let CommandResult::Error(message) = &result {
+                assert!(
+                    !message.contains("Unknown subcommand"),
+                    "/session {sub} should route to the absorbed command, got: {message}"
+                );
+            }
+        }
+
+        // /export copy routes to the clipboard copy path.
+        let export = find_command("export").unwrap();
+        let result = export.execute("copy", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.contains("No assistant messages"))
+            }
+            other => panic!("expected copy-path message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_thinking_effort_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /login refresh routes to the provider-reset path.
+        let login = find_command("login").unwrap();
+        let result = login.execute("refresh", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::RefreshProviderState),
+            "/login refresh should route to the refresh path"
+        );
+
+        // /thinking back routes to the think-back trace viewer.
+        let thinking = find_command("thinking").unwrap();
+        let result = thinking.execute("back", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/thinking back should route to the think-back path"
+        );
+
+        // /effort fast routes to the fast-mode toggle.
+        let effort = find_command("effort").unwrap();
+        let result = effort.execute("fast on", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::ConfigChangeMessage(_, _)),
+            "/effort fast should route to the fast-mode toggle"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_review_status_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /config advisor routes to the advisor settings path.
+        let config = find_command("config").unwrap();
+        let result = config.execute("advisor", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Advisor model")),
+            other => panic!("expected advisor message, got {:?}", other),
+        }
+
+        // /config output-style shows/sets the output style.
+        let result = config.execute("output-style", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/config output-style should route to the output-style command"
+        );
+
+        // /status doctor routes to the diagnostic suite.
+        let status = find_command("status").unwrap();
+        let result = status.execute("doctor", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.to_lowercase().contains("coven"))
+            }
+            other => panic!("expected doctor diagnostics, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_command_absorbs_agents_and_managed() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let command = find_command("agent").unwrap();
+
+        // /agent list routes to the named agents command.
+        let result = command.execute("list", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::Message(_)),
+            "/agent list should route to the named agents command"
+        );
+
+        // /agent managed routes to the managed-agents surface.
+        let result = command.execute("managed", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/agent managed should route to the managed-agents surface"
+        );
     }
 
     #[tokio::test]
@@ -9807,7 +10157,6 @@ mod tests {
             "help",
             "clear",
             "compact",
-            "cost",
             "exit",
             "model",
             "config",
@@ -9933,10 +10282,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cost_command_returns_message() {
+    async fn test_usage_cost_returns_message() {
         let mut ctx = make_ctx();
-        let cmd = find_command("cost").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("usage").unwrap();
+        let result = cmd.execute("cost", &mut ctx).await;
         assert!(matches!(result, CommandResult::Message(_)));
     }
 
@@ -10248,7 +10597,7 @@ mod tests {
         //  - stats: intercepted directly by the TUI to open the live stats
         //    dialog; the named CLI `stats` command handles aggregate saved
         //    session reports outside the TUI.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "stats"];
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
 
         let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
             .iter()

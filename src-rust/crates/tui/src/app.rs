@@ -53,13 +53,9 @@ use tracing::debug;
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
-        "add-dir",
-        "Add an extra workspace root to the active session",
+        "agent",
+        "List, inspect, and manage familiars and managed agents",
     ),
-    ("advisor", "Set or unset the server-side advisor model"),
-    ("agent", "List available familiars or show familiar details"),
-    ("agents", "Browse familiar definitions and active familiars"),
-    ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -67,26 +63,27 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Stage and commit changes (model drafts the message)",
     ),
     ("compact", "Compact the conversation context"),
-    ("config", "Open settings"),
+    (
+        "config",
+        "Open settings (theme, keybindings, advisor, import, UI)",
+    ),
     ("connect", "Connect an AI provider"),
-    ("copy", "Copy the last assistant response to clipboard"),
     (
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
     ),
     ("diff", "Inspect the current git diff"),
-    ("doctor", "Run diagnostics"),
-    ("effort", "Set effort level (low/medium/high/max)"),
+    (
+        "effort",
+        "Set effort level (low/normal/high) or toggle fast mode",
+    ),
     ("exit", "Quit Coven Code"),
-    ("export", "Export conversation"),
+    ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
         "Set your active familiar — changes the TUI mascot live",
     ),
-    ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
-    ("fork", "Fork session into a new branch"),
-    ("goal", "Set or view the current session goal"),
     (
         "handoff",
         "Hand off current session context to a Coven familiar",
@@ -94,72 +91,52 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
     (
-        "import-config",
-        "Import CLAUDE.md and settings.json from ~/.claude",
-    ),
-    (
         "incant",
         "Cast a speech incantation (caveman, rocky) or lift it with off",
     ),
     ("init", "Initialize AGENTS.md for this project"),
-    ("keybindings", "Show keybinding configuration"),
-    ("login", "Log in to Coven Code"),
+    ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
-    (
-        "managed-agents",
-        "Configure manager-executor managed agent system",
-    ),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
-    ("output-style", "Toggle output style (auto/stream/verbose)"),
     ("permissions", "Manage tool permission rules"),
     ("plan", "Enter plan mode (read-only)"),
-    ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
     (
-        "pr-comments",
-        "Read or post comments on the active GitHub PR",
+        "plugin",
+        "Manage plugins (list/info/enable/disable/install/reload)",
     ),
     ("providers", "List available AI providers and their status"),
     ("quit", "Exit Coven Code"),
-    ("refresh", "Clear saved provider auth and model caches"),
-    (
-        "reload-plugins",
-        "Reload the active session plugin registry",
-    ),
     ("resume", "Resume a previous session"),
-    ("review", "Review changes (git diff)"),
+    (
+        "review",
+        "Review changes (security/ultra variants, PR comments)",
+    ),
     (
         "rewind",
         "Rewind the conversation or roll back file changes",
     ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
-    ("session", "Browse and manage sessions"),
-    ("settings", "Open settings"),
+    ("session", "Browse, rename, fork, branch, and tag sessions"),
     (
-        "share",
-        "Upload the current session as a secret gist and get a shareable URL",
+        "settings",
+        "Open settings (theme, keybindings, advisor, import, UI)",
     ),
     ("skills", "List and manage skills"),
-    ("status", "Show the current session status"),
-    ("stats", "Open the interactive session statistics dialog"),
-    ("survey", "Open session feedback survey"),
-    ("switch", "Switch the active account for a provider"),
-    ("tag", "Tag the current session with a label"),
-    ("tasks", "Manage tracked background tasks"),
-    ("theme", "Open the theme picker"),
     (
-        "think-back",
-        "Show extended-thinking traces from previous responses",
+        "status",
+        "Show session status or run diagnostics (/status doctor)",
     ),
-    ("thinking", "Configure extended thinking for the session"),
+    ("survey", "Open session feedback survey"),
+    ("tasks", "Manage tracked background tasks"),
+    (
+        "thinking",
+        "Configure extended thinking or view past thinking traces",
+    ),
     (
         "update",
-        "Check for updates and upgrade to the latest version",
-    ),
-    (
-        "upgrade",
         "Check for updates and upgrade to the latest version",
     ),
     ("usage", "Detailed per-call token usage breakdown"),
@@ -2450,16 +2427,61 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
-        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage") {
+        let args_trimmed = args.trim();
+        // Folded subcommands (issue #73) open the same TUI surfaces as their
+        // former top-level names, so e.g. `/config theme` still gets the
+        // picker and `/usage stats` still gets the stats dialog.
+        let (sub, sub_rest) = match args_trimmed.split_once(char::is_whitespace) {
+            Some((s, r)) => (s, r.trim()),
+            None => (args_trimmed, ""),
+        };
+        match (cmd, sub, sub_rest) {
+            ("usage", "stats", _) => return self.intercept_slash_command("stats"),
+            ("config" | "settings", "theme", "") => return self.intercept_slash_command("theme"),
+            ("config" | "settings", "keybindings", _) => {
+                return self.intercept_slash_command("keybindings")
+            }
+            ("config" | "settings", "import" | "import-config", _) => {
+                return self.intercept_slash_command("import-config")
+            }
+            ("export", "copy", "") => return self.intercept_slash_command("copy"),
+            ("effort", "fast", _) => return self.intercept_slash_command("fast"),
+            _ => {}
+        }
+        if !args_trimmed.is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }
-        if cmd == "mcp" && !args.trim().is_empty() {
+        if cmd == "mcp" && !args_trimmed.is_empty() {
             return false;
         }
-        if cmd == "agents" && args.trim() == "reset" {
+        if cmd == "agents" && args_trimmed == "reset" {
             self.open_agents_menu();
             self.agents_menu.route = AgentsRoute::ResetConfirm;
             return true;
+        }
+        // Commands whose argument forms are handled by the commands crate
+        // (subcommand folds from issues #59/#73): only the bare form keeps
+        // its TUI overlay/intercept behavior.
+        if !args_trimmed.is_empty()
+            && matches!(
+                cmd,
+                "rewind"
+                    | "session"
+                    | "remote"
+                    | "export"
+                    | "review"
+                    | "agent"
+                    | "agents"
+                    | "status"
+                    | "thinking"
+                    | "think"
+                    | "plugin"
+                    | "plugins"
+                    | "effort"
+                    | "login"
+            )
+        {
+            return false;
         }
         if cmd == "handoff" {
             let familiar = args.trim().to_string();
@@ -7661,6 +7683,35 @@ role = "Research"
         let mut app = make_app();
         assert!(!app.intercept_slash_command_with_args("mcp", "auth mcphub"));
         assert!(!app.mcp_view.visible);
+    }
+
+    #[test]
+    fn argument_forms_reach_command_layer() {
+        let mut app = make_app();
+        // Folded subcommand forms must not be swallowed by the bare-name
+        // TUI intercepts (issues #59/#73).
+        assert!(!app.intercept_slash_command_with_args("rewind", "list"));
+        assert!(!app.rewind_flow.visible);
+        assert!(!app.intercept_slash_command_with_args("session", "rename my-title"));
+        assert!(!app.session_browser.visible);
+        assert!(!app.intercept_slash_command_with_args("export", "copy 2"));
+        assert!(!app.export_dialog.visible);
+        assert!(!app.intercept_slash_command_with_args("review", "security"));
+        assert!(!app.intercept_slash_command_with_args("status", "doctor"));
+        assert!(!app.intercept_slash_command_with_args("thinking", "back"));
+        // Bare forms keep their overlays.
+        assert!(app.intercept_slash_command_with_args("rewind", ""));
+        assert!(app.rewind_flow.visible);
+    }
+
+    #[test]
+    fn folded_subcommands_open_legacy_tui_surfaces() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command_with_args("usage", "stats"));
+        assert!(app.stats_dialog.visible);
+        app.stats_dialog.close();
+        assert!(app.intercept_slash_command_with_args("config", "theme"));
+        assert!(app.theme_screen.visible);
     }
 
     #[test]

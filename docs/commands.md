@@ -8,22 +8,23 @@ This document is the reference for the visible slash commands available in Coven
 
 1. [Command System Overview](#command-system-overview)
 2. [Session & Navigation](#session--navigation)
-3. [Model & Provider](#model--provider) — `/model`, `/providers`, `/connect`, `/thinking`, `/effort`, `/advisor`, `/fast`
-4. [Configuration & Settings](#configuration--settings) — `/config`, `/keybindings`, `/permissions`, `/hooks`, `/mcp`, `/output-style`, `/theme`
+3. [Model & Provider](#model--provider) — `/model`, `/providers`, `/connect`, `/thinking`, `/effort`
+4. [Configuration & Settings](#configuration--settings) — `/config`, `/permissions`, `/hooks`, `/mcp`
 5. [Code & Git](#code--git) — `/commit`, `/diff`, `/review`, `/init`, `/search`
 6. [Search & Files](#search--files)
-7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/stats`, `/status`
-8. [Agents & Tasks](#agents--tasks) — `/agents`, `/tasks`, `/goal`, `/managed-agents`, `/agent`
+7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/status`
+8. [Agents & Tasks](#agents--tasks) — `/agent`, `/tasks`, `/coven goal`
 9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
 10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
-11. [Authentication](#authentication) — `/login`, `/logout`, `/switch`, `/refresh`
-12. [Display & Terminal](#display--terminal) — `/theme`, `/output-style`, `/incant`
-13. [Diagnostics & Info](#diagnostics--info) — `/doctor`, `/version`, `/update`
-14. [Export & Sharing](#export--sharing) — `/export`, `/copy`, `/share`
-15. [Advanced & Internal](#advanced--internal) — `/thinking`, `/connect`, `/fork`, `/effort`, `/whisper`, `/sandbox`, `/think-back`
+11. [Authentication](#authentication) — `/login`, `/logout`
+12. [Display & Terminal](#display--terminal) — `/incant`, `/config color`
+13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/update`, `/status doctor`
+14. [Export & Sharing](#export--sharing) — `/export`
+15. [Advanced & Internal](#advanced--internal) — `/whisper`, `/sandbox`
 16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`, `/familiar`
-17. [Additional Commands](#additional-commands) — feedback, config import, plugin reload, named CLI commands
-18. [Command Availability](#command-availability)
+17. [Additional Commands](#additional-commands) — feedback, named CLI commands
+18. [Deprecated Aliases](#deprecated-aliases)
+19. [Command Availability](#command-availability)
 
 ---
 
@@ -106,19 +107,23 @@ Show or manage conversation sessions. Without arguments, shows the current sessi
 /session                       — show current session status
 /session list                  — list recent sessions
 /session rename <new-name>     — rename the current session
+/session fork [name]           — fork into a new independent session
+/session branch <name>         — create a branch of the conversation at this point
+/session tag <tag>             — toggle a searchable tag on the current session
+/session add-dir <path>        — add a directory to the allowed workspace paths
 ```
 
-`/session rename` absorbs the former standalone `/rename` command. The new name is used in session listings and exports.
+`/session rename` absorbs the former standalone `/rename` command. The new name is used in session listings and exports. The former `/fork`, `/branch`, `/tag`, and `/add-dir` commands fold in here as subcommands (see [Deprecated Aliases](#deprecated-aliases)).
 
 ---
 
-### /fork
+### /session fork
 
 Fork the current session into a new independent session that begins from the current conversation state. Useful for exploring two different approaches without losing either.
 
 ```
-/fork
-/fork <new-session-name>
+/session fork
+/session fork <new-session-name>
 ```
 
 ---
@@ -195,9 +200,25 @@ Configure extended thinking for the current session. Extended thinking allows th
 /thinking
 /thinking on
 /thinking off
+/thinking back [play] [n]
 ```
 
-See also `/effort` for a higher-level interface to thinking depth.
+See also `/effort` for a higher-level interface to thinking depth, and `/thinking back` below for viewing past thinking traces.
+
+---
+
+### /thinking back
+
+Display the extended-thinking traces from previous model responses in the current session. Only available when extended thinking was used for those responses. Pass a number to view the Nth most-recent trace. Replaces the former `/think-back` command.
+
+```
+/thinking back         — show the most recent thinking trace
+/thinking back 2       — show the second most recent thinking trace
+/thinking back play    — replay the most recent trace as an animated walkthrough
+/thinking back play 2  — replay the second most recent trace
+```
+
+`/thinking back play` absorbs the former `/thinkback-play` command. Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Coven Code suggests enabling extended thinking.
 
 ---
 
@@ -219,33 +240,18 @@ Set the thinking effort level. This is a convenience wrapper over `/thinking` th
 /effort max
 ```
 
----
-
-### /advisor
-
-Set or unset a secondary advisor model that provides supplementary suggestions alongside the main model. When set, the advisor model's context is available to improve main-model responses.
-
-```
-/advisor                          — show current advisor setting
-/advisor claude-opus-4-6          — set advisor model by name
-/advisor provider/model           — set advisor using provider/model format
-/advisor off                      — disable the advisor
-/advisor unset                    — disable the advisor
-```
-
-The advisor model persists to `~/.coven-code/settings.json` under `advisorModel`. Model IDs must start with `claude-` or contain a `/` (provider/model format).
+See also `/effort fast` below for switching to the provider's faster model. For a secondary advisor model, see [`/config advisor`](#config-advisor).
 
 ---
 
-### /fast
-**Aliases:** `speed`
+### /effort fast
 
-Toggle fast mode. In fast mode, Coven Code switches to the active provider's smaller, faster model for quick responses. Useful when you want rapid answers and deep reasoning is not required.
+Toggle fast mode. In fast mode, Coven Code switches to the active provider's smaller, faster model for quick responses. Useful when you want rapid answers and deep reasoning is not required. Replaces the former `/fast` command.
 
 ```
-/fast          — toggle fast mode on/off
-/fast on       — enable fast mode
-/fast off      — disable fast mode
+/effort fast          — toggle fast mode on/off
+/effort fast on       — enable fast mode
+/effort fast off      — disable fast mode
 ```
 
 Setting persists to `~/.coven-code/ui-settings.json`.
@@ -276,14 +282,18 @@ Common keys:
 | `outputStyle` | Output rendering style |
 | `autoApprove` | Auto-approve tool calls |
 
+Subcommands: `/config keybindings`, `/config theme [name]`, `/config output-style [style]`, `/config import`, `/config advisor [model|off]`, `/config color`, `/config vim`, `/config voice`, `/config statusline`, `/config terminal-setup` — each documented below or under [Display & Terminal](#display--terminal).
+
+`/config import` imports user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. It replaces the former `/import-config` command.
+
 ---
 
-### /keybindings
+### /config keybindings
 
-Open the interactive keybinding configurator. Displays all bound actions with their current shortcuts. Select an action to rebind it. Changes are written to `~/.coven-code/keybindings.json`.
+Open the interactive keybinding configurator. Displays all bound actions with their current shortcuts. Select an action to rebind it. Changes are written to `~/.coven-code/keybindings.json`. Replaces the former `/keybindings` command.
 
 ```
-/keybindings
+/config keybindings
 ```
 
 See [keybindings.md](./keybindings.md) for the full keybindings reference.
@@ -339,28 +349,44 @@ Add or remove MCP servers by editing `~/.coven-code/settings.json`.
 
 ---
 
-### /output-style
+### /config output-style
 
-Select how the model's output is rendered in the terminal. Choices include `auto`, `plain`, `markdown`, `streaming`, and others depending on terminal capabilities.
+Select how the model's output is rendered in the terminal. Choices include `auto`, `plain`, `markdown`, `streaming`, and others depending on terminal capabilities. Replaces the former `/output-style` command.
 
 ```
-/output-style
-/output-style plain
-/output-style markdown
+/config output-style
+/config output-style plain
+/config output-style markdown
 ```
 
 ---
 
-### /theme
+### /config theme
 
-Open the interactive theme picker. Preview and select a color theme for the Coven Code TUI.
+Open the interactive theme picker. Preview and select a color theme for the Coven Code TUI. Replaces the former `/theme` command.
 
 ```
-/theme
-/theme dark
-/theme light
-/theme solarized
+/config theme
+/config theme dark
+/config theme light
+/config theme solarized
 ```
+
+---
+
+### /config advisor
+
+Set or unset a secondary advisor model that provides supplementary suggestions alongside the main model. When set, the advisor model's context is available to improve main-model responses. Replaces the former `/advisor` command.
+
+```
+/config advisor                          — show current advisor setting
+/config advisor claude-opus-4-6          — set advisor model by name
+/config advisor provider/model           — set advisor using provider/model format
+/config advisor off                      — disable the advisor
+/config advisor unset                    — disable the advisor
+```
+
+The advisor model persists to `~/.coven-code/settings.json` under `advisorModel`. Model IDs must start with `claude-` or contain a `/` (provider/model format).
 
 ---
 
@@ -453,6 +479,8 @@ Variants (the former `/security-review` and `/ultrareview` commands fold in here
                              performance, maintainability, error handling, test
                              coverage, API design, and architecture; each finding
                              is tagged by category and severity
+/review comments           — fetch comments from the associated GitHub pull
+                             request (replaces the former /pr-comments command)
 ```
 
 GitHub posting requires `GITHUB_TOKEN` (a personal access token with repo scope); the PR number is auto-detected from `git remote` or supplied via `CLAUDE_PR_NUMBER`.
@@ -517,13 +545,16 @@ Display a detailed token usage breakdown for the current session. Shows input to
 /usage
 /usage cost
 /usage context
+/usage stats
 ```
+
+In the TUI, `/usage stats` opens the interactive session statistics dialog (replacing the former `/stats` command).
 
 ---
 
 ### /usage cost
 
-Show the total token usage and estimated cost for the current session. Provides a quick summary without the full account/quota context of `/usage`. In the TUI, `/stats` opens the interactive stats dialog.
+Show the total token usage and estimated cost for the current session. Provides a quick summary without the full account/quota context of `/usage`. In the TUI, `/usage stats` opens the interactive stats dialog.
 
 ```
 /usage cost
@@ -539,19 +570,28 @@ Show the current session status. Includes active model, permission mode, thinkin
 
 ```
 /status
+/status doctor    — run the diagnostics suite
 ```
+
+See [`/status doctor`](#status-doctor) under Diagnostics & Info for the full diagnostics description.
 
 ---
 
 ## Agents & Tasks
 
-### /agents
+### /agent
 
-Browse and manage saved workspace agents and Coven familiars.
+Browse and manage named agents, saved workspace agents, and Coven familiars. Named agents are predefined configurations with their own system prompts, model bindings, and access levels. Absorbs the former `/agents` command.
 
 ```
-/agents                         — open the agents/familiars menu
-/agents reset                   — open reset confirmation
+/agent                          — open the agents/familiars menu
+/agent list                     — list all visible named agents with access levels
+/agent <name>                   — show full details for a specific named agent
+/agent create [name]            — create a new agent
+/agent edit <name>              — edit an existing agent
+/agent delete <name>            — delete an agent
+/agent reset                    — open reset confirmation
+/agent managed ...              — configure manager-executor agents (see below)
 coven-code agents reset         — erase saved user agents and familiar roster
 ```
 
@@ -559,6 +599,8 @@ The reset action removes `~/.coven/familiars.toml`, custom `*.md` agent files
 from `~/.coven-code/agents/` and the current workspace's `.coven-code/agents/`,
 and clears `agents`, `familiar`, and `managed_agents` settings. It does not
 remove built-in agents, plugin packages, sessions, credentials, or history.
+
+To activate an agent, start Coven Code with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents.
 
 ---
 
@@ -576,19 +618,19 @@ Manage tracked background tasks. Tasks are shell commands or model invocations r
 
 ---
 
-### /goal
+### /coven goal
 
-Set a durable multi-turn autonomous goal. When a goal is active, Coven Code continues working across turns until the goal is marked complete, paused, or a 200-turn runaway guard fires. Designed for complex, sustained tasks that would otherwise require repeated manual re-prompting.
+Set a durable multi-turn autonomous goal. When a goal is active, Coven Code continues working across turns until the goal is marked complete, paused, or a 200-turn runaway guard fires. Designed for complex, sustained tasks that would otherwise require repeated manual re-prompting. Replaces the former standalone `/goal` command (which remains a hidden compatibility alias for one release).
 
 ```
-/goal <objective>                    — set a new goal and begin working autonomously
-/goal --tokens 250K <objective>      — set a goal with a soft token budget cap
-/goal                                — show current goal status
-/goal status                         — show current goal status
-/goal pause                          — pause the active goal
-/goal resume                         — resume a paused goal
-/goal clear                          — delete the current goal
-/goal complete                       — request a completion audit
+/coven goal <objective>              — set a new goal and begin working autonomously
+/coven goal --tokens 250K <text>     — set a goal with a soft token budget cap
+/coven goal                          — show current goal status
+/coven goal status                   — show current goal status
+/coven goal pause                    — pause the active goal
+/coven goal resume                   — resume a paused goal
+/coven goal clear                    — delete the current goal
+/coven goal complete                 — request a completion audit
 ```
 
 When the model believes the goal has been achieved, it calls the `GoalComplete` tool with an audit summary and evidence. Goals can be disabled globally by setting `COVEN_CODE_GOALS=0` in your environment.
@@ -597,28 +639,28 @@ See [Goal System](./advanced.md#goal-system) in the advanced guide.
 
 ---
 
-### /managed-agents
+### /agent managed
 
-Configure the manager-executor agent architecture, where a manager model delegates subtasks to one or more executor agents working in parallel. Includes budget controls and isolation options.
+Configure the manager-executor agent architecture, where a manager model delegates subtasks to one or more executor agents working in parallel. Includes budget controls and isolation options. Replaces the former `/managed-agents` command.
 
 ```
-/managed-agents                                       — show current configuration
-/managed-agents status                                — show current configuration
-/managed-agents presets                               — list built-in presets
-/managed-agents preset <name>                         — apply a named preset
-/managed-agents setup                                 — show setup instructions
-/managed-agents enable                                — enable managed agents
-/managed-agents disable                               — disable managed agents
-/managed-agents reset                                 — remove all managed-agent configuration
-/managed-agents configure manager-model <model>       — set the manager model
-/managed-agents configure executor-model <model>      — set the executor model
-/managed-agents configure executor-turns <n>          — set executor max turns
-/managed-agents configure concurrent <n>              — set max concurrent executors
-/managed-agents configure isolation on|off            — toggle executor isolation
-/managed-agents configure budget-split shared         — shared token pool
-/managed-agents configure budget-split percentage:<n> — percentage split (manager gets n%)
-/managed-agents configure budget-split fixed:<m>:<e>  — fixed USD caps (manager / executor)
-/managed-agents budget <amount>                       — set total budget in USD (0 to clear)
+/agent managed                                       — show current configuration
+/agent managed status                                — show current configuration
+/agent managed presets                               — list built-in presets
+/agent managed preset <name>                         — apply a named preset
+/agent managed setup                                 — show setup instructions
+/agent managed enable                                — enable managed agents
+/agent managed disable                               — disable managed agents
+/agent managed reset                                 — remove all managed-agent configuration
+/agent managed configure manager-model <model>       — set the manager model
+/agent managed configure executor-model <model>      — set the executor model
+/agent managed configure executor-turns <n>          — set executor max turns
+/agent managed configure concurrent <n>              — set max concurrent executors
+/agent managed configure isolation on|off            — toggle executor isolation
+/agent managed configure budget-split shared         — shared token pool
+/agent managed configure budget-split percentage:<n> — percentage split (manager gets n%)
+/agent managed configure budget-split fixed:<m>:<e>  — fixed USD caps (manager / executor)
+/agent managed budget <amount>                       — set total budget in USD (0 to clear)
 ```
 
 Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`). Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
@@ -626,19 +668,6 @@ Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4
 > **Preview feature.** Behaviour may change across releases.
 
 See [Managed Agents](./advanced.md#managed-agents) in the advanced guide.
-
----
-
-### /agent
-
-List all available named agents, or show details for a specific agent. Named agents are predefined configurations with their own system prompts, model bindings, and access levels. Useful for discovering what agents are available before starting a session.
-
-```
-/agent             — list all visible named agents with access levels
-/agent <name>      — show full details for a specific named agent
-```
-
-To activate an agent, start Coven Code with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents.
 
 ---
 
@@ -756,6 +785,8 @@ Authenticate with Anthropic or Codex via OAuth PKCE. Opens a browser for the flo
 
 If a profile matching the JWT's email or account_id already exists, that profile is refreshed in place — re-logging-in is idempotent. Use `--label` to either name a fresh profile or to disambiguate.
 
+Subcommands: `/login switch [name]` to change the active account and `/login refresh` to force a token refresh — both documented below.
+
 ---
 
 ### /logout
@@ -771,14 +802,14 @@ Remove credentials. By default removes only the **active** profile for the provi
 
 ---
 
-### /switch
+### /login switch
 
-Switch the active account for a provider. Anthropic by default; pass `--codex` for Codex. Run `/switch` with no arguments to list every stored account and see available profile ids — the active profile in each provider is marked with `*`.
+Switch the active account for a provider. Anthropic by default; pass `--codex` for Codex. Run `/login switch` with no arguments to list every stored account and see available profile ids — the active profile in each provider is marked with `*`. Replaces the former `/switch` command.
 
 ```
-/switch                          — list stored accounts across providers
-/switch work                     — set active Anthropic profile to "work"
-/switch --codex personal         — set active Codex profile to "personal"
+/login switch                    — list stored accounts across providers
+/login switch work               — set active Anthropic profile to "work"
+/login switch --codex personal   — set active Codex profile to "personal"
 ```
 
 Sample listing output:
@@ -793,47 +824,19 @@ Codex:
 
 ---
 
-### /refresh
+### /login refresh
 
-Refresh the provider authentication state. Forces a token refresh without full re-authentication. Useful when a session token has expired mid-session.
+Refresh the provider authentication state. Forces a token refresh without full re-authentication. Useful when a session token has expired mid-session. Replaces the former `/refresh` command.
 
 ```
-/refresh
+/login refresh
 ```
 
 ---
 
 ## Display & Terminal
 
-### /theme
-
-Documented above under [Configuration & Settings](#configuration--settings).
-
----
-
-### /output-style
-
-Documented above under [Configuration & Settings](#configuration--settings).
-
----
-
-### /config statusline
-
-Documented above under [Configuration & Settings](#configuration--settings).
-
----
-
-### /config vim
-
-Documented above under [Configuration & Settings](#configuration--settings).
-
----
-
-### /config terminal-setup
-
-Documented above under [Configuration & Settings](#configuration--settings).
-
----
+Theme, output style, statusline, vim mode, and terminal setup are all `/config` subcommands documented under [Configuration & Settings](#configuration--settings).
 
 ### /incant
 
@@ -882,12 +885,12 @@ Set the prompt bar color for the current session. Accepts standard color names o
 
 ## Diagnostics & Info
 
-### /doctor
+### /status doctor
 
-Run the Coven Code diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues.
+Run the Coven Code diagnostics suite. Checks configuration integrity, provider connectivity, tool availability, MCP server health, and reports any issues. Replaces the former `/doctor` command.
 
 ```
-/doctor
+/status doctor
 ```
 
 ---
@@ -905,13 +908,11 @@ Display the current Coven Code version string and build metadata.
 ---
 
 ### /update
-**Aliases:** `upgrade`
 
-Check for available updates. Queries the GitHub releases API and displays the latest version. If a newer version exists, prints the download URL or upgrade instructions. Does not auto-update.
+Check for available updates. Queries the GitHub releases API and displays the latest version. If a newer version exists, prints the download URL or upgrade instructions. Does not auto-update. (`/upgrade` is a hidden compatibility alias.)
 
 ```
 /update
-/upgrade
 ```
 
 ---
@@ -927,28 +928,32 @@ Export the current session transcript. Supported formats include Markdown, JSON,
 /export --format markdown
 /export --format json --output session.json
 /export --stdout
+/export copy [n]    — copy a recent response to the clipboard
+/export share       — upload the session as a shareable gist
+```
+
+The former `/copy` and `/share` commands fold in here as subcommands, documented below.
+
+---
+
+### /export copy
+
+Copy the most recent assistant response to the system clipboard. Pass a number to copy the Nth most-recent response. On Linux a `wl-clipboard` or `xclip` backend is used; on macOS and Windows the native clipboard API is used. Replaces the former `/copy` command.
+
+```
+/export copy         — copy the most recent response
+/export copy 2       — copy the second most recent response
+/export copy N       — copy the Nth most recent response
 ```
 
 ---
 
-### /copy
+### /export share
 
-Copy the most recent assistant response to the system clipboard. Pass a number to copy the Nth most-recent response. On Linux a `wl-clipboard` or `xclip` backend is used; on macOS and Windows the native clipboard API is used.
-
-```
-/copy         — copy the most recent response
-/copy 2       — copy the second most recent response
-/copy N       — copy the Nth most recent response
-```
-
----
-
-### /share
-
-Upload the current session as a secret GitHub gist and return a shareable URL. The session is rendered as a single self-contained HTML file and uploaded via the `gh` CLI; a viewer URL of the form `https://opencoven.github.io/coven-code/session/#<gist-id>` is printed.
+Upload the current session as a secret GitHub gist and return a shareable URL. The session is rendered as a single self-contained HTML file and uploaded via the `gh` CLI; a viewer URL of the form `https://opencoven.github.io/coven-code/session/#<gist-id>` is printed. Replaces the former `/share` command.
 
 ```
-/share
+/export share
 ```
 
 Requires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). The viewer base URL can be overridden with `COVEN_CODE_SHARE_VIEWER_URL`. Secret gists are unlisted but readable by anyone who has the link.
@@ -956,36 +961,6 @@ Requires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). The vi
 ---
 
 ## Advanced & Internal
-
-### /thinking
-
-Documented above under [Model & Provider](#model--provider).
-
----
-
-### /connect
-
-Documented above under [Model & Provider](#model--provider).
-
----
-
-### /fork
-
-Documented above under [Session & Navigation](#session--navigation).
-
----
-
-### /effort
-
-Documented above under [Model & Provider](#model--provider).
-
----
-
-### /usage context
-
-Documented above under [Search & Files](#search--files).
-
----
 
 ### /whisper
 **Aliases:** `btw`
@@ -1013,23 +988,6 @@ Enable or disable sandboxed execution of shell commands. When sandbox mode is on
 ```
 
 > A restart is recommended after toggling for full effect. On Windows (non-WSL), sandbox mode is not supported.
-
----
-
-### /think-back
-**Aliases:** `thinkback`
-
-Display the extended-thinking traces from previous model responses in the current session. Only available when extended thinking was used for those responses. Pass a number to view the Nth most-recent trace.
-
-```
-/think-back         — show the most recent thinking trace
-/think-back 2       — show the second most recent thinking trace
-/think-back play    — replay the most recent trace as an animated walkthrough
-/think-back play 2  — replay the second most recent trace
-/thinkback          — alias
-```
-
-`/think-back play` absorbs the former `/thinkback-play` command. Thinking traces appear when the model uses extended thinking mode (see `/thinking`). If no traces are found, Coven Code suggests enabling extended thinking.
 
 ---
 
@@ -1177,23 +1135,17 @@ section above. They are grouped by purpose.
 | Command | Description |
 |---------|-------------|
 | `/feedback` (alias `bug`) | Submit feedback about Coven Code. `/feedback report` for a bug report. |
-| `/import-config` | Import user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. |
-| `/reload-plugins` | Reload the active session plugin registry, hooks, agents, skills, and MCP definitions. |
-
-### Workspace & GitHub
-
-| Command | Description |
-|---------|-------------|
-| `/add-dir` | Add a directory to Coven Code's allowed workspace paths. |
-| `/branch` | Create a branch of the current conversation at this point. |
-| `/tag` | Toggle a searchable tag on the current session. |
-| `/pr-comments` | Get comments from a GitHub pull request. |
+| `/config import` | Import user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. |
+| `/plugin reload` | Reload the active session plugin registry, hooks, agents, skills, and MCP definitions. |
 
 ### Named CLI commands
 
-These run as `coven-code <name>` from the shell. Most have slash
-adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`);
-`ultraplan` and `stats` are CLI-only.
+These run as `coven-code <name>` from the shell. Their old slash
+adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`)
+are now hidden one-release aliases — in the TUI this functionality
+is reached via `/session`, `/agent`, and `/review` (see
+[Deprecated Aliases](#deprecated-aliases)). `ultraplan` and `stats`
+are CLI-only.
 
 | Command | Description |
 |---------|-------------|
@@ -1204,7 +1156,38 @@ adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`);
 | `tag` | Toggle a searchable session tag. |
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
-| `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/stats` opens the stats dialog). |
+| `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/usage stats` opens the stats dialog). |
+
+---
+
+## Deprecated Aliases
+
+The following top-level commands were folded into subcommands. These hidden aliases remain invocable for one release and will be removed afterwards.
+
+| Old command | New form |
+|-------------|----------|
+| `/fork` | `/session fork [name]` |
+| `/branch` | `/session branch ...` |
+| `/tag` | `/session tag ...` |
+| `/add-dir` | `/session add-dir <path>` |
+| `/copy` | `/export copy [n]` |
+| `/share` | `/export share` |
+| `/switch` | `/login switch [name]` |
+| `/refresh` | `/login refresh` |
+| `/think-back` | `/thinking back [play]` |
+| `/fast` | `/effort fast [on\|off]` |
+| `/keybindings` | `/config keybindings` |
+| `/theme` | `/config theme [name]` |
+| `/output-style` | `/config output-style [style]` |
+| `/import-config` | `/config import` |
+| `/advisor` | `/config advisor [model\|off]` |
+| `/agents` | `/agent [list\|create\|edit\|delete\|reset] [name]` |
+| `/managed-agents` | `/agent managed ...` |
+| `/pr-comments` | `/review comments` |
+| `/doctor` | `/status doctor` |
+| `/stats` | `/usage stats` |
+| `/reload-plugins` | `/plugin reload` |
+| `/upgrade` | `/update` |
 
 ---
 
@@ -1230,7 +1213,7 @@ Some commands are available only under certain account or platform conditions:
 
 | Command | Restriction |
 |---------|-------------|
-| `/fast` | Available when a fast-mode model is configured for the active provider |
+| `/effort fast` | Available when a fast-mode model is configured for the active provider |
 | `/sandbox` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
 | `/config voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
 | `/chrome` | Requires a running Chrome/Chromium instance launched with remote debugging enabled |
