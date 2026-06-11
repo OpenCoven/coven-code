@@ -57,8 +57,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Add an extra workspace root to the active session",
     ),
     ("advisor", "Set or unset the server-side advisor model"),
-    ("agent", "List available familiars or show familiar details"),
-    ("agents", "Browse familiar definitions and active familiars"),
+    (
+        "agent",
+        "Browse, inspect, and manage familiars and sub-agents",
+    ),
     ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
@@ -105,10 +107,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("keybindings", "Show keybinding configuration"),
     ("login", "Log in to Coven Code"),
     ("logout", "Log out of Coven Code"),
-    (
-        "managed-agents",
-        "Configure manager-executor managed agent system",
-    ),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
@@ -143,7 +141,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
-    ("stats", "Open the interactive session statistics dialog"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
     ("tag", "Tag the current session with a label"),
@@ -158,11 +155,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "update",
         "Check for updates and upgrade to the latest version",
     ),
-    (
-        "upgrade",
-        "Check for updates and upgrade to the latest version",
-    ),
-    ("usage", "Detailed per-call token usage breakdown"),
+    ("usage", "Token usage, quotas, and session statistics"),
     ("version", "Display the current Coven Code version"),
     (
         "whisper",
@@ -2450,6 +2443,27 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
+        // /usage stats opens the same live dialog the former standalone
+        // /stats did; other /usage views render via the command layer.
+        if cmd == "usage" && args.trim() == "stats" {
+            return self.intercept_slash_command("stats");
+        }
+        // /agent is the umbrella for the former /agents browser: bare /agent
+        // opens the TUI browser, /agent reset jumps to the reset confirm,
+        // and anything else (list/create/<name>/managed …) goes to the
+        // command layer.
+        if cmd == "agent" {
+            let sub = args.trim();
+            if sub.is_empty() {
+                return self.intercept_slash_command("agents");
+            }
+            if sub == "reset" {
+                self.open_agents_menu();
+                self.agents_menu.route = AgentsRoute::ResetConfirm;
+                return true;
+            }
+            return false;
+        }
         if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }

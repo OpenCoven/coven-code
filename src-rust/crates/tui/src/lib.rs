@@ -947,7 +947,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
 
-        assert!(rendered.contains("/agents"));
+        assert!(rendered.contains("/agent"));
         assert!(rendered.contains("[cmd]"));
     }
 

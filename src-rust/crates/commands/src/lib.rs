@@ -286,6 +286,9 @@ pub struct NamedCommandAdapter {
     pub slash_aliases: &'static [&'static str],
     pub slash_description: &'static str,
     pub slash_help: &'static str,
+    /// `true` for one-release compatibility aliases folded into a parent
+    /// command — still callable, but absent from /help and autocomplete.
+    pub slash_hidden: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1983,10 +1986,10 @@ impl SlashCommand for UsageCommand {
         "Show API usage, quotas, and rate limit status"
     }
     fn help(&self) -> &str {
-        "Usage: /usage [cost|context]\n\n\
+        "Usage: /usage [cost|context|stats]\n\n\
          Shows current session API usage and account quota information.\n\
-         Use /usage cost for the session cost breakdown or /usage context for context-window details.\n\
-         The legacy /cost and /context commands remain hidden compatibility aliases."
+         Use /usage cost for the session cost breakdown, /usage context for\n\
+         context-window details, or /usage stats for the full statistics view."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1997,9 +2000,10 @@ impl SlashCommand for UsageCommand {
             "" | "summary" | "quota" | "status" => {}
             "cost" | "costs" => return CostCommand.execute(rest, ctx).await,
             "context" | "window" => return ContextCommand.execute(rest, ctx).await,
+            "stats" => return StatsCommand.execute(rest, ctx).await,
             other => {
                 return CommandResult::Error(format!(
-                    "Unknown usage view '{}'. Use: /usage [cost|context]",
+                    "Unknown usage view '{}'. Use: /usage [cost|context|stats]",
                     other
                 ))
             }
@@ -5220,14 +5224,17 @@ impl SlashCommand for StatsCommand {
     fn name(&self) -> &str {
         "stats"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /usage stats; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Show token usage and cost statistics"
     }
     fn help(&self) -> &str {
-        "Usage: /stats\n\n\
+        "Usage: /usage stats\n\n\
          Shows detailed token usage and cost breakdown for the current session,\n\
          including cache creation/read token counts, turn counts, and session duration.\n\
-         Use /usage for quota and account info. Use /cost for a quick cost summary."
+         Use /usage for quota and account info, /usage cost for a quick cost summary."
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -7434,6 +7441,10 @@ impl SlashCommand for NamedCommandAdapter {
         self.slash_name
     }
 
+    fn hidden(&self) -> bool {
+        self.slash_hidden
+    }
+
     fn aliases(&self) -> Vec<&str> {
         self.slash_aliases.to_vec()
     }
@@ -7838,14 +7849,34 @@ impl SlashCommand for AgentCommand {
         "agent"
     }
     fn description(&self) -> &str {
-        "List available agents or get info about a specific agent"
+        "Browse, inspect, and manage familiars and sub-agents"
     }
     fn help(&self) -> &str {
-        "Usage: /agent [name]\n\nWithout arguments, lists all available named agents.\nWith a name, shows details for that agent.\n\nTo use an agent, start Coven Code with: --agent <name>"
+        "Usage: /agent [name] | /agent [list|create|edit|delete|reset] [name] | /agent managed [...]\n\n\
+         Without arguments, lists all available named agents (in the TUI, opens the agents browser).\n\
+         With a name, shows details for that agent.\n\
+         /agent list|create|edit|delete|reset manage sub-agent definitions (formerly /agents).\n\
+         /agent managed configures the manager-executor system (formerly /managed-agents).\n\n\
+         To use an agent, start Coven Code with: --agent <name>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use std::collections::HashMap;
+
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            // /agent managed … absorbs the former standalone /managed-agents.
+            "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
+            // /agent list|create|… absorbs the former standalone /agents.
+            "list" | "create" | "edit" | "delete" | "reset" => {
+                return execute_named_command_from_slash("agents", trimmed, ctx);
+            }
+            _ => {}
+        }
 
         // Merge built-in defaults with user-defined agents (user wins on collision).
         let mut all_agents: HashMap<String, claurst_core::AgentDefinition> =
@@ -8088,6 +8119,9 @@ impl SlashCommand for FamiliarCommand {
 impl SlashCommand for ManagedAgentsCommand {
     fn name(&self) -> &str {
         "managed-agents"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /agent managed; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Configure and manage the manager-executor agent architecture"
@@ -9225,6 +9259,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(CommitCommand),
         Box::new(NamedCommandAdapter {
             slash_name: "add-dir",
+            slash_hidden: false,
             target_name: "add-dir",
             slash_aliases: &[],
             slash_description: "Add a directory to Coven Code's allowed workspace paths",
@@ -9232,6 +9267,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "agents",
+            slash_hidden: true,
             target_name: "agents",
             slash_aliases: &[],
             slash_description: "Manage and configure sub-agents",
@@ -9239,6 +9275,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "branch",
+            slash_hidden: false,
             target_name: "branch",
             slash_aliases: &[],
             slash_description: "Create a branch of the current conversation at this point",
@@ -9246,6 +9283,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "tag",
+            slash_hidden: false,
             target_name: "tag",
             slash_aliases: &[],
             slash_description: "Toggle a searchable tag on the current session",
@@ -9253,6 +9291,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
+            slash_hidden: false,
             target_name: "pr-comments",
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",
@@ -10199,10 +10238,7 @@ mod tests {
         //    `App::intercept_slash_command_with_args` (sends the current
         //    session context to a Coven familiar). It is documented in
         //    docs/familiars.md and lives in tui/src/handoff.rs.
-        //  - stats: intercepted directly by the TUI to open the live stats
-        //    dialog; the named CLI `stats` command handles aggregate saved
-        //    session reports outside the TUI.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "stats"];
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
 
         let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
             .iter()
