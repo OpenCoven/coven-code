@@ -69,8 +69,6 @@ pub mod feature_flags;
 pub mod mcp_templates;
 
 // IDE environment detection (VS Code, Cursor, JetBrains, …).
-pub mod ide;
-pub use ide::{detect_ide, IdeKind};
 
 // Background update checker — compares running version against GitHub releases.
 pub mod update_check;

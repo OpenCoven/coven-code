@@ -488,7 +488,7 @@ fn command_category(name: &str) -> &'static str {
         "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
         "login" | "logout" | "switch" | "refresh" | "permissions" => "Auth & Permissions",
         "memory" | "diff" | "init" | "commit" | "review" | "import-config" => "Project",
-        "mcp" | "hooks" | "ide" | "chrome" => "Integrations",
+        "mcp" | "hooks" | "chrome" => "Integrations",
         "session" | "resume" | "search" | "share" => "Sessions & Remote",
         "help" | "exit" | "feedback" | "bug" => "General",
         "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
@@ -9281,13 +9281,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_help: "Usage: /tag [list|add|remove] [tag]",
         }),
         Box::new(NamedCommandAdapter {
-            slash_name: "ide",
-            target_name: "ide",
-            slash_aliases: &[],
-            slash_description: "Manage IDE integrations and show status",
-            slash_help: "Usage: /ide [status|connect|disconnect|open]",
-        }),
-        Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
             target_name: "pr-comments",
             slash_aliases: &[],
@@ -9755,22 +9748,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ide_slash_adapter_uses_named_command() {
-        let mut ctx = make_ctx();
-        let command = find_command("ide").unwrap();
-        let result = command.execute("status", &mut ctx).await;
-        match result {
-            CommandResult::Message(message) => assert!(message.contains("IDE")),
-            other => panic!("expected IDE status message, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
     async fn rewind_with_args_routes_to_file_rollback_not_overlay() {
         let _guard = CommandEnvGuard::with_coven_home(None);
         let mut ctx = make_ctx();
-        ctx.messages
-            .push(claurst_core::types::Message::user("hi"));
+        ctx.messages.push(claurst_core::types::Message::user("hi"));
         let command = find_command("rewind").unwrap();
 
         // `list` must reach the checkpoints path, never the overlay.
@@ -9850,7 +9831,6 @@ mod tests {
             "agents",
             "branch",
             "tag",
-            "ide",
             "pr-comments",
             "whisper",
             "incant",

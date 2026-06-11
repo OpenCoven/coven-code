@@ -1187,14 +1187,13 @@ section above. They are grouped by purpose.
 | `/add-dir` | Add a directory to Coven Code's allowed workspace paths. |
 | `/branch` | Create a branch of the current conversation at this point. |
 | `/tag` | Toggle a searchable tag on the current session. |
-| `/ide` | Manage IDE integrations and show status. |
 | `/pr-comments` | Get comments from a GitHub pull request. |
 
 ### Named CLI commands
 
 These run as `coven-code <name>` from the shell. Most have slash
-adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
-`/pr-comments`); `ultraplan` and `stats` are CLI-only.
+adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`);
+`ultraplan` and `stats` are CLI-only.
 
 | Command | Description |
 |---------|-------------|
@@ -1203,7 +1202,6 @@ adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
 | `add-dir` | Add a directory to the allowed workspace paths. |
 | `branch` | Branch the current conversation. |
 | `tag` | Toggle a searchable session tag. |
-| `ide` | Manage IDE integrations. |
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
 | `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/stats` opens the stats dialog). |

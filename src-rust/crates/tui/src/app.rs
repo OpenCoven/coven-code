@@ -93,7 +93,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
-    ("ide", "Connect to the active IDE integration"),
     (
         "import-config",
         "Import CLAUDE.md and settings.json from ~/.claude",
