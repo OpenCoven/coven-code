@@ -4446,12 +4446,38 @@ impl SlashCommand for SessionCommand {
     fn description(&self) -> &str {
         "Show or manage conversation sessions"
     }
+    fn help(&self) -> &str {
+        "Usage: /session [list|rename <name>|fork [name]|branch ...|tag ...|add-dir <path>]\n\n\
+         Without arguments, shows the current session (or the active remote URL).\n\n\
+         Subcommands:\n\
+           /session list           — list saved sessions\n\
+           /session rename <name>  — rename the current session\n\
+           /session fork [name]    — fork the session into a new branch\n\
+           /session branch ...     — create/switch/list conversation branches\n\
+           /session tag ...        — toggle searchable session tags\n\
+           /session add-dir <path> — add a workspace root to the session\n\n\
+         The legacy /fork, /branch, /tag, and /add-dir commands remain hidden\n\
+         one-release compatibility aliases."
+    }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let trimmed = args.trim();
         // /session rename [...] absorbs the former standalone /rename command.
         if let Some(rest) = trimmed.strip_prefix("rename") {
             return RenameCommand.execute(rest.trim(), ctx).await;
+        }
+        // Subcommands absorbed from the former /fork, /branch, /tag, and
+        // /add-dir commands (issue #73).
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "fork" => return ForkCommand.execute(rest, ctx).await,
+            "branch" => return execute_named_command_from_slash("branch", rest, ctx),
+            "tag" => return execute_named_command_from_slash("tag", rest, ctx),
+            "add-dir" => return execute_named_command_from_slash("add-dir", rest, ctx),
+            _ => {}
         }
         match trimmed {
             "list" => {
@@ -4550,6 +4576,9 @@ impl SlashCommand for SessionCommand {
 impl SlashCommand for ForkCommand {
     fn name(&self) -> &str {
         "fork"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Fork the current session into a new branch"
@@ -4793,15 +4822,21 @@ impl SlashCommand for ExportCommand {
         "Export conversation to markdown or JSON"
     }
     fn help(&self) -> &str {
-        "Usage: /export [--format markdown|json] [--output <file>]\n\n\
+        "Usage: /export [copy [n]|share] [--format markdown|json] [--output <file>]\n\n\
          Export the current conversation.\n\n\
+         Subcommands:\n\
+           copy [n]            Copy the (n-th most recent) assistant response\n\
+                               to the clipboard (absorbs the former /copy)\n\
+           share               Upload the session as a secret gist and return\n\
+                               a shareable URL (absorbs the former /share)\n\n\
          Flags:\n\
            --format markdown   Render as readable Markdown (default for .md files)\n\
            --format json       Full structured JSON export (default)\n\
            --output <path>     Write to file; if omitted, prints to the terminal\n\n\
          Examples:\n\
            /export\n\
-           /export --format markdown\n\
+           /export copy\n\
+           /export share\n\
            /export --format json --output chat.json\n\
            /export --output conversation.md"
     }
@@ -4809,6 +4844,17 @@ impl SlashCommand for ExportCommand {
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         // ── Parse flags ────────────────────────────────────────────────────
         let args = args.trim();
+        // Subcommands absorbed from the former /copy and /share commands
+        // (issue #73); both stay as hidden one-release aliases.
+        let (head, rest) = match args.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (args, ""),
+        };
+        match head {
+            "copy" => return CopyCommand.execute(rest, ctx).await,
+            "share" => return ShareCommand.execute(rest, ctx).await,
+            _ => {}
+        }
         let mut format: Option<&str> = None; // "markdown" | "json"
         let mut output_path: Option<String> = None;
 
@@ -4934,6 +4980,9 @@ impl SlashCommand for ExportCommand {
 impl SlashCommand for ShareCommand {
     fn name(&self) -> &str {
         "share"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Upload the current session as a secret GitHub gist and return a shareable URL"
@@ -5643,6 +5692,9 @@ impl SlashCommand for ContextCommand {
 impl SlashCommand for CopyCommand {
     fn name(&self) -> &str {
         "copy"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Copy the last assistant response to the clipboard"
@@ -9293,7 +9345,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Add a directory to Coven Code's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
-            slash_hidden: false,
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "agents",
@@ -9309,7 +9361,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Create a branch of the current conversation at this point",
             slash_help: "Usage: /branch [create|switch|list] [name]",
-            slash_hidden: false,
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "tag",
@@ -9317,7 +9369,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Toggle a searchable tag on the current session",
             slash_help: "Usage: /tag [list|add|remove] [tag]",
-            slash_hidden: false,
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
@@ -9738,7 +9790,16 @@ mod tests {
 
     #[test]
     fn phase_three_legacy_commands_are_hidden_but_callable() {
-        let hidden_legacy = ["agents", "managed-agents"];
+        let hidden_legacy = [
+            "agents",
+            "managed-agents",
+            "fork",
+            "branch",
+            "tag",
+            "add-dir",
+            "copy",
+            "share",
+        ];
 
         for name in hidden_legacy {
             let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
@@ -9760,6 +9821,35 @@ mod tests {
                 assert!(message.contains("Session Statistics") || message.contains("oken"))
             }
             other => panic!("expected stats message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_and_export_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /session list still works and fork/branch/tag/add-dir route to
+        // their absorbed implementations (never an unknown-subcommand error).
+        let session = find_command("session").unwrap();
+        for sub in ["tag list", "branch list", "add-dir"] {
+            let result = session.execute(sub, &mut ctx).await;
+            if let CommandResult::Error(message) = &result {
+                assert!(
+                    !message.contains("Unknown subcommand"),
+                    "/session {sub} should route to the absorbed command, got: {message}"
+                );
+            }
+        }
+
+        // /export copy routes to the clipboard copy path.
+        let export = find_command("export").unwrap();
+        let result = export.execute("copy", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.contains("No assistant messages"))
+            }
+            other => panic!("expected copy-path message, got {:?}", other),
         }
     }
 

@@ -52,16 +52,11 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    (
-        "add-dir",
-        "Add an extra workspace root to the active session",
-    ),
     ("advisor", "Set or unset the server-side advisor model"),
     (
         "agent",
         "List, inspect, and manage familiars and managed agents",
     ),
-    ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -71,7 +66,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "Compact the conversation context"),
     ("config", "Open settings"),
     ("connect", "Connect an AI provider"),
-    ("copy", "Copy the last assistant response to clipboard"),
     (
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
@@ -80,14 +74,13 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
     ("exit", "Quit Coven Code"),
-    ("export", "Export conversation"),
+    ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
         "Set your active familiar — changes the TUI mascot live",
     ),
     ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
-    ("fork", "Fork session into a new branch"),
     ("goal", "Set or view the current session goal"),
     (
         "handoff",
@@ -133,17 +126,12 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
-    ("session", "Browse and manage sessions"),
+    ("session", "Browse, rename, fork, branch, and tag sessions"),
     ("settings", "Open settings"),
-    (
-        "share",
-        "Upload the current session as a secret gist and get a shareable URL",
-    ),
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
-    ("tag", "Tag the current session with a label"),
     ("tasks", "Manage tracked background tasks"),
     ("theme", "Open the theme picker"),
     (
