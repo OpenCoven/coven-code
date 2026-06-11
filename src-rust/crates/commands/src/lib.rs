@@ -657,6 +657,9 @@ impl SlashCommand for CostCommand {
     fn name(&self) -> &str {
         "cost"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Show token usage and cost for this session"
     }
@@ -820,15 +823,58 @@ impl SlashCommand for ConfigCommand {
     fn description(&self) -> &str {
         "Show or modify configuration settings"
     }
+    fn help(&self) -> &str {
+        "Usage: /config [show|get|set|unset|color|vim|voice|statusline|terminal-setup] ...\n\n\
+         Shows or modifies configuration settings.\n\n\
+         Core settings:\n\
+           /config\n\
+           /config set theme <default|dark|light>\n\
+           /config set output-style <default|concise|explanatory|learning|formal|casual>\n\
+           /config set model <model>\n\
+           /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n\
+           /config unset <model|output-style>\n\n\
+         UI settings:\n\
+           /config color [<name|#RRGGBB|default>]\n\
+           /config vim [on|off]\n\
+           /config voice [on|off|status]\n\
+           /config statusline [show|hide] [cost|tokens|model|time|all]\n\
+           /config terminal-setup"
+    }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let args = args.trim();
         if args.is_empty() || matches!(args, "show" | "get") {
             let json = serde_json::to_string_pretty(&ctx.config).unwrap_or_default();
             return CommandResult::Message(format!(
-                "Current configuration:\n{}\n\nUsage:\n  /config\n  /config set theme <default|dark|light>\n  /config set output-style <default|concise|explanatory|learning|formal|casual>\n  /config set model <model>\n  /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n  /config unset <model|output-style>",
-                json
+                "Current configuration:\n{}\n\n{}",
+                json,
+                self.help()
             ));
+        }
+
+        let mut subcommand_parts = args.splitn(2, char::is_whitespace);
+        let subcommand = subcommand_parts.next().unwrap_or_default();
+        let subcommand_args = subcommand_parts.next().unwrap_or_default().trim();
+        match subcommand {
+            "color" | "prompt-color" | "prompt_color" => {
+                return ColorCommand.execute(subcommand_args, ctx).await;
+            }
+            "vim" | "vi" | "editor" | "editor-mode" | "editor_mode" => {
+                return VimCommand.execute(subcommand_args, ctx).await;
+            }
+            "voice" => {
+                return VoiceCommand.execute(subcommand_args, ctx).await;
+            }
+            "statusline" | "status-line" | "status_line" => {
+                return StatuslineCommand.execute(subcommand_args, ctx).await;
+            }
+            "terminal-setup" | "terminal_setup" | "terminal" => {
+                if !subcommand_args.is_empty() {
+                    return CommandResult::Error("Usage: /config terminal-setup".to_string());
+                }
+                return TerminalSetupCommand.execute("", ctx).await;
+            }
+            _ => {}
         }
 
         if let Some(key) = args.strip_prefix("get ").map(str::trim) {
@@ -1002,6 +1048,9 @@ impl SlashCommand for ConfigCommand {
 impl SlashCommand for ColorCommand {
     fn name(&self) -> &str {
         "color"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Set or show the prompt bar color for this session"
@@ -1935,12 +1984,28 @@ impl SlashCommand for UsageCommand {
         "Show API usage, quotas, and rate limit status"
     }
     fn help(&self) -> &str {
-        "Usage: /usage\n\n\
+        "Usage: /usage [cost|context]\n\n\
          Shows current session API usage and account quota information.\n\
-         For cost details, use /cost."
+         Use /usage cost for the session cost breakdown or /usage context for context-window details.\n\
+         The legacy /cost and /context commands remain hidden compatibility aliases."
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let mut parts = args.trim().splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or_default();
+        let rest = parts.next().unwrap_or_default().trim();
+        match subcommand {
+            "" | "summary" | "quota" | "status" => {}
+            "cost" | "costs" => return CostCommand.execute(rest, ctx).await,
+            "context" | "window" => return ContextCommand.execute(rest, ctx).await,
+            other => {
+                return CommandResult::Error(format!(
+                    "Unknown usage view '{}'. Use: /usage [cost|context]",
+                    other
+                ))
+            }
+        }
+
         let input = ctx.cost_tracker.input_tokens();
         let output = ctx.cost_tracker.output_tokens();
         let cache_creation = ctx.cost_tracker.cache_creation_tokens();
@@ -5118,7 +5183,9 @@ impl SlashCommand for RewindCommand {
     fn help(&self) -> &str {
         "Usage: /rewind\n\
          Opens an interactive overlay to select the message to rewind to.\n\
-         Use ↑↓ to navigate, Enter to select, y/n to confirm."
+         Use ↑↓ to navigate, Enter to select, y/n to confirm.\n\n\
+         The legacy /undo and /revert file-rollback commands remain available \
+         as hidden compatibility commands for this release."
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -5490,6 +5557,9 @@ where
 impl SlashCommand for ContextCommand {
     fn name(&self) -> &str {
         "context"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Show context window usage (tokens used / available)"
@@ -6134,6 +6204,9 @@ impl SlashCommand for VimCommand {
     fn name(&self) -> &str {
         "vim"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["vi"]
     }
@@ -6193,6 +6266,9 @@ impl SlashCommand for VimCommand {
 impl SlashCommand for VoiceCommand {
     fn name(&self) -> &str {
         "voice"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Toggle voice input mode on/off"
@@ -6383,6 +6459,9 @@ impl SlashCommand for StatuslineCommand {
     fn name(&self) -> &str {
         "statusline"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Configure what is shown in the status line"
     }
@@ -6536,6 +6615,9 @@ impl SlashCommand for SecurityReviewCommand {
 impl SlashCommand for TerminalSetupCommand {
     fn name(&self) -> &str {
         "terminal-setup"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Help configure your terminal for optimal Coven Code use"
@@ -7361,6 +7443,9 @@ impl SlashCommand for UndoCommand {
     fn name(&self) -> &str {
         "undo"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec![]
     }
@@ -7383,6 +7468,9 @@ impl SlashCommand for UndoCommand {
 impl SlashCommand for RevertCommand {
     fn name(&self) -> &str {
         "revert"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Revert file changes from an assistant turn back to pre-turn state"
@@ -9565,6 +9653,103 @@ mod tests {
     }
 
     #[test]
+    fn phase_two_legacy_commands_are_hidden_but_callable() {
+        let hidden_legacy = [
+            "color",
+            "context",
+            "cost",
+            "revert",
+            "statusline",
+            "terminal-setup",
+            "undo",
+            "vim",
+            "voice",
+        ];
+
+        for name in hidden_legacy {
+            let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
+            assert!(
+                command.hidden(),
+                "{name} should stay callable as a hidden one-release compatibility alias"
+            );
+        }
+
+        let visible_names: std::collections::HashSet<&str> = all_commands()
+            .iter()
+            .filter(|command| !command.hidden())
+            .map(|command| command.name())
+            .collect();
+        for name in hidden_legacy {
+            assert!(
+                !visible_names.contains(name),
+                "{name} should not be a visible primary command"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_command_owns_folded_ui_settings() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let command = find_command("config").unwrap();
+
+        let result = command.execute("color", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Current prompt color")),
+            other => panic!("expected color status message, got {:?}", other),
+        }
+
+        let result = command.execute("statusline", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.contains("Status line configuration"))
+            }
+            other => panic!("expected statusline message, got {:?}", other),
+        }
+
+        let result = command.execute("voice status", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Voice mode")),
+            other => panic!("expected voice status message, got {:?}", other),
+        }
+
+        let result = command.execute("vim on", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Editor mode set to vim")),
+            other => panic!("expected vim setting message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_command_owns_cost_and_context_views() {
+        let mut ctx = make_ctx();
+        let command = find_command("usage").unwrap();
+
+        let result = command.execute("cost", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Session Cost")),
+            other => panic!("expected cost message, got {:?}", other),
+        }
+
+        let result = command.execute("context", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Context Window Usage")),
+            other => panic!("expected context message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn ide_slash_adapter_uses_named_command() {
+        let mut ctx = make_ctx();
+        let command = find_command("ide").unwrap();
+        let result = command.execute("status", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("IDE")),
+            other => panic!("expected IDE status message, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_find_command_by_alias() {
         // /help has aliases "h" and "?"
         assert!(find_command("h").is_some());
@@ -10030,7 +10215,10 @@ mod tests {
         //    `App::intercept_slash_command_with_args` (sends the current
         //    session context to a Coven familiar). It is documented in
         //    docs/familiars.md and lives in tui/src/handoff.rs.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
+        //  - stats: intercepted directly by the TUI to open the live stats
+        //    dialog; the named CLI `stats` command handles aggregate saved
+        //    session reports outside the TUI.
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "stats"];
 
         let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
             .iter()

@@ -62,7 +62,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
-    ("color", "Set the prompt bar color for the current session"),
     (
         "commit",
         "Stage and commit changes (model drafts the message)",
@@ -70,9 +69,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "Compact the conversation context"),
     ("config", "Open settings"),
     ("connect", "Connect an AI provider"),
-    ("context", "Show context window and rate limit usage"),
     ("copy", "Copy the last assistant response to clipboard"),
-    ("cost", "Show cost breakdown"),
     (
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
@@ -132,7 +129,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Reload the active session plugin registry",
     ),
     ("resume", "Resume a previous session"),
-    ("revert", "Revert a file to its pre-session state"),
     ("review", "Review changes (git diff)"),
     ("rewind", "Rewind to an earlier turn"),
     ("sandbox", "Toggle sandboxed shell execution"),
@@ -145,22 +141,17 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
-    ("statusline", "Configure the TUI status line"),
+    ("stats", "Open the interactive session statistics dialog"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
     ("tag", "Tag the current session with a label"),
     ("tasks", "Manage tracked background tasks"),
-    (
-        "terminal-setup",
-        "Run the terminal capability detection wizard",
-    ),
     ("theme", "Open the theme picker"),
     (
         "think-back",
         "Show extended-thinking traces from previous responses",
     ),
     ("thinking", "Configure extended thinking for the session"),
-    ("undo", "Undo a file change made during this session"),
     (
         "update",
         "Check for updates and upgrade to the latest version",
@@ -171,8 +162,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("usage", "Detailed per-call token usage breakdown"),
     ("version", "Display the current Coven Code version"),
-    ("vim", "Toggle vim keybindings"),
-    ("voice", "Toggle voice input mode"),
     (
         "whisper",
         "Whisper a side question to your familiar (not kept in history)",
@@ -181,13 +170,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
 
 fn help_command_category(name: &str) -> &'static str {
     match name {
-        "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => {
-            "Model & Provider"
-        }
-        "diff" | "review" | "rewind" | "revert" | "undo" | "export" | "copy" | "share" => {
-            "Review & History"
-        }
-        "cost" | "context" | "usage" | "doctor" | "status" => "Diagnostics",
+        "connect" | "model" | "providers" | "refresh" | "fast" | "effort" => "Model & Provider",
+        "diff" | "review" | "rewind" | "export" | "copy" | "share" => "Review & History",
+        "usage" | "doctor" | "status" | "stats" => "Diagnostics",
         "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
             "Workspace"
         }
@@ -2520,6 +2505,9 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
+        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage") {
+            return false;
+        }
         if cmd == "mcp" && !args.trim().is_empty() {
             return false;
         }
@@ -7879,6 +7867,14 @@ role = "Research"
         assert!(app.prompt_input.vim_enabled);
         assert!(app.intercept_slash_command("vim"));
         assert!(!app.prompt_input.vim_enabled);
+    }
+
+    #[test]
+    fn config_with_args_reaches_command_layer() {
+        let mut app = make_app();
+        assert!(!app.settings_screen.visible);
+        assert!(!app.intercept_slash_command_with_args("config", "vim on"));
+        assert!(!app.settings_screen.visible);
     }
 
     #[test]
