@@ -40,7 +40,7 @@ export function render() {
     <ol>
       <li>The <strong>welcome panel</strong> (top-left of the home screen): glyph, name, access tier dot, and on wider terminals the role and an accent rule. See <a href="#welcome-screen">Welcome Screen</a>.</li>
       <li>The <strong>F2 switcher popup</strong>: one row per saved familiar, each painted in that familiar's accent palette with a coloured tier dot.</li>
-      <li>The <strong><code>/agents</code> detail view</strong>: the card appears above the persona preview when you select a familiar-sourced agent.</li>
+      <li>The <strong><code>/familiar</code> detail view</strong>: the card appears above the persona preview when you select a familiar-sourced agent.</li>
     </ol>
 
     <h2>Switching Familiars</h2>
@@ -67,12 +67,12 @@ coven-code agents use raven</code></pre>
 
     <ul>
       <li>The welcome panel shows <code>Familiar: none</code> until a saved roster familiar is selected.</li>
-      <li>The <code>/agents</code> overlay shows only workspace agents.</li>
+      <li>The <code>/familiar</code> overlay shows only workspace agents.</li>
       <li><kbd>F2</kbd> opens a switcher only when a saved familiar roster exists.</li>
       <li><code>/familiar</code> lists and selects only familiars from <code>~/.coven/familiars.toml</code>.</li>
     </ul>
 
-    <p>After <code>/agents</code> reset or <code>coven-code agents reset</code>, Coven Code removes <code>~/.coven/familiars.toml</code>, renders <code>Familiar: none</code>, hides the footer familiar label, and does not open the F2 switcher until the roster file is recreated.</p>
+    <p>After <code>/familiar reset-roster</code> or <code>coven-code agents reset</code>, Coven Code removes <code>~/.coven/familiars.toml</code>, renders <code>Familiar: none</code>, hides the footer familiar label, and does not open the F2 switcher until the roster file is recreated.</p>
 
     <p>Install the daemon to unlock the full roster:</p>
 

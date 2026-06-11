@@ -932,7 +932,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = make_app();
         app.handle_key_event(key(KeyCode::Char('/')));
-        app.handle_key_event(key(KeyCode::Char('a')));
+        app.handle_key_event(key(KeyCode::Char('c')));
 
         terminal
             .draw(|frame| crate::render::render_app(frame, &app))
@@ -947,7 +947,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
 
-        assert!(rendered.contains("/agent"));
+        assert!(rendered.contains("/clear"));
         assert!(rendered.contains("[cmd]"));
     }
 

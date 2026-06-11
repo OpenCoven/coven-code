@@ -2,7 +2,7 @@
 
 Coven Code has a named-agent system that lets you select a pre-configured persona with its own tool permissions, model, system prompt, and turn budget. For larger tasks it also supports a coordinator mode where a top-level agent orchestrates a pool of parallel worker agents.
 
-> **Coven familiars as agents:** If the Coven daemon is installed, every familiar in `~/.coven/familiars.toml` is automatically available as a named agent in both the `/agents` overlay and the `coven-code agents` CLI. See [Coven Familiars](familiars) for the full reference.
+> **Coven familiars as agents:** If the Coven daemon is installed, every familiar in `~/.coven/familiars.toml` is automatically available as a named agent in both the `/familiar` overlay and the `coven-code agents` CLI. See [Coven Familiars](familiars) for the full reference.
 
 ---
 
@@ -72,12 +72,12 @@ coven-code --agent plan --provider openai --model o3 "review this architecture"
 
 ---
 
-## The /agents Command
+## The /familiar Command
 
-Within an interactive session, `/agents` lists all available named agents (built-in and custom):
+Within an interactive session, `/familiar` is the unified surface for familiars and agents (`/agent` remains as an alias; the old `/agents` is a hidden one-release shim). `/familiar list` lists all available named agents (built-in and custom):
 
 ```
-/agents
+/familiar list
 ```
 
 Output shows the agent name, description, access level, and max turn limit. Agents with `visible: false` in their definition are hidden from this list.
@@ -88,8 +88,9 @@ Output shows the agent name, description, access level, and max turn limit. Agen
 
 Define custom agents in `~/.coven-code/settings.json` under the `agents` key. Custom definitions override built-in agents of the same name.
 
-To erase saved user agents and return to the built-in roster, open `/agents`
-and choose **Reset familiars and agents**, or run `coven-code agents reset`.
+To erase saved user agents and return to the built-in roster, open `/familiar`
+and choose **Reset familiars and agents**, run `/familiar reset-roster`, or run
+`coven-code agents reset`.
 This removes custom agent markdown files, clears agent/familiar settings, and
 removes the Coven familiar roster without touching built-ins, plugins, sessions,
 credentials, or history.
@@ -134,12 +135,12 @@ credentials, or history.
 
 | Field | Type | Description |
 |---|---|---|
-| `description` | string | Short description shown in `/agents` |
+| `description` | string | Short description shown in `/familiar list` |
 | `model` | string | Model override in `provider/model` or bare `model` form. Omit to use the session default. |
 | `temperature` | number | Sampling temperature override (0.0–1.0). Omit to use the model default. |
 | `prompt` | string | System prompt prefix prepended before the main system prompt. |
 | `access` | string | Permission restriction: `"full"` (all tools), `"read-only"` (no writes/shell), `"search-only"` (search tools only). Default: `"full"`. |
-| `visible` | bool | Whether to show in `/agents` output. Default: `true`. |
+| `visible` | bool | Whether to show in `/familiar list` output. Default: `true`. |
 | `max_turns` | number or null | Maximum agentic turns. Null means unlimited. Overrides the global turn budget. |
 | `color` | string | ANSI terminal color for display: `"cyan"`, `"magenta"`, `"green"`, `"yellow"`, `"blue"`, etc. |
 

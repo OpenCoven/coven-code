@@ -303,13 +303,20 @@ The welcome panel and footer only show a familiar when the selected id exists
 in `~/.coven/familiars.toml`; stale or reset familiar settings render as
 `Familiar: none`.
 
-To erase custom familiars and reset the agent roster, open `/agents` and choose
-**Reset familiars and agents**, or run `coven-code agents reset`. This removes
-`~/.coven/familiars.toml`, custom agent markdown files, and saved
-agent/familiar settings. After reset the welcome panel renders
-`Familiar: none`, the footer shows no familiar label, and the F2 familiar
-switcher does not open until a saved familiar roster exists again. The
-`/familiar` command only lists and selects familiars from
+Every switching surface — the `/familiar` command, the F2 popup, and the
+familiars/agents menu — performs the same full activation: it changes the
+mascot, persists the choice to `~/.coven-code/settings.json`, and activates
+the familiar's agent definition so the session's tool list is re-filtered to
+the familiar's access tier (`full`, `read-only`, or `search-only`; omitted or
+unknown tiers fail closed to `read-only`).
+
+To erase custom familiars and reset the agent roster, open `/familiar` and
+choose **Reset familiars and agents**, run `/familiar reset-roster`, or run
+`coven-code agents reset`. This removes `~/.coven/familiars.toml`, custom
+agent markdown files, and saved agent/familiar settings. After reset the
+welcome panel renders `Familiar: none`, the footer shows no familiar label,
+and the F2 familiar switcher does not open until a saved familiar roster
+exists again. The `/familiar` command only selects familiars from
 `~/.coven/familiars.toml`; stale settings or built-in names are ignored when
 the roster file is absent.
 

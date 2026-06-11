@@ -52,10 +52,6 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    (
-        "agent",
-        "List, inspect, and manage familiars and managed agents",
-    ),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -81,7 +77,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
-        "Set your active familiar — changes the TUI mascot live",
+        "Your familiar & agents — switch persona, inspect, and manage",
     ),
     ("feedback", "Open session feedback survey"),
     (
@@ -147,20 +143,32 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
 ];
 
-fn help_command_category(name: &str) -> &'static str {
+/// Canonical category for a slash command. Single source of truth shared by
+/// the F1 help overlay, the command palette, and the `/help` text output in
+/// `claurst-commands` (which delegates here) so every surface groups
+/// commands the same way.
+pub fn slash_command_category(name: &str) -> &'static str {
     match name {
-        "connect" | "model" | "providers" | "refresh" | "fast" | "effort" => "Model & Provider",
-        "diff" | "review" | "rewind" | "export" | "copy" | "share" => "Review & History",
-        "usage" | "doctor" | "status" | "stats" => "Diagnostics",
-        "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
-            "Workspace"
+        "clear" | "compact" | "rewind" | "undo" | "revert" | "export" | "branch" | "fork" => {
+            "Conversation"
         }
-        "agent" | "agents" | "memory" | "plugin" | "feedback" | "survey" => "Tools",
-        "session" | "resume" | "fork" | "clear" | "compact" | "whisper" | "quit" | "exit" => {
-            "Session"
+        "model" | "config" | "settings" | "theme" | "color" | "vim" | "fast" | "effort"
+        | "voice" | "statusline" | "output-style" | "keybindings" | "sandbox" => "Settings",
+        "cost" | "usage" | "context" | "stats" => "Usage & Cost",
+        "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
+        "login" | "logout" | "switch" | "refresh" | "permissions" | "connect" | "providers" => {
+            "Auth & Permissions"
         }
-        "coven" | "handoff" | "familiar" => "Coven Substrate",
-        _ => "Commands",
+        "memory" | "diff" | "init" | "commit" | "review" | "import-config" | "security-review" => {
+            "Project"
+        }
+        "mcp" | "hooks" | "chrome" => "Integrations",
+        "session" | "resume" | "search" | "share" | "rename" => "Sessions & Remote",
+        "help" | "exit" | "quit" | "feedback" | "survey" | "bug" => "General",
+        "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
+        "copy" | "skills" | "plugin" | "reload-plugins" | "whisper" | "incant" => "Tools & Extras",
+        "coven" | "familiar" | "familiars" | "handoff" => "Coven",
+        _ => "Other",
     }
 }
 
@@ -171,7 +179,7 @@ fn help_overlay_entries() -> Vec<HelpEntry> {
             name: (*name).to_string(),
             aliases: String::new(),
             description: (*description).to_string(),
-            category: help_command_category(name).to_string(),
+            category: slash_command_category(name).to_string(),
         })
         .collect()
 }
@@ -2454,7 +2462,12 @@ impl App {
         if cmd == "mcp" && !args_trimmed.is_empty() {
             return false;
         }
-        if cmd == "agents" && args_trimmed == "reset" {
+        // Destructive roster wipes always go through the confirmation screen
+        // in the TUI: the unified `/familiar reset-roster` and the legacy
+        // `/agents reset` both land on the same dialog.
+        if (matches!(cmd, "familiar" | "familiars" | "agent") && args_trimmed == "reset-roster")
+            || (cmd == "agents" && args_trimmed == "reset")
+        {
             self.open_agents_menu();
             self.agents_menu.route = AgentsRoute::ResetConfirm;
             return true;
@@ -2472,6 +2485,8 @@ impl App {
                     | "review"
                     | "agent"
                     | "agents"
+                    | "familiar"
+                    | "familiars"
                     | "status"
                     | "thinking"
                     | "think"
@@ -2547,7 +2562,10 @@ impl App {
                 self.mcp_view.open(servers);
                 true
             }
-            "agents" => {
+            // One visual surface for familiars and agents: the bare command
+            // (canonical /familiar, alias /agent, deprecated /agents) opens
+            // the interactive menu; argument forms run in the commands crate.
+            "familiar" | "familiars" | "agent" | "agents" => {
                 self.open_agents_menu();
                 true
             }
@@ -3526,7 +3544,11 @@ impl App {
                         .get(self.familiar_switcher_idx)
                         .cloned()
                     {
+                        // Full activation, same as the menu and /familiar:
+                        // mascot + persisted setting + agent mode/tool tier.
                         self.config.familiar = Some(id.clone());
+                        self.persist_familiar_setting(Some(id.clone()));
+                        self.apply_familiar_agent_mode(Some(id.clone()), None);
                         self.push_notification(
                             crate::notifications::NotificationKind::Info,
                             format!("\u{2728} Familiar: {}", id),
@@ -5264,15 +5286,54 @@ impl App {
 
     /// Activate a Coven familiar as the session's agent mode and close the picker.
     ///
-    /// Sets `agent_mode_changed` so the main loop swaps `query_config.agent_definition`
-    /// and re-filters the tool list according to the familiar's access tier.
+    /// Every familiar-activation surface (agents menu, F2 switcher, the
+    /// /familiar command) converges on the same three effects: the mascot
+    /// (`config.familiar`), the persisted setting, and the agent definition
+    /// whose access tier drives the runtime tool filter.
     fn activate_familiar_agent(&mut self, id: String, display: String) {
         self.agents_menu.close();
-        self.agent_mode = Some(id);
-        self.agent_mode_changed = true;
-        self.accent_color = accent_for_mode(self.agent_mode.as_deref());
-        self.plan_mode = false;
-        self.status_message = Some(format!("Switched to {} familiar.", display));
+        self.config.familiar = Some(id.clone());
+        self.persist_familiar_setting(Some(id.clone()));
+        self.apply_familiar_agent_mode(Some(id), Some(&display));
+    }
+
+    /// Persist the familiar choice to settings.json (best-effort — a failed
+    /// write surfaces as a warning and the in-memory switch still applies).
+    fn persist_familiar_setting(&mut self, target: Option<String>) {
+        let result = Settings::load_sync().and_then(|mut settings| {
+            settings.config.familiar = target;
+            settings.save_sync()
+        });
+        if let Err(err) = result {
+            self.push_notification(
+                NotificationKind::Warning,
+                format!("Could not save familiar setting: {err}"),
+                Some(4),
+            );
+        }
+    }
+
+    /// Sync the session agent mode to a familiar choice. Sets
+    /// `agent_mode_changed` so the main loop swaps `query_config.agent_definition`
+    /// and re-filters the tool list according to the familiar's access tier.
+    /// `None` steps back down to the default (full-access, no persona) mode.
+    pub fn apply_familiar_agent_mode(&mut self, id: Option<String>, display: Option<&str>) {
+        match id {
+            Some(id) => {
+                let label = display.unwrap_or(id.as_str()).to_string();
+                self.agent_mode = Some(id);
+                self.agent_mode_changed = true;
+                self.accent_color = accent_for_mode(self.agent_mode.as_deref());
+                self.plan_mode = false;
+                self.status_message = Some(format!("Switched to {} familiar.", label));
+            }
+            None => {
+                self.agent_mode = None;
+                self.agent_mode_changed = true;
+                self.accent_color = accent_for_mode(None);
+                self.plan_mode = false;
+            }
+        }
     }
 
     fn handle_diff_viewer_key(&mut self, key: KeyEvent) {

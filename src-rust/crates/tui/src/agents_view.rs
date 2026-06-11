@@ -116,6 +116,9 @@ pub struct AgentDefinition {
     pub shadowed_by: Option<String>,
     /// Markdown body / instructions.
     pub instructions: String,
+    /// Resolved tool-access tier ("full" | "read-only" | "search-only").
+    /// Set for familiar-sourced definitions; `None` when unspecified.
+    pub access: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,33 +593,21 @@ fn parse_agent_def(path: &std::path::Path) -> Option<AgentDefinition> {
         tools,
         shadowed_by: None,
         instructions,
+        access: None,
     })
 }
 
 /// Build an `AgentDefinition` from a Coven daemon familiar record.
 ///
-/// The resulting definition carries:
-/// - `source: "coven:familiar"` — identifies it as daemon-sourced
+/// Derives prompt, description, and access tier from
+/// [`coven_shared::familiar_to_agent_definition`] — the same conversion the
+/// runtime agent map uses — so what this menu shows is exactly what the
+/// session runs. The resulting definition carries:
+/// - `source: "coven:familiar:<id>"` — identifies it as daemon-sourced
 /// - `file_path` pointing to `~/.coven/familiars.toml` (informational)
-/// - a synthesised system-prompt body describing the familiar's role
 pub fn familiar_as_agent_def(fam: &coven_shared::CovenFamiliar) -> AgentDefinition {
+    let (id, core_def) = coven_shared::familiar_to_agent_definition(fam);
     let display = fam.display_name.as_deref().unwrap_or(&fam.id).to_string();
-    let emoji = fam.emoji.as_deref().unwrap_or("✨");
-    let role = fam.role.as_deref().unwrap_or("Familiar");
-    let desc = fam
-        .description
-        .as_deref()
-        .unwrap_or("A Coven familiar available as an agent context.")
-        .to_string();
-    let pronouns = fam
-        .pronouns
-        .as_deref()
-        .map(|p| format!(" Pronouns: {p}."))
-        .unwrap_or_default();
-
-    let instructions = format!(
-        "You are {emoji} {display}, a Coven familiar with the role of {role}.{pronouns}\n\n{desc}\n\nOperate with the full context of the current workspace. Respond in character but remain focused on the developer's goals."
-    );
 
     let familiar_toml = dirs::home_dir()
         .map(|h| h.join(".coven").join("familiars.toml"))
@@ -625,13 +616,14 @@ pub fn familiar_as_agent_def(fam: &coven_shared::CovenFamiliar) -> AgentDefiniti
     AgentDefinition {
         file_path: familiar_toml,
         name: display,
-        source: format!("coven:familiar:{}", fam.id),
-        model: None, // use session default; user can override
+        source: format!("coven:familiar:{}", id),
+        model: core_def.model, // use session default; user can override
         memory_scope: Some("workspace".to_string()),
-        description: format!("{emoji} {role} — {desc}"),
+        description: core_def.description.unwrap_or_default(),
         tools: Vec::new(),
         shadowed_by: None,
-        instructions,
+        instructions: core_def.prompt.unwrap_or_default(),
+        access: Some(core_def.access),
     }
 }
 
@@ -793,6 +785,7 @@ mod tests {
             tools: Vec::new(),
             shadowed_by: None,
             instructions: format!("You are {}.", display),
+            access: Some("read-only".to_string()),
         }
     }
 
@@ -807,7 +800,43 @@ mod tests {
             tools: Vec::new(),
             shadowed_by: None,
             instructions: "You are a workspace agent.".to_string(),
+            access: None,
         }
+    }
+
+    #[test]
+    fn familiar_as_agent_def_matches_core_conversion() {
+        let fam = coven_shared::CovenFamiliar {
+            id: "Cody".to_string(),
+            display_name: Some("Cody".to_string()),
+            emoji: Some("⚡".to_string()),
+            role: Some("Code".to_string()),
+            description: Some("Builds and ships.".to_string()),
+            pronouns: None,
+            access: Some("full".to_string()),
+        };
+        let def = familiar_as_agent_def(&fam);
+        let (id, core_def) = coven_shared::familiar_to_agent_definition(&fam);
+
+        assert_eq!(def.source, format!("coven:familiar:{}", id));
+        assert_eq!(def.instructions, core_def.prompt.unwrap_or_default());
+        assert_eq!(def.description, core_def.description.unwrap_or_default());
+        assert_eq!(def.access.as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn familiar_as_agent_def_defaults_access_to_read_only() {
+        let fam = coven_shared::CovenFamiliar {
+            id: "sage".to_string(),
+            display_name: None,
+            emoji: None,
+            role: None,
+            description: None,
+            pronouns: None,
+            access: None,
+        };
+        let def = familiar_as_agent_def(&fam);
+        assert_eq!(def.access.as_deref(), Some("read-only"));
     }
 
     #[test]
@@ -1146,13 +1175,18 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
         let abs_idx = start + abs_rel_idx;
         let selected = state.selected_row == abs_idx + 2;
         // Extract emoji from description prefix if present.
-        let desc_short = def
+        let mut desc_short = def
             .description
             .split(" — ")
             .next()
             .unwrap_or(&def.description)
             .trim()
             .to_string();
+        // Surface the tool-access tier so restricted familiars are
+        // distinguishable at a glance.
+        if let Some(access) = def.access.as_deref() {
+            desc_short.push_str(&format!("  ·  {}", access));
+        }
         lines.push(agent_list_row(
             def.name.clone(),
             desc_short,
@@ -1253,15 +1287,33 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
             Span::raw(mem.clone()),
         ]));
     }
+    if let Some(access) = def.access.as_deref() {
+        // The access tier is the security boundary the runtime tool filter
+        // enforces — render it prominently so the menu never overstates
+        // what a restricted familiar can do.
+        let access_style = match access {
+            "full" => Style::default().fg(Color::Rgb(34, 197, 94)), // green-500
+            "read-only" => Style::default().fg(Color::Rgb(234, 179, 8)), // yellow-500
+            _ => Style::default().fg(Color::Rgb(59, 130, 246)),     // blue-500
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" Access     ", Style::default().fg(COVEN_CODE_MUTED)),
+            Span::styled(access.to_string(), access_style.add_modifier(Modifier::BOLD)),
+        ]));
+    }
     if !def.tools.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(" Tools      ", Style::default().fg(COVEN_CODE_MUTED)),
             Span::raw(def.tools.join(", ")),
         ]));
     } else {
+        let tools_label = match def.access.as_deref() {
+            Some("full") | None => "All tools".to_string(),
+            Some(access) => format!("Filtered by access tier ({})", access),
+        };
         lines.push(Line::from(vec![
             Span::styled(" Tools      ", Style::default().fg(COVEN_CODE_MUTED)),
-            Span::styled("All tools", Style::default().fg(COVEN_CODE_MUTED)),
+            Span::styled(tools_label, Style::default().fg(COVEN_CODE_MUTED)),
         ]));
     }
     lines.push(Line::default());

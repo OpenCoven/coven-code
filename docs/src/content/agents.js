@@ -77,7 +77,7 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
 
     <pre><code data-lang="bash">coven-code --agent plan --provider openai --model o3 "review this architecture"</code></pre>
 
-    <p>Inside the TUI, use <code>/agents</code> to list everything available (built-in, custom, plus Coven familiars when the daemon is online).</p>
+    <p>Inside the TUI, use <code>/familiar</code> to list everything available (built-in, custom, plus Coven familiars when the daemon is online).</p>
 
     <h2>Custom Agents</h2>
 
@@ -97,7 +97,7 @@ coven-code --agent explore "find all usages of the deprecated config API"</code>
   }
 }</code></pre>
 
-    <p>Workspace agents can also be defined as markdown files in <code>.coven-code/agents/*.md</code> with frontmatter — these are picked up automatically and surfaced in <code>/agents</code>.</p>
+    <p>Workspace agents can also be defined as markdown files in <code>.coven-code/agents/*.md</code> with frontmatter — these are picked up automatically and surfaced in <code>/familiar</code>.</p>
 
     <h2>Coordinator Mode</h2>
 

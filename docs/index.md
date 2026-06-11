@@ -60,7 +60,7 @@ Run named agents (`build`, `plan`, `explore`) or spawn parallel sub-agents in co
 Set a durable objective with `/coven goal` and Coven Code works autonomously across turns until the goal is verified complete — using the `GoalCompleteTool` for audited completion rather than just stopping.
 
 ### Managed agents (preview)
-Configure a manager-executor architecture with `/agent managed` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
+Configure a manager-executor architecture with `/familiar managed` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
 
 ### Speech incantations
 Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85%, saving tokens in long sessions. Lift the incantation with `/incant off`.
@@ -184,7 +184,7 @@ Inside the interactive TUI, type `/` to see all available commands. Common ones:
 | `/login switch [<id>]` | Switch active account; with no id, lists stored accounts (`--codex` for Codex) |
 | `/logout` | Clear credentials for the active account (`--all` to purge) |
 | `/coven goal <objective>` | Set an autonomous multi-turn goal |
-| `/agent managed` | Configure manager-executor agents |
+| `/familiar managed` | Configure manager-executor agents |
 | `/compact` | Compress conversation history |
 | `/cost` | Token usage and cost for this session |
 | `/incant <voice>` | Cast a speech incantation (`caveman`, `rocky`); `/incant off` lifts it |
@@ -207,7 +207,7 @@ See [Slash Commands](commands) for the complete reference.
 
 Coven Code connects natively to the [Coven daemon](https://opencoven.ai/docs) when it is running on your machine. With the daemon active:
 
-- **Familiars appear as agents** — every familiar you have configured in `~/.coven/familiars.toml` is automatically surfaced in the `/agent` overlay and the `coven-code agents` command.
+- **Familiars appear as agents** — every familiar you have configured in `~/.coven/familiars.toml` is automatically surfaced in the `/familiar` overlay and the `coven-code agents` command.
 - **Skills are visible** — daemon-registered skills are listed as awareness context so the model knows what capabilities are available.
 - **Familiar glyphs animate** in the welcome panel using the glyph that matches your configured `"familiar"` setting.
 
