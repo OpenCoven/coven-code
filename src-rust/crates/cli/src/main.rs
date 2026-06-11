@@ -3392,7 +3392,6 @@ async fn run_interactive(
                     if !app.is_streaming
                         && app.permission_request.is_none()
                         && !app.history_search_overlay.visible
-                        && app.history_search.is_none()
                     => {
                         if app.key_input_dialog.visible {
                             // Paste into API key input dialog

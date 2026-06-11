@@ -339,7 +339,7 @@ pub fn update_terminal_title(topic: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app::{App, HistorySearch, ToolStatus, ToolUseBlock};
+    use app::{App, ToolStatus, ToolUseBlock};
     use claurst_core::config::Config;
     use claurst_core::cost::CostTracker;
     use claurst_core::file_history::FileHistory;
@@ -1193,11 +1193,11 @@ mod tests {
     #[test]
     fn test_f1_toggles_help() {
         let mut app = make_app();
-        assert!(!app.show_help);
+        assert!(!app.help_overlay.visible);
         app.handle_key_event(key(KeyCode::F(1)));
-        assert!(app.show_help);
+        assert!(app.help_overlay.visible);
         app.handle_key_event(key(KeyCode::F(1)));
-        assert!(!app.show_help);
+        assert!(!app.help_overlay.visible);
     }
 
     #[test]
@@ -1550,32 +1550,6 @@ mod tests {
 
         assert!(!rendered.contains("◆"));
         assert!(rendered.contains("▣"));
-    }
-
-    // ---- HistorySearch --------------------------------------------------
-
-    #[test]
-    fn test_history_search_matches() {
-        let history = vec![
-            "git commit".to_string(),
-            "git push".to_string(),
-            "cargo build".to_string(),
-        ];
-        let mut hs = HistorySearch::new();
-        hs.query = "git".to_string();
-        hs.update_matches(&history);
-        assert_eq!(hs.matches.len(), 2);
-        assert_eq!(hs.matches[0], 0);
-        assert_eq!(hs.matches[1], 1);
-    }
-
-    #[test]
-    fn test_history_search_no_matches() {
-        let history = vec!["hello".to_string()];
-        let mut hs = HistorySearch::new();
-        hs.query = "xyz".to_string();
-        hs.update_matches(&history);
-        assert!(hs.matches.is_empty());
     }
 
     // ---- PermissionRequest --------------------------------------------

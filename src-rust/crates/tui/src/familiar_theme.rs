@@ -18,7 +18,7 @@
 //!
 //! ```ignore
 //! let theme = familiar_theme::resolve(id, daemon_familiars);
-//! let card  = familiar_card::render_card(&theme, size, loading);
+//! let card  = familiar_card::render_card(&theme, size, pose);
 //! ```
 
 use claurst_core::coven_shared::CovenFamiliar;
@@ -27,9 +27,10 @@ use ratatui::style::Color;
 // ── Palette ──────────────────────────────────────────────────────────────────
 
 /// Four-color palette covering body fill, accent details, eye sockets, and
-/// the deep background behind the eyes. Eye + bg are intentionally shared
-/// across all themes so the eye rendering helpers in [`crate::mascot`] can
-/// stay archetype-agnostic.
+/// the deep background behind the eyes. The eye socket follows each
+/// familiar's hue (a light tint for legibility against the shared dark
+/// `eye_bg`), so the eye rendering helpers in [`crate::mascot`] can stay
+/// archetype-agnostic while the eyes still read as "this familiar".
 #[derive(Debug, Clone, Copy)]
 pub struct FamiliarPalette {
     pub primary: Color,
@@ -39,11 +40,11 @@ pub struct FamiliarPalette {
 }
 
 impl FamiliarPalette {
-    const fn from_rgb(primary: (u8, u8, u8), accent: (u8, u8, u8)) -> Self {
+    const fn from_rgb(primary: (u8, u8, u8), accent: (u8, u8, u8), eye: (u8, u8, u8)) -> Self {
         Self {
             primary: Color::Rgb(primary.0, primary.1, primary.2),
             accent: Color::Rgb(accent.0, accent.1, accent.2),
-            eye_socket: Color::Rgb(196, 181, 253), // violet-300, retained for legibility
+            eye_socket: Color::Rgb(eye.0, eye.1, eye.2),
             eye_bg: Color::Rgb(15, 5, 40),
         }
     }
@@ -108,49 +109,49 @@ impl FamiliarTheme {
 const BUILTIN_PALETTES: &[(&str, FamiliarPalette, Archetype, &str, &str)] = &[
     (
         "kitty",
-        FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250)),
+        FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250), (196, 181, 253)),
         Archetype::Cat,
         "Kitty",
         "\u{1f431}",
     ),
     (
         "nova",
-        FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138)),
+        FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138), (254, 240, 138)),
         Archetype::SorceressCrown,
         "Nova",
         "\u{1f451}",
     ),
     (
         "cody",
-        FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252)),
+        FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252), (165, 243, 252)),
         Archetype::Robot,
         "Cody",
         "\u{1f4bb}",
     ),
     (
         "charm",
-        FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232)),
+        FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232), (251, 207, 232)),
         Archetype::Heart,
         "Charm",
         "\u{2728}",
     ),
     (
         "sage",
-        FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208)),
+        FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208), (167, 243, 208)),
         Archetype::WizardBook,
         "Sage",
         "\u{1f33f}",
     ),
     (
         "astra",
-        FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254)),
+        FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254), (199, 210, 254)),
         Archetype::Moon,
         "Astra",
         "\u{1f319}",
     ),
     (
         "echo",
-        FamiliarPalette::from_rgb((20, 184, 166), (153, 246, 228)),
+        FamiliarPalette::from_rgb((20, 184, 166), (153, 246, 228), (153, 246, 228)),
         Archetype::Ghost,
         "Echo",
         "\u{1f47b}",
@@ -160,14 +161,14 @@ const BUILTIN_PALETTES: &[(&str, FamiliarPalette, Archetype, &str, &str)] = &[
 /// Eight-color palette table used to pick a deterministic accent for any
 /// user-defined familiar by hashing its id.
 const PROCEDURAL_PALETTES: &[FamiliarPalette] = &[
-    FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250)), // violet
-    FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138)), // gold
-    FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252)), // cyan
-    FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232)), // pink
-    FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208)), // emerald
-    FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254)), // indigo
-    FamiliarPalette::from_rgb((251, 113, 133), (254, 205, 211)), // rose
-    FamiliarPalette::from_rgb((250, 204, 21), (253, 224, 71)),  // amber
+    FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250), (196, 181, 253)), // violet
+    FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138), (254, 240, 138)), // gold
+    FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252), (165, 243, 252)), // cyan
+    FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232), (251, 207, 232)), // pink
+    FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208), (167, 243, 208)), // emerald
+    FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254), (199, 210, 254)), // indigo
+    FamiliarPalette::from_rgb((251, 113, 133), (254, 205, 211), (254, 205, 211)), // rose
+    FamiliarPalette::from_rgb((250, 204, 21), (253, 224, 71), (254, 240, 138)),  // amber
 ];
 
 const PROCEDURAL_ARCHETYPES: &[Archetype] = &[
@@ -290,6 +291,17 @@ mod tests {
         assert_eq!(
             format!("{:?}", a.palette.primary),
             format!("{:?}", b.palette.primary)
+        );
+    }
+
+    #[test]
+    fn eye_socket_palette_varies_by_familiar() {
+        let kitty = resolve("kitty", &[]);
+        let cody = resolve("cody", &[]);
+
+        assert_ne!(
+            kitty.palette.eye_socket, cody.palette.eye_socket,
+            "eye sockets should use each familiar palette instead of one hardcoded violet"
         );
     }
 

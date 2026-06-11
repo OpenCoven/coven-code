@@ -1206,7 +1206,11 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         if let Some(id) = def.source.strip_prefix("coven:familiar:") {
             let daemon = coven_shared::load_familiars().unwrap_or_default();
             let theme = familiar_theme::resolve(id, &daemon);
-            for line in familiar_card::render_card(&theme, CardSize::Standard, None) {
+            for line in familiar_card::render_card(
+                &theme,
+                CardSize::Standard,
+                &crate::mascot::CompanionPose::Static,
+            ) {
                 lines.push(line);
             }
             lines.push(Line::default());

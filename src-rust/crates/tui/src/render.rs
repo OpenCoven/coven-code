@@ -24,7 +24,6 @@ use crate::hooks_config_menu::render_hooks_config_menu;
 use crate::import_config_dialog::render_import_config_dialog;
 use crate::invalid_config_dialog::render_invalid_config_dialog;
 use crate::key_input_dialog::render_key_input_dialog;
-use crate::mascot::CompanionPose;
 use crate::mcp_view::render_mcp_view;
 use crate::memory_file_selector::render_memory_file_selector;
 use crate::memory_update_notification::render_memory_update_notification;
@@ -83,6 +82,9 @@ const SPINNER_FRAME_DIVISOR: u64 = 2;
 // 1 (bottom border) ≈ 11 rows. The right column packs Tips above Status;
 // the box fits all of it cleanly.
 const WELCOME_BOX_HEIGHT: u16 = 11;
+// Cap the welcome box width on large terminals so it doesn't stretch
+// edge-to-edge; everything inside fits comfortably within 120 columns.
+const WELCOME_BOX_MAX_WIDTH: u16 = 120;
 const STATUS_THINKING: &str = "thinking";
 const STATUS_THINKING_ELLIPSIS: &str = "thinking\u{2026}";
 const STREAM_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(3);
@@ -534,12 +536,9 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_tasks_overlay(frame, &app.tasks_overlay, size);
     }
 
-    // New help overlay
+    // Help overlay
     if app.help_overlay.visible {
         render_help_overlay(frame, &app.help_overlay, size);
-    } else if app.show_help {
-        // Legacy fallback â€” render the simple help overlay
-        render_simple_help_overlay(frame, size);
     }
 
     // History search overlay
@@ -550,9 +549,6 @@ pub fn render_app(frame: &mut Frame, app: &App) {
             &app.prompt_input.history,
             size,
         );
-    } else if let Some(ref hs) = app.history_search {
-        // Legacy history search rendering
-        render_legacy_history_search(frame, hs, app, size);
     }
 
     // Settings screen (highest-priority full-screen overlay)
@@ -1634,8 +1630,9 @@ fn visible_familiar(app: &App) -> Option<claurst_core::coven_shared::CovenFamili
 
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // --- Box dimensions ---
-    // The box should be at most the full area width, and a fixed height.
-    let box_width = area.width;
+    // Fixed height; width capped so the box doesn't stretch edge-to-edge on
+    // very wide terminals.
+    let box_width = area.width.min(WELCOME_BOX_MAX_WIDTH);
     let box_height: u16 = WELCOME_BOX_HEIGHT;
     if area.height < box_height || box_width < 30 {
         // Too small: collapse to a single-line status that still surfaces
@@ -1734,10 +1731,6 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     };
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
     let card_size = familiar_card::pick_size(left_w);
-    let loading_frame = match app.companion_current_pose {
-        CompanionPose::Loading { frame } => Some(frame),
-        CompanionPose::Static => None,
-    };
 
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
@@ -1753,7 +1746,11 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
             left_lines.push(Line::from(Span::raw(seq)));
         } else {
-            left_lines.extend(familiar_card::render_card(&theme, card_size, loading_frame));
+            left_lines.extend(familiar_card::render_card(
+                &theme,
+                card_size,
+                &app.companion_current_pose,
+            ));
         }
     }
     frame.render_widget(
@@ -2910,11 +2907,11 @@ fn render_prompt_suggestions(frame: &mut Frame, app: &App, area: Rect) {
                     truncate_middle(&suggestion.text, label_width),
                     label_style,
                 ));
+                spans.push(Span::styled(
+                    " [context] ",
+                    Style::default().fg(Color::DarkGray),
+                ));
                 if !suggestion.description.is_empty() {
-                    spans.push(Span::styled(
-                        " \u{2014} ",
-                        Style::default().fg(Color::DarkGray),
-                    ));
                     spans.push(Span::styled(
                         truncate_text(&suggestion.description, area.width as usize / 2),
                         detail_style,
@@ -2950,166 +2947,6 @@ fn render_prompt_suggestions(frame: &mut Frame, app: &App, area: Rect) {
             },
         );
     }
-}
-
-// -----------------------------------------------------------------------
-// Legacy simple help overlay (fallback when help_overlay is not open)
-// -----------------------------------------------------------------------
-
-fn render_simple_help_overlay(frame: &mut Frame, area: Rect) {
-    let help_width = 50u16.min(area.width.saturating_sub(4));
-    let help_height = 20u16.min(area.height.saturating_sub(4));
-    let help_area = crate::overlays::centered_rect(help_width, help_height, area);
-
-    frame.render_widget(Clear, help_area);
-
-    let lines = vec![
-        Line::from(vec![Span::styled(
-            " Key Bindings",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )]),
-        Line::from(""),
-        kb_line("Enter", "Submit message"),
-        kb_line("Ctrl+C", "Cancel streaming / Quit"),
-        kb_line("Ctrl+D", "Quit (empty input)"),
-        kb_line("Up / Down", "Navigate input history"),
-        kb_line("Ctrl+R", "Search input history"),
-        kb_line("PageUp / PageDown", "Scroll messages"),
-        kb_line("F1 / ?", "Toggle this help"),
-        kb_line("Alt+H", "Toggle this help"),
-        kb_line("F2", "Switch familiar"),
-        kb_line("Ctrl+B", "Create / switch branch"),
-        kb_line("Tab", "Cycle mode (build/plan/explore)"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            " Permission Dialog",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )]),
-        Line::from(""),
-        kb_line("1 / 2 / 3", "Select option"),
-        kb_line("y / a / n", "Allow / Always / Deny"),
-        kb_line("Enter", "Confirm selection"),
-        kb_line("Esc", "Deny (close dialog)"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            " press F1 or ? to close ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Help ")
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let para = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Left);
-    frame.render_widget(para, help_area);
-}
-
-fn kb_line<'a>(key: &str, desc: &str) -> Line<'a> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("{:<20}", key),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(desc.to_string()),
-    ])
-}
-
-// -----------------------------------------------------------------------
-// Legacy history search overlay (used when history_search_overlay is not open)
-// -----------------------------------------------------------------------
-
-fn render_legacy_history_search(
-    frame: &mut Frame,
-    hs: &crate::app::HistorySearch,
-    app: &App,
-    area: Rect,
-) {
-    let dialog_width = 60u16.min(area.width.saturating_sub(4));
-    let visible_matches = 8usize;
-    let dialog_height = (4 + visible_matches.min(hs.matches.len().max(1)) as u16)
-        .min(area.height.saturating_sub(4));
-    let dialog_area = crate::overlays::centered_rect(dialog_width, dialog_height, area);
-
-    frame.render_widget(Clear, dialog_area);
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::raw("  Search: "),
-        Span::styled(
-            hs.query.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{2588}", Style::default().fg(Color::White)),
-    ]));
-    lines.push(Line::from(""));
-
-    if hs.matches.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "  (no matches)",
-            Style::default().fg(Color::DarkGray),
-        )]));
-    } else {
-        let start = hs.selected.saturating_sub(visible_matches / 2);
-        let end = (start + visible_matches).min(hs.matches.len());
-        let start = end.saturating_sub(visible_matches).min(start);
-
-        for (display_idx, &hist_idx) in hs.matches[start..end].iter().enumerate() {
-            let real_idx = start + display_idx;
-            let is_selected = real_idx == hs.selected;
-            let entry = app
-                .prompt_input
-                .history
-                .get(hist_idx)
-                .map(String::as_str)
-                .unwrap_or("");
-
-            let truncated = if UnicodeWidthStr::width(entry) > (dialog_width as usize - 6) {
-                let mut s = entry.to_string();
-                s.truncate(dialog_width as usize - 9);
-                format!("{}\u{2026}", s)
-            } else {
-                entry.to_string()
-            };
-
-            let (prefix, style) = if is_selected {
-                (
-                    "  \u{25BA} ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                ("    ", Style::default().fg(Color::White))
-            };
-            lines.push(Line::from(vec![
-                Span::raw(prefix),
-                Span::styled(truncated, style),
-            ]));
-        }
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" History Search (Esc to cancel) ")
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let para = Paragraph::new(lines).block(block);
-    frame.render_widget(para, dialog_area);
 }
 
 // -----------------------------------------------------------------------
@@ -3678,5 +3515,68 @@ mod welcome_tests {
             label == "Daemon: online" || label == "Daemon: offline",
             "unexpected daemon label: {label}"
         );
+    }
+
+    #[test]
+    fn welcome_box_width_is_capped_on_large_terminals() {
+        let mut terminal = Terminal::new(TestBackend::new(180, 14)).expect("terminal");
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+
+        terminal
+            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .expect("draw welcome");
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..WELCOME_BOX_HEIGHT {
+            for x in WELCOME_BOX_MAX_WIDTH..180 {
+                assert_eq!(
+                    buffer[(x, y)].symbol(),
+                    " ",
+                    "welcome box should not paint past {WELCOME_BOX_MAX_WIDTH} columns at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typeahead_suggestions_show_source_badges() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 3)).expect("terminal");
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        app.prompt_input.suggestions = vec![
+            crate::prompt_input::TypeaheadSuggestion {
+                text: "/help".to_string(),
+                description: "Show help".to_string(),
+                source: TypeaheadSource::SlashCommand,
+            },
+            crate::prompt_input::TypeaheadSuggestion {
+                text: "@src/main.rs".to_string(),
+                description: "file".to_string(),
+                source: TypeaheadSource::FileRef,
+            },
+            crate::prompt_input::TypeaheadSuggestion {
+                text: "previous prompt".to_string(),
+                description: "recent".to_string(),
+                source: TypeaheadSource::History,
+            },
+        ];
+
+        terminal
+            .draw(|frame| render_prompt_suggestions(frame, &app, frame.area()))
+            .expect("draw suggestions");
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        for expected in ["[cmd]", "[context]", "[history]"] {
+            assert!(
+                content.contains(expected),
+                "suggestion list should include {expected} badge, got {content:?}"
+            );
+        }
     }
 }
