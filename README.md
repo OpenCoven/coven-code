@@ -2,7 +2,7 @@
 
 **Coven Code** is an open-source, multi-provider agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
-> **Attribution:** Coven Code is derived from Claurst v0.0.25 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
+> **Attribution:** Coven Code is derived from Claurst v0.0.26 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
 
 ---
 
@@ -16,7 +16,7 @@ Multi-provider terminal coding agent with a rich ratatui TUI: chat forking, memo
 
 ## Status
 
-> **Beta (v0.0.25).** Core agent, multi-provider routing, and TUI are stable for daily use. Experimental features are flagged below.
+> **Beta (v0.0.26).** Core agent, multi-provider routing, and TUI are stable for daily use. Experimental features are flagged below.
 
 Recent highlights:
 - **/share** — share sessions via unlisted GitHub Gists `[EXPERIMENTAL]`
