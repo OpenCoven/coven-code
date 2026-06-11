@@ -7,12 +7,12 @@
 //! the user still has a signal that work is in progress.
 //!
 //! Built-in archetypes dispatch to the pixel-art builders in
-//! [`crate::rustle`]. Procedural archetypes ([`Archetype::SigilCrystal`] etc.)
+//! [`crate::mascot`]. Procedural archetypes ([`Archetype::SigilCrystal`] etc.)
 //! draw a colored frame around the familiar's emoji so any user-defined entry
 //! from `~/.coven/familiars.toml` gets first-class visual identity.
 
 use crate::familiar_theme::{Archetype, FamiliarPalette, FamiliarTheme};
-use crate::rustle::{archetype_lines, RustlePose};
+use crate::mascot::{archetype_lines, CompanionPose};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -51,8 +51,8 @@ pub fn render_card(
     loading: Option<u64>,
 ) -> Vec<Line<'static>> {
     let pose = match loading {
-        Some(frame) => RustlePose::Loading { frame },
-        None => RustlePose::Static,
+        Some(frame) => CompanionPose::Loading { frame },
+        None => CompanionPose::Static,
     };
     let glyph = glyph_lines(theme, &pose);
 
@@ -240,7 +240,7 @@ fn access_line(theme: &FamiliarTheme, primary: Color, inner_w: u16) -> Line<'sta
 
 // ── Glyph dispatch ───────────────────────────────────────────────────────────
 
-fn glyph_lines(theme: &FamiliarTheme, pose: &RustlePose) -> Vec<Line<'static>> {
+fn glyph_lines(theme: &FamiliarTheme, pose: &CompanionPose) -> Vec<Line<'static>> {
     match theme.archetype {
         Archetype::SigilCrystal => sigil_crystal(&theme.palette, &theme.emoji),
         Archetype::SigilHex => sigil_hex(&theme.palette, &theme.emoji),

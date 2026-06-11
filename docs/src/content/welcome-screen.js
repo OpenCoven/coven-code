@@ -19,7 +19,7 @@ export function render() {
           <div class="tui-grid">
             <div>
               <div class="tui-greeting">Welcome back, val!</div>
-              <pre class="tui-rustle">      ∧___∧
+              <pre class="tui-mascot">      ∧___∧
      ( ・ω・ )
       o_(")(")</pre>
             </div>

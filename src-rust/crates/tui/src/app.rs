@@ -1281,7 +1281,7 @@ pub struct App {
     /// Current familiar pose for rendering. `Static` when idle; `Loading {
     /// frame }` while streaming has stalled long enough to surface a spinner.
     /// The glyph itself never walks or blinks.
-    pub rustle_current_pose: crate::rustle::RustlePose,
+    pub companion_current_pose: crate::mascot::CompanionPose,
     /// Instant the current turn's streaming began (reset each time streaming starts).
     pub turn_start: Option<std::time::Instant>,
     /// Elapsed time string for the last completed turn, e.g. "2m 5s".
@@ -1791,7 +1791,7 @@ impl App {
             new_messages_while_scrolled: 0,
             token_warning_threshold_shown: 0,
             session_start: std::time::Instant::now(),
-            rustle_current_pose: crate::rustle::RustlePose::Static,
+            companion_current_pose: crate::mascot::CompanionPose::Static,
             turn_start: None,
             last_turn_elapsed: None,
             last_turn_verb: None,
@@ -2359,24 +2359,24 @@ impl App {
     /// The glyph itself is static — this just toggles between `Static` and
     /// `Loading { frame }` so the eye-spinner kicks in when the assistant has
     /// gone quiet for 3+ seconds. Call once per frame before rendering.
-    pub fn tick_rustle_pose(&mut self) {
+    pub fn tick_companion_pose(&mut self) {
         let stalled = self.is_streaming
             && self
                 .stall_start
                 .map(|s| s.elapsed() > std::time::Duration::from_secs(3))
                 .unwrap_or(false);
-        self.rustle_current_pose = if stalled {
-            crate::rustle::RustlePose::Loading {
+        self.companion_current_pose = if stalled {
+            crate::mascot::CompanionPose::Loading {
                 frame: self.frame_count,
             }
         } else {
-            crate::rustle::RustlePose::Static
+            crate::mascot::CompanionPose::Static
         };
     }
 
     /// No-op retained for callsites left over from the animated era (Tab /
     /// mode-switch handlers). The static glyph has no look-down pose.
-    pub fn rustle_look_down(&mut self) {}
+    pub fn companion_look_down(&mut self) {}
 
     /// Cycle to the next agent mode: build → plan → explore → build.
     /// Sets `agent_mode_changed` so the main loop can update the query config
@@ -5011,7 +5011,7 @@ impl App {
                 } else if !self.is_streaming && self.prompt_input.is_empty() {
                     // Cycle agent mode: build → plan → explore → build
                     self.cycle_agent_mode();
-                    self.rustle_look_down();
+                    self.companion_look_down();
                 }
             }
 
@@ -5885,7 +5885,7 @@ impl App {
                         self.refresh_prompt_input();
                     } else if self.prompt_input.is_empty() {
                         self.cycle_agent_mode();
-                        self.rustle_look_down();
+                        self.companion_look_down();
                     }
                 }
                 false

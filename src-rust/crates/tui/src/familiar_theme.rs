@@ -28,7 +28,7 @@ use ratatui::style::Color;
 
 /// Four-color palette covering body fill, accent details, eye sockets, and
 /// the deep background behind the eyes. Eye + bg are intentionally shared
-/// across all themes so the eye rendering helpers in [`crate::rustle`] can
+/// across all themes so the eye rendering helpers in [`crate::mascot`] can
 /// stay archetype-agnostic.
 #[derive(Debug, Clone, Copy)]
 pub struct FamiliarPalette {
@@ -51,7 +51,7 @@ impl FamiliarPalette {
 
 // ── Archetype ────────────────────────────────────────────────────────────────
 
-/// Which renderer in [`crate::rustle`] / [`crate::familiar_card`] draws the
+/// Which renderer in [`crate::mascot`] / [`crate::familiar_card`] draws the
 /// glyph body. The first seven variants map to the hand-crafted built-ins;
 /// `SigilCrystal`/`SigilHex`/`SigilRune`/`SigilSeal` are procedural frames
 /// used for any user-defined familiar.

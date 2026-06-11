@@ -2457,7 +2457,7 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     'main: loop {
         app.frame_count = app.frame_count.wrapping_add(1);
-        app.tick_rustle_pose();
+        app.tick_companion_pose();
         app.notifications.tick();
 
         // Process file injection dialog outcome (if any)
