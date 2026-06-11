@@ -9456,7 +9456,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             target_name: "pr-comments",
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",
-            slash_help: "Usage: /pr-comments <PR-number>",
+            slash_help: "Usage: /review comments [PR-number]",
         }),
         // Batch-1 new commands
         Box::new(CopyCommand),
