@@ -2771,15 +2771,23 @@ impl SlashCommand for LoginCommand {
         "Authenticate with Anthropic or Codex (multi-account)"
     }
     fn help(&self) -> &str {
-        "Usage: /login [--console] [--codex] [--label <name>]\n\n\
+        "Usage: /login [--console] [--codex] [--label <name>] | /login switch [--codex] [profile-id]\n\n\
          Start an OAuth login. Anthropic OAuth requires a configured Coven Code\n\
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
          add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
-         you can `switch` to it later by that name."
+         you can switch to it later by that name.\n\n\
+         /login switch makes a stored account active (formerly /switch);\n\
+         with no profile id it lists stored accounts."
     }
 
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /login switch absorbs the former standalone /switch command.
+        if let Some(rest) = args.trim().strip_prefix("switch") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return SwitchCommand.execute(rest.trim(), ctx).await;
+            }
+        }
         let tokens: Vec<&str> = args.split_whitespace().collect();
         let use_codex = tokens.contains(&"--codex");
         let login_with_claude_ai = !tokens.contains(&"--console");
@@ -2954,14 +2962,17 @@ impl SlashCommand for SwitchCommand {
     fn name(&self) -> &str {
         "switch"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /login switch; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Switch the active account for a provider"
     }
     fn help(&self) -> &str {
-        "Usage: /switch [--codex] <profile-id>\n\n\
+        "Usage: /login switch [--codex] <profile-id>\n\n\
          Make a stored account active. Defaults to Anthropic; pass `--codex`\n\
-         to switch the Codex account instead. Run /switch with no arguments\n\
-         to list stored accounts and see available profile ids."
+         to switch the Codex account instead. Run /login switch with no\n\
+         arguments to list stored accounts and see available profile ids."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2981,7 +2992,7 @@ impl SlashCommand for SwitchCommand {
 
         let Some(id) = id else {
             return CommandResult::Error(format!(
-                "Usage: /switch {}<profile-id> (try /accounts to see options)",
+                "Usage: /login switch {}<profile-id> (run /login switch to see options)",
                 if use_codex { "--codex " } else { "" }
             ));
         };
@@ -3003,18 +3014,21 @@ impl SlashCommand for RefreshCommand {
     fn name(&self) -> &str {
         "refresh"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /providers refresh; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Clear saved provider auth and model caches"
     }
     fn help(&self) -> &str {
-        "Usage: /refresh\n\n\
+        "Usage: /providers refresh\n\n\
          Clears saved provider credentials, provider/model selection, and model caches, then rebuilds the live runtime state.\n\
          After refreshing, run /connect to authenticate and choose a provider again."
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
         if !args.trim().is_empty() {
-            return CommandResult::Error("Usage: /refresh".to_string());
+            return CommandResult::Error("Usage: /providers refresh".to_string());
         }
         CommandResult::RefreshProviderState
     }
@@ -4810,25 +4824,39 @@ impl SlashCommand for ExportCommand {
         "export"
     }
     fn description(&self) -> &str {
-        "Export conversation to markdown or JSON"
+        "Export conversation (file, clipboard, or shareable link)"
     }
     fn help(&self) -> &str {
-        "Usage: /export [--format markdown|json] [--output <file>]\n\n\
+        "Usage: /export [--format markdown|json] [--output <file>] | /export copy [n] | /export share\n\n\
          Export the current conversation.\n\n\
          Flags:\n\
            --format markdown   Render as readable Markdown (default for .md files)\n\
            --format json       Full structured JSON export (default)\n\
            --output <path>     Write to file; if omitted, prints to the terminal\n\n\
+         Variants (absorbing the former standalone commands):\n\
+           /export copy [n]    Copy the Nth most-recent assistant response to the clipboard\n\
+           /export share       Upload the session as a secret gist and print a shareable URL\n\n\
          Examples:\n\
            /export\n\
            /export --format markdown\n\
-           /export --format json --output chat.json\n\
-           /export --output conversation.md"
+           /export copy\n\
+           /export share"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         // ── Parse flags ────────────────────────────────────────────────────
         let args = args.trim();
+        // /export copy and /export share absorb the former standalone
+        // /copy and /share commands.
+        let (head, rest) = match args.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (args, ""),
+        };
+        match head {
+            "copy" => return CopyCommand.execute(rest, ctx).await,
+            "share" => return ShareCommand.execute(rest, ctx).await,
+            _ => {}
+        }
         let mut format: Option<&str> = None; // "markdown" | "json"
         let mut output_path: Option<String> = None;
 
@@ -4955,11 +4983,14 @@ impl SlashCommand for ShareCommand {
     fn name(&self) -> &str {
         "share"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /export share; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Upload the current session as a secret GitHub gist and return a shareable URL"
     }
     fn help(&self) -> &str {
-        "Usage: /share\n\n\
+        "Usage: /export share\n\n\
          Renders the current session as a single self-contained HTML file,\n\
          uploads it as a secret GitHub gist via the `gh` CLI, and prints a\n\
          viewer URL of the form https://opencoven.github.io/coven-code/session/#<gist-id>.\n\n\
@@ -5667,11 +5698,14 @@ impl SlashCommand for CopyCommand {
     fn name(&self) -> &str {
         "copy"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /export copy; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Copy the last assistant response to the clipboard"
     }
     fn help(&self) -> &str {
-        "Usage: /copy [n]\n\n\
+        "Usage: /export copy [n]\n\n\
          Copies the most recent assistant response to the system clipboard.\n\
          Optionally pass a number to copy the Nth most-recent response."
     }
@@ -7786,13 +7820,28 @@ impl SlashCommand for ProvidersCommand {
         "providers"
     }
     fn description(&self) -> &str {
-        "List available AI providers and their status"
+        "List AI providers; /providers refresh clears auth and model caches"
     }
     fn help(&self) -> &str {
-        "Usage: /providers\n\nList all providers registered in the model registry with their\nmodel counts, context windows, and pricing information."
+        "Usage: /providers [refresh]\n\n\
+         List all providers registered in the model registry with their\n\
+         model counts, context windows, and pricing information.\n\n\
+         /providers refresh clears saved provider credentials and model\n\
+         caches, then rebuilds the live runtime state (formerly /refresh)."
     }
 
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /providers refresh absorbs the former standalone /refresh command.
+        match args.trim() {
+            "" => {}
+            "refresh" => return RefreshCommand.execute("", ctx).await,
+            other => {
+                return CommandResult::Error(format!(
+                    "Unknown providers subcommand '{}'. Use: /providers [refresh]",
+                    other
+                ))
+            }
+        }
         let registry = claurst_api::ModelRegistry::new();
         let all = registry.list_all();
 

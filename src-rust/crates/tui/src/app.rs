@@ -66,7 +66,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "Compact the conversation context"),
     ("config", "Open settings"),
     ("connect", "Connect an AI provider"),
-    ("copy", "Copy the last assistant response to clipboard"),
     (
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
@@ -75,7 +74,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
     ("exit", "Quit Coven Code"),
-    ("export", "Export conversation"),
+    (
+        "export",
+        "Export conversation (file, clipboard, or shareable link)",
+    ),
     (
         "familiar",
         "Set your active familiar — changes the TUI mascot live",
@@ -112,9 +114,11 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "pr-comments",
         "Read or post comments on the active GitHub PR",
     ),
-    ("providers", "List available AI providers and their status"),
+    (
+        "providers",
+        "List AI providers; refresh clears auth and model caches",
+    ),
     ("quit", "Exit Coven Code"),
-    ("refresh", "Clear saved provider auth and model caches"),
     (
         "reload-plugins",
         "Reload the active session plugin registry",
@@ -132,14 +136,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Browse and manage sessions (rename, fork, branch, tag, add-dir)",
     ),
     ("settings", "Open settings"),
-    (
-        "share",
-        "Upload the current session as a secret gist and get a shareable URL",
-    ),
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
     ("survey", "Open session feedback survey"),
-    ("switch", "Switch the active account for a provider"),
     ("tasks", "Manage tracked background tasks"),
     ("theme", "Open the theme picker"),
     (
@@ -2461,6 +2460,15 @@ impl App {
             return false;
         }
         if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage" | "session") {
+            return false;
+        }
+        // /export copy reuses the live clipboard intercept; every other
+        // /export variant (share, copy <n>, --format …) renders via the
+        // command layer. Bare /export keeps opening the export dialog.
+        if cmd == "export" && !args.trim().is_empty() {
+            if args.trim() == "copy" {
+                return self.intercept_slash_command("copy");
+            }
             return false;
         }
         if cmd == "mcp" && !args.trim().is_empty() {
