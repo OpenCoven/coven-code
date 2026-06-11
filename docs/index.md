@@ -45,7 +45,7 @@ Anthropic Claude (default), OpenAI, Google Gemini, AWS Bedrock, Azure OpenAI, Ol
 A ratatui-based TUI with real-time streaming, syntax-highlighted code blocks, diff viewer, permission dialogs, slash command autocomplete, session browser, and a full keybinding system.
 
 ### Multi-account credentials
-Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with `/switch` or `coven-code auth switch <id>`. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent. See [Authentication](auth#multi-account-profiles).
+Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with `/login switch` or `coven-code auth switch <id>`. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent. See [Authentication](auth#multi-account-profiles).
 
 ### @file injection
 Type `@path/to/file` anywhere in a prompt to inject the file's contents inline. Typeahead autocomplete suggests paths as you type, with size/binary safety checks before submit. See [@file Injection](keybindings#file-injection-with-typeahead).
@@ -57,10 +57,10 @@ Extend Coven Code with TOML-manifest plugins that add custom slash commands, MCP
 Run named agents (`build`, `plan`, `explore`) or spawn parallel sub-agents in coordinator mode. Agents communicate via a shared task registry and message channels.
 
 ### Goal system
-Set a durable objective with `/goal` and Coven Code works autonomously across turns until the goal is verified complete — using the `GoalCompleteTool` for audited completion rather than just stopping.
+Set a durable objective with `/coven goal` and Coven Code works autonomously across turns until the goal is verified complete — using the `GoalCompleteTool` for audited completion rather than just stopping.
 
 ### Managed agents (preview)
-Configure a manager-executor architecture with `/managed-agents` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
+Configure a manager-executor architecture with `/agent managed` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
 
 ### Speech incantations
 Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85%, saving tokens in long sessions. Lift the incantation with `/incant off`.
@@ -164,7 +164,7 @@ When you launch `coven-code` interactively, the home screen opens with a single 
 | `Provider` | Active provider id (`anthropic` when unset) | `provider` in [settings.json](configuration), see [Providers](providers) |
 | `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/coven` to bring it online |
 | `Familiar` | Current familiar id, with an `(F2 to switch)` hint | `familiar` in settings, `/familiar`, or **F2** |
-| `Goal` | Active autonomous goal (only shown when one is set) | `/goal <objective>` |
+| `Goal` | Active autonomous goal (only shown when one is set) | `/coven goal <objective>` |
 
 Press **F2** at any time to open the familiar switcher popup.
 
@@ -181,20 +181,20 @@ Inside the interactive TUI, type `/` to see all available commands. Common ones:
 | `/help` | Show all commands |
 | `/model` | Switch model or provider |
 | `/login` | OAuth login (Anthropic; `--codex` for ChatGPT, `--label <name>` to name) |
-| `/switch [<id>]` | Switch active account; with no id, lists stored accounts (`--codex` for Codex) |
+| `/login switch [<id>]` | Switch active account; with no id, lists stored accounts (`--codex` for Codex) |
 | `/logout` | Clear credentials for the active account (`--all` to purge) |
-| `/goal <objective>` | Set an autonomous multi-turn goal |
-| `/managed-agents` | Configure manager-executor agents |
+| `/coven goal <objective>` | Set an autonomous multi-turn goal |
+| `/agent managed` | Configure manager-executor agents |
 | `/compact` | Compress conversation history |
 | `/cost` | Token usage and cost for this session |
 | `/incant <voice>` | Cast a speech incantation (`caveman`, `rocky`); `/incant off` lifts it |
 | `/whisper <q>` | Side question to your familiar, not kept in history |
 | `/rewind` | Go back to a previous message |
-| `/copy` | Copy last response to clipboard |
+| `/export copy` | Copy last response to clipboard |
 | `/export` | Save session transcript |
-| `/think-back` | View thinking traces from previous responses |
+| `/thinking back` | View thinking traces from previous responses |
 | `/review ultra` | Exhaustive multi-dimensional code review |
-| `/advisor <model>` | Set a secondary advisor model |
+| `/config advisor <model>` | Set a secondary advisor model |
 | `/sandbox` | Toggle sandboxed shell execution |
 | `/update` | Check for and download updates |
 | `/exit` | Quit |
@@ -207,7 +207,7 @@ See [Slash Commands](commands) for the complete reference.
 
 Coven Code connects natively to the [Coven daemon](https://opencoven.ai/docs) when it is running on your machine. With the daemon active:
 
-- **Familiars appear as agents** — every familiar you have configured in `~/.coven/familiars.toml` is automatically surfaced in the `/agents` overlay and the `coven-code agents` command.
+- **Familiars appear as agents** — every familiar you have configured in `~/.coven/familiars.toml` is automatically surfaced in the `/agent` overlay and the `coven-code agents` command.
 - **Skills are visible** — daemon-registered skills are listed as awareness context so the model knows what capabilities are available.
 - **Familiar glyphs animate** in the welcome panel using the glyph that matches your configured `"familiar"` setting.
 
