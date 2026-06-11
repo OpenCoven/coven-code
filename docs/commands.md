@@ -9,15 +9,15 @@ This document is the reference for the visible slash commands available in Coven
 1. [Command System Overview](#command-system-overview)
 2. [Session & Navigation](#session--navigation)
 3. [Model & Provider](#model--provider) — `/model`, `/providers`, `/connect`, `/thinking`, `/effort`, `/advisor`, `/fast`
-4. [Configuration & Settings](#configuration--settings) — `/config`, `/keybindings`, `/permissions`, `/hooks`, `/mcp`, `/output-style`, `/theme`, `/statusline`, `/vim`, `/voice`, `/terminal-setup`
-5. [Code & Git](#code--git) — `/commit`, `/diff`, `/undo`, `/revert`, `/review`, `/init`, `/search`
-6. [Search & Files](#search--files) — `/context`
-7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/cost`, `/status`
+4. [Configuration & Settings](#configuration--settings) — `/config`, `/keybindings`, `/permissions`, `/hooks`, `/mcp`, `/output-style`, `/theme`
+5. [Code & Git](#code--git) — `/commit`, `/diff`, `/review`, `/init`, `/search`
+6. [Search & Files](#search--files)
+7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/stats`, `/status`
 8. [Agents & Tasks](#agents--tasks) — `/agents`, `/tasks`, `/goal`, `/managed-agents`, `/agent`
 9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
 10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
 11. [Authentication](#authentication) — `/login`, `/logout`, `/switch`, `/refresh`
-12. [Display & Terminal](#display--terminal) — `/theme`, `/output-style`, `/statusline`, `/vim`, `/terminal-setup`, `/incant`, `/color`
+12. [Display & Terminal](#display--terminal) — `/theme`, `/output-style`, `/incant`
 13. [Diagnostics & Info](#diagnostics--info) — `/doctor`, `/version`, `/update`
 14. [Export & Sharing](#export--sharing) — `/export`, `/copy`, `/share`
 15. [Advanced & Internal](#advanced--internal) — `/thinking`, `/connect`, `/fork`, `/effort`, `/whisper`, `/sandbox`, `/think-back`
@@ -131,6 +131,8 @@ Rewind the conversation to a previous message. Displays a numbered list of messa
 /rewind
 /rewind <message-index>
 ```
+
+`/undo` and `/revert` remain available as hidden compatibility commands for one release, but new docs and command discovery route history work through `/rewind`.
 
 ---
 
@@ -358,51 +360,48 @@ Open the interactive theme picker. Preview and select a color theme for the Cove
 
 ---
 
-### /statusline
+### /config statusline
 
 Configure the status line displayed at the bottom of the TUI. Toggle individual elements such as model name, token count, session name, and git branch.
 
 ```
-/statusline
-/statusline toggle model
-/statusline toggle tokens
+/config statusline
+/config statusline show model
+/config statusline hide tokens
 ```
 
 ---
 
-### /vim
-**Aliases:** `vi`
+### /config vim
 
 Toggle vim keybinding mode on or off. In vim mode the input field behaves like a vim editor (normal/insert/visual modes). Persisted to config.
 
 ```
-/vim
-/vim on
-/vim off
+/config vim
+/config vim on
+/config vim off
 ```
 
 ---
 
-### /voice
+### /config voice
 
 Configure voice input/output. Requires a supported audio backend. Subcommands control microphone selection, TTS voice, and push-to-talk behavior.
 
 ```
-/voice
-/voice on
-/voice off
-/voice mic <device>
-/voice tts <voice-name>
+/config voice status
+/config voice on
+/config voice off
 ```
 
 ---
 
-### /terminal-setup
+### /config terminal-setup
 
 Run the terminal capability detection and setup wizard. Checks for true-color support, font ligatures, Unicode rendering, and configures Coven Code accordingly.
 
 ```
-/terminal-setup
+/config terminal-setup
 ```
 
 ---
@@ -427,31 +426,6 @@ Show file diffs for changes made during the current session. Displays a unified 
 ```
 /diff
 /diff <file-path>
-```
-
----
-
-### /undo
-
-Undo file changes made during the current session. Restores files to their state before Coven Code's last write operation. Can be called multiple times to step further back.
-
-```
-/undo
-/undo <file-path>
-```
-
----
-
-### /revert
-
-Revert file changes from an assistant turn back to their pre-turn state, using the shadow-git snapshot. `/undo` reverts the most recent edit; `/revert` reverts a chosen turn and removes that turn (and any later turns) from the session transcript.
-
-```
-/revert            — revert the most recent assistant turn
-/revert 2          — revert the second-to-last turn
-/revert abc123     — revert the turn whose message id starts with 'abc123'
-/revert list       — list turns that have recorded file changes
-/revert diff [n]   — preview the shadow-git diff for a turn without reverting
 ```
 
 ---
@@ -505,12 +479,12 @@ Search the codebase using natural language or regex patterns. Wraps the GrepTool
 
 ## Search & Files
 
-### /context
+### /usage context
 
 Analyze context window usage. Shows a breakdown of tokens consumed by system prompt, conversation history, file contents, and tool results. Helps identify what to compact or drop.
 
 ```
-/context
+/usage context
 ```
 
 ---
@@ -537,16 +511,18 @@ Display a detailed token usage breakdown for the current session. Shows input to
 
 ```
 /usage
+/usage cost
+/usage context
 ```
 
 ---
 
-### /cost
+### /usage cost
 
-Show the total token usage and estimated cost for the current session. Provides a quick summary without the per-call breakdown of `/usage`. In the TUI, `/cost` opens the interactive stats dialog.
+Show the total token usage and estimated cost for the current session. Provides a quick summary without the full account/quota context of `/usage`. In the TUI, `/stats` opens the interactive stats dialog.
 
 ```
-/cost
+/usage cost
 ```
 
 For aggregate token / cost / tool statistics across saved sessions, use the `stats` CLI command: `coven-code stats [summary|sessions|tools|daily|session <id>]`.
@@ -837,19 +813,19 @@ Documented above under [Configuration & Settings](#configuration--settings).
 
 ---
 
-### /statusline
+### /config statusline
 
 Documented above under [Configuration & Settings](#configuration--settings).
 
 ---
 
-### /vim
+### /config vim
 
 Documented above under [Configuration & Settings](#configuration--settings).
 
 ---
 
-### /terminal-setup
+### /config terminal-setup
 
 Documented above under [Configuration & Settings](#configuration--settings).
 
@@ -887,15 +863,15 @@ Intensity:
 
 ---
 
-### /color
+### /config color
 
 Set the prompt bar color for the current session. Accepts standard color names or hex values. The color resets when the session ends unless saved via `/config`.
 
 ```
-/color               — open the interactive color picker
-/color <name>        — set to a named color (e.g., blue, red, green)
-/color #ff6b6b       — set to a hex color value
-/color default       — reset to the theme default
+/config color             — show the current prompt color
+/config color <name>      — set to a named color (e.g., blue, red, green)
+/config color #ff6b6b     — set to a hex color value
+/config color default     — reset to the theme default
 ```
 
 ---
@@ -1001,7 +977,7 @@ Documented above under [Model & Provider](#model--provider).
 
 ---
 
-### /context
+### /usage context
 
 Documented above under [Search & Files](#search--files).
 
@@ -1226,7 +1202,7 @@ adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
 | `ide` | Manage IDE integrations. |
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
-| `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/cost` opens the stats dialog). |
+| `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/stats` opens the stats dialog). |
 
 ---
 
@@ -1238,13 +1214,13 @@ Not all commands are available in all contexts.
 
 When running with `--remote`, only a restricted set of commands is available:
 
-`session`, `exit`, `clear`, `help`, `theme`, `vim`, `cost`, `usage`, `plan`, `keybindings`, `statusline`
+`session`, `exit`, `clear`, `help`, `theme`, `config`, `usage`, `plan`, `keybindings`
 
 ### Bridge Mode
 
 Over the Remote Control bridge (used by IDE integrations), only `local`-type commands are forwarded:
 
-`compact`, `clear`, `cost`
+`compact`, `clear`, `usage`
 
 ### Availability-Restricted Commands
 
@@ -1254,5 +1230,5 @@ Some commands are available only under certain account or platform conditions:
 |---------|-------------|
 | `/fast` | Available when a fast-mode model is configured for the active provider |
 | `/sandbox` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
-| `/voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
+| `/config voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
 | `/chrome` | Requires a running Chrome/Chromium instance launched with remote debugging enabled |
