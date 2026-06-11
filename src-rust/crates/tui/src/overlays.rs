@@ -440,6 +440,10 @@ pub fn render_help_overlay(frame: &mut Frame, overlay: &HelpOverlay, area: Rect)
     )));
     for (key, desc) in &[
         ("F1 / ?", "Toggle help"),
+        ("Alt+H", "Toggle help"),
+        ("F2", "Switch familiar"),
+        ("Ctrl+B", "Create / switch branch"),
+        ("Tab", "Cycle mode: build / plan / explore"),
         ("Ctrl+Shift+A", "Model picker"),
         ("Ctrl+K", "Command palette"),
         ("Ctrl+C", "Cancel / quit"),
@@ -1954,6 +1958,8 @@ pub fn render_global_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     // --- HelpOverlay ---------------------------------------------------
 
@@ -1987,6 +1993,31 @@ mod tests {
         assert_eq!(h.filter, "he");
         h.pop_filter_char();
         assert_eq!(h.filter, "h");
+    }
+
+    #[test]
+    fn help_overlay_lists_hidden_keybinding_hints() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        let mut overlay = HelpOverlay::new();
+        overlay.visible = true;
+        terminal
+            .draw(|frame| render_help_overlay(frame, &overlay, frame.area()))
+            .expect("draw help overlay");
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        for expected in ["F2", "Alt+H", "Ctrl+B", "Tab"] {
+            assert!(
+                content.contains(expected),
+                "help overlay should mention {expected}, got {content:?}"
+            );
+        }
     }
 
     #[test]

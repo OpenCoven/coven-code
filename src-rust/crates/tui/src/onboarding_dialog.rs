@@ -467,6 +467,9 @@ fn render_keybindings_page(frame: &mut Frame, area: Rect) {
         kb("PgUp/PgDn", "scroll transcript"),
         kb("Ctrl+K", "command palette"),
         kb("Ctrl+Shift+A", "model picker"),
+        kb("F2", "switch familiar"),
+        kb("Alt+H", "open help"),
+        kb("Ctrl+B", "create / switch branch"),
         Line::from(""),
         Line::from(Span::styled(
             "  Permissions",
@@ -584,6 +587,12 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("Keyboard") || content.contains("Enter"));
+        for expected in ["F2", "Alt+H", "Ctrl+B", "Tab", "build/plan/explore"] {
+            assert!(
+                content.contains(expected),
+                "onboarding keybindings should mention {expected}, got {content:?}"
+            );
+        }
     }
 
     #[test]

@@ -2386,6 +2386,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
 
+        if app.prompt_input.text.is_empty() && !app.is_streaming {
+            spans.push(Span::styled(
+                "F2 familiar  Alt+H help  Ctrl+B branch  Tab mode",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
         // Agent type badge (shown when running as subagent / coordinator)
         if let Some(ref badge) = app.agent_type_badge {
             spans.push(Span::styled(
@@ -2958,6 +2965,10 @@ fn render_simple_help_overlay(frame: &mut Frame, area: Rect) {
         kb_line("Ctrl+R", "Search input history"),
         kb_line("PageUp / PageDown", "Scroll messages"),
         kb_line("F1 / ?", "Toggle this help"),
+        kb_line("Alt+H", "Toggle this help"),
+        kb_line("F2", "Switch familiar"),
+        kb_line("Ctrl+B", "Create / switch branch"),
+        kb_line("Tab", "Cycle mode (build/plan/explore)"),
         Line::from(""),
         Line::from(vec![Span::styled(
             " Permission Dialog",
@@ -3448,6 +3459,8 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 mod welcome_tests {
     use super::*;
     use crate::app::test_env::EnvGuard;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn make_test_app_with_model_and_familiar(
         model: Option<&str>,
@@ -3600,6 +3613,30 @@ mod welcome_tests {
         // flash cadence.
         assert_eq!(spinner_char(0), spinner_char(1));
         assert_ne!(spinner_char(1), spinner_char(2));
+    }
+
+    #[test]
+    fn footer_exposes_hidden_keybinding_hints() {
+        let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        terminal
+            .draw(|frame| render_footer(frame, &app, frame.area()))
+            .expect("draw footer");
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        for expected in ["F2", "Alt+H", "Ctrl+B", "Tab"] {
+            assert!(
+                content.contains(expected),
+                "footer should mention {expected}, got {content:?}"
+            );
+        }
     }
 
     #[test]
