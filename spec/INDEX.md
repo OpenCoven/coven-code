@@ -4,8 +4,8 @@
 > that Claurst (and therefore Coven Code) was modeled on. They do **not** describe this Rust
 > codebase — crate names, paths, versions, and the command/tool surface differ. For current
 > Coven Code documentation see [`docs/`](../docs/index.md); for the audit of this codebase see
-> [`docs/AUDIT-2026-06.md`](../docs/AUDIT-2026-06.md). `13_rust_codebase.md` is also stale and
-> pending a rewrite.
+> [`docs/AUDIT-2026-06.md`](../docs/AUDIT-2026-06.md). `13_rust_codebase.md` has been rewritten
+> as the current Rust workspace reference.
 
 > Quick-reference index across all spec documents.
 > Total spec coverage: ~990 KB across 15 markdown files.
@@ -29,7 +29,7 @@
 | 10 | [10_utils.md](10_utils.md) | 60 KB | ~564 utility files organized by category |
 | 11 | [11_special_systems.md](11_special_systems.md) | 64 KB | Buddy/Tamagotchi, memdir, keybindings, skills, voice, plugins, migrations |
 | 12 | [12_constants_types.md](12_constants_types.md) | 83 KB | Every constant, type, OAuth config, system prompts, tool limits, beta headers |
-| 13 | [13_rust_codebase.md](13_rust_codebase.md) | 63 KB | Complete Rust rewrite: all 9 crates, 33 tools, query loop, TUI, bridge |
+| 13 | [13_rust_codebase.md](13_rust_codebase.md) | 14 KB | Current Coven Code Rust workspace: 12 crates, `coven-code` binary, tools, query loop, TUI, ACP, bridge |
 
 ---
 
@@ -92,11 +92,12 @@
 | Cyber risk instruction | 12 | §cyberRisk |
 | Tool name constants | 12 | §tools |
 | All TypeScript types | 12 | §types |
-| Rust rewrite overview | 13 | §1 |
-| Rust tool implementations | 13 | §cc-tools |
-| Rust query loop | 13 | §cc-query |
-| Rust TUI | 13 | §cc-tui |
-| Rust bridge | 13 | §cc-bridge |
+| Rust workspace overview | 13 | §Overview |
+| Rust crate map | 13 | §Workspace Members |
+| Rust tool implementations | 13 | §Tools Runtime |
+| Rust query loop | 13 | §Query Loop and Sessions |
+| Rust TUI | 13 | §Terminal UI |
+| Rust ACP / bridge / MCP / plugins | 13 | §MCP, Plugins, Bridge, and ACP |
 
 ---
 
@@ -114,15 +115,15 @@
 | Number of utility files | ~564 |
 | Ink terminal framework files | 96 |
 | Bridge protocol files | 31 |
-| Rust crates | 9 |
-| Rust source files | 47 |
+| Rust crates | 12 |
+| Rust source files | ~238 |
 | Spec documentation size | ~990 KB |
 
 ---
 
 ## Architecture in One Paragraph
 
-Claude Code is a terminal AI coding assistant built as a React application running in a custom terminal UI framework (Ink, a React reconciler targeting terminal output with Yoga flexbox layout). The main loop (`query.ts` + `QueryEngine.ts`) streams responses from the Claude API, executes tools with user permission, and manages a 200K-token context window with automatic compaction. It has 100+ slash commands, 40+ tools (file I/O, shell, web, agents, MCP), a multi-agent system for parallel task execution, a memory system for long-term context, voice input, IDE integration via a bridge protocol (WebSocket/SSE), and a plugin/skills marketplace. The codebase is being rewritten in Rust (`claude-code-rust/`) as a complete standalone reimplementation.
+The upstream Claude Code specs describe a terminal AI coding assistant built as a React application running in a custom terminal UI framework. Coven Code's active implementation is the Rust workspace under `src-rust/`, with the `coven-code` binary, `claurst-*` crates, `~/.coven-code` persistence, and `AGENTS.md` instruction discovery. Use the earlier spec files for upstream TypeScript reference material, and use `13_rust_codebase.md` for the current Coven Code Rust workspace.
 
 ---
 
