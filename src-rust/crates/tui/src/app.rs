@@ -72,14 +72,16 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("diff", "Inspect the current git diff"),
     ("doctor", "Run diagnostics"),
-    ("effort", "Set effort level (low/medium/high/max)"),
+    (
+        "effort",
+        "Set effort level (low/normal/high) or toggle fast mode",
+    ),
     ("exit", "Quit Coven Code"),
     ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
         "Set your active familiar — changes the TUI mascot live",
     ),
-    ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
     ("goal", "Set or view the current session goal"),
     (
@@ -98,7 +100,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("init", "Initialize AGENTS.md for this project"),
     ("keybindings", "Show keybinding configuration"),
-    ("login", "Log in to Coven Code"),
+    ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
@@ -113,7 +115,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("providers", "List available AI providers and their status"),
     ("quit", "Exit Coven Code"),
-    ("refresh", "Clear saved provider auth and model caches"),
     (
         "reload-plugins",
         "Reload the active session plugin registry",
@@ -131,14 +132,12 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
     ("survey", "Open session feedback survey"),
-    ("switch", "Switch the active account for a provider"),
     ("tasks", "Manage tracked background tasks"),
     ("theme", "Open the theme picker"),
     (
-        "think-back",
-        "Show extended-thinking traces from previous responses",
+        "thinking",
+        "Configure extended thinking or view past thinking traces",
     ),
-    ("thinking", "Configure extended thinking for the session"),
     (
         "update",
         "Check for updates and upgrade to the latest version",

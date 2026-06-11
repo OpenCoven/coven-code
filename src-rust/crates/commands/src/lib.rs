@@ -2779,10 +2779,25 @@ impl SlashCommand for LoginCommand {
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
          add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
-         you can `switch` to it later by that name."
+         you can switch to it later by that name.\n\n\
+         Subcommands (absorbing the former /switch and /refresh):\n\
+           /login switch [name]  — switch the active account for a provider\n\
+           /login refresh        — clear saved provider auth and model caches"
     }
 
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // Subcommands absorbed from the former /switch and /refresh commands
+        // (issue #73); both stay as hidden one-release aliases.
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "switch" => return SwitchCommand.execute(rest, ctx).await,
+            "refresh" => return RefreshCommand.execute(rest, ctx).await,
+            _ => {}
+        }
         let tokens: Vec<&str> = args.split_whitespace().collect();
         let use_codex = tokens.contains(&"--codex");
         let login_with_claude_ai = !tokens.contains(&"--console");
@@ -2957,6 +2972,9 @@ impl SlashCommand for SwitchCommand {
     fn name(&self) -> &str {
         "switch"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Switch the active account for a provider"
     }
@@ -3005,6 +3023,9 @@ impl SlashCommand for SwitchCommand {
 impl SlashCommand for RefreshCommand {
     fn name(&self) -> &str {
         "refresh"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Clear saved provider auth and model caches"
@@ -4636,7 +4657,20 @@ impl SlashCommand for ThinkingCommand {
         vec!["think"]
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    fn help(&self) -> &str {
+        "Usage: /thinking [back ...]\n\n\
+         Shows extended-thinking availability for the active model.\n\
+         /thinking back [play] shows extended-thinking traces from previous\n\
+         responses (absorbing the former /think-back command)."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /thinking back absorbs the former standalone /think-back command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("back") {
+            return ThinkBackCommand.execute(rest.trim(), ctx).await;
+        }
         // Extended thinking is configured through the model; just inform the user
         let model = ctx.config.effective_model();
         if model.contains("claude-3-5") || model.contains("claude-3.5") {
@@ -5497,12 +5531,20 @@ impl SlashCommand for EffortCommand {
         "Set the model's thinking effort (low | normal | high)"
     }
     fn help(&self) -> &str {
-        "Usage: /effort [low|normal|high]\n\
+        "Usage: /effort [low|normal|high|fast [on|off]]\n\
          Sets how much computation the model uses for reasoning.\n\
-         'high' enables extended thinking with a larger budget."
+         'high' enables extended thinking with a larger budget.\n\
+         /effort fast toggles fast mode (smaller, quicker model),\n\
+         absorbing the former /fast command."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /effort fast absorbs the former standalone /fast command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("fast") {
+            return FastCommand.execute(rest.trim(), ctx).await;
+        }
         match args.trim() {
             "" => CommandResult::Message(
                 "Current effort: normal\nUse /effort [low|normal|high] to change.".to_string(),
@@ -6873,6 +6915,9 @@ impl SlashCommand for FastCommand {
     fn name(&self) -> &str {
         "fast"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["speed"]
     }
@@ -6945,6 +6990,9 @@ impl SlashCommand for FastCommand {
 impl SlashCommand for ThinkBackCommand {
     fn name(&self) -> &str {
         "think-back"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["thinkback"]
@@ -9799,6 +9847,10 @@ mod tests {
             "add-dir",
             "copy",
             "share",
+            "switch",
+            "refresh",
+            "think-back",
+            "fast",
         ];
 
         for name in hidden_legacy {
@@ -9851,6 +9903,36 @@ mod tests {
             }
             other => panic!("expected copy-path message, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn login_thinking_effort_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /login refresh routes to the provider-reset path.
+        let login = find_command("login").unwrap();
+        let result = login.execute("refresh", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::RefreshProviderState),
+            "/login refresh should route to the refresh path"
+        );
+
+        // /thinking back routes to the think-back trace viewer.
+        let thinking = find_command("thinking").unwrap();
+        let result = thinking.execute("back", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/thinking back should route to the think-back path"
+        );
+
+        // /effort fast routes to the fast-mode toggle.
+        let effort = find_command("effort").unwrap();
+        let result = effort.execute("fast on", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::ConfigChangeMessage(_, _)),
+            "/effort fast should route to the fast-mode toggle"
+        );
     }
 
     #[tokio::test]
