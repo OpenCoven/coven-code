@@ -52,7 +52,6 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("accounts", "List every stored account across providers"),
     (
         "add-dir",
         "Add an extra workspace root to the active session",
@@ -61,9 +60,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("agent", "List available familiars or show familiar details"),
     ("agents", "Browse familiar definitions and active familiars"),
     ("branch", "Create or switch session branches"),
-    ("btw", "Send a side-channel note to the model"),
-    ("caveman", "Caveman speech mode — save big token"),
-    ("checkpoints", "Browse session snapshots / restore points"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     ("color", "Set the prompt bar color for the current session"),
@@ -81,28 +77,23 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
     ),
-    ("ctx-viz", "Visualize context-window contents and usage"),
-    ("desktop", "Computer-use desktop control"),
     ("diff", "Inspect the current git diff"),
     ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
     ("exit", "Quit Coven Code"),
     ("export", "Export conversation"),
-    ("extra-usage", "Detailed token usage breakdown"),
     (
         "familiar",
         "Set your active familiar — changes the TUI mascot live",
     ),
     ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
-    ("files", "List files read or written this session"),
     ("fork", "Fork session into a new branch"),
     ("goal", "Set or view the current session goal"),
     (
         "handoff",
         "Hand off current session context to a Coven familiar",
     ),
-    ("heapdump", "Show process memory and diagnostic information"),
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
     ("ide", "Connect to the active IDE integration"),
@@ -110,18 +101,12 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "import-config",
         "Import CLAUDE.md and settings.json from ~/.claude",
     ),
+    (
+        "incant",
+        "Cast a speech incantation (caveman, rocky) or lift it with off",
+    ),
     ("init", "Initialize AGENTS.md for this project"),
-    (
-        "insights",
-        "Generate a session analysis report with conversation statistics",
-    ),
-    ("install-github-app", "Install the Coven Code GitHub App"),
-    (
-        "install-slack-app",
-        "Install the Coven Code Slack integration",
-    ),
     ("keybindings", "Show keybinding configuration"),
-    ("links", "Open URLs from this session in your browser"),
     ("login", "Log in to Coven Code"),
     ("logout", "Log out of Coven Code"),
     (
@@ -130,14 +115,8 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
-    (
-        "mobile",
-        "Show QR code / links for the mobile companion app",
-    ),
     ("model", "Change the AI model"),
-    ("normal", "Deactivate speech mode"),
     ("output-style", "Toggle output style (auto/stream/verbose)"),
-    ("passes", "Inspect per-turn pass history"),
     ("permissions", "Manage tool permission rules"),
     ("plan", "Enter plan mode (read-only)"),
     ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
@@ -145,27 +124,19 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "pr-comments",
         "Read or post comments on the active GitHub PR",
     ),
-    ("privacy-settings", "Open Coven Code privacy settings"),
     ("providers", "List available AI providers and their status"),
     ("quit", "Exit Coven Code"),
-    ("rate-limit-options", "Configure rate-limit handling"),
     ("refresh", "Clear saved provider auth and model caches"),
-    ("release-notes", "View Coven Code release notes / changelog"),
     (
         "reload-plugins",
         "Reload the active session plugin registry",
     ),
-    ("remote-control", "Remote-control session via the bridge"),
-    ("remote-env", "Configure the remote-control environment"),
-    ("rename", "Rename this session"),
     ("resume", "Resume a previous session"),
     ("revert", "Revert a file to its pre-session state"),
     ("review", "Review changes (git diff)"),
     ("rewind", "Rewind to an earlier turn"),
-    ("rocky", "Rocky speech mode — amaze amaze amaze"),
-    ("sandbox-toggle", "Toggle sandboxed shell execution"),
+    ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
-    ("security-review", "Run a security-focused review pass"),
     ("session", "Browse and manage sessions"),
     ("settings", "Open settings"),
     (
@@ -173,20 +144,12 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Upload the current session as a secret gist and get a shareable URL",
     ),
     ("skills", "List and manage skills"),
-    ("snapshot", "Manage filesystem snapshots"),
-    ("stats", "Open token and cost stats"),
     ("status", "Show the current session status"),
     ("statusline", "Configure the TUI status line"),
-    ("stickers", "Open the Coven Code sticker page"),
-    ("summary", "Generate a session summary"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
     ("tag", "Tag the current session with a label"),
     ("tasks", "Manage tracked background tasks"),
-    (
-        "teleport",
-        "Bundle session state for teleporting to another machine",
-    ),
     (
         "terminal-setup",
         "Run the terminal capability detection wizard",
@@ -196,15 +159,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "think-back",
         "Show extended-thinking traces from previous responses",
     ),
-    (
-        "thinkback-play",
-        "Replay a previous thinking trace as a walkthrough",
-    ),
     ("thinking", "Configure extended thinking for the session"),
-    (
-        "ultrareview",
-        "Run an exhaustive multi-dimensional code review",
-    ),
     ("undo", "Undo a file change made during this session"),
     (
         "update",
@@ -218,7 +173,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("version", "Display the current Coven Code version"),
     ("vim", "Toggle vim keybindings"),
     ("voice", "Toggle voice input mode"),
-    ("web-setup", "Open the web-setup proxy assistant"),
+    (
+        "whisper",
+        "Whisper a side question to your familiar (not kept in history)",
+    ),
 ];
 
 fn help_command_category(name: &str) -> &'static str {
@@ -226,13 +184,15 @@ fn help_command_category(name: &str) -> &'static str {
         "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => {
             "Model & Provider"
         }
-        "diff" | "review" | "rewind" | "export" | "copy" | "share" | "links" => "Review & History",
-        "stats" | "cost" | "context" | "insights" | "heapdump" | "doctor" => "Diagnostics",
+        "diff" | "review" | "rewind" | "revert" | "undo" | "export" | "copy" | "share" => {
+            "Review & History"
+        }
+        "cost" | "context" | "usage" | "doctor" | "status" => "Diagnostics",
         "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
             "Workspace"
         }
         "agent" | "agents" | "memory" | "plugin" | "feedback" | "survey" => "Tools",
-        "session" | "resume" | "rename" | "fork" | "clear" | "compact" | "quit" | "exit" => {
+        "session" | "resume" | "fork" | "clear" | "compact" | "whisper" | "quit" | "exit" => {
             "Session"
         }
         "coven" | "handoff" | "familiar" => "Coven Substrate",
@@ -1399,8 +1359,6 @@ pub struct App {
     pub overage_upsell: crate::overage_upsell::OverageCreditUpsellState,
     /// Voice mode availability notice.
     pub voice_mode_notice: crate::voice_mode_notice::VoiceModeNoticeState,
-    /// Desktop app upsell startup dialog.
-    pub desktop_upsell: crate::desktop_upsell_startup::DesktopUpsellStartupState,
     /// Startup error dialog for malformed settings.json or AGENTS.md.
     pub invalid_config_dialog: crate::invalid_config_dialog::InvalidConfigDialogState,
     /// Memory update notification banner.
@@ -1873,7 +1831,6 @@ impl App {
             hooks_config_menu: crate::hooks_config_menu::HooksConfigMenuState::new(),
             overage_upsell: crate::overage_upsell::OverageCreditUpsellState::new(),
             voice_mode_notice: crate::voice_mode_notice::VoiceModeNoticeState::new(),
-            desktop_upsell: crate::desktop_upsell_startup::DesktopUpsellStartupState::new(),
             invalid_config_dialog: crate::invalid_config_dialog::InvalidConfigDialogState::new(),
             memory_update_notification:
                 crate::memory_update_notification::MemoryUpdateNotificationState::new(),
@@ -2935,7 +2892,6 @@ impl App {
             || self.overage_upsell.visible
             || self.voice_mode_notice.visible
             || self.memory_update_notification.visible
-            || self.desktop_upsell.visible
             || self.import_config_dialog.visible
             || self.invalid_config_dialog.visible
             || self.bypass_permissions_dialog.visible
@@ -4600,29 +4556,6 @@ impl App {
             }
             self.status_message = Some("Recording cancelled.".to_string());
             return false;
-        }
-
-        // Desktop upsell startup dialog
-        if self.desktop_upsell.visible {
-            match key.code {
-                KeyCode::Up | KeyCode::BackTab => {
-                    self.desktop_upsell.select_prev();
-                    return false;
-                }
-                KeyCode::Down | KeyCode::Tab => {
-                    self.desktop_upsell.select_next();
-                    return false;
-                }
-                KeyCode::Enter => {
-                    self.desktop_upsell.confirm();
-                    return false;
-                }
-                KeyCode::Esc => {
-                    self.desktop_upsell.dismiss_temporarily();
-                    return false;
-                }
-                _ => return false,
-            }
         }
 
         // Memory update notification dismiss

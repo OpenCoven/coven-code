@@ -646,30 +646,6 @@ impl NamedCommand for TagCommand {
 // passes
 // ---------------------------------------------------------------------------
 
-pub struct PassesCommand;
-
-impl NamedCommand for PassesCommand {
-    fn name(&self) -> &str {
-        "passes"
-    }
-    fn description(&self) -> &str {
-        "Share a free week of Coven Code with friends"
-    }
-    fn usage(&self) -> &str {
-        "coven-code passes"
-    }
-
-    fn execute_named(&self, _args: &[&str], _ctx: &CommandContext) -> CommandResult {
-        CommandResult::Message(
-            "Coven Code Passes \u{2014} Share Coven Code with friends\n\n\
-             Share a free week of Coven Code with a friend\n\
-             Visit https://claude.ai/passes to get your referral link\n\
-             Each referral gives your friend 1 week of Coven Code Pro"
-                .to_string(),
-        )
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helper: process liveness check (used by IdeCommand)
 // ---------------------------------------------------------------------------
@@ -865,116 +841,6 @@ impl NamedCommand for PrCommentsCommand {
 // desktop
 // ---------------------------------------------------------------------------
 
-pub struct DesktopCommand;
-
-impl NamedCommand for DesktopCommand {
-    fn name(&self) -> &str {
-        "desktop"
-    }
-    fn description(&self) -> &str {
-        "Download and set up Coven Code Desktop app"
-    }
-    fn usage(&self) -> &str {
-        "coven-code desktop"
-    }
-
-    fn execute_named(&self, _args: &[&str], ctx: &CommandContext) -> CommandResult {
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
-        let download_url = "https://claude.ai/download";
-
-        // Detect if Coven Code Desktop is likely installed (platform-specific heuristic).
-        let desktop_likely_installed = match os {
-            "macos" => {
-                std::path::Path::new("/Applications/Claude.app").exists()
-                    || std::path::Path::new(&format!(
-                        "{}/Applications/Claude.app",
-                        std::env::var("HOME").unwrap_or_default()
-                    ))
-                    .exists()
-            }
-            "windows" => {
-                std::env::var("LOCALAPPDATA")
-                    .map(|p| {
-                        std::path::Path::new(&p)
-                            .join("Programs/Claude/Claude.exe")
-                            .exists()
-                    })
-                    .unwrap_or(false)
-                    || std::path::Path::new("C:\\Program Files\\Claude\\Claude.exe").exists()
-            }
-            _ => false,
-        };
-
-        // If a remote session is active the user is already bridged — show a
-        // deep link so they can open the current session in Desktop.
-        if let Some(ref session_url) = ctx.remote_session_url {
-            let session_id = session_url.split('/').next_back().unwrap_or("");
-            let deep_link = format!("claude://session/{}", session_id);
-
-            let mut msg = String::new();
-            msg.push_str("\u{2713} Already connected to Coven Code Desktop\n\n");
-            msg.push_str("Your Coven Code session is synced with Coven Code Desktop.\n\n");
-            msg.push_str(&format!("Open this session in Desktop: {deep_link}\n\n"));
-            if desktop_likely_installed {
-                msg.push_str("Coven Code Desktop is installed on this machine.\n");
-                msg.push_str(&format!("Manage your installation: {download_url}"));
-            } else {
-                msg.push_str(&format!("Download / manage Desktop: {download_url}"));
-            }
-            return CommandResult::Message(msg);
-        }
-
-        let msg = if os == "macos" {
-            if desktop_likely_installed {
-                format!(
-                    "Open Coven Code Desktop \u{2014} macOS\n\n\
-                     Coven Code Desktop appears to be installed.\n\
-                     Launch it from /Applications/Claude.app and sign in with your Anthropic account.\n\n\
-                     Download / update: {download_url}"
-                )
-            } else {
-                format!(
-                    "Download Coven Code Desktop \u{2014} macOS\n\n\
-                     Download: {download_url}\n\n\
-                     Setup instructions:\n\
-                     1. Download and install Coven Code Desktop for macOS\n\
-                     2. Open Coven Code Desktop and sign in with the same Anthropic account\n\
-                     3. Coven Code will detect the Desktop bridge automatically"
-                )
-            }
-        } else if os == "windows" {
-            let arch_note = if arch == "x86_64" { " (x64)" } else { "" };
-            if desktop_likely_installed {
-                format!(
-                    "Open Coven Code Desktop \u{2014} Windows{arch_note}\n\n\
-                     Coven Code Desktop appears to be installed.\n\
-                     Launch it from your Start menu and sign in with your Anthropic account.\n\n\
-                     Download / update: {download_url}"
-                )
-            } else {
-                format!(
-                    "Download Coven Code Desktop for Windows{arch_note}\n\n\
-                     Download: {download_url}\n\n\
-                     Setup instructions:\n\
-                     1. Download and run the Coven Code Desktop installer\n\
-                     2. Open Coven Code Desktop and sign in with the same Anthropic account\n\
-                     3. Coven Code will detect the Desktop bridge automatically"
-                )
-            }
-        } else {
-            // Linux and other platforms
-            format!(
-                "Coven Code Desktop is not yet available for {os}\n\n\
-                 On Linux, you can use Coven Code via the CLI or visit https://claude.ai in your browser.\n\
-                 Check {download_url} for the latest platform availability."
-            )
-        };
-
-        CommandResult::Message(msg)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // mobile — helper
 // ---------------------------------------------------------------------------
@@ -1037,276 +903,17 @@ pub fn render_qr(url: &str) -> Vec<String> {
 // mobile
 // ---------------------------------------------------------------------------
 
-pub struct MobileCommand;
-
-impl NamedCommand for MobileCommand {
-    fn name(&self) -> &str {
-        "mobile"
-    }
-    fn description(&self) -> &str {
-        "Download the Coven Code mobile app"
-    }
-    fn usage(&self) -> &str {
-        "coven-code mobile [ios|android]"
-    }
-
-    fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
-        let ios_url = "https://apps.apple.com/app/claude-by-anthropic/id6473753684";
-        let android_url = "https://play.google.com/store/apps/details?id=com.anthropic.claude";
-        let mobile_url = "https://claude.ai/mobile";
-
-        let has_session = ctx.remote_session_url.is_some();
-
-        // Build a session URL string upfront (may be empty if no session).
-        let session_qr_url: String = if let Some(ref url) = ctx.remote_session_url {
-            let encoded = urlencoding::encode(url);
-            format!("https://claude.ai/code/mobile?session={}", encoded)
-        } else {
-            String::new()
-        };
-
-        // Choose which platform / URL to show the QR for (default: claude.ai/mobile).
-        let (platform_label, qr_url): (&str, &str) = match args.first().copied().unwrap_or("") {
-            "ios" | "1" => ("[1] iOS  (selected)", ios_url),
-            "android" | "2" => ("[2] Android  (selected)", android_url),
-            "session" | "3" => {
-                if has_session {
-                    ("[3] Session  (selected)", session_qr_url.as_str())
-                } else {
-                    (
-                        "session link unavailable \u{2014} no active remote session",
-                        mobile_url,
-                    )
-                }
-            }
-            _ => ("both platforms", mobile_url),
-        };
-
-        let qr_lines = render_qr(qr_url);
-
-        let mut out = String::new();
-        out.push_str("Scan to download Coven Code mobile app\n");
-        out.push_str(&format!("Platform: {platform_label}\n\n"));
-        if has_session {
-            out.push_str(
-                "  [1] iOS    [2] Android    [3] Session (QR links to active session)\n\n",
-            );
-        } else {
-            out.push_str("  [1] iOS    [2] Android\n\n");
-        }
-
-        // QR block — indent by 2 spaces
-        for line in &qr_lines {
-            out.push_str("  ");
-            out.push_str(line);
-            out.push('\n');
-        }
-
-        out.push('\n');
-        out.push_str(&format!("  iOS:     {ios_url}\n"));
-        out.push_str(&format!("  Android: {android_url}\n"));
-        if has_session {
-            out.push_str(&format!("  Session: {}\n", session_qr_url));
-        }
-        out.push('\n');
-        out.push_str(&format!("Or visit {mobile_url}"));
-
-        CommandResult::Message(out)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // install-github-app
 // ---------------------------------------------------------------------------
-
-pub struct InstallGithubAppCommand;
-
-impl NamedCommand for InstallGithubAppCommand {
-    fn name(&self) -> &str {
-        "install-github-app"
-    }
-    fn description(&self) -> &str {
-        "Set up Coven Code GitHub Actions for a repository"
-    }
-    fn usage(&self) -> &str {
-        "coven-code install-github-app"
-    }
-
-    fn execute_named(&self, _args: &[&str], ctx: &CommandContext) -> CommandResult {
-        let provider_id = ctx.config.selected_provider_id();
-        let provider_secret_step = claurst_core::config::primary_api_key_env_var_for_provider(provider_id)
-            .map(|provider_secret| {
-                format!(
-                    "3. Add your provider credential to repository secrets (for example {provider_secret})"
-                )
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "3. Configure any required provider credentials or connectivity for {provider_id} in your workflow environment"
-                )
-            });
-
-        CommandResult::Message(format!(
-            "To install the Coven Code GitHub App:\n\
-             1. Visit https://github.com/apps/claude-code-app and click Install\n\
-             2. Select the repositories to enable\n\
-             {provider_secret_step}\n\n\
-             The app enables Coven Code in GitHub Actions workflows for the configured provider."
-        ))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // remote-setup
 // ---------------------------------------------------------------------------
 
-pub struct RemoteSetupCommand;
-
-impl NamedCommand for RemoteSetupCommand {
-    fn name(&self) -> &str {
-        "remote-setup"
-    }
-    fn description(&self) -> &str {
-        "Check and configure a remote Coven Code environment"
-    }
-    fn usage(&self) -> &str {
-        "coven-code remote-setup"
-    }
-
-    fn execute_named(&self, _args: &[&str], ctx: &CommandContext) -> CommandResult {
-        use std::net::ToSocketAddrs;
-
-        let mut steps = Vec::new();
-        let provider_id = ctx.config.selected_provider_id();
-        let provider_name = provider_id.replace('-', " ");
-        let credential_hint = claurst_core::config::api_key_env_vars_for_provider(provider_id);
-        let credentials_required = !matches!(
-            provider_id,
-            "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" | "llama-server"
-        );
-        let credential_help = if credential_hint.is_empty() {
-            format!("configure an API key for {provider_name} in settings")
-        } else {
-            format!(
-                "set {} or configure apiKey in settings",
-                credential_hint.join(" / ")
-            )
-        };
-
-        // Step 1: Check provider credentials
-        let has_api_key = !credentials_required || ctx.config.resolve_api_key().is_some();
-        steps.push(format!(
-            "{} {} credentials {}",
-            if has_api_key { "\u{2713}" } else { "\u{2717}" },
-            provider_name,
-            if !credentials_required {
-                "are not required for this provider".to_string()
-            } else if has_api_key {
-                "are configured".to_string()
-            } else {
-                format!("are NOT configured — {credential_help}")
-            }
-        ));
-
-        // Step 2: Check SSH agent forwarding (check SSH_AUTH_SOCK)
-        let has_ssh_agent = std::env::var("SSH_AUTH_SOCK").is_ok();
-        steps.push(format!(
-            "{} SSH agent forwarding {}",
-            if has_ssh_agent {
-                "\u{2713}"
-            } else {
-                "\u{25cb}"
-            },
-            if has_ssh_agent {
-                "detected".to_string()
-            } else {
-                "not detected (optional \u{2014} needed for git over SSH)".to_string()
-            }
-        ));
-
-        // Step 3: Check coven-code config dir exists
-        let config_dir = claurst_core::config::Settings::config_dir();
-        let has_config = config_dir.exists();
-        steps.push(format!(
-            "{} Coven Code config dir {}",
-            if has_config { "\u{2713}" } else { "\u{2717}" },
-            if has_config {
-                format!("exists at {}", config_dir.display())
-            } else {
-                "missing \u{2014} run 'coven-code' once to initialize".to_string()
-            }
-        ));
-
-        // Step 4: Check provider endpoint reachability
-        let api_base = ctx.config.resolve_api_base();
-        let (net_ok, net_target) = if let Ok(parsed) = reqwest::Url::parse(&api_base) {
-            if let Some(host) = parsed.host_str() {
-                let port = parsed.port_or_known_default().unwrap_or(443);
-                let target = format!("{host}:{port}");
-                let resolved = (host, port)
-                    .to_socket_addrs()
-                    .map(|mut addrs| addrs.next().is_some())
-                    .unwrap_or(false);
-                (resolved, target)
-            } else {
-                (false, api_base.clone())
-            }
-        } else {
-            (false, api_base.clone())
-        };
-        steps.push(format!(
-            "{} Network connectivity {}",
-            if net_ok { "\u{2713}" } else { "\u{2717}" },
-            if net_ok {
-                format!("to {net_target}")
-            } else {
-                format!("FAILED \u{2014} check access to {net_target}")
-            }
-        ));
-
-        let all_ok = has_api_key && has_config && net_ok;
-
-        CommandResult::Message(format!(
-            "Remote Setup Checklist\n\n\
-             {}\n\n\
-             {}",
-            steps.join("\n"),
-            if all_ok {
-                "\u{2713} All checks passed. Coven Code is ready for remote use.\nStart a session: coven-code --bridge"
-            } else {
-                "\u{2717} Some checks failed. Fix the issues above and run 'coven-code remote-setup' again."
-            }
-        ))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // stickers
 // ---------------------------------------------------------------------------
-
-pub struct StickersCommand;
-
-impl NamedCommand for StickersCommand {
-    fn name(&self) -> &str {
-        "stickers"
-    }
-    fn description(&self) -> &str {
-        "Open the Coven Code sticker page in your browser"
-    }
-    fn usage(&self) -> &str {
-        "coven-code stickers"
-    }
-
-    fn execute_named(&self, _args: &[&str], _ctx: &CommandContext) -> CommandResult {
-        let url = "https://www.stickermule.com/claudecode";
-        match open::that(url) {
-            Ok(_) => CommandResult::Message(format!("Opening stickers page: {url}")),
-            Err(e) => {
-                CommandResult::Message(format!("Visit: {url}\n(Could not open browser: {e})"))
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ultraplan — Agentic planning with extended thinking
@@ -1391,14 +998,8 @@ static NAMED_COMMANDS: Lazy<Vec<Box<dyn NamedCommand>>> = Lazy::new(|| {
         Box::new(AddDirCommand),
         Box::new(BranchCommand),
         Box::new(TagCommand),
-        Box::new(PassesCommand),
         Box::new(IdeCommand),
         Box::new(PrCommentsCommand),
-        Box::new(DesktopCommand),
-        Box::new(MobileCommand),
-        Box::new(InstallGithubAppCommand),
-        Box::new(RemoteSetupCommand),
-        Box::new(StickersCommand),
         Box::new(UltraplanCommand),
         Box::new(crate::StatsCommand),
     ]
@@ -1471,7 +1072,6 @@ mod tests {
         assert!(find_named_command("agents").is_some());
         assert!(find_named_command("ide").is_some());
         assert!(find_named_command("branch").is_some());
-        assert!(find_named_command("passes").is_some());
     }
 
     #[test]
@@ -1603,13 +1203,5 @@ mod tests {
             CommandResult::Error(_) | CommandResult::Message(_) => {}
             other => panic!("Unexpected result: {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_install_github_app_returns_message() {
-        let ctx = make_ctx();
-        let cmd = InstallGithubAppCommand;
-        let result = cmd.execute_named(&[], &ctx);
-        assert!(matches!(result, CommandResult::Message(_)));
     }
 }
