@@ -287,6 +287,8 @@ pub struct NamedCommandAdapter {
     pub slash_aliases: &'static [&'static str],
     pub slash_description: &'static str,
     pub slash_help: &'static str,
+    /// One-release compatibility aliases for folded commands (issue #73).
+    pub slash_hidden: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1984,10 +1986,13 @@ impl SlashCommand for UsageCommand {
         "Show API usage, quotas, and rate limit status"
     }
     fn help(&self) -> &str {
-        "Usage: /usage [cost|context]\n\n\
+        "Usage: /usage [cost|context|stats]\n\n\
          Shows current session API usage and account quota information.\n\
-         Use /usage cost for the session cost breakdown or /usage context for context-window details.\n\
-         The legacy /cost and /context commands remain hidden compatibility aliases."
+         Use /usage cost for the session cost breakdown, /usage context for\n\
+         context-window details, or /usage stats for the detailed statistics\n\
+         view (opens the stats dialog in the TUI).\n\
+         The legacy /cost, /context, and /stats commands remain hidden\n\
+         compatibility aliases."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1998,9 +2003,10 @@ impl SlashCommand for UsageCommand {
             "" | "summary" | "quota" | "status" => {}
             "cost" | "costs" => return CostCommand.execute(rest, ctx).await,
             "context" | "window" => return ContextCommand.execute(rest, ctx).await,
+            "stats" => return StatsCommand.execute(rest, ctx).await,
             other => {
                 return CommandResult::Error(format!(
-                    "Unknown usage view '{}'. Use: /usage [cost|context]",
+                    "Unknown usage view '{}'. Use: /usage [cost|context|stats]",
                     other
                 ))
             }
@@ -7447,6 +7453,10 @@ impl SlashCommand for NamedCommandAdapter {
         self.slash_help
     }
 
+    fn hidden(&self) -> bool {
+        self.slash_hidden
+    }
+
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         execute_named_command_from_slash(self.target_name, args, ctx)
     }
@@ -7868,11 +7878,33 @@ impl SlashCommand for AgentCommand {
         "List available agents or get info about a specific agent"
     }
     fn help(&self) -> &str {
-        "Usage: /agent [name]\n\nWithout arguments, lists all available named agents.\nWith a name, shows details for that agent.\n\nTo use an agent, start Coven Code with: --agent <name>"
+        "Usage: /agent [name] | /agent [list|create|edit|delete|reset] [name] | /agent managed ...\n\n\
+         Without arguments, lists all available named agents.\n\
+         With a name, shows details for that agent.\n\n\
+         Management subcommands (absorbing the former /agents):\n\
+           /agent list|create|edit|delete|reset [name]\n\
+         Managed-agent architecture (absorbing the former /managed-agents):\n\
+           /agent managed ...\n\n\
+         To use an agent, start Coven Code with: --agent <name>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use std::collections::HashMap;
+
+        // Subcommands absorbed from the former /agents and /managed-agents
+        // commands (issue #73); both stay as hidden one-release aliases.
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
+        match head {
+            "list" | "create" | "edit" | "delete" | "reset" => {
+                return execute_named_command_from_slash("agents", trimmed, ctx);
+            }
+            "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
+            _ => {}
+        }
 
         // Merge built-in defaults with user-defined agents (user wins on collision).
         let mut all_agents: HashMap<String, claurst_core::AgentDefinition> =
@@ -8115,6 +8147,9 @@ impl SlashCommand for FamiliarCommand {
 impl SlashCommand for ManagedAgentsCommand {
     fn name(&self) -> &str {
         "managed-agents"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Configure and manage the manager-executor agent architecture"
@@ -9258,13 +9293,15 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Add a directory to Coven Code's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
+            slash_hidden: false,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "agents",
             target_name: "agents",
             slash_aliases: &[],
             slash_description: "Manage and configure sub-agents",
-            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]",
+            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]\nDeprecated: use /agent [list|create|edit|delete|reset|managed]",
+            slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "branch",
@@ -9272,6 +9309,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Create a branch of the current conversation at this point",
             slash_help: "Usage: /branch [create|switch|list] [name]",
+            slash_hidden: false,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "tag",
@@ -9279,6 +9317,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Toggle a searchable tag on the current session",
             slash_help: "Usage: /tag [list|add|remove] [tag]",
+            slash_hidden: false,
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
@@ -9286,6 +9325,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",
             slash_help: "Usage: /pr-comments <PR-number>",
+            slash_hidden: false,
         }),
         // Batch-1 new commands
         Box::new(ContextCommand),
@@ -9694,6 +9734,54 @@ mod tests {
                 "{name} should not be a visible primary command"
             );
         }
+    }
+
+    #[test]
+    fn phase_three_legacy_commands_are_hidden_but_callable() {
+        let hidden_legacy = ["agents", "managed-agents"];
+
+        for name in hidden_legacy {
+            let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
+            assert!(
+                command.hidden(),
+                "{name} should stay callable as a hidden one-release compatibility alias"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_stats_subcommand_routes_to_stats() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let command = find_command("usage").unwrap();
+        let result = command.execute("stats", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.contains("Session Statistics") || message.contains("oken"))
+            }
+            other => panic!("expected stats message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_command_absorbs_agents_and_managed() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let command = find_command("agent").unwrap();
+
+        // /agent list routes to the named agents command.
+        let result = command.execute("list", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::Message(_)),
+            "/agent list should route to the named agents command"
+        );
+
+        // /agent managed routes to the managed-agents surface.
+        let result = command.execute("managed", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/agent managed should route to the managed-agents surface"
+        );
     }
 
     #[tokio::test]
@@ -10248,7 +10336,7 @@ mod tests {
         //  - stats: intercepted directly by the TUI to open the live stats
         //    dialog; the named CLI `stats` command handles aggregate saved
         //    session reports outside the TUI.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "stats"];
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
 
         let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
             .iter()

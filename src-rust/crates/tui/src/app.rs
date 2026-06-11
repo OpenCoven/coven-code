@@ -57,8 +57,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Add an extra workspace root to the active session",
     ),
     ("advisor", "Set or unset the server-side advisor model"),
-    ("agent", "List available familiars or show familiar details"),
-    ("agents", "Browse familiar definitions and active familiars"),
+    (
+        "agent",
+        "List, inspect, and manage familiars and managed agents",
+    ),
     ("branch", "Create or switch session branches"),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
@@ -105,10 +107,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("keybindings", "Show keybinding configuration"),
     ("login", "Log in to Coven Code"),
     ("logout", "Log out of Coven Code"),
-    (
-        "managed-agents",
-        "Configure manager-executor managed agent system",
-    ),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
@@ -143,7 +141,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("skills", "List and manage skills"),
     ("status", "Show the current session status"),
-    ("stats", "Open the interactive session statistics dialog"),
     ("survey", "Open session feedback survey"),
     ("switch", "Switch the active account for a provider"),
     ("tag", "Tag the current session with a label"),
@@ -156,10 +153,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("thinking", "Configure extended thinking for the session"),
     (
         "update",
-        "Check for updates and upgrade to the latest version",
-    ),
-    (
-        "upgrade",
         "Check for updates and upgrade to the latest version",
     ),
     ("usage", "Detailed per-call token usage breakdown"),
@@ -2460,9 +2453,7 @@ impl App {
         };
         match (cmd, sub, sub_rest) {
             ("usage", "stats", _) => return self.intercept_slash_command("stats"),
-            ("config" | "settings", "theme", "") => {
-                return self.intercept_slash_command("theme")
-            }
+            ("config" | "settings", "theme", "") => return self.intercept_slash_command("theme"),
             ("config" | "settings", "keybindings", _) => {
                 return self.intercept_slash_command("keybindings")
             }
