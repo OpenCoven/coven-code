@@ -272,11 +272,11 @@ export function registerDemos(Alpine) {
         { id: '/insights', category: 'Memory & Cost', desc: 'Session statistics and tool usage report' },
         { id: '/status', category: 'Memory & Cost', desc: 'Connection and daemon status' },
         // Agents & Tasks
-        { id: '/agent list', category: 'Agents & Tasks', desc: 'List built-in, custom, and familiar agents' },
-        { id: '/agent', category: 'Agents & Tasks', desc: 'Switch active agent for this session' },
+        { id: '/familiar list', category: 'Agents & Tasks', desc: 'List built-in, custom, and familiar agents' },
+        { id: '/familiar', category: 'Agents & Tasks', desc: 'Your familiar & agents — switch, inspect, manage' },
         { id: '/tasks', category: 'Agents & Tasks', desc: 'Show the live task list' },
         { id: '/goal', category: 'Agents & Tasks', desc: 'Set an autonomous multi-turn goal' },
-        { id: '/agent managed', category: 'Agents & Tasks', desc: 'Configure manager-executor agents' },
+        { id: '/familiar managed', category: 'Agents & Tasks', desc: 'Configure manager-executor agents' },
         { id: '/plan', category: 'Agents & Tasks', desc: 'Enter planning mode (read-only)' },
         { id: '/ultraplan', category: 'Agents & Tasks', desc: 'Deep planning mode' },
         { id: '/ultrareview', category: 'Agents & Tasks', desc: 'Exhaustive multi-dimensional code review' },
@@ -294,7 +294,6 @@ export function registerDemos(Alpine) {
         { id: '/stickers', category: 'Display', desc: 'Toggle sticker rendering' },
         // Coven
         { id: '/coven', category: 'Coven', desc: 'Substrate surface: kill, log, send, familiars, etc.' },
-        { id: '/familiar', category: 'Coven', desc: 'Switch active familiar (also F2)' },
         { id: '/handoff', category: 'Coven', desc: 'Hand off a session between familiars' },
         // Diagnostics
         { id: '/status doctor', category: 'Diagnostics', desc: 'Environment and substrate health check' },

@@ -275,7 +275,6 @@ pub struct CheckpointsCommand;
 pub struct SnapshotDiffCommand;
 pub struct ProvidersCommand;
 pub struct ConnectCommand;
-pub struct AgentCommand;
 pub struct FamiliarCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
@@ -478,28 +477,11 @@ fn execute_named_command_from_slash(
 
 // ---- /help ---------------------------------------------------------------
 
-/// Category labels for help grouping.
+/// Category labels for help grouping. Delegates to the canonical
+/// categorization in `claurst-tui` so the `/help` text output, the F1 help
+/// overlay, and the command palette all group commands identically.
 fn command_category(name: &str) -> &'static str {
-    match name {
-        "clear" | "compact" | "rewind" | "undo" | "revert" | "export" | "branch" | "fork" => {
-            "Conversation"
-        }
-        "model" | "config" | "theme" | "color" | "vim" | "fast" | "effort" | "voice"
-        | "statusline" | "output-style" | "keybindings" | "sandbox" => "Settings",
-        "cost" | "usage" | "context" => "Usage & Cost",
-        "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
-        "login" | "logout" | "switch" | "refresh" | "permissions" => "Auth & Permissions",
-        "memory" | "diff" | "init" | "commit" | "review" | "import-config" => "Project",
-        "mcp" | "hooks" | "chrome" => "Integrations",
-        "session" | "resume" | "search" | "share" => "Sessions & Remote",
-        "help" | "exit" | "feedback" | "bug" => "General",
-        "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
-        "copy" | "skills" | "agents" | "plugin" | "reload-plugins" | "whisper" | "incant" => {
-            "Tools & Extras"
-        }
-        "coven" | "familiar" | "agent" | "managed-agents" => "Coven",
-        _ => "Other",
-    }
+    claurst_tui::app::slash_command_category(name)
 }
 
 #[async_trait]
@@ -558,6 +540,7 @@ impl SlashCommand for HelpCommand {
             "Sessions & Remote",
             "AI & Thinking",
             "Tools & Extras",
+            "Coven",
             "General",
             "Other",
         ];
@@ -8031,126 +8014,135 @@ impl SlashCommand for ConnectCommand {
     }
 }
 
-// ---- /agent ---------------------------------------------------------------
-
-#[async_trait]
-impl SlashCommand for AgentCommand {
-    fn name(&self) -> &str {
-        "agent"
-    }
-    fn description(&self) -> &str {
-        "List available agents or get info about a specific agent"
-    }
-    fn help(&self) -> &str {
-        "Usage: /agent [name] | /agent [list|create|edit|delete|reset] [name] | /agent managed ...\n\n\
-         Without arguments, lists all available named agents.\n\
-         With a name, shows details for that agent.\n\n\
-         Management subcommands (absorbing the former /agents):\n\
-           /agent list|create|edit|delete|reset [name]\n\
-         Managed-agent architecture (absorbing the former /managed-agents):\n\
-           /agent managed ...\n\n\
-         To use an agent, start Coven Code with: --agent <name>"
-    }
-
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        use std::collections::HashMap;
-
-        // Subcommands absorbed from the former /agents and /managed-agents
-        // commands (issue #73); both stay as hidden one-release aliases.
-        let trimmed = args.trim();
-        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-            Some((h, r)) => (h, r.trim()),
-            None => (trimmed, ""),
-        };
-        match head {
-            "list" | "create" | "edit" | "delete" | "reset" => {
-                return execute_named_command_from_slash("agents", trimmed, ctx);
-            }
-            "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
-            _ => {}
-        }
-
-        // Merge built-in defaults with user-defined agents (user wins on collision).
-        let mut all_agents: HashMap<String, claurst_core::AgentDefinition> =
-            claurst_core::default_agents();
-        all_agents.extend(ctx.config.agents.clone());
-
-        let agent_name = args.trim();
-
-        if agent_name.is_empty() {
-            // List all visible agents.
-            let mut keys: Vec<&String> = all_agents
-                .iter()
-                .filter(|(_, d)| d.visible)
-                .map(|(k, _)| k)
-                .collect();
-            keys.sort();
-
-            let mut output = "Available agents:\n\n".to_string();
-            for name in keys {
-                let def = &all_agents[name];
-                output.push_str(&format!(
-                    "  @{} — {}\n    access: {}{}\n",
-                    name,
-                    def.description.as_deref().unwrap_or(""),
-                    def.access,
-                    def.max_turns
-                        .map(|t| format!(", max_turns: {}", t))
-                        .unwrap_or_default(),
-                ));
-            }
-            output.push_str("\nUse --agent <name> when starting Coven Code to activate an agent.");
-            CommandResult::Message(output)
-        } else if let Some(def) = all_agents.get(agent_name) {
-            // Show details for the named agent.
-            let mut output = format!("Agent: @{}\n", agent_name);
-            if let Some(ref desc) = def.description {
-                output.push_str(&format!("Description: {}\n", desc));
-            }
-            output.push_str(&format!("Access: {}\n", def.access));
-            if let Some(ref model) = def.model {
-                output.push_str(&format!("Model: {}\n", model));
-            }
-            if let Some(t) = def.max_turns {
-                output.push_str(&format!("Max turns: {}\n", t));
-            }
-            if let Some(ref color) = def.color {
-                output.push_str(&format!("Color: {}\n", color));
-            }
-            if let Some(ref prompt) = def.prompt {
-                output.push_str(&format!("\nSystem prompt prefix:\n  {}\n", prompt));
-            }
-            output.push_str(&format!("\nTo activate: coven-code --agent {}", agent_name));
-            CommandResult::Message(output)
-        } else {
-            CommandResult::Error(format!(
-                "Unknown agent '{}'. Run /agent to see available agents.",
-                agent_name
-            ))
-        }
-    }
-}
-
-// ---- /familiar -----------------------------------------------------------
+// ---- /familiar — unified familiar & agent surface -------------------------
 //
-// Sets the active familiar — updates settings.json AND live-swaps app.config
-// so the mascot changes immediately without restart.
+// Familiars (daemon roster in `~/.coven/familiars.toml`) and agents
+// (built-ins + workspace definitions) resolve through the same runtime
+// agent map — `default_agents_with_familiars_and_config` — so they share a
+// single command. `/familiar` absorbs the former `/agent` (which had
+// absorbed `/agents` and `/managed-agents`, issue #73); `agent` stays as an
+// alias and `/agents` / `/managed-agents` remain hidden one-release shims.
 //
-// Usage:
-//   /familiar          — show current familiar + roster
-//   /familiar <id>     — switch to a saved familiar (persists to settings.json)
-//   /familiar reset    — clear setting
+// Switching updates settings.json AND live-swaps app.config so the mascot
+// changes immediately; the TUI main loop also activates the familiar's
+// agent definition, which re-filters the tool list to its access tier.
 
-/// Return daemon-declared familiars from `~/.coven/familiars.toml`.
-fn current_familiar_roster() -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
+/// Return daemon-declared familiars from `~/.coven/familiars.toml` as
+/// `(id, description, resolved access tier)` rows.
+fn current_familiar_roster() -> Vec<(String, String, &'static str)> {
+    let mut out: Vec<(String, String, &'static str)> = Vec::new();
 
     if let Some(daemon) = claurst_core::coven_shared::load_familiars() {
         for f in daemon {
             let desc = format_daemon_familiar(&f);
-            out.push((f.id, desc));
+            let access = f.resolved_access();
+            out.push((f.id, desc, access));
         }
     }
+    out
+}
+
+/// The true runtime agent map: built-ins, workspace agents, and familiars
+/// merged with the security precedence the query loop actually uses
+/// (reserved built-in and familiar ids cannot be shadowed by settings).
+fn merged_runtime_agents(
+    ctx: &CommandContext,
+) -> std::collections::HashMap<String, claurst_core::AgentDefinition> {
+    claurst_core::coven_shared::default_agents_with_familiars_and_config(&ctx.config.agents)
+}
+
+/// Details for one entry of the runtime agent map, familiar-aware.
+fn format_agent_detail(
+    name: &str,
+    def: &claurst_core::AgentDefinition,
+    roster: &[(String, String, &'static str)],
+) -> String {
+    let is_familiar = roster.iter().any(|(id, _, _)| id == name);
+    let mut output = if is_familiar {
+        format!("Familiar: {}\n", name)
+    } else {
+        format!("Agent: @{}\n", name)
+    };
+    if let Some(ref desc) = def.description {
+        output.push_str(&format!("Description: {}\n", desc));
+    }
+    output.push_str(&format!("Access: {}\n", def.access));
+    if let Some(ref model) = def.model {
+        output.push_str(&format!("Model: {}\n", model));
+    }
+    if let Some(t) = def.max_turns {
+        output.push_str(&format!("Max turns: {}\n", t));
+    }
+    if let Some(ref color) = def.color {
+        output.push_str(&format!("Color: {}\n", color));
+    }
+    if let Some(ref prompt) = def.prompt {
+        output.push_str(&format!("\nSystem prompt prefix:\n  {}\n", prompt));
+    }
+    if is_familiar {
+        output.push_str(&format!("\nActivate: /familiar {}", name));
+    } else {
+        output.push_str(&format!("\nTo activate: coven-code --agent {}", name));
+    }
+    output
+}
+
+/// The bare `/familiar` overview: current familiar, roster (with access
+/// tiers), and the remaining agents from the true runtime map.
+fn familiar_overview(ctx: &CommandContext) -> String {
+    let roster = current_familiar_roster();
+    let from_daemon = claurst_core::coven_shared::coven_home().is_some() && !roster.is_empty();
+    let current = current_familiar_display(ctx.config.familiar.as_deref(), &roster);
+    let auto_hint = infer_familiar_from_env()
+        .map(|f| format!(" (auto-detect suggests: {})", f))
+        .unwrap_or_default();
+
+    let mut out = format!("Current familiar: {}{}\n", current, auto_hint);
+
+    if roster.is_empty() {
+        out.push_str(
+            "\nNo familiars saved. Define them in ~/.coven/familiars.toml (Coven daemon).\n",
+        );
+    } else {
+        let source = if from_daemon {
+            " (from ~/.coven/familiars.toml)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("\nRoster{}:\n", source));
+        for (name, desc, access) in &roster {
+            let marker = if name == current { " ◀" } else { "" };
+            out.push_str(&format!("  {:<8} {}  [{}]{}\n", name, desc, access, marker));
+        }
+    }
+
+    // Agents from the same runtime map, minus roster ids already shown.
+    let agents = merged_runtime_agents(ctx);
+    let roster_ids: std::collections::HashSet<&str> =
+        roster.iter().map(|(id, _, _)| id.as_str()).collect();
+    let mut keys: Vec<&String> = agents
+        .iter()
+        .filter(|(k, d)| d.visible && !roster_ids.contains(k.as_str()))
+        .map(|(k, _)| k)
+        .collect();
+    keys.sort();
+    if !keys.is_empty() {
+        out.push_str("\nAgents:\n");
+        for name in keys {
+            let def = &agents[name];
+            out.push_str(&format!(
+                "  @{:<10} {}  [{}]\n",
+                name,
+                def.description.as_deref().unwrap_or(""),
+                def.access,
+            ));
+        }
+    }
+
+    out.push_str(
+        "\nSwitch familiar: /familiar <name> · Details: /familiar info <name>\n\
+         Manage agents: /familiar list|create|edit|delete · Architecture: /familiar managed",
+    );
     out
 }
 
@@ -8174,10 +8166,10 @@ fn format_daemon_familiar(f: &claurst_core::coven_shared::CovenFamiliar) -> Stri
 
 fn current_familiar_display<'a>(
     configured: Option<&'a str>,
-    roster: &'a [(String, String)],
+    roster: &'a [(String, String, &'static str)],
 ) -> &'a str {
     match configured {
-        Some(current) if roster.iter().any(|(name, _)| name == current) => current,
+        Some(current) if roster.iter().any(|(name, _, _)| name == current) => current,
         _ => "none",
     }
 }
@@ -8209,52 +8201,75 @@ impl SlashCommand for FamiliarCommand {
         "familiar"
     }
     fn description(&self) -> &str {
-        "Set your active familiar — changes the TUI mascot live"
+        "Your familiar & agents — switch persona, inspect, and manage"
     }
     fn aliases(&self) -> Vec<&str> {
-        vec!["familiars"]
+        vec!["familiars", "agent"]
     }
     fn help(&self) -> &str {
-        "Usage: /familiar [name|reset|auto]\n\n\
-         Without arguments, shows the current familiar and roster.\n\
-         With a saved familiar name,\n\
-         switches immediately and persists to settings.json.\n\n\
-         /familiar reset  — clear the familiar setting\n\
-         /familiar auto   — infer from your system username\n\n\
-         Or set \"familiar\" to a saved roster id directly in ~/.coven-code/settings.json."
+        "Usage: /familiar [name | info <name> | list|create|edit|delete [name] | managed ... | reset | reset-roster | auto]\n\n\
+         One surface for familiars and agents — both resolve through the same\n\
+         runtime agent map and access-tier security under the hood.\n\n\
+         /familiar                  Current familiar, roster, and agents (with access tiers)\n\
+         /familiar <name>           Switch familiar — persists and applies the persona's\n\
+                                    agent definition + tool access immediately\n\
+         /familiar <agent>          Details for a built-in or workspace agent\n\
+         /familiar info <name>      Details for any familiar or agent\n\
+         /familiar list|create|edit|delete [name]   Manage workspace agents\n\
+         /familiar managed ...      Manager-executor architecture (presets, budget)\n\
+         /familiar reset            Clear the active familiar\n\
+         /familiar reset-roster     Reset saved familiars and workspace agents\n\
+         /familiar auto             Infer your familiar from the system username\n\n\
+         Roster lives in ~/.coven/familiars.toml (Coven daemon). In the TUI,\n\
+         bare /familiar opens the visual menu and F2 is the quick switcher."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let arg = args.trim().to_lowercase();
-        let roster = current_familiar_roster();
-        let from_daemon = claurst_core::coven_shared::coven_home().is_some()
-            && claurst_core::coven_shared::load_familiars().is_some();
+        let trimmed = args.trim();
+        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim()),
+            None => (trimmed, ""),
+        };
 
-        if arg.is_empty() {
-            // Show current + roster.
-            let current = current_familiar_display(ctx.config.familiar.as_deref(), &roster);
-            let auto_hint = infer_familiar_from_env()
-                .map(|f| format!(" (auto-detect suggests: {})", f))
-                .unwrap_or_default();
-            let source = if from_daemon {
-                " (roster from ~/.coven/familiars.toml)"
-            } else {
-                ""
-            };
-            let mut out = format!(
-                "Current familiar: {}{}\n\nRoster{}:\n",
-                current, auto_hint, source
-            );
-            for (name, desc) in &roster {
-                let marker = if name == current { " ◀" } else { "" };
-                out.push_str(&format!("  {:8} {}{}", name, desc, marker));
-                out.push('\n');
+        match head {
+            // Workspace agent management (absorbed from /agents via /agent).
+            "list" | "create" | "edit" | "delete" => {
+                return execute_named_command_from_slash("agents", trimmed, ctx);
             }
-            out.push_str("\nUsage: /familiar <name>  to switch");
-            return CommandResult::Message(out);
+            // Manager-executor architecture (absorbed from /managed-agents).
+            "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
+            // The old `/agents reset` roster wipe. `/familiar reset` clears
+            // the active familiar instead, so the destructive variant gets
+            // an explicit, unambiguous name.
+            "reset-roster" => {
+                return execute_named_command_from_slash("agents", "reset", ctx);
+            }
+            "info" => {
+                if rest.is_empty() {
+                    return CommandResult::Error("Usage: /familiar info <name>".to_string());
+                }
+                let agents = merged_runtime_agents(ctx);
+                let roster = current_familiar_roster();
+                let key = rest.to_lowercase();
+                return match agents.get(&key) {
+                    Some(def) => CommandResult::Message(format_agent_detail(&key, def, &roster)),
+                    None => CommandResult::Error(format!(
+                        "Unknown familiar or agent '{}'. Run /familiar to see what's available.",
+                        rest
+                    )),
+                };
+            }
+            _ => {}
         }
 
-        // Resolve name.
+        let arg = trimmed.to_lowercase();
+        let roster = current_familiar_roster();
+
+        if arg.is_empty() || arg == "status" {
+            return CommandResult::Message(familiar_overview(ctx));
+        }
+
+        // Resolve switch target.
         let target = if arg == "reset" {
             None
         } else if arg == "auto" {
@@ -8267,15 +8282,28 @@ impl SlashCommand for FamiliarCommand {
                     );
                 }
             }
-        } else if roster.iter().any(|(n, _)| n == &arg) {
+        } else if roster.iter().any(|(n, _, _)| n == &arg) {
             Some(arg.clone())
         } else {
-            let names: Vec<&str> = roster.iter().map(|(n, _)| n.as_str()).collect();
-            return CommandResult::Error(format!(
-                "Unknown familiar '{}'. Choose from: {}",
-                arg,
-                names.join(", ")
-            ));
+            // Not a roster familiar — fall back to agent details from the
+            // true runtime map (the old /agent <name> behavior).
+            let agents = merged_runtime_agents(ctx);
+            if let Some(def) = agents.get(&arg) {
+                return CommandResult::Message(format_agent_detail(&arg, def, &roster));
+            }
+            let names: Vec<&str> = roster.iter().map(|(n, _, _)| n.as_str()).collect();
+            return CommandResult::Error(if names.is_empty() {
+                format!(
+                    "Unknown familiar or agent '{}'. Run /familiar to see what's available.",
+                    arg
+                )
+            } else {
+                format!(
+                    "Unknown familiar or agent '{}'. Familiars: {}. Run /familiar for agents.",
+                    arg,
+                    names.join(", ")
+                )
+            });
         };
 
         // Persist to settings.json.
@@ -8284,20 +8312,24 @@ impl SlashCommand for FamiliarCommand {
             return CommandResult::Error(format!("Failed to save familiar: {}", e));
         }
 
-        // Live-swap config so render picks it up immediately.
+        // Live-swap config so render picks it up immediately. The TUI main
+        // loop reacts to the familiar change by activating the matching
+        // agent definition and re-filtering tools to its access tier.
         let mut new_config = ctx.config.clone();
         new_config.familiar = target.clone();
 
         let msg = match &target {
-            Some(name) => format!(
-                "Familiar set to {}. {} ",
-                name,
-                roster
+            Some(name) => {
+                let (desc, access) = roster
                     .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, d)| d.as_str())
-                    .unwrap_or("")
-            ),
+                    .find(|(n, _, _)| n == name)
+                    .map(|(_, d, a)| (d.as_str(), *a))
+                    .unwrap_or(("", claurst_core::coven_shared::DEFAULT_FAMILIAR_ACCESS));
+                format!(
+                    "Familiar set to {} — {} [{}]. Persona and tool access applied.",
+                    name, desc, access
+                )
+            }
             None => "Familiar reset to none.".to_string(),
         };
 
@@ -9469,7 +9501,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             target_name: "agents",
             slash_aliases: &[],
             slash_description: "Manage and configure sub-agents",
-            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]\nDeprecated: use /agent [list|create|edit|delete|reset|managed]",
+            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]\nDeprecated: use /familiar [list|create|edit|delete|reset-roster|managed]",
             slash_hidden: true,
         }),
         Box::new(NamedCommandAdapter {
@@ -9511,8 +9543,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
-        // Named agent system
-        Box::new(AgentCommand),
+        // Unified familiar & agent surface (/familiar, alias /agent)
         Box::new(FamiliarCommand),
         // Session search (SQLite)
         Box::new(SearchCommand),
@@ -10387,6 +10418,110 @@ mod tests {
                 "Could not infer a familiar from USER/USERNAME and the saved roster."
             ),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_alias_resolves_to_unified_familiar_command() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let cmd = find_command("agent").expect("/agent should resolve");
+        assert_eq!(
+            cmd.name(),
+            "familiar",
+            "/agent must be an alias of the unified /familiar command"
+        );
+    }
+
+    #[tokio::test]
+    async fn familiar_info_shows_builtin_agent_with_access_tier() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("info build", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Agent: @build"), "{msg}");
+                assert!(msg.contains("Access: full"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn familiar_bare_name_falls_back_to_agent_details() {
+        // The old /agent <name> behavior: a non-roster name that exists in
+        // the runtime agent map shows details instead of erroring.
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("plan", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Agent: @plan"), "{msg}");
+                assert!(msg.contains("Access: read-only"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn familiar_overview_lists_runtime_agents_with_access() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Current familiar: none"), "{msg}");
+                assert!(msg.contains("@build"), "{msg}");
+                assert!(msg.contains("[full]"), "{msg}");
+                assert!(msg.contains("[read-only]"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn familiar_switch_reports_access_tier_and_persists() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        std::fs::write(
+            guard.coven_home().join("familiars.toml"),
+            "[[familiar]]\nid = \"nova\"\nrole = \"Queen\"\naccess = \"full\"\n",
+        )
+        .expect("write roster");
+
+        let mut ctx = make_ctx();
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("nova", &mut ctx).await;
+        match result {
+            CommandResult::ConfigChangeMessage(cfg, msg) => {
+                assert_eq!(cfg.familiar.as_deref(), Some("nova"));
+                assert!(msg.contains("[full]"), "{msg}");
+            }
+            other => panic!("expected ConfigChangeMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn familiar_roster_shows_resolved_access_tiers() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        std::fs::write(
+            guard.coven_home().join("familiars.toml"),
+            "[[familiar]]\nid = \"sage\"\nrole = \"Research\"\n",
+        )
+        .expect("write roster");
+
+        let mut ctx = make_ctx();
+        let cmd = find_command("familiar").unwrap();
+        let result = cmd.execute("", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                // Access omitted in the roster file → fails closed to read-only,
+                // and the overview must say so.
+                assert!(msg.contains("sage"), "{msg}");
+                assert!(msg.contains("[read-only]"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 

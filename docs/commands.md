@@ -13,7 +13,7 @@ This document is the reference for the visible slash commands available in Coven
 5. [Code & Git](#code--git) — `/commit`, `/diff`, `/review`, `/init`, `/search`
 6. [Search & Files](#search--files)
 7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/status`
-8. [Agents & Tasks](#agents--tasks) — `/agent`, `/tasks`, `/coven goal`
+8. [Agents & Tasks](#agents--tasks) — `/familiar`, `/tasks`, `/coven goal`
 9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
 10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
 11. [Authentication](#authentication) — `/login`, `/logout`
@@ -21,7 +21,7 @@ This document is the reference for the visible slash commands available in Coven
 13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/update`, `/status doctor`
 14. [Export & Sharing](#export--sharing) — `/export`
 15. [Advanced & Internal](#advanced--internal) — `/whisper`, `/sandbox`
-16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`, `/familiar`
+16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`
 17. [Additional Commands](#additional-commands) — feedback, named CLI commands
 18. [Deprecated Aliases](#deprecated-aliases)
 19. [Command Availability](#command-availability)
@@ -579,28 +579,36 @@ See [`/status doctor`](#status-doctor) under Diagnostics & Info for the full dia
 
 ## Agents & Tasks
 
-### /agent
+### /familiar
+**Aliases:** `/familiars`, `/agent`
 
-Browse and manage named agents, saved workspace agents, and Coven familiars. Named agents are predefined configurations with their own system prompts, model bindings, and access levels. Absorbs the former `/agents` command.
+The single surface for familiars and agents. Familiars (from `~/.coven/familiars.toml`) and agents (built-in + workspace) resolve through the same runtime agent map and access-tier security under the hood, so one command covers both. Absorbs the former `/agent` command — which had absorbed `/agents` and `/managed-agents`.
 
 ```
-/agent                          — open the agents/familiars menu
-/agent list                     — list all visible named agents with access levels
-/agent <name>                   — show full details for a specific named agent
-/agent create [name]            — create a new agent
-/agent edit <name>              — edit an existing agent
-/agent delete <name>            — delete an agent
-/agent reset                    — open reset confirmation
-/agent managed ...              — configure manager-executor agents (see below)
-coven-code agents reset         — erase saved user agents and familiar roster
+/familiar                       — open the familiars/agents menu (TUI); text overview elsewhere
+/familiar status                — text overview: current familiar, roster, agents, access tiers
+/familiar <name>                — switch familiar: persists the choice and immediately applies
+                                  the persona's agent definition + tool access tier
+/familiar <agent>               — show details for a built-in or workspace agent
+/familiar info <name>           — show details for any familiar or agent
+/familiar list                  — list all visible named agents with access levels
+/familiar create [name]         — create a new workspace agent
+/familiar edit <name>           — edit an existing workspace agent
+/familiar delete <name>         — delete a workspace agent
+/familiar reset                 — clear the active familiar
+/familiar reset-roster          — erase saved user agents and familiar roster
+/familiar managed ...           — configure manager-executor agents (see below)
+/familiar auto                  — infer your familiar from the system username
 ```
 
-The reset action removes `~/.coven/familiars.toml`, custom `*.md` agent files
+Switching a familiar does three things at once: it changes the TUI mascot, persists the choice to `~/.coven-code/settings.json`, and activates the familiar's agent definition — which re-filters the available tools to the familiar's access tier (`full`, `read-only`, or `search-only`). The F2 key opens a quick switcher with the same semantics.
+
+The `reset-roster` action removes `~/.coven/familiars.toml`, custom `*.md` agent files
 from `~/.coven-code/agents/` and the current workspace's `.coven-code/agents/`,
 and clears `agents`, `familiar`, and `managed_agents` settings. It does not
 remove built-in agents, plugin packages, sessions, credentials, or history.
 
-To activate an agent, start Coven Code with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents.
+To activate an agent at startup, run Coven Code with `--agent <name>`. See [agents.md](./agents.md) for defining custom agents and [familiars.md](./familiars.md) for the familiar concept.
 
 ---
 
@@ -639,28 +647,28 @@ See [Goal System](./advanced.md#goal-system) in the advanced guide.
 
 ---
 
-### /agent managed
+### /familiar managed
 
 Configure the manager-executor agent architecture, where a manager model delegates subtasks to one or more executor agents working in parallel. Includes budget controls and isolation options. Replaces the former `/managed-agents` command.
 
 ```
-/agent managed                                       — show current configuration
-/agent managed status                                — show current configuration
-/agent managed presets                               — list built-in presets
-/agent managed preset <name>                         — apply a named preset
-/agent managed setup                                 — show setup instructions
-/agent managed enable                                — enable managed agents
-/agent managed disable                               — disable managed agents
-/agent managed reset                                 — remove all managed-agent configuration
-/agent managed configure manager-model <model>       — set the manager model
-/agent managed configure executor-model <model>      — set the executor model
-/agent managed configure executor-turns <n>          — set executor max turns
-/agent managed configure concurrent <n>              — set max concurrent executors
-/agent managed configure isolation on|off            — toggle executor isolation
-/agent managed configure budget-split shared         — shared token pool
-/agent managed configure budget-split percentage:<n> — percentage split (manager gets n%)
-/agent managed configure budget-split fixed:<m>:<e>  — fixed USD caps (manager / executor)
-/agent managed budget <amount>                       — set total budget in USD (0 to clear)
+/familiar managed                                       — show current configuration
+/familiar managed status                                — show current configuration
+/familiar managed presets                               — list built-in presets
+/familiar managed preset <name>                         — apply a named preset
+/familiar managed setup                                 — show setup instructions
+/familiar managed enable                                — enable managed agents
+/familiar managed disable                               — disable managed agents
+/familiar managed reset                                 — remove all managed-agent configuration
+/familiar managed configure manager-model <model>       — set the manager model
+/familiar managed configure executor-model <model>      — set the executor model
+/familiar managed configure executor-turns <n>          — set executor max turns
+/familiar managed configure concurrent <n>              — set max concurrent executors
+/familiar managed configure isolation on|off            — toggle executor isolation
+/familiar managed configure budget-split shared         — shared token pool
+/familiar managed configure budget-split percentage:<n> — percentage split (manager gets n%)
+/familiar managed configure budget-split fixed:<m>:<e>  — fixed USD caps (manager / executor)
+/familiar managed budget <amount>                       — set total budget in USD (0 to clear)
 ```
 
 Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`). Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
@@ -1108,17 +1116,15 @@ defined in `~/.coven/familiars.toml`. See
 
 ---
 
-### /familiar
-**Aliases:** `familiars`
+### /familiar (substrate notes)
 
-Set your active familiar — changes the TUI mascot live and updates
-the persona that gets injected into the system prompt when launched
-with `--agent <familiar-id>`.
-
-```
-/familiar               show current familiar
-/familiar <id>          switch to a familiar by id
-```
+`/familiar` is documented in full under
+[Agents & Tasks](#familiar) — it is the unified surface for familiars
+and agents. In substrate terms: switching a familiar changes the TUI
+mascot live, persists the choice, and activates the familiar's agent
+definition (with its access tier) for the session. The roster is read
+from `~/.coven/familiars.toml`; live familiar status comes from the
+daemon when it is running (`/coven familiars`).
 
 Press **F2** at any time to open the familiar switcher popup
 interactively (the welcome screen's status block hints at this).
@@ -1143,7 +1149,7 @@ section above. They are grouped by purpose.
 These run as `coven-code <name>` from the shell. Their old slash
 adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`)
 are now hidden one-release aliases — in the TUI this functionality
-is reached via `/session`, `/agent`, and `/review` (see
+is reached via `/session`, `/familiar`, and `/review` (see
 [Deprecated Aliases](#deprecated-aliases)). `ultraplan` and `stats`
 are CLI-only.
 
@@ -1181,8 +1187,9 @@ The following top-level commands were folded into subcommands. These hidden alia
 | `/output-style` | `/config output-style [style]` |
 | `/import-config` | `/config import` |
 | `/advisor` | `/config advisor [model\|off]` |
-| `/agents` | `/agent [list\|create\|edit\|delete\|reset] [name]` |
-| `/managed-agents` | `/agent managed ...` |
+| `/agent` | `/familiar` (alias; one command for familiars and agents) |
+| `/agents` | `/familiar [list\|create\|edit\|delete] [name]`, `/familiar reset-roster` |
+| `/managed-agents` | `/familiar managed ...` |
 | `/pr-comments` | `/review comments` |
 | `/doctor` | `/status doctor` |
 | `/stats` | `/usage stats` |

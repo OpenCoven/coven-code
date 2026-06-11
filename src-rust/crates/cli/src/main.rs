@@ -2842,7 +2842,26 @@ async fn run_interactive(
                                         // model reset to None means fast mode off.
                                         app.fast_mode = false;
                                     }
+                                    // A familiar switch (/familiar <id>) must also
+                                    // activate the matching agent definition so the
+                                    // persona and its access-tier tool filter apply,
+                                    // not just the mascot.
+                                    let old_familiar = app.config.familiar.clone();
                                     app.config = applied_cfg.clone();
+                                    if applied_cfg.familiar != old_familiar {
+                                        match applied_cfg.familiar.clone() {
+                                            Some(id) => {
+                                                app.apply_familiar_agent_mode(Some(id), None)
+                                            }
+                                            None => {
+                                                // Only step down if the session was
+                                                // running the now-cleared familiar.
+                                                if app.agent_mode == old_familiar {
+                                                    app.apply_familiar_agent_mode(None, None);
+                                                }
+                                            }
+                                        }
+                                    }
                                     session.model = claurst_api::effective_model_for_config(
                                         &cmd_ctx.config,
                                         &model_registry,

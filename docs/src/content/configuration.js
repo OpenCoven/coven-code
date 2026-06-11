@@ -80,7 +80,7 @@ export function render() {
     <p>Set <code>"permission_mode"</code> to one of <code>"default"</code>, <code>"acceptEdits"</code>, <code>"bypassPermissions"</code>, or <code>"plan"</code>. See the <a href="#tools">interactive permission visualizer</a> for what each mode allows, prompts on, and blocks.</p>
 
     <h3>Familiar</h3>
-    <p>Set <code>"familiar"</code> to the id of your active familiar (e.g. <code>"kitty"</code>, <code>"raven"</code>). This drives the welcome-screen portrait and the <code>/agents</code> overlay when the daemon is online.</p>
+    <p>Set <code>"familiar"</code> to the id of your active familiar (e.g. <code>"kitty"</code>, <code>"raven"</code>). This drives the welcome-screen portrait and the <code>/familiar</code> overlay when the daemon is online.</p>
 
     <pre><code data-lang="json">{
   "familiar": "raven",

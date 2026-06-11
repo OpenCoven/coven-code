@@ -69,7 +69,7 @@ impl NamedCommand for AgentsCommand {
                 if defs.is_empty() {
                     return CommandResult::Message(
                         "Available Agents (0)\n\n\
-                         No custom agents defined. Create one with /new-agent\n\
+                         No custom agents defined. Create one with /familiar create <name>\n\
                          or run: coven-code agents create <name>\n\n\
                          No Coven familiars found. Install the Coven daemon to\n\
                          automatically surface familiars here."
@@ -110,12 +110,13 @@ impl NamedCommand for AgentsCommand {
                             .nth(1)
                             .unwrap_or(&def.description)
                             .trim();
+                        let access = def.access.as_deref().unwrap_or("read-only");
                         out.push_str(&format!(
-                            "  \u{2605} {} (id: {})\n    {}\n",
-                            def.name, id, desc_short
+                            "  \u{2605} {} (id: {}, access: {})\n    {}\n",
+                            def.name, id, access, desc_short
                         ));
                     }
-                    out.push_str("\nSwitch active familiar: coven-code agent <name>");
+                    out.push_str("\nSwitch active familiar: /familiar <name>");
                 }
 
                 if user_defs.is_empty() {
