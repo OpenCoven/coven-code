@@ -125,14 +125,18 @@ Fork the current session into a new independent session that begins from the cur
 
 ### /rewind
 
-Rewind the conversation to a previous message. Displays a numbered list of messages; enter a number to truncate history to that point and resume from there.
+Single entry point for going back in time. Without arguments, opens an interactive overlay to pick the message to rewind the conversation to. With arguments, rolls back file changes recorded by the shadow-git snapshot system (absorbing the former `/undo` and `/revert`).
 
 ```
-/rewind
-/rewind <message-index>
+/rewind            — interactive conversation rewind overlay
+/rewind list       — list assistant turns with recorded file changes
+/rewind diff [n]   — preview a turn's diff without reverting
+/rewind last       — revert the most recent assistant turn
+/rewind <n>        — revert the n-th most recent assistant turn
+/rewind <uuid>     — revert the turn whose message id starts with <uuid>
 ```
 
-`/undo` and `/revert` remain available as hidden compatibility commands for one release, but new docs and command discovery route history work through `/rewind`.
+`/undo` and `/revert` remain hidden compatibility aliases for one release.
 
 ---
 
