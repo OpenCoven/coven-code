@@ -961,61 +961,6 @@ pub struct TurnMetadata {
     pub interrupted: bool,
 }
 
-/// State for Ctrl+R history search mode (legacy inline struct, kept for test
-/// compatibility — the overlay version lives in `overlays::HistorySearchOverlay`).
-#[derive(Debug, Clone)]
-pub struct HistorySearch {
-    pub query: String,
-    /// Indices into `input_history` that match the current query.
-    pub matches: Vec<usize>,
-    /// Which match is currently highlighted.
-    pub selected: usize,
-}
-
-impl HistorySearch {
-    pub fn new() -> Self {
-        Self {
-            query: String::new(),
-            matches: Vec::new(),
-            selected: 0,
-        }
-    }
-
-    /// Re-compute matches against the given history slice.
-    pub fn update_matches(&mut self, history: &[String]) {
-        let q = self.query.to_lowercase();
-        self.matches = history
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                if s.to_lowercase().contains(&q) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Clamp selected to valid range
-        if !self.matches.is_empty() && self.selected >= self.matches.len() {
-            self.selected = self.matches.len() - 1;
-        }
-    }
-
-    /// Return the currently selected history entry, if any.
-    pub fn current_entry<'a>(&self, history: &'a [String]) -> Option<&'a str> {
-        self.matches
-            .get(self.selected)
-            .and_then(|&i| history.get(i))
-            .map(String::as_str)
-    }
-}
-
-impl Default for HistorySearch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Attempt to copy text to the system clipboard using trusted platform clipboard helpers.
 /// Returns true if successful.
 pub fn try_copy_to_clipboard(text: &str) -> bool {
@@ -1212,7 +1157,6 @@ pub struct App {
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
     pub spinner_verb: Option<String>,
     pub should_exit: bool,
-    pub show_help: bool,
 
     // Extended state
     pub tool_use_blocks: Vec<ToolUseBlock>,
@@ -1243,7 +1187,6 @@ pub struct App {
     /// and tool list to match the newly-selected agent.
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
-    pub history_search: Option<HistorySearch>,
     pub keybindings: KeybindingResolver,
 
     // Cursor position within input (byte offset)
@@ -1752,7 +1695,6 @@ impl App {
             status_message: None,
             spinner_verb: None,
             should_exit: false,
-            show_help: false,
             tool_use_blocks: Vec::new(),
             permission_request: None,
             frame_count: 0,
@@ -1769,7 +1711,6 @@ impl App {
             agent_mode_changed: false,
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
-            history_search: None,
             keybindings: KeybindingResolver::new(&user_keybindings),
             cursor_pos: 0,
             auto_scroll: true,
@@ -2341,7 +2282,7 @@ impl App {
 
     /// Update the familiar pose for this render frame.
     ///
-    /// The glyph itself is static — this just toggles between `Static` and
+    /// Toggles between `Idle { frame }` (blink/sway idle loop) and
     /// `Loading { frame }` so the eye-spinner kicks in when the assistant has
     /// gone quiet for 3+ seconds. Call once per frame before rendering.
     pub fn tick_companion_pose(&mut self) {
@@ -2355,7 +2296,9 @@ impl App {
                 frame: self.frame_count,
             }
         } else {
-            crate::mascot::CompanionPose::Static
+            crate::mascot::CompanionPose::Idle {
+                frame: self.frame_count,
+            }
         };
     }
 
@@ -2824,7 +2767,6 @@ impl App {
             "help" => {
                 // Open the help overlay (same as pressing `?` or F1).
                 if !self.help_overlay.visible {
-                    self.show_help = true;
                     self.help_overlay.toggle();
                 }
                 true
@@ -2864,9 +2806,7 @@ impl App {
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
             || self.help_overlay.visible
-            || self.show_help
             || self.history_search_overlay.visible
-            || self.history_search.is_some()
             || self.settings_screen.visible
             || self.theme_screen.visible
             || self.stats_dialog.visible
@@ -4497,11 +4437,6 @@ impl App {
             return self.handle_global_search_key(key);
         }
 
-        // Legacy history-search mode intercepts most keys
-        if self.history_search.is_some() {
-            return self.handle_history_search_key(key);
-        }
-
         // Notification dismiss
         if key.code == KeyCode::Esc && !self.notifications.is_empty() {
             self.notifications.dismiss_current();
@@ -4825,13 +4760,8 @@ impl App {
 
             // ---- History search ----------------------------------------
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Open the new overlay-based history search
-                let overlay = HistorySearchOverlay::open(&self.prompt_input.history);
-                self.history_search_overlay = overlay;
-                // Also open legacy for backwards compat
-                let mut hs = HistorySearch::new();
-                hs.update_matches(&self.prompt_input.history);
-                self.history_search = Some(hs);
+                self.history_search_overlay =
+                    HistorySearchOverlay::open(&self.prompt_input.history);
             }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.global_search.open();
@@ -4845,7 +4775,6 @@ impl App {
 
             // ---- Help overlay ------------------------------------------
             KeyCode::F(1) => {
-                self.show_help = !self.show_help;
                 self.help_overlay.toggle();
             }
             KeyCode::F(2) => {
@@ -4875,7 +4804,6 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
-                self.show_help = !self.show_help;
                 self.help_overlay.toggle();
             }
             // With the kitty keyboard protocol, Shift+/ is reported as Char('/') with
@@ -4888,7 +4816,6 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
-                self.show_help = !self.show_help;
                 self.help_overlay.toggle();
             }
 
@@ -5165,12 +5092,10 @@ impl App {
             KeyContext::Confirmation
         } else if self.help_overlay.visible {
             KeyContext::Help
-        } else if self.history_search_overlay.visible || self.history_search.is_some() {
+        } else if self.history_search_overlay.visible {
             KeyContext::HistorySearch
         } else if self.permission_request.is_some() {
             KeyContext::Confirmation
-        } else if self.show_help {
-            KeyContext::Help
         } else {
             KeyContext::Chat
         }
@@ -5362,7 +5287,6 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::F(1) => {
                 self.help_overlay.close();
-                self.show_help = false;
             }
             KeyCode::Char('?')
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -5370,7 +5294,6 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
                 self.help_overlay.close();
-                self.show_help = false;
             }
             KeyCode::Up => {
                 self.help_overlay.scroll_up();
@@ -5394,7 +5317,6 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.history_search_overlay.close();
-                self.history_search = None;
             }
             KeyCode::Enter => {
                 if let Some(entry) = self
@@ -5404,37 +5326,16 @@ impl App {
                     self.set_prompt_text(entry.to_string());
                 }
                 self.history_search_overlay.close();
-                self.history_search = None;
             }
             KeyCode::Up => {
                 self.history_search_overlay.select_prev();
-                if let Some(hs) = self.history_search.as_mut() {
-                    let count = hs.matches.len();
-                    if count > 0 {
-                        if hs.selected == 0 {
-                            hs.selected = count - 1;
-                        } else {
-                            hs.selected -= 1;
-                        }
-                    }
-                }
             }
             KeyCode::Down => {
                 self.history_search_overlay.select_next();
-                if let Some(hs) = self.history_search.as_mut() {
-                    let count = hs.matches.len();
-                    if count > 0 {
-                        hs.selected = (hs.selected + 1) % count;
-                    }
-                }
             }
             KeyCode::Backspace => {
                 let history = self.prompt_input.history.clone();
                 self.history_search_overlay.pop_char(&history);
-                if let Some(hs) = self.history_search.as_mut() {
-                    hs.query.pop();
-                    hs.update_matches(&history);
-                }
             }
             // 'p' with no modifiers and an empty query = pin/unpin the selected entry.
             // When the query is non-empty 'p' is treated as a filter character so
@@ -5449,10 +5350,6 @@ impl App {
                 let c = normalize_char_with_shift(c, key.modifiers);
                 let history = self.prompt_input.history.clone();
                 self.history_search_overlay.push_char(c, &history);
-                if let Some(hs) = self.history_search.as_mut() {
-                    hs.query.push(c);
-                    hs.update_matches(&history);
-                }
             }
             _ => {}
         }
@@ -5593,11 +5490,8 @@ impl App {
             }
             "redraw" => false,
             "historySearch" => {
-                let overlay = HistorySearchOverlay::open(&self.prompt_input.history);
-                self.history_search_overlay = overlay;
-                let mut hs = HistorySearch::new();
-                hs.update_matches(&self.prompt_input.history);
-                self.history_search = Some(hs);
+                self.history_search_overlay =
+                    HistorySearchOverlay::open(&self.prompt_input.history);
                 false
             }
             "openSearch" => {
@@ -5722,47 +5616,30 @@ impl App {
                 false
             }
             "close" => {
-                self.show_help = false;
                 self.help_overlay.close();
                 false
             }
             "select" => {
-                // Legacy history search select
-                if let Some(hs) = self.history_search.as_ref() {
-                    if let Some(entry) = hs.current_entry(&self.prompt_input.history) {
+                if self.history_search_overlay.visible {
+                    if let Some(entry) = self
+                        .history_search_overlay
+                        .current_entry(&self.prompt_input.history)
+                    {
                         self.set_prompt_text(entry.to_string());
                     }
                 }
-                self.history_search = None;
                 self.history_search_overlay.close();
                 false
             }
             "cancel" => {
-                self.history_search = None;
                 self.history_search_overlay.close();
                 false
             }
             "prevResult" => {
-                if let Some(hs) = self.history_search.as_mut() {
-                    let count = hs.matches.len();
-                    if count > 0 {
-                        if hs.selected == 0 {
-                            hs.selected = count - 1;
-                        } else {
-                            hs.selected -= 1;
-                        }
-                    }
-                }
                 self.history_search_overlay.select_prev();
                 false
             }
             "nextResult" => {
-                if let Some(hs) = self.history_search.as_mut() {
-                    let count = hs.matches.len();
-                    if count > 0 {
-                        hs.selected = (hs.selected + 1) % count;
-                    }
-                }
                 self.history_search_overlay.select_next();
                 false
             }
@@ -5829,7 +5706,6 @@ impl App {
             }
             "openHelp" => {
                 // Alt+H: Open help (alternative to F1)
-                self.show_help = !self.show_help;
                 self.help_overlay.toggle();
                 false
             }
@@ -5880,59 +5756,6 @@ impl App {
             }
             _ => false,
         }
-    }
-
-    /// Handle a key event while in legacy history-search mode.
-    fn handle_history_search_key(&mut self, key: KeyEvent) -> bool {
-        let hs = match self.history_search.as_mut() {
-            Some(h) => h,
-            None => return false,
-        };
-        match key.code {
-            KeyCode::Esc => {
-                self.history_search = None;
-                self.history_search_overlay.close();
-            }
-            KeyCode::Enter => {
-                if let Some(entry) = hs.current_entry(&self.prompt_input.history) {
-                    self.set_prompt_text(entry.to_string());
-                }
-                self.history_search = None;
-                self.history_search_overlay.close();
-            }
-            KeyCode::Up => {
-                let count = hs.matches.len();
-                if count > 0 {
-                    if hs.selected == 0 {
-                        hs.selected = count - 1;
-                    } else {
-                        hs.selected -= 1;
-                    }
-                }
-            }
-            KeyCode::Down => {
-                let count = hs.matches.len();
-                if count > 0 {
-                    hs.selected = (hs.selected + 1) % count;
-                }
-            }
-            KeyCode::Backspace => {
-                hs.query.pop();
-                let history = self.prompt_input.history.clone();
-                if let Some(hs) = self.history_search.as_mut() {
-                    hs.update_matches(&history);
-                }
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                hs.query.push(c);
-                let history = self.prompt_input.history.clone();
-                if let Some(hs) = self.history_search.as_mut() {
-                    hs.update_matches(&history);
-                }
-            }
-            _ => {}
-        }
-        false
     }
 
     /// Handle a key event while a permission dialog is active.
@@ -6335,7 +6158,6 @@ impl App {
         !self.is_streaming
             && self.permission_request.is_none()
             && !self.history_search_overlay.visible
-            && self.history_search.is_none()
             && !matches!(
                 self.prompt_input.vim_mode,
                 crate::prompt_input::VimMode::Normal
@@ -6418,7 +6240,6 @@ impl App {
             && self.permission_request.is_none()
             && !self.ask_user_dialog.visible
             && !self.history_search_overlay.visible
-            && self.history_search.is_none()
             && !self.settings_screen.visible
             && !self.theme_screen.visible
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
@@ -7315,8 +7136,7 @@ impl App {
                     Event::Paste(data)
                         if !self.is_streaming
                             && self.permission_request.is_none()
-                            && !self.history_search_overlay.visible
-                            && self.history_search.is_none() =>
+                            && !self.history_search_overlay.visible =>
                     {
                         self.handle_paste_data(data);
                         self.refresh_prompt_input();
@@ -8016,11 +7836,9 @@ role = "Research"
     fn test_help_slash_command_opens_overlay() {
         let mut app = make_app();
         assert!(!app.help_overlay.visible);
-        assert!(!app.show_help);
         assert!(!app.help_overlay.commands.is_empty());
         assert!(app.intercept_slash_command("help"));
         assert!(app.help_overlay.visible);
-        assert!(app.show_help);
     }
 
     #[test]
@@ -8041,19 +7859,16 @@ role = "Research"
         app.handle_key_event(press_key(KeyCode::Char('?'), KeyModifiers::SHIFT));
 
         assert!(app.help_overlay.visible);
-        assert!(app.show_help);
     }
 
     #[test]
     fn test_question_mark_shortcut_closes_help_with_shift_modifier() {
         let mut app = make_app();
         app.help_overlay.toggle();
-        app.show_help = true;
 
         app.handle_key_event(press_key(KeyCode::Char('?'), KeyModifiers::SHIFT));
 
         assert!(!app.help_overlay.visible);
-        assert!(!app.show_help);
     }
 
     #[test]

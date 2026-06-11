@@ -5,14 +5,12 @@
 //! determines which glyph renders in the welcome screen top-left, the F2
 //! switcher, and the `/agents` detail view.
 //!
-//! The glyph itself is **static** — no walking, no idle blink, no
-//! Tab-triggered look-down. The only motion is the loading spinner that
-//! rotates inside the eye row when the assistant is mid-turn and stalled.
-//! That motion lives in [`loading_eye_spans`]. Everything else is one
-//! frame for one pose.
+//! The glyph has subtle idle motion (blink/spark frames) plus a loading
+//! spinner that rotates inside the eye row when the assistant is mid-turn
+//! and stalled. Loading motion lives in [`loading_eye_spans`].
 //!
 //! Public surface:
-//! - [`CompanionPose`] — `Static` for the resting glyph, `Loading { frame }` for the spinner.
+//! - [`CompanionPose`] — `Static`, `Idle { frame }`, or `Loading { frame }`.
 //! - [`archetype_lines`] — palette-aware glyph dispatcher used by [`crate::familiar_card`].
 //! - [`mascot_lines_for`] — legacy entry point preserved for callers that still
 //!   pass a familiar slug; it routes through the theme/card path internally.
@@ -39,11 +37,14 @@ use ratatui::text::{Line, Span};
 
 /// Pose / expression of the companion mascot.
 ///
-/// Static is the resting frame. Loading carries a monotonically-increasing
-/// frame counter that drives the eye-spinner animation.
+/// Static is the resting frame, used by surfaces that never animate (F2
+/// switcher rows, `/agents` detail view). Idle and Loading carry a
+/// monotonically-increasing frame counter: Idle drives the blink/sway idle
+/// loop, Loading drives the eye-spinner animation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompanionPose {
     Static,
+    Idle { frame: u64 },
     Loading { frame: u64 },
 }
 
@@ -73,6 +74,19 @@ fn eyeball_style(palette: &FamiliarPalette) -> Style {
         .fg(Color::White)
         .bg(palette.eye_bg)
         .add_modifier(Modifier::BOLD)
+}
+
+// The event loop ticks at roughly 10 fps, so the 120-frame idle cycle is
+// about 12 seconds: the glyph sways one column to the right for the second
+// half of each cycle, and blinks (or sparks, for familiars without eyes)
+// briefly inside that window.
+
+fn idle_blink(frame: u64) -> bool {
+    matches!(frame % 120, 90..=95)
+}
+
+fn idle_sway(frame: u64) -> bool {
+    matches!(frame % 120, 60..=119)
 }
 
 // ── Eye helpers ───────────────────────────────────────────────────────────────
@@ -162,7 +176,11 @@ fn kitty_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static
         body_style(palette),
     ));
     let row2 = match pose {
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2590}\u{2500}   \u{2500}\u{2590}\u{258c} ".to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2590}\u{25c8}   \u{25c8}\u{2590}\u{258c} ".to_string(),
             body_style(palette),
         )),
@@ -202,7 +220,11 @@ fn nova_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static>
                 body_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2597}\u{2584}\u{2726}\u{2584}\u{2597}\u{2596}    ".to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2597}\u{2584}\u{265b}\u{2584}\u{2597}\u{2596}    ".to_string(),
             body_style(palette),
         )),
@@ -233,7 +255,11 @@ fn cody_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static>
                 body_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2584}\u{2584}[\u{2500} \u{2500}]\u{2584}  ".to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2584}\u{2584}[\u{25c8} \u{25c8}]\u{2584}  ".to_string(),
             body_style(palette),
         )),
@@ -264,7 +290,12 @@ fn charm_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static
                 body_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2726}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2726} "
+                .to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588} "
                 .to_string(),
             body_style(palette),
@@ -304,7 +335,11 @@ fn sage_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static>
                 body_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2590}~~\u{253c}~~\u{258c}   ".to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2590}\u{2500}\u{2500}\u{253c}\u{2500}\u{2500}\u{258c}   ".to_string(),
             body_style(palette),
         )),
@@ -335,7 +370,11 @@ fn astra_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static
                 body_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Idle { frame } if idle_blink(*frame) => Line::from(Span::styled(
+            " \u{2588}    \u{00b7}    ".to_string(),
+            body_style(palette),
+        )),
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             " \u{2588}    \u{2726}    ".to_string(),
             body_style(palette),
         )),
@@ -363,7 +402,16 @@ fn echo_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static>
             ));
             Line::from(spans)
         }
-        CompanionPose::Static => {
+        CompanionPose::Idle { frame } if idle_blink(*frame) => {
+            let mut spans = vec![Span::styled("  \u{2588}[".to_string(), body_style(palette))];
+            spans.extend(eye_spans(palette, "\u{2500}\u{00b7}\u{2500}"));
+            spans.push(Span::styled(
+                "]\u{2588}   ".to_string(),
+                body_style(palette),
+            ));
+            Line::from(spans)
+        }
+        CompanionPose::Static | CompanionPose::Idle { .. } => {
             let mut spans = vec![Span::styled("  \u{2588}[".to_string(), body_style(palette))];
             spans.extend(eye_spans(palette, "\u{2580}\u{00b7}\u{2580}"));
             spans.push(Span::styled(
@@ -390,7 +438,7 @@ fn echo_lines(palette: &FamiliarPalette, pose: &CompanionPose) -> [Line<'static>
                 accent_style(palette),
             ))
         }
-        CompanionPose::Static => Line::from(Span::styled(
+        CompanionPose::Static | CompanionPose::Idle { .. } => Line::from(Span::styled(
             "  \u{2580}\u{2584}\u{2580}\u{2584}\u{2580} \u{00b7}\u{00b7}\u{00b7}".to_string(),
             accent_style(palette),
         )),
@@ -410,7 +458,7 @@ pub fn archetype_lines(
     palette: &FamiliarPalette,
     pose: &CompanionPose,
 ) -> [Line<'static>; 5] {
-    match arch {
+    let mut lines = match arch {
         Archetype::Cat => kitty_lines(palette, pose),
         Archetype::SorceressCrown => nova_lines(palette, pose),
         Archetype::Robot => cody_lines(palette, pose),
@@ -422,7 +470,18 @@ pub fn archetype_lines(
         | Archetype::SigilHex
         | Archetype::SigilRune
         | Archetype::SigilSeal => kitty_lines(palette, pose),
+    };
+    // Idle sway: drift the whole glyph one column right for half of each
+    // idle cycle. Card layouts pad rows to a fixed width, so the shift only
+    // moves the glyph inside its slot.
+    if let CompanionPose::Idle { frame } = pose {
+        if idle_sway(*frame) {
+            for line in lines.iter_mut() {
+                line.spans.insert(0, Span::raw(" "));
+            }
+        }
     }
+    lines
 }
 
 /// Resolve a familiar slug to its theme and render the glyph block.
@@ -472,6 +531,27 @@ mod tests {
         let txt_a = line_text(&a[1]);
         let txt_b = line_text(&b[1]);
         assert_ne!(txt_a, txt_b, "loading row should differ between frames");
+    }
+
+    #[test]
+    fn idle_pose_blinks_between_frames() {
+        let awake = mascot_lines_for(Some("kitty"), &CompanionPose::Idle { frame: 0 });
+        let blink = mascot_lines_for(Some("kitty"), &CompanionPose::Idle { frame: 90 });
+
+        assert_ne!(
+            line_text(&awake[1]),
+            line_text(&blink[1]),
+            "idle row should blink instead of staying completely static"
+        );
+    }
+
+    #[test]
+    fn idle_pose_sways_between_frames() {
+        // Frame 0 sits in the resting half of the idle cycle, frame 60 in the
+        // swayed half: every row gains a one-column shift.
+        let rest = mascot_lines_for(Some("sage"), &CompanionPose::Idle { frame: 0 });
+        let sway = mascot_lines_for(Some("sage"), &CompanionPose::Idle { frame: 60 });
+        assert_eq!(format!(" {}", line_text(&rest[0])), line_text(&sway[0]));
     }
 
     #[test]

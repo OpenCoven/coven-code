@@ -2,9 +2,10 @@
 //!
 //! Given a [`crate::familiar_theme::FamiliarTheme`] and a [`CardSize`], produces
 //! the lines that render the active familiar in the welcome panel, the F2
-//! switcher, and the `/agents` detail view. The glyph itself never animates;
-//! only the eye row spins while the assistant is in the `Loading` state, so
-//! the user still has a signal that work is in progress.
+//! switcher, and the `/agents` detail view. The welcome panel passes the live
+//! [`CompanionPose`] so the glyph blinks and sways while idle and spins its
+//! eye row while the assistant is in the `Loading` state; other surfaces pass
+//! `CompanionPose::Static` and stay still.
 //!
 //! Built-in archetypes dispatch to the pixel-art builders in
 //! [`crate::mascot`]. Procedural archetypes ([`Archetype::SigilCrystal`] etc.)
@@ -43,18 +44,15 @@ pub fn pick_size(width: u16) -> CardSize {
     }
 }
 
-/// Render the full card. `loading` is `Some(frame_count)` to spin the eyes,
-/// `None` for the resting state.
+/// Render the full card with the given pose: `Static` for surfaces that
+/// never animate, `Idle { frame }` for the blink/sway loop, or
+/// `Loading { frame }` to spin the eyes.
 pub fn render_card(
     theme: &FamiliarTheme,
     size: CardSize,
-    loading: Option<u64>,
+    pose: &CompanionPose,
 ) -> Vec<Line<'static>> {
-    let pose = match loading {
-        Some(frame) => CompanionPose::Loading { frame },
-        None => CompanionPose::Static,
-    };
-    let glyph = glyph_lines(theme, &pose);
+    let glyph = glyph_lines(theme, pose);
 
     match size {
         CardSize::Compact => glyph_only(glyph),
@@ -424,7 +422,7 @@ mod tests {
     #[test]
     fn render_card_compact_is_glyph_only() {
         let t = familiar_theme::resolve("kitty", &[]);
-        let lines = render_card(&t, CardSize::Compact, None);
+        let lines = render_card(&t, CardSize::Compact, &CompanionPose::Static);
         // Built-in archetypes return 5 rows (4 content + 1 blank); compact passes through.
         assert!(lines.len() >= 4);
     }
@@ -432,7 +430,7 @@ mod tests {
     #[test]
     fn render_card_standard_has_border() {
         let t = familiar_theme::resolve("nova", &[]);
-        let lines = render_card(&t, CardSize::Standard, None);
+        let lines = render_card(&t, CardSize::Standard, &CompanionPose::Static);
         // Top border + 5 glyph rows + access row + bottom border = at least 8.
         assert!(lines.len() >= 7);
     }
@@ -440,15 +438,15 @@ mod tests {
     #[test]
     fn render_card_large_includes_rule_row() {
         let t = familiar_theme::resolve("sage", &[]);
-        let lines = render_card(&t, CardSize::Large, None);
+        let lines = render_card(&t, CardSize::Large, &CompanionPose::Static);
         // Large has at least one more row than Standard (the rule + role region).
-        let standard = render_card(&t, CardSize::Standard, None).len();
+        let standard = render_card(&t, CardSize::Standard, &CompanionPose::Static).len();
         assert!(lines.len() > standard);
     }
 
     #[test]
     fn unknown_familiar_falls_back_without_panic() {
         let t = familiar_theme::resolve("definitely-not-real", &[]);
-        let _ = render_card(&t, CardSize::Large, None);
+        let _ = render_card(&t, CardSize::Large, &CompanionPose::Static);
     }
 }

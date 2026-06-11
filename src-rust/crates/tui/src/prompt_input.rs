@@ -3170,7 +3170,8 @@ impl PromptInputState {
         })
     }
 
-    /// Update typeahead suggestions for slash commands and file references in the current text.
+    /// Update typeahead suggestions for slash commands, file references, and
+    /// (for plain text) matching prompt-history entries.
     pub fn update_suggestions(
         &mut self,
         slash_commands: &[(&str, &str)],
@@ -3187,7 +3188,21 @@ impl PromptInputState {
             file_autocomplete_show_hidden,
         );
 
+        // Plain text with no command/file suggestions: offer recent history
+        // entries that share the typed prefix.
         if self.suggestions.is_empty() {
+            self.suggestions = self.history_suggestions();
+        }
+
+        if self.suggestions.is_empty() {
+            self.suggestion_index = None;
+        } else if self
+            .suggestions
+            .iter()
+            .all(|s| s.source == TypeaheadSource::History)
+        {
+            // History hints are passive: never auto-select them, so Enter
+            // still submits the typed prompt. Tab accepts the top hint.
             self.suggestion_index = None;
         } else {
             let idx = self
@@ -3196,6 +3211,34 @@ impl PromptInputState {
                 .min(self.suggestions.len() - 1);
             self.suggestion_index = Some(idx);
         }
+    }
+
+    /// Recent prompt-history entries (newest first, deduplicated) that start
+    /// with the text before the cursor. Skips slash commands — those have
+    /// their own suggestion source — and inputs shorter than 2 characters,
+    /// which match too much to be useful.
+    fn history_suggestions(&self) -> Vec<TypeaheadSuggestion> {
+        const MAX_HISTORY_SUGGESTIONS: usize = 3;
+        let query = self.text[..self.cursor].to_lowercase();
+        if query.trim().len() < 2 || query.starts_with('/') {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.history
+            .iter()
+            .rev()
+            .filter(|entry| {
+                let lower = entry.to_lowercase();
+                lower.starts_with(&query) && lower != query
+            })
+            .filter(|entry| seen.insert(entry.to_lowercase()))
+            .take(MAX_HISTORY_SUGGESTIONS)
+            .map(|entry| TypeaheadSuggestion {
+                text: entry.clone(),
+                description: String::new(),
+                source: TypeaheadSource::History,
+            })
+            .collect()
     }
 
     /// Select the next suggestion.
@@ -4291,6 +4334,80 @@ mod tests {
         s.accept_suggestion();
         assert_eq!(s.text, "/help");
         assert_eq!(s.cursor, 5);
+        assert!(s.suggestions.is_empty());
+    }
+
+    // ---- history suggestions -------------------------------------------
+
+    #[test]
+    fn history_suggestions_match_prefix_newest_first() {
+        let mut s = PromptInputState::new();
+        s.history = vec![
+            "fix the parser".to_string(),
+            "cargo build".to_string(),
+            "fix the lexer".to_string(),
+        ];
+        s.text = "fix".to_string();
+        s.cursor = s.text.len();
+        s.update_suggestions(&[], 15, false);
+        let texts: Vec<&str> = s.suggestions.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, vec!["fix the lexer", "fix the parser"]);
+        assert!(s
+            .suggestions
+            .iter()
+            .all(|x| x.source == TypeaheadSource::History));
+    }
+
+    #[test]
+    fn history_suggestions_never_auto_select() {
+        // Enter must keep submitting the typed prompt, so passive history
+        // hints leave suggestion_index unset; Tab accepts the top hint.
+        let mut s = PromptInputState::new();
+        s.history = vec!["fix the parser".to_string()];
+        s.text = "fix".to_string();
+        s.cursor = s.text.len();
+        s.update_suggestions(&[], 15, false);
+        assert!(!s.suggestions.is_empty());
+        assert_eq!(s.suggestion_index, None);
+    }
+
+    #[test]
+    fn history_suggestions_skip_short_and_exact_input() {
+        let mut s = PromptInputState::new();
+        s.history = vec!["fix the parser".to_string()];
+        // One character matches too much to be useful.
+        s.text = "f".to_string();
+        s.cursor = 1;
+        s.update_suggestions(&[], 15, false);
+        assert!(s.suggestions.is_empty());
+        // Input identical to the history entry suggests nothing new.
+        s.text = "fix the parser".to_string();
+        s.cursor = s.text.len();
+        s.update_suggestions(&[], 15, false);
+        assert!(s.suggestions.is_empty());
+    }
+
+    #[test]
+    fn history_suggestion_accepted_via_tab_flow() {
+        let mut s = PromptInputState::new();
+        s.history = vec!["fix the parser".to_string()];
+        s.text = "fix".to_string();
+        s.cursor = s.text.len();
+        s.update_suggestions(&[], 15, false);
+        // Tab handler sets the index before accepting (see app.rs "indent").
+        s.suggestion_index = Some(0);
+        s.accept_suggestion();
+        assert_eq!(s.text, "fix the parser");
+        assert_eq!(s.cursor, "fix the parser".len());
+    }
+
+    #[test]
+    fn slash_input_does_not_surface_history() {
+        let mut s = PromptInputState::new();
+        s.history = vec!["/help me understand".to_string()];
+        s.text = "/zz".to_string();
+        s.cursor = s.text.len();
+        s.update_suggestions(&[], 15, false);
         assert!(s.suggestions.is_empty());
     }
 
