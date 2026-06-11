@@ -826,7 +826,7 @@ impl SlashCommand for ConfigCommand {
         "Show or modify configuration settings"
     }
     fn help(&self) -> &str {
-        "Usage: /config [show|get|set|unset|color|vim|voice|statusline|terminal-setup] ...\n\n\
+        "Usage: /config [show|get|set|unset|<area>] ...\n\n\
          Shows or modifies configuration settings.\n\n\
          Core settings:\n\
            /config\n\
@@ -835,12 +835,17 @@ impl SlashCommand for ConfigCommand {
            /config set model <model>\n\
            /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n\
            /config unset <model|output-style>\n\n\
-         UI settings:\n\
+         Areas:\n\
            /config color [<name|#RRGGBB|default>]\n\
            /config vim [on|off]\n\
            /config voice [on|off|status]\n\
            /config statusline [show|hide] [cost|tokens|model|time|all]\n\
-           /config terminal-setup"
+           /config terminal-setup\n\
+           /config theme [name]      — theme picker / set theme\n\
+           /config keybindings       — open keybindings.json\n\
+           /config output-style [s]  — show or set the output style\n\
+           /config import            — import settings from ~/.claude\n\
+           /config advisor [model]   — set the advisor model"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -875,6 +880,23 @@ impl SlashCommand for ConfigCommand {
                     return CommandResult::Error("Usage: /config terminal-setup".to_string());
                 }
                 return TerminalSetupCommand.execute("", ctx).await;
+            }
+            // Folded in Phase 3 (issue #73); the old top-level names stay
+            // hidden one-release aliases.
+            "keybindings" | "keybinding" => {
+                return KeybindingsCommand.execute(subcommand_args, ctx).await;
+            }
+            "theme" => {
+                return ThemeCommand.execute(subcommand_args, ctx).await;
+            }
+            "output-style" | "output_style" => {
+                return OutputStyleCommand.execute(subcommand_args, ctx).await;
+            }
+            "import" | "import-config" | "import_config" => {
+                return ImportConfigCommand.execute(subcommand_args, ctx).await;
+            }
+            "advisor" => {
+                return AdvisorCommand.execute(subcommand_args, ctx).await;
             }
             _ => {}
         }
@@ -1116,6 +1138,9 @@ impl SlashCommand for ThemeCommand {
     fn name(&self) -> &str {
         "theme"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Show or change the current theme"
     }
@@ -1156,6 +1181,9 @@ impl SlashCommand for ThemeCommand {
 impl SlashCommand for OutputStyleCommand {
     fn name(&self) -> &str {
         "output-style"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Show or switch the current output style"
@@ -1218,6 +1246,9 @@ impl SlashCommand for OutputStyleCommand {
 impl SlashCommand for KeybindingsCommand {
     fn name(&self) -> &str {
         "keybindings"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Create or open ~/.coven-code/keybindings.json"
@@ -1352,8 +1383,20 @@ impl SlashCommand for StatusCommand {
     fn description(&self) -> &str {
         "Show comprehensive system and session status"
     }
+    fn help(&self) -> &str {
+        "Usage: /status [doctor]\n\n\
+         Shows authentication, MCP, hook, and session status.\n\
+         /status doctor runs the full diagnostic suite (absorbing the\n\
+         former /doctor command)."
+    }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /status doctor absorbs the former standalone /doctor command
+        // (issue #73); the old name stays a hidden one-release alias.
+        let trimmed = args.trim();
+        if let Some(rest) = trimmed.strip_prefix("doctor") {
+            return DoctorCommand.execute(rest.trim(), ctx).await;
+        }
         // Auth status
         let auth_status = match claurst_core::oauth::OAuthTokens::load().await {
             Some(tokens) => {
@@ -2230,6 +2273,9 @@ impl SlashCommand for ReloadPluginsCommand {
     fn name(&self) -> &str {
         "reload-plugins"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Reload all plugins without restarting"
     }
@@ -2342,6 +2388,9 @@ impl SlashCommand for PluginSlashCommandAdapter {
 impl SlashCommand for DoctorCommand {
     fn name(&self) -> &str {
         "doctor"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Check system health and diagnose issues"
@@ -3154,7 +3203,8 @@ impl SlashCommand for ReviewCommand {
          review as a comment to the associated GitHub PR.\n\n\
          Variants:\n\
            /review security  — security-focused review (vulnerabilities, secrets, injection)\n\
-           /review ultra     — exhaustive multi-dimensional review\n\n\
+           /review ultra     — exhaustive multi-dimensional review\n\
+           /review comments  — read comments on the active GitHub PR\n\n\
          GitHub posting requires:\n\
            GITHUB_TOKEN  — a personal access token with repo scope\n\
            CLAUDE_PR_NUMBER — the PR number (auto-detected from `git remote` if absent)\n\n\
@@ -3175,6 +3225,11 @@ impl SlashCommand for ReviewCommand {
         match head {
             "security" => return SecurityReviewCommand.execute(rest, ctx).await,
             "ultra" | "ultrareview" => return UltrareviewCommand.execute(rest, ctx).await,
+            // /review comments absorbs the former standalone /pr-comments
+            // command (issue #73); the old name stays a hidden alias.
+            "comments" | "pr-comments" => {
+                return execute_named_command_from_slash("pr-comments", rest, ctx)
+            }
             _ => {}
         }
         let base = trimmed;
@@ -3486,6 +3541,9 @@ fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 impl SlashCommand for ImportConfigCommand {
     fn name(&self) -> &str {
         "import-config"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Import CLAUDE.md and settings.json from ~/.claude"
@@ -6847,6 +6905,9 @@ impl SlashCommand for AdvisorCommand {
     fn name(&self) -> &str {
         "advisor"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Set or unset the server-side advisor model"
     }
@@ -9425,7 +9486,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",
             slash_help: "Usage: /pr-comments <PR-number>",
-            slash_hidden: false,
+            slash_hidden: true,
         }),
         // Batch-1 new commands
         Box::new(ContextCommand),
@@ -9851,6 +9912,14 @@ mod tests {
             "refresh",
             "think-back",
             "fast",
+            "keybindings",
+            "theme",
+            "output-style",
+            "import-config",
+            "advisor",
+            "doctor",
+            "reload-plugins",
+            "pr-comments",
         ];
 
         for name in hidden_legacy {
@@ -9933,6 +10002,37 @@ mod tests {
             matches!(result, CommandResult::ConfigChangeMessage(_, _)),
             "/effort fast should route to the fast-mode toggle"
         );
+    }
+
+    #[tokio::test]
+    async fn config_review_status_absorb_their_clusters() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        // /config advisor routes to the advisor settings path.
+        let config = find_command("config").unwrap();
+        let result = config.execute("advisor", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => assert!(message.contains("Advisor model")),
+            other => panic!("expected advisor message, got {:?}", other),
+        }
+
+        // /config output-style shows/sets the output style.
+        let result = config.execute("output-style", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::Error(_)),
+            "/config output-style should route to the output-style command"
+        );
+
+        // /status doctor routes to the diagnostic suite.
+        let status = find_command("status").unwrap();
+        let result = status.execute("doctor", &mut ctx).await;
+        match result {
+            CommandResult::Message(message) => {
+                assert!(message.to_lowercase().contains("coven"))
+            }
+            other => panic!("expected doctor diagnostics, got {:?}", other),
+        }
     }
 
     #[tokio::test]

@@ -52,7 +52,6 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("advisor", "Set or unset the server-side advisor model"),
     (
         "agent",
         "List, inspect, and manage familiars and managed agents",
@@ -64,14 +63,16 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Stage and commit changes (model drafts the message)",
     ),
     ("compact", "Compact the conversation context"),
-    ("config", "Open settings"),
+    (
+        "config",
+        "Open settings (theme, keybindings, advisor, import, UI)",
+    ),
     ("connect", "Connect an AI provider"),
     (
         "coven",
         "Drive the local Coven daemon (sessions, harness runs, rituals)",
     ),
     ("diff", "Inspect the current git diff"),
-    ("doctor", "Run diagnostics"),
     (
         "effort",
         "Set effort level (low/normal/high) or toggle fast mode",
@@ -91,36 +92,28 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
     (
-        "import-config",
-        "Import CLAUDE.md and settings.json from ~/.claude",
-    ),
-    (
         "incant",
         "Cast a speech incantation (caveman, rocky) or lift it with off",
     ),
     ("init", "Initialize AGENTS.md for this project"),
-    ("keybindings", "Show keybinding configuration"),
     ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
-    ("output-style", "Toggle output style (auto/stream/verbose)"),
     ("permissions", "Manage tool permission rules"),
     ("plan", "Enter plan mode (read-only)"),
-    ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
     (
-        "pr-comments",
-        "Read or post comments on the active GitHub PR",
+        "plugin",
+        "Manage plugins (list/info/enable/disable/install/reload)",
     ),
     ("providers", "List available AI providers and their status"),
     ("quit", "Exit Coven Code"),
-    (
-        "reload-plugins",
-        "Reload the active session plugin registry",
-    ),
     ("resume", "Resume a previous session"),
-    ("review", "Review changes (git diff)"),
+    (
+        "review",
+        "Review changes (security/ultra variants, PR comments)",
+    ),
     (
         "rewind",
         "Rewind the conversation or roll back file changes",
@@ -128,12 +121,17 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
     ("session", "Browse, rename, fork, branch, and tag sessions"),
-    ("settings", "Open settings"),
+    (
+        "settings",
+        "Open settings (theme, keybindings, advisor, import, UI)",
+    ),
     ("skills", "List and manage skills"),
-    ("status", "Show the current session status"),
+    (
+        "status",
+        "Show session status or run diagnostics (/status doctor)",
+    ),
     ("survey", "Open session feedback survey"),
     ("tasks", "Manage tracked background tasks"),
-    ("theme", "Open the theme picker"),
     (
         "thinking",
         "Configure extended thinking or view past thinking traces",
