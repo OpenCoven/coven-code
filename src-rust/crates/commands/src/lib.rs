@@ -665,7 +665,7 @@ impl SlashCommand for CostCommand {
          Shows per-category token counts and the estimated cost for this session.\n\
          Cache write tokens are priced slightly higher than input; cache read tokens\n\
          are ~10x cheaper — caching reduces cost significantly in long sessions.\n\
-         For per-call breakdown use /extra-usage. For account quotas use /usage."
+         For account quotas use /usage."
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -719,7 +719,7 @@ impl SlashCommand for CostCommand {
              ─────────────────────────────\n\
                Total tokens:   {total:>10}\n\
                Total cost:              ${cost:.4}{savings}\n\n\
-             Use /usage for quota info · /extra-usage for per-call breakdown",
+             Use /usage for quota info",
             model = model,
             pricing_line = pricing_line,
             input = input,
@@ -1937,7 +1937,6 @@ impl SlashCommand for UsageCommand {
     fn help(&self) -> &str {
         "Usage: /usage\n\n\
          Shows current session API usage and account quota information.\n\
-         For detailed per-call breakdown, use /extra-usage.\n\
          For cost details, use /cost."
     }
 
@@ -1976,8 +1975,7 @@ impl SlashCommand for UsageCommand {
                Cache read:   {cache_read:>10}\n\
                Total:        {total:>10}\n\n\
              Estimated cost: ${cost:.4}\n\n\
-             Use /extra-usage for per-call breakdown.\n\
-             Use /rate-limit-options to see your plan limits.",
+             Use /cost for session cost details.",
             account_info = account_info,
             model = ctx.config.effective_model(),
             input = input,
@@ -5207,7 +5205,7 @@ impl SlashCommand for StatsCommand {
              \n\
              Estimated cost:   ${cost:.4}\n\
              \n\
-             Use /usage for quota info · /cost for quick cost · /extra-usage for per-call breakdown",
+             Use /usage for quota info · /cost for quick cost",
             model = model,
             user_turns = user_turns,
             assistant_turns = assistant_turns,

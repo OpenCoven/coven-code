@@ -62,8 +62,8 @@ Set a durable objective with `/goal` and Coven Code works autonomously across tu
 ### Managed agents (preview)
 Configure a manager-executor architecture with `/managed-agents` where a manager model delegates subtasks to parallel executor agents with full budget split controls.
 
-### Speech modes
-Activate `/caveman` or `/rocky` to compress model responses by 40–85%, saving tokens in long sessions. Deactivate with `/normal`.
+### Speech incantations
+Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85%, saving tokens in long sessions. Lift the incantation with `/incant off`.
 
 ---
 
@@ -181,24 +181,21 @@ Inside the interactive TUI, type `/` to see all available commands. Common ones:
 | `/help` | Show all commands |
 | `/model` | Switch model or provider |
 | `/login` | OAuth login (Anthropic; `--codex` for ChatGPT, `--label <name>` to name) |
-| `/accounts` | List stored Anthropic + Codex accounts |
-| `/switch <id>` | Switch active account (`--codex` for Codex) |
+| `/switch [<id>]` | Switch active account; with no id, lists stored accounts (`--codex` for Codex) |
 | `/logout` | Clear credentials for the active account (`--all` to purge) |
 | `/goal <objective>` | Set an autonomous multi-turn goal |
 | `/managed-agents` | Configure manager-executor agents |
 | `/compact` | Compress conversation history |
 | `/cost` | Token usage and cost for this session |
-| `/insights` | Session statistics and tool usage report |
-| `/caveman` | Activate telegraphic speech mode (save tokens) |
-| `/rocky` | Activate Rocky (Project Hail Mary) speech mode |
-| `/normal` | Deactivate speech modes |
+| `/incant <voice>` | Cast a speech incantation (`caveman`, `rocky`); `/incant off` lifts it |
+| `/whisper <q>` | Side question to your familiar, not kept in history |
 | `/rewind` | Go back to a previous message |
 | `/copy` | Copy last response to clipboard |
 | `/export` | Save session transcript |
 | `/think-back` | View thinking traces from previous responses |
-| `/ultrareview` | Exhaustive multi-dimensional code review |
+| `/review ultra` | Exhaustive multi-dimensional code review |
 | `/advisor <model>` | Set a secondary advisor model |
-| `/sandbox-toggle` | Toggle sandboxed shell execution |
+| `/sandbox` | Toggle sandboxed shell execution |
 | `/update` | Check for and download updates |
 | `/exit` | Quit |
 
