@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Coven Code installer for Linux and macOS.
-# Upstream: Claurst installer by Kuber Mehta (GPL-3.0), rebranded for OpenCoven/coven-codes.
+# Upstream: Claurst installer by Kuber Mehta (GPL-3.0), rebranded for OpenCoven/coven-code.
 #
 # Quick install:
 #   curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash

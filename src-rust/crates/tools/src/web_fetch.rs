@@ -328,7 +328,7 @@ impl Tool for WebFetchTool {
 
         let resp = match client
             .get(&params.url)
-            .header("User-Agent", "Claude-Code/1.0")
+            .header("User-Agent", "CovenCode/1.0")
             .send()
             .await
         {

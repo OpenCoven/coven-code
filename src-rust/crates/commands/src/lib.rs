@@ -1952,12 +1952,12 @@ impl SlashCommand for BugCommand {
         let report = args.trim();
         if report.is_empty() {
             CommandResult::Message(
-                "To submit feedback or report a bug, visit: https://github.com/anthropics/claude-code/issues"
+                "To submit feedback or report a bug, visit: https://github.com/OpenCoven/coven-code/issues"
                     .to_string(),
             )
         } else {
             CommandResult::Message(format!(
-                "To submit feedback or report a bug, visit: https://github.com/anthropics/claude-code/issues\nSuggested report summary: {}",
+                "To submit feedback or report a bug, visit: https://github.com/OpenCoven/coven-code/issues\nSuggested report summary: {}",
                 report
             ))
         }
@@ -7742,7 +7742,7 @@ impl SlashCommand for FeedbackCommand {
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        let url = "https://github.com/anthropics/claude-code/issues/new";
+        let url = "https://github.com/OpenCoven/coven-code/issues/new";
         let report = args.trim();
         let display_url = if report.is_empty() {
             url.to_string()

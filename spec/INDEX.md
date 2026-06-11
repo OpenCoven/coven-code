@@ -1,5 +1,12 @@
 # Claude Code — Spec Index
 
+> **Note (OpenCoven):** These spec documents describe the **upstream TypeScript Claude Code**
+> that Claurst (and therefore Coven Code) was modeled on. They do **not** describe this Rust
+> codebase — crate names, paths, versions, and the command/tool surface differ. For current
+> Coven Code documentation see [`docs/`](../docs/index.md); for the audit of this codebase see
+> [`docs/AUDIT-2026-06.md`](../docs/AUDIT-2026-06.md). `13_rust_codebase.md` is also stale and
+> pending a rewrite.
+
 > Quick-reference index across all spec documents.
 > Total spec coverage: ~990 KB across 15 markdown files.
 
