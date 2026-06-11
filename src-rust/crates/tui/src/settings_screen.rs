@@ -1,7 +1,10 @@
-// settings_screen.rs — Flat searchable settings interface.
+// settings_screen.rs — Sectioned searchable settings interface.
 //
-// Opened by /config or /settings commands. Shows all editable settings
-// in a single scrollable list with live search filtering.
+// Opened by /config or /settings commands. Settings are grouped into
+// sections (Response, Context, Interface, Workflow) rendered as one
+// scrollable list with non-selectable section headers, live search
+// filtering (labels and section names), and a `Settings › Section`
+// breadcrumb that follows the selection.
 // Changes are persisted via Settings::save_sync() or settings.json writes.
 
 use crate::overlays::{
@@ -33,15 +36,19 @@ pub struct SettingsEntry {
     pub key: &'static str,
     pub label: &'static str,
     pub description: &'static str,
+    pub section: &'static str,
     pub kind: SettingKind,
     pub value: String,
 }
+
+/// Section display order. Entries within `all_entries` are already grouped;
+/// this list exists so tests can assert the grouping stays contiguous.
+pub const SECTIONS: [&str; 4] = ["Response", "Context", "Interface", "Workflow"];
 
 pub struct SettingsScreen {
     pub visible: bool,
     pub search_query: String,
     pub selected_idx: usize,
-    pub scroll_offset: usize,
     /// Which field is being edited (field name as key).
     pub edit_field: Option<String>,
     /// Current buffer content while editing a field.
@@ -80,7 +87,6 @@ impl SettingsScreen {
             visible: false,
             search_query: String::new(),
             selected_idx: 0,
-            scroll_offset: 0,
             edit_field: None,
             edit_value: String::new(),
             settings_snapshot: settings_snapshot.clone(),
@@ -161,7 +167,6 @@ impl SettingsScreen {
         self.edit_value.clear();
         self.search_query.clear();
         self.selected_idx = 0;
-        self.scroll_offset = 0;
         self.visible = true;
 
         // Wire real settings from snapshot
@@ -270,11 +275,19 @@ impl Default for SettingsScreen {
 // ---------------------------------------------------------------------------
 
 fn all_entries(screen: &SettingsScreen) -> Vec<SettingsEntry> {
+    fn flag(v: bool) -> String {
+        if v { "true" } else { "false" }.to_string()
+    }
+
+    // Entries are grouped by section; sections appear in `SECTIONS` order so
+    // the renderer can emit a header whenever the section changes.
     let mut entries = vec![
+        // ── Response ────────────────────────────────────────────────
         SettingsEntry {
             key: "max_tokens",
             label: "Max Tokens",
             description: "Maximum tokens per response.",
+            section: "Response",
             kind: SettingKind::Number,
             value: screen
                 .settings_snapshot
@@ -284,165 +297,57 @@ fn all_entries(screen: &SettingsScreen) -> Vec<SettingsEntry> {
                 .unwrap_or_else(|| claurst_core::constants::DEFAULT_MAX_TOKENS.to_string()),
         },
         SettingsEntry {
-            key: "auto_compact",
-            label: "Auto-compact",
-            description: "Automatically compact turns at threshold.",
-            kind: SettingKind::Bool,
-            value: if screen.auto_compact { "true" } else { "false" }.to_string(),
-        },
-        SettingsEntry {
-            key: "notifications",
-            label: "Desktop notifications",
-            description: "Notify when a turn completes.",
-            kind: SettingKind::Bool,
-            value: if screen.notifications {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "show_turn_duration",
-            label: "Show turn duration",
-            description: "Display elapsed time per turn in status bar.",
-            kind: SettingKind::Bool,
-            value: if screen.show_turn_duration {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
             key: "output_style",
             label: "Output Style",
             description: "Controls the verbosity and format of responses.",
+            section: "Response",
             kind: SettingKind::Enum {
                 options: vec!["default", "concise", "explanatory", "learning"],
             },
             value: screen.output_style.clone(),
         },
         SettingsEntry {
-            key: "reduce_motion",
-            label: "Reduce motion",
-            description: "Disable UI animations.",
-            kind: SettingKind::Bool,
-            value: if screen.reduce_motion {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "terminal_progress_bar",
-            label: "Terminal progress bar",
-            description: "Show progress during tool use.",
-            kind: SettingKind::Bool,
-            value: if screen.terminal_progress_bar {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "verbose",
-            label: "Verbose logging",
-            description: "Log additional debug information. Takes effect on next session.",
-            kind: SettingKind::Bool,
-            value: if screen.verbose { "true" } else { "false" }.to_string(),
-        },
-        SettingsEntry {
-            key: "cursor_blink_enabled",
-            label: "Cursor blinking",
-            description: "Enable cursor blinking in the chat prompt.",
-            kind: SettingKind::Bool,
-            value: if screen.cursor_blink_enabled {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "auto_copy_enabled",
-            label: "Auto-copy on highlight",
-            description: "Automatically copy highlighted text to clipboard.",
-            kind: SettingKind::Bool,
-            value: if screen.auto_copy_enabled {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "show_cwd",
-            label: "Show current directory",
-            description: "Display the current working directory in the footer.",
-            kind: SettingKind::Bool,
-            value: if screen.show_cwd { "true" } else { "false" }.to_string(),
-        },
-        SettingsEntry {
-            key: "show_git_branch",
-            label: "Show git branch",
-            description: "Display the current git branch in the footer.",
-            kind: SettingKind::Bool,
-            value: if screen.show_git_branch {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        },
-        SettingsEntry {
-            key: "compact_threshold",
-            label: "Auto-compact threshold",
-            description: "Context usage % at which to trigger auto-compact (0-100).",
-            kind: SettingKind::Number,
-            value: screen.compact_threshold.clone(),
-        },
-        SettingsEntry {
-            key: "auto_commits",
-            label: "Auto-commits",
-            description: "Automatically snapshot changes to git via shadow-git.",
-            kind: SettingKind::Bool,
-            value: if screen.auto_commits { "true" } else { "false" }.to_string(),
-        },
-        SettingsEntry {
             key: "output_format",
             label: "Output format",
             description: "How responses are formatted: text, JSON, or streaming JSON.",
+            section: "Response",
             kind: SettingKind::Enum {
                 options: vec!["text", "json", "streamjson"],
             },
             value: screen.output_format.clone(),
         },
+        // ── Context ─────────────────────────────────────────────────
+        SettingsEntry {
+            key: "auto_compact",
+            label: "Auto-compact",
+            description: "Automatically compact turns at threshold.",
+            section: "Context",
+            kind: SettingKind::Bool,
+            value: flag(screen.auto_compact),
+        },
+        SettingsEntry {
+            key: "compact_threshold",
+            label: "Auto-compact threshold",
+            description: "Context usage % at which to trigger auto-compact (0-100).",
+            section: "Context",
+            kind: SettingKind::Number,
+            value: screen.compact_threshold.clone(),
+        },
         SettingsEntry {
             key: "disable_claude_mds",
             label: "Disable CLAUDE.md",
             description: "Ignore CLAUDE.md files in projects (use defaults instead).",
+            section: "Context",
             kind: SettingKind::Bool,
-            value: if screen.disable_claude_mds {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
+            value: flag(screen.disable_claude_mds),
         },
         SettingsEntry {
             key: "fileInjectionEnabled",
             label: "File injection (@)",
             description: "Auto-inject @file references into message context.",
+            section: "Context",
             kind: SettingKind::Bool,
-            value: if screen.file_injection_enabled {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
+            value: flag(screen.file_injection_enabled),
         },
     ];
 
@@ -452,6 +357,7 @@ fn all_entries(screen: &SettingsScreen) -> Vec<SettingsEntry> {
             key: "fileAutocompleteLimit",
             label: "File autocomplete limit",
             description: "Max suggestions shown in @ autocomplete (type more to narrow results).",
+            section: "Context",
             kind: SettingKind::Number,
             value: screen.file_autocomplete_limit.clone(),
         });
@@ -459,24 +365,119 @@ fn all_entries(screen: &SettingsScreen) -> Vec<SettingsEntry> {
             key: "fileAutocompleteShowHiddenFiles",
             label: "Show hidden files",
             description: "Include hidden files (.) in @ autocomplete.",
+            section: "Context",
             kind: SettingKind::Bool,
-            value: if screen.file_autocomplete_show_hidden_files {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
+            value: flag(screen.file_autocomplete_show_hidden_files),
         });
         entries.push(SettingsEntry {
             key: "fileInjectionMaxSize",
             label: "File injection max size",
             description: "Max file size to auto-inject (KB, 0=no limit).",
+            section: "Context",
             kind: SettingKind::Number,
             value: screen.file_injection_max_size.clone(),
         });
     }
 
+    entries.extend([
+        // ── Interface ───────────────────────────────────────────────
+        SettingsEntry {
+            key: "show_turn_duration",
+            label: "Show turn duration",
+            description: "Display elapsed time per turn in status bar.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.show_turn_duration),
+        },
+        SettingsEntry {
+            key: "show_cwd",
+            label: "Show current directory",
+            description: "Display the current working directory in the footer.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.show_cwd),
+        },
+        SettingsEntry {
+            key: "show_git_branch",
+            label: "Show git branch",
+            description: "Display the current git branch in the footer.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.show_git_branch),
+        },
+        SettingsEntry {
+            key: "cursor_blink_enabled",
+            label: "Cursor blinking",
+            description: "Enable cursor blinking in the chat prompt.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.cursor_blink_enabled),
+        },
+        SettingsEntry {
+            key: "reduce_motion",
+            label: "Reduce motion",
+            description: "Disable UI animations.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.reduce_motion),
+        },
+        SettingsEntry {
+            key: "terminal_progress_bar",
+            label: "Terminal progress bar",
+            description: "Show progress during tool use.",
+            section: "Interface",
+            kind: SettingKind::Bool,
+            value: flag(screen.terminal_progress_bar),
+        },
+        // ── Workflow ────────────────────────────────────────────────
+        SettingsEntry {
+            key: "notifications",
+            label: "Desktop notifications",
+            description: "Notify when a turn completes.",
+            section: "Workflow",
+            kind: SettingKind::Bool,
+            value: flag(screen.notifications),
+        },
+        SettingsEntry {
+            key: "auto_copy_enabled",
+            label: "Auto-copy on highlight",
+            description: "Automatically copy highlighted text to clipboard.",
+            section: "Workflow",
+            kind: SettingKind::Bool,
+            value: flag(screen.auto_copy_enabled),
+        },
+        SettingsEntry {
+            key: "auto_commits",
+            label: "Auto-commits",
+            description: "Automatically snapshot changes to git via shadow-git.",
+            section: "Workflow",
+            kind: SettingKind::Bool,
+            value: flag(screen.auto_commits),
+        },
+        SettingsEntry {
+            key: "verbose",
+            label: "Verbose logging",
+            description: "Log additional debug information. Takes effect on next session.",
+            section: "Workflow",
+            kind: SettingKind::Bool,
+            value: flag(screen.verbose),
+        },
+    ]);
+
     entries
+}
+
+/// Entries whose label or section matches the search query, case-insensitively.
+/// Searching "interface" surfaces a whole section; searching "git" surfaces
+/// the matching labels.
+fn filtered_entries(screen: &SettingsScreen) -> Vec<SettingsEntry> {
+    let query = screen.search_query.to_lowercase();
+    all_entries(screen)
+        .into_iter()
+        .filter(|e| {
+            e.label.to_lowercase().contains(&query) || e.section.to_lowercase().contains(&query)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -531,26 +532,51 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
     let description_area = layout[4];
     let footer_area = layout[5];
 
-    // Header
-    let title = Line::from(vec![
-        Span::styled(
-            " Settings",
-            Style::default()
-                .fg(COVEN_CODE_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" — Coven Code", Style::default().fg(COVEN_CODE_MUTED)),
-        Span::styled(
-            format!(
-                "{:>width$}",
-                "Esc close",
-                width = inner.width.saturating_sub(19) as usize
-            ),
+    // Header: breadcrumb that follows the selection — `Settings › Section`
+    // plus `› Setting` while a field is being edited.
+    let filtered = filtered_entries(screen);
+    let mut title_spans = vec![Span::styled(
+        " Settings",
+        Style::default()
+            .fg(COVEN_CODE_ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(entry) = filtered.get(screen.selected_idx) {
+        title_spans.push(Span::styled(
+            " \u{203a} ",
             Style::default().fg(COVEN_CODE_MUTED),
+        ));
+        title_spans.push(Span::styled(
+            entry.section,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if screen.edit_field.as_deref() == Some(entry.key) {
+            title_spans.push(Span::styled(
+                " \u{203a} ",
+                Style::default().fg(COVEN_CODE_MUTED),
+            ));
+            title_spans.push(Span::styled(
+                entry.label,
+                Style::default().fg(COVEN_CODE_MUTED),
+            ));
+        }
+    }
+    let used: usize = title_spans
+        .iter()
+        .map(|sp| sp.content.chars().count())
+        .sum();
+    title_spans.push(Span::styled(
+        format!(
+            "{:>width$}",
+            "Esc close",
+            width = (inner.width as usize).saturating_sub(used)
         ),
-    ]);
+        Style::default().fg(COVEN_CODE_MUTED),
+    ));
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().bg(COVEN_CODE_PANEL_BG)),
+        Paragraph::new(Line::from(title_spans)).style(Style::default().bg(COVEN_CODE_PANEL_BG)),
         header_area,
     );
 
@@ -570,16 +596,6 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
     render_settings_list(frame, screen, content_area);
 
     // Description of selected entry
-    let all = all_entries(screen);
-    let filtered: Vec<_> = all
-        .iter()
-        .filter(|e| {
-            e.label
-                .to_lowercase()
-                .contains(&screen.search_query.to_lowercase())
-        })
-        .collect();
-
     let desc_text = if let Some(entry) = filtered.get(screen.selected_idx) {
         // For Output Style, show current selection and all available options with descriptions
         if entry.key == "output_style" {
@@ -670,17 +686,7 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
 }
 
 fn render_settings_list(frame: &mut Frame, screen: &SettingsScreen, area: Rect) {
-    let all = all_entries(screen);
-
-    // Filter entries by search query
-    let filtered: Vec<_> = all
-        .iter()
-        .filter(|e| {
-            e.label
-                .to_lowercase()
-                .contains(&screen.search_query.to_lowercase())
-        })
-        .collect();
+    let filtered = filtered_entries(screen);
 
     if filtered.is_empty() {
         let para = Paragraph::new("No settings match your search.")
@@ -689,13 +695,31 @@ fn render_settings_list(frame: &mut Frame, screen: &SettingsScreen, area: Rect) 
         return;
     }
 
-    // Build lines
+    // Build display rows: a non-selectable header introduces each section,
+    // entries follow underneath. Selection indexes entries only.
     let mut lines: Vec<Line> = Vec::new();
-    let visible_rows = area.height as usize;
+    let mut selected_row = 0usize;
+    let mut last_section: Option<&str> = None;
 
     for (i, entry) in filtered.iter().enumerate() {
+        if last_section != Some(entry.section) {
+            if last_section.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {}", entry.section.to_uppercase()),
+                Style::default()
+                    .fg(COVEN_CODE_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            last_section = Some(entry.section);
+        }
+
         let is_selected = i == screen.selected_idx;
-        let marker = if is_selected { "►" } else { " " };
+        if is_selected {
+            selected_row = lines.len();
+        }
+        let marker = if is_selected { "\u{25ba}" } else { " " };
 
         let label_len = 40usize;
 
@@ -715,24 +739,24 @@ fn render_settings_list(frame: &mut Frame, screen: &SettingsScreen, area: Rect) 
             Style::default()
         };
 
-        let line = Line::from(vec![
+        lines.push(Line::from(vec![
             Span::styled(
                 format!("   {} {:<label_len$}", marker, entry.label),
                 row_style,
             ),
             Span::styled(value_str, row_style),
-        ]);
-        lines.push(line);
+        ]));
     }
 
-    // Scroll tracking is handled in update_scroll_offset_for_selection()
+    // Keep the selected row centred in the real viewport (headers included),
+    // clamped so the list never scrolls past its end.
+    let visible_rows = (area.height as usize).max(1);
+    let max_scroll = lines.len().saturating_sub(visible_rows);
+    let scroll = selected_row
+        .saturating_sub(visible_rows / 2)
+        .min(max_scroll);
 
-    // Apply manual scrolling
-    let visible_lines: Vec<Line> = lines
-        .into_iter()
-        .skip(screen.scroll_offset)
-        .take(visible_rows.max(1))
-        .collect();
+    let visible_lines: Vec<Line> = lines.into_iter().skip(scroll).take(visible_rows).collect();
 
     let para = Paragraph::new(visible_lines);
     frame.render_widget(para, area);
@@ -792,20 +816,9 @@ pub fn handle_settings_key(
         }
         KeyCode::Up => {
             screen.select_prev();
-            update_scroll_offset_for_selection(screen);
         }
         KeyCode::Down => {
-            let all = all_entries(screen);
-            let filtered: Vec<_> = all
-                .iter()
-                .filter(|e| {
-                    e.label
-                        .to_lowercase()
-                        .contains(&screen.search_query.to_lowercase())
-                })
-                .collect();
-            screen.select_next(filtered.len());
-            update_scroll_offset_for_selection(screen);
+            screen.select_next(filtered_entries(screen).len());
         }
         KeyCode::Char(c) => {
             screen.push_search_char(c);
@@ -815,25 +828,8 @@ pub fn handle_settings_key(
     true
 }
 
-fn update_scroll_offset_for_selection(screen: &mut SettingsScreen) {
-    let visible_rows = 10; // Rough estimate, will be actual in real usage
-    if screen.selected_idx < screen.scroll_offset {
-        screen.scroll_offset = screen.selected_idx;
-    } else if screen.selected_idx >= screen.scroll_offset + visible_rows {
-        screen.scroll_offset = screen.selected_idx.saturating_sub(visible_rows - 1);
-    }
-}
-
 fn toggle_or_cycle_current(screen: &mut SettingsScreen) {
-    let all = all_entries(screen);
-    let filtered: Vec<_> = all
-        .iter()
-        .filter(|e| {
-            e.label
-                .to_lowercase()
-                .contains(&screen.search_query.to_lowercase())
-        })
-        .collect();
+    let filtered = filtered_entries(screen);
 
     if let Some(entry) = filtered.get(screen.selected_idx) {
         match entry.kind {
@@ -1006,12 +1002,72 @@ mod tests {
 
         let initial = screen.notifications;
         let all = all_entries(&screen);
-        let entry = &all[2]; // notifications is at index 2
+        let entry = all
+            .iter()
+            .find(|e| e.key == "notifications")
+            .expect("notifications entry present");
         assert_eq!(entry.label, "Desktop notifications");
 
         // Simulate toggle (manually, since toggle_or_cycle_current modifies internal state)
         screen.notifications = !screen.notifications;
         assert_ne!(screen.notifications, initial);
+    }
+
+    #[test]
+    fn every_entry_belongs_to_a_known_section() {
+        let mut screen = SettingsScreen::new();
+        screen.file_injection_enabled = true; // include conditional entries
+        for entry in all_entries(&screen) {
+            assert!(
+                SECTIONS.contains(&entry.section),
+                "entry {} has unknown section {}",
+                entry.key,
+                entry.section
+            );
+        }
+    }
+
+    #[test]
+    fn sections_are_contiguous_and_in_order() {
+        let mut screen = SettingsScreen::new();
+        screen.file_injection_enabled = true;
+        let entries = all_entries(&screen);
+
+        // Collapse the per-entry sections into the order they first appear;
+        // a section reappearing after a different one means the grouping broke.
+        let mut seen: Vec<&str> = Vec::new();
+        for entry in &entries {
+            match seen.last() {
+                Some(last) if *last == entry.section => {}
+                _ => {
+                    assert!(
+                        !seen.contains(&entry.section),
+                        "section {} is not contiguous",
+                        entry.section
+                    );
+                    seen.push(entry.section);
+                }
+            }
+        }
+        assert_eq!(seen, SECTIONS.to_vec());
+    }
+
+    #[test]
+    fn search_matches_section_names() {
+        let mut screen = SettingsScreen::new();
+        screen.search_query = "interface".to_string();
+        let filtered = filtered_entries(&screen);
+        assert!(!filtered.is_empty());
+        assert!(filtered.iter().all(|e| e.section == "Interface"));
+    }
+
+    #[test]
+    fn search_still_matches_labels() {
+        let mut screen = SettingsScreen::new();
+        screen.search_query = "git branch".to_string();
+        let filtered = filtered_entries(&screen);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key, "show_git_branch");
     }
 
     #[test]
