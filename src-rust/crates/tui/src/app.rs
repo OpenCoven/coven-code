@@ -84,7 +84,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Set your active familiar — changes the TUI mascot live",
     ),
     ("feedback", "Open session feedback survey"),
-    ("goal", "Set or view the current session goal"),
     (
         "handoff",
         "Hand off current session context to a Coven familiar",

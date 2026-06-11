@@ -1576,6 +1576,9 @@ impl SlashCommand for GoalCommand {
     fn name(&self) -> &str {
         "goal"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /coven goal (issue #73); one-release alias
+    }
     fn description(&self) -> &str {
         "Set or manage a durable long-running goal for autonomous work"
     }
@@ -8681,6 +8684,7 @@ fn coven_help_text() -> &'static str {
      Status & lifecycle\n\
        /coven                          Daemon health + active session count\n\
        /coven status                   Same as /coven\n\
+       /coven goal <objective>         Set or manage a durable autonomous goal\n\
        /coven capabilities             Daemon capability catalog (harness manifests)\n\
        /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
@@ -8956,13 +8960,19 @@ impl SlashCommand for CovenCommand {
     fn help(&self) -> &str {
         coven_help_text()
     }
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use claurst_core::coven_shared::DaemonClient;
 
         let trimmed = args.trim();
         let mut parts = trimmed.splitn(2, char::is_whitespace);
         let sub = parts.next().unwrap_or("").trim();
         let rest = parts.next().unwrap_or("").trim();
+
+        // /coven goal absorbs the former standalone /goal command
+        // (issue #73); /goal stays as a hidden one-release alias.
+        if sub == "goal" {
+            return GoalCommand.execute(rest, ctx).await;
+        }
 
         // No subcommand → status. Matches `coven` (default) UX in coven-cli.
         if sub.is_empty() || sub == "status" {
@@ -9407,11 +9417,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(HelpCommand),
         Box::new(ClearCommand),
         Box::new(CompactCommand),
-        Box::new(CostCommand),
         Box::new(ExitCommand),
         Box::new(ModelCommand),
         Box::new(ConfigCommand),
-        Box::new(ColorCommand),
         Box::new(PluginCommand),
         Box::new(VersionCommand),
         Box::new(ResumeCommand),
@@ -9489,14 +9497,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_hidden: true,
         }),
         // Batch-1 new commands
-        Box::new(ContextCommand),
         Box::new(CopyCommand),
         Box::new(ChromeCommand),
-        Box::new(VimCommand),
-        Box::new(VoiceCommand),
         Box::new(UpgradeCommand),
-        Box::new(StatuslineCommand),
-        Box::new(TerminalSetupCommand),
         Box::new(FastCommand),
         Box::new(ThinkBackCommand),
         // /whisper (BtwCommand) and /sandbox (SandboxToggleCommand)
@@ -9505,8 +9508,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         // Advisor
         Box::new(AdvisorCommand),
         // Snapshot / revert system
-        Box::new(UndoCommand),
-        Box::new(RevertCommand),
         // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
@@ -9863,8 +9864,12 @@ mod tests {
     }
 
     #[test]
-    fn phase_two_legacy_commands_are_hidden_but_callable() {
-        let hidden_legacy = [
+    fn phase_two_legacy_aliases_are_removed() {
+        // The Phase 2 hidden aliases' one-release grace period ended with
+        // this release (issue #73 housekeeping): the names no longer resolve.
+        // Their functionality lives on as subcommands of /config, /usage,
+        // and /rewind.
+        for name in [
             "color",
             "context",
             "cost",
@@ -9874,25 +9879,10 @@ mod tests {
             "undo",
             "vim",
             "voice",
-        ];
-
-        for name in hidden_legacy {
-            let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        ] {
             assert!(
-                command.hidden(),
-                "{name} should stay callable as a hidden one-release compatibility alias"
-            );
-        }
-
-        let visible_names: std::collections::HashSet<&str> = all_commands()
-            .iter()
-            .filter(|command| !command.hidden())
-            .map(|command| command.name())
-            .collect();
-        for name in hidden_legacy {
-            assert!(
-                !visible_names.contains(name),
-                "{name} should not be a visible primary command"
+                find_command(name).is_none(),
+                "{name} should be fully removed after its alias grace period"
             );
         }
     }
@@ -10167,7 +10157,6 @@ mod tests {
             "help",
             "clear",
             "compact",
-            "cost",
             "exit",
             "model",
             "config",
@@ -10293,10 +10282,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cost_command_returns_message() {
+    async fn test_usage_cost_returns_message() {
         let mut ctx = make_ctx();
-        let cmd = find_command("cost").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("usage").unwrap();
+        let result = cmd.execute("cost", &mut ctx).await;
         assert!(matches!(result, CommandResult::Message(_)));
     }
 
