@@ -269,7 +269,6 @@ pub struct IncantCommand;
 pub struct SandboxToggleCommand;
 pub struct UltrareviewCommand;
 pub struct AdvisorCommand;
-pub struct UndoCommand;
 pub struct RevertCommand;
 pub struct CheckpointsCommand;
 pub struct SnapshotDiffCommand;
@@ -7452,32 +7451,6 @@ impl SlashCommand for NamedCommandAdapter {
     }
 }
 
-// ---- /undo (alias for /revert targeting the most recent assistant turn) ----
-
-#[async_trait]
-impl SlashCommand for UndoCommand {
-    fn name(&self) -> &str {
-        "undo"
-    }
-    fn hidden(&self) -> bool {
-        true
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec![]
-    }
-    fn description(&self) -> &str {
-        "Revert all file changes from the last assistant turn (alias: /revert)"
-    }
-    fn help(&self) -> &str {
-        "Usage: /undo\n\nReverts all file changes made during the most recent assistant turn.\n\
-         For finer control use /revert. To list what changed, use /checkpoints."
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        RevertCommand.execute("", ctx).await
-    }
-}
-
 // ---- /revert ---------------------------------------------------------------
 
 #[async_trait]
@@ -9211,11 +9184,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(HelpCommand),
         Box::new(ClearCommand),
         Box::new(CompactCommand),
-        Box::new(CostCommand),
         Box::new(ExitCommand),
         Box::new(ModelCommand),
         Box::new(ConfigCommand),
-        Box::new(ColorCommand),
         Box::new(PluginCommand),
         Box::new(VersionCommand),
         Box::new(ResumeCommand),
@@ -9288,14 +9259,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_help: "Usage: /pr-comments <PR-number>",
         }),
         // Batch-1 new commands
-        Box::new(ContextCommand),
         Box::new(CopyCommand),
         Box::new(ChromeCommand),
-        Box::new(VimCommand),
-        Box::new(VoiceCommand),
         Box::new(UpgradeCommand),
-        Box::new(StatuslineCommand),
-        Box::new(TerminalSetupCommand),
         Box::new(FastCommand),
         Box::new(ThinkBackCommand),
         // /whisper (BtwCommand) and /sandbox (SandboxToggleCommand)
@@ -9303,9 +9269,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(SandboxToggleCommand),
         // Advisor
         Box::new(AdvisorCommand),
-        // Snapshot / revert system
-        Box::new(UndoCommand),
-        Box::new(RevertCommand),
         // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
@@ -9662,8 +9625,11 @@ mod tests {
     }
 
     #[test]
-    fn phase_two_legacy_commands_are_hidden_but_callable() {
-        let hidden_legacy = [
+    fn phase_two_legacy_commands_are_fully_removed() {
+        // The Phase 2 hidden aliases' one-release grace period has ended:
+        // the names no longer resolve at all. Their impls survive only as
+        // delegation targets of /config, /usage, and /rewind.
+        let removed_legacy = [
             "color",
             "context",
             "cost",
@@ -9675,23 +9641,10 @@ mod tests {
             "voice",
         ];
 
-        for name in hidden_legacy {
-            let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        for name in removed_legacy {
             assert!(
-                command.hidden(),
-                "{name} should stay callable as a hidden one-release compatibility alias"
-            );
-        }
-
-        let visible_names: std::collections::HashSet<&str> = all_commands()
-            .iter()
-            .filter(|command| !command.hidden())
-            .map(|command| command.name())
-            .collect();
-        for name in hidden_legacy {
-            assert!(
-                !visible_names.contains(name),
-                "{name} should not be a visible primary command"
+                find_command(name).is_none(),
+                "{name} should no longer resolve after the alias grace period"
             );
         }
     }
@@ -9807,7 +9760,6 @@ mod tests {
             "help",
             "clear",
             "compact",
-            "cost",
             "exit",
             "model",
             "config",
@@ -9934,9 +9886,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_cost_command_returns_message() {
+        // /cost is no longer registered (expired Phase 2 alias); the impl
+        // remains as the delegation target of /usage cost.
         let mut ctx = make_ctx();
-        let cmd = find_command("cost").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        assert!(find_command("cost").is_none());
+        let result = UsageCommand.execute("cost", &mut ctx).await;
         assert!(matches!(result, CommandResult::Message(_)));
     }
 

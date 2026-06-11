@@ -2601,17 +2601,6 @@ impl App {
                 self.should_exit = true;
                 true
             }
-            "vim" => {
-                self.prompt_input.vim_enabled = !self.prompt_input.vim_enabled;
-                let status = if self.prompt_input.vim_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                self.status_message = Some(format!("Vim mode {}.", status));
-                self.refresh_prompt_input();
-                true
-            }
             "fast" => {
                 self.fast_mode = !self.fast_mode;
                 let status = if self.fast_mode {
@@ -2693,46 +2682,9 @@ impl App {
                 self.effort_picker.open(self.effort_level);
                 true
             }
-            "voice" => {
-                let was_on = self.voice_recorder.is_some();
-                if was_on {
-                    // Stop any active recording before disabling.
-                    if self.voice_recording {
-                        self.voice_recording = false;
-                        self.voice_event_rx = None;
-                        if let Some(ref recorder_arc) = self.voice_recorder {
-                            let recorder = recorder_arc.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Ok(mut r) = recorder.lock() {
-                                    tokio::runtime::Handle::current()
-                                        .block_on(r.stop_recording())
-                                        .ok();
-                                }
-                            });
-                        }
-                    }
-                    self.voice_recorder = None;
-                    self.voice_mode_notice.dismiss();
-                    self.status_message = Some("Voice mode disabled.".to_string());
-                } else {
-                    let recorder = claurst_core::voice::global_voice_recorder();
-                    if let Ok(mut r) = recorder.lock() {
-                        r.set_enabled(true);
-                    }
-                    self.voice_recorder = Some(recorder);
-                    self.voice_mode_notice = crate::voice_mode_notice::VoiceModeNoticeState::new();
-                    self.status_message =
-                        Some("Voice mode enabled. Press Alt+V to start recording.".to_string());
-                }
-                true
-            }
             "doctor" => {
                 // Handled by execute_command (DoctorCommand).
                 false
-            }
-            "cost" => {
-                self.stats_dialog.open();
-                true
             }
             "rewind" => {
                 self.open_rewind_flow();
@@ -2740,10 +2692,6 @@ impl App {
             }
             "export" => {
                 self.export_dialog.open();
-                true
-            }
-            "context" => {
-                self.context_viz.toggle();
                 true
             }
             "rename" => {
@@ -7679,16 +7627,6 @@ role = "Research"
         assert!(!app.should_exit);
         assert!(app.intercept_slash_command("exit"));
         assert!(app.should_exit);
-    }
-
-    #[test]
-    fn test_vim_slash_command_toggles_vim() {
-        let mut app = make_app();
-        assert!(!app.prompt_input.vim_enabled);
-        assert!(app.intercept_slash_command("vim"));
-        assert!(app.prompt_input.vim_enabled);
-        assert!(app.intercept_slash_command("vim"));
-        assert!(!app.prompt_input.vim_enabled);
     }
 
     #[test]
