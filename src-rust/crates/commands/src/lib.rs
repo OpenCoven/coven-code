@@ -488,7 +488,7 @@ fn command_category(name: &str) -> &'static str {
         "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
         "login" | "logout" | "switch" | "refresh" | "permissions" => "Auth & Permissions",
         "memory" | "diff" | "init" | "commit" | "review" | "import-config" => "Project",
-        "mcp" | "hooks" | "ide" | "chrome" => "Integrations",
+        "mcp" | "hooks" | "chrome" => "Integrations",
         "session" | "resume" | "search" | "share" => "Sessions & Remote",
         "help" | "exit" | "feedback" | "bug" => "General",
         "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
@@ -5178,23 +5178,39 @@ impl SlashCommand for RewindCommand {
         "rewind"
     }
     fn description(&self) -> &str {
-        "Interactively select a message to rewind to"
+        "Rewind the conversation or roll back a turn's file changes"
     }
     fn help(&self) -> &str {
-        "Usage: /rewind\n\
-         Opens an interactive overlay to select the message to rewind to.\n\
-         Use ↑↓ to navigate, Enter to select, y/n to confirm.\n\n\
-         The legacy /undo and /revert file-rollback commands remain available \
-         as hidden compatibility commands for this release."
+        "Usage: /rewind [list|diff [n]|last|<n>|<uuid>]\n\n\
+         Without arguments, opens an interactive overlay to pick the message to\n\
+         rewind the conversation to (↑↓ to navigate, Enter to select, y/n to confirm).\n\n\
+         With arguments, rolls back file changes recorded by the shadow-git\n\
+         snapshot system (absorbing the former /undo and /revert):\n\
+           /rewind list     — list assistant turns with recorded file changes\n\
+           /rewind diff [n] — preview a turn's diff without reverting\n\
+           /rewind last     — revert the most recent assistant turn\n\
+           /rewind <n>      — revert the n-th most recent assistant turn\n\
+           /rewind <uuid>   — revert the turn whose message id starts with <uuid>\n\n\
+         The legacy /undo and /revert commands remain hidden one-release\n\
+         compatibility aliases for the argument forms."
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        if ctx.messages.is_empty() {
-            return CommandResult::Message(
-                "Nothing to rewind — conversation is empty.".to_string(),
-            );
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            if ctx.messages.is_empty() {
+                return CommandResult::Message(
+                    "Nothing to rewind — conversation is empty.".to_string(),
+                );
+            }
+            return CommandResult::OpenRewindOverlay;
         }
-        CommandResult::OpenRewindOverlay
+        // File-rollback forms absorbed from /undo and /revert. RevertCommand
+        // already handles list / diff / <n> / <uuid>.
+        match trimmed {
+            "last" | "undo" => RevertCommand.execute("", ctx).await,
+            _ => RevertCommand.execute(trimmed, ctx).await,
+        }
     }
 }
 
@@ -9265,13 +9281,6 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_help: "Usage: /tag [list|add|remove] [tag]",
         }),
         Box::new(NamedCommandAdapter {
-            slash_name: "ide",
-            target_name: "ide",
-            slash_aliases: &[],
-            slash_description: "Manage IDE integrations and show status",
-            slash_help: "Usage: /ide [status|connect|disconnect|open]",
-        }),
-        Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
             target_name: "pr-comments",
             slash_aliases: &[],
@@ -9739,13 +9748,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ide_slash_adapter_uses_named_command() {
+    async fn rewind_with_args_routes_to_file_rollback_not_overlay() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
         let mut ctx = make_ctx();
-        let command = find_command("ide").unwrap();
-        let result = command.execute("status", &mut ctx).await;
+        ctx.messages.push(claurst_core::types::Message::user("hi"));
+        let command = find_command("rewind").unwrap();
+
+        // `list` must reach the checkpoints path, never the overlay.
+        let result = command.execute("list", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::OpenRewindOverlay),
+            "/rewind list must route to the revert/checkpoints path"
+        );
+
+        // `diff` must reach the snapshot-diff path, never the overlay.
+        let result = command.execute("diff", &mut ctx).await;
+        assert!(
+            !matches!(result, CommandResult::OpenRewindOverlay),
+            "/rewind diff must route to the snapshot diff path"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewind_without_args_keeps_existing_behavior() {
+        let mut ctx = make_ctx();
+        let command = find_command("rewind").unwrap();
+        let result = command.execute("", &mut ctx).await;
         match result {
-            CommandResult::Message(message) => assert!(message.contains("IDE")),
-            other => panic!("expected IDE status message, got {:?}", other),
+            CommandResult::Message(message) => assert!(message.contains("Nothing to rewind")),
+            other => panic!("expected empty-conversation message, got {:?}", other),
         }
     }
 
@@ -9800,7 +9831,6 @@ mod tests {
             "agents",
             "branch",
             "tag",
-            "ide",
             "pr-comments",
             "whisper",
             "incant",

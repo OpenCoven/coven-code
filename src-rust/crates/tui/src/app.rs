@@ -93,7 +93,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("help", "Show help"),
     ("hooks", "Browse configured hooks (read-only)"),
-    ("ide", "Connect to the active IDE integration"),
     (
         "import-config",
         "Import CLAUDE.md and settings.json from ~/.claude",
@@ -130,7 +129,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("resume", "Resume a previous session"),
     ("review", "Review changes (git diff)"),
-    ("rewind", "Rewind to an earlier turn"),
+    (
+        "rewind",
+        "Rewind the conversation or roll back file changes",
+    ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
     ("session", "Browse and manage sessions"),

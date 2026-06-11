@@ -125,14 +125,18 @@ Fork the current session into a new independent session that begins from the cur
 
 ### /rewind
 
-Rewind the conversation to a previous message. Displays a numbered list of messages; enter a number to truncate history to that point and resume from there.
+Single entry point for going back in time. Without arguments, opens an interactive overlay to pick the message to rewind the conversation to. With arguments, rolls back file changes recorded by the shadow-git snapshot system (absorbing the former `/undo` and `/revert`).
 
 ```
-/rewind
-/rewind <message-index>
+/rewind            — interactive conversation rewind overlay
+/rewind list       — list assistant turns with recorded file changes
+/rewind diff [n]   — preview a turn's diff without reverting
+/rewind last       — revert the most recent assistant turn
+/rewind <n>        — revert the n-th most recent assistant turn
+/rewind <uuid>     — revert the turn whose message id starts with <uuid>
 ```
 
-`/undo` and `/revert` remain available as hidden compatibility commands for one release, but new docs and command discovery route history work through `/rewind`.
+`/undo` and `/revert` remain hidden compatibility aliases for one release.
 
 ---
 
@@ -1183,14 +1187,13 @@ section above. They are grouped by purpose.
 | `/add-dir` | Add a directory to Coven Code's allowed workspace paths. |
 | `/branch` | Create a branch of the current conversation at this point. |
 | `/tag` | Toggle a searchable tag on the current session. |
-| `/ide` | Manage IDE integrations and show status. |
 | `/pr-comments` | Get comments from a GitHub pull request. |
 
 ### Named CLI commands
 
 These run as `coven-code <name>` from the shell. Most have slash
-adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
-`/pr-comments`); `ultraplan` and `stats` are CLI-only.
+adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/pr-comments`);
+`ultraplan` and `stats` are CLI-only.
 
 | Command | Description |
 |---------|-------------|
@@ -1199,7 +1202,6 @@ adapters (`/agents`, `/add-dir`, `/branch`, `/tag`, `/ide`,
 | `add-dir` | Add a directory to the allowed workspace paths. |
 | `branch` | Branch the current conversation. |
 | `tag` | Toggle a searchable session tag. |
-| `ide` | Manage IDE integrations. |
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
 | `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/stats` opens the stats dialog). |

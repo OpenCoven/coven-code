@@ -643,117 +643,6 @@ impl NamedCommand for TagCommand {
 }
 
 // ---------------------------------------------------------------------------
-// passes
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Helper: process liveness check (used by IdeCommand)
-// ---------------------------------------------------------------------------
-
-fn is_pid_alive(pid: u64) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // On Windows, query the process table via tasklist
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::path::Path::new(&format!("/proc/{}", pid)).exists()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ide
-// ---------------------------------------------------------------------------
-
-pub struct IdeCommand;
-
-impl NamedCommand for IdeCommand {
-    fn name(&self) -> &str {
-        "ide"
-    }
-    fn description(&self) -> &str {
-        "Manage IDE integrations and show status"
-    }
-    fn usage(&self) -> &str {
-        "coven-code ide [status|connect|disconnect|open]"
-    }
-
-    fn execute_named(&self, _args: &[&str], _ctx: &CommandContext) -> CommandResult {
-        // ---- Environment-based IDE detection --------------------------------
-        let env_detection = claurst_core::detect_ide();
-        let env_section = match &env_detection {
-            Some(kind) => {
-                let mut lines = vec![format!("Detected IDE: {}", kind.display_name())];
-                if let Some(cmd) = kind.extension_install_command() {
-                    lines.push(format!("To install the Coven Code extension: {}", cmd));
-                }
-                lines.join("\n")
-            }
-            None => "No IDE detected. Running in standalone terminal.".to_string(),
-        };
-
-        // ---- Lockfile-based connection status --------------------------------
-        let lockfile_dir = dirs::home_dir()
-            .map(|h| h.join(".coven-code").join("ide"))
-            .unwrap_or_default();
-
-        let mut ides = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&lockfile_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "lock") {
-                    if let Ok(lock_content) = std::fs::read_to_string(&path) {
-                        if let Ok(info) = serde_json::from_str::<serde_json::Value>(&lock_content) {
-                            let pid = info["pid"].as_u64().unwrap_or(0);
-                            let alive = is_pid_alive(pid);
-                            if alive {
-                                let ide_name = info["ideName"]
-                                    .as_str()
-                                    .unwrap_or("Unknown IDE")
-                                    .to_string();
-                                let port = info["port"].as_u64().unwrap_or(0);
-                                let workspace_folders = info["workspaceFolders"]
-                                    .as_array()
-                                    .map(|a| {
-                                        a.iter()
-                                            .filter_map(|v| v.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    })
-                                    .unwrap_or_default();
-                                ides.push(format!(
-                                    "  {} (PID {}, port {}) \u{2014} {}",
-                                    ide_name, pid, port, workspace_folders
-                                ));
-                            } else {
-                                // Clean up dead lockfile
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let connection_section = if ides.is_empty() {
-            "No active IDE extension connections found.".to_string()
-        } else {
-            format!("Connected IDEs:\n{}\n\nUse 'coven-code ide open <file>' to open a file in the IDE.", ides.join("\n"))
-        };
-
-        CommandResult::Message(format!("{env_section}\n\n{connection_section}"))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // pr-comments
 // ---------------------------------------------------------------------------
 
@@ -998,7 +887,6 @@ static NAMED_COMMANDS: Lazy<Vec<Box<dyn NamedCommand>>> = Lazy::new(|| {
         Box::new(AddDirCommand),
         Box::new(BranchCommand),
         Box::new(TagCommand),
-        Box::new(IdeCommand),
         Box::new(PrCommentsCommand),
         Box::new(UltraplanCommand),
         Box::new(crate::StatsCommand),
@@ -1070,7 +958,6 @@ mod tests {
     #[test]
     fn test_find_named_command_found() {
         assert!(find_named_command("agents").is_some());
-        assert!(find_named_command("ide").is_some());
         assert!(find_named_command("branch").is_some());
     }
 
@@ -1082,7 +969,7 @@ mod tests {
     #[test]
     fn test_find_named_command_case_insensitive() {
         assert!(find_named_command("Agents").is_some());
-        assert!(find_named_command("IDE").is_some());
+        assert!(find_named_command("BRANCH").is_some());
     }
 
     #[test]
