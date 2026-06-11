@@ -1381,10 +1381,26 @@ impl SlashCommand for StatusCommand {
         "status"
     }
     fn description(&self) -> &str {
-        "Show comprehensive system and session status"
+        "Show system and session status; /status doctor runs diagnostics"
+    }
+    fn help(&self) -> &str {
+        "Usage: /status [doctor]\n\n\
+         Shows authentication, MCP, hook, and session status.\n\
+         /status doctor runs the full diagnostics check (formerly /doctor)."
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /status doctor absorbs the former standalone /doctor command.
+        match args.trim() {
+            "" => {}
+            "doctor" => return DoctorCommand.execute("", ctx).await,
+            other => {
+                return CommandResult::Error(format!(
+                    "Unknown status subcommand '{}'. Use: /status [doctor]",
+                    other
+                ))
+            }
+        }
         // Auth status
         let auth_status = match claurst_core::oauth::OAuthTokens::load().await {
             Some(tokens) => {
@@ -1563,6 +1579,9 @@ fn parse_token_budget(s: &str) -> Option<u64> {
 impl SlashCommand for GoalCommand {
     fn name(&self) -> &str {
         "goal"
+    }
+    fn hidden(&self) -> bool {
+        true // folded into /coven goal; one-release compatibility alias
     }
     fn description(&self) -> &str {
         "Set or manage a durable long-running goal for autonomous work"
@@ -2258,11 +2277,14 @@ impl SlashCommand for ReloadPluginsCommand {
     fn name(&self) -> &str {
         "reload-plugins"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /plugin reload; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Reload all plugins without restarting"
     }
     fn help(&self) -> &str {
-        "Usage: /reload-plugins\n\
+        "Usage: /plugin reload\n\
          Reloads all plugins and shows what changed."
     }
 
@@ -2371,11 +2393,14 @@ impl SlashCommand for DoctorCommand {
     fn name(&self) -> &str {
         "doctor"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /status doctor; one-release compatibility alias
+    }
     fn description(&self) -> &str {
         "Check system health and diagnose issues"
     }
     fn help(&self) -> &str {
-        "Usage: /doctor\n\
+        "Usage: /status doctor\n\
          Runs a comprehensive system diagnostics check:\n\
          - API key validation (live GET /v1/models call)\n\
          - Git availability\n\
@@ -3169,13 +3194,14 @@ impl SlashCommand for ReviewCommand {
         "Review code changes via LLM and optionally post to GitHub PR"
     }
     fn help(&self) -> &str {
-        "Usage: /review [base-ref] | /review security [path] | /review ultra [path]\n\n\
+        "Usage: /review [base-ref] | /review security [path] | /review ultra [path] | /review comments [PR#]\n\n\
          Runs `git diff <base>...HEAD` (or `git diff --cached` when no base is given),\n\
          sends the diff to the LLM for a structured review, then optionally posts the\n\
          review as a comment to the associated GitHub PR.\n\n\
          Variants:\n\
            /review security  — security-focused review (vulnerabilities, secrets, injection)\n\
-           /review ultra     — exhaustive multi-dimensional review\n\n\
+           /review ultra     — exhaustive multi-dimensional review\n\
+           /review comments  — read comments on the active GitHub PR (formerly /pr-comments)\n\n\
          GitHub posting requires:\n\
            GITHUB_TOKEN  — a personal access token with repo scope\n\
            CLAUDE_PR_NUMBER — the PR number (auto-detected from `git remote` if absent)\n\n\
@@ -3196,6 +3222,8 @@ impl SlashCommand for ReviewCommand {
         match head {
             "security" => return SecurityReviewCommand.execute(rest, ctx).await,
             "ultra" | "ultrareview" => return UltrareviewCommand.execute(rest, ctx).await,
+            // /review comments absorbs the former standalone /pr-comments.
+            "comments" => return execute_named_command_from_slash("pr-comments", rest, ctx),
             _ => {}
         }
         let base = trimmed;
@@ -4669,13 +4697,27 @@ impl SlashCommand for ThinkingCommand {
         "thinking"
     }
     fn description(&self) -> &str {
-        "Toggle extended thinking mode"
+        "Configure extended thinking; /thinking back shows previous traces"
+    }
+    fn help(&self) -> &str {
+        "Usage: /thinking | /thinking back [n] | /thinking back play [n]\n\n\
+         Shows extended-thinking availability for the active model.\n\
+         /thinking back displays thinking traces from previous responses\n\
+         (formerly /think-back); `play` replays a trace as an animated\n\
+         walkthrough."
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["think"]
     }
 
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // /thinking back absorbs the former standalone /think-back command
+        // (which itself absorbed /thinkback-play as `back play`).
+        if let Some(rest) = args.trim().strip_prefix("back") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return ThinkBackCommand.execute(rest.trim(), ctx).await;
+            }
+        }
         // Extended thinking is configured through the model; just inform the user
         let model = ctx.config.effective_model();
         if model.contains("claude-3-5") || model.contains("claude-3.5") {
@@ -6988,6 +7030,9 @@ impl SlashCommand for ThinkBackCommand {
     fn name(&self) -> &str {
         "think-back"
     }
+    fn hidden(&self) -> bool {
+        true // folded into /thinking back; one-release compatibility alias
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["thinkback"]
     }
@@ -8629,6 +8674,10 @@ fn coven_help_text() -> &'static str {
      Coven Calls (delegation ledger)\n\
        /coven calls [--limit N]        Read ~/.coven/cave-coven-calls.json\n\
      \n\
+     Durable goals\n\
+       /coven goal [<objective>|status|pause|resume|clear|complete]\n\
+       /coven goal --tokens 250K <objective>\n\
+     \n\
      Parallel-work protocol\n\
        /coven claim acquire|release|status|heartbeat|canary [args]\n\
        /coven hooks-install            Install git hooks for the claim protocol\n\
@@ -8876,7 +8925,7 @@ impl SlashCommand for CovenCommand {
     fn help(&self) -> &str {
         coven_help_text()
     }
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         use claurst_core::coven_shared::DaemonClient;
 
         let trimmed = args.trim();
@@ -8903,6 +8952,9 @@ impl SlashCommand for CovenCommand {
         }
 
         match sub {
+            // /coven goal absorbs the former standalone /goal command:
+            // durable goals are Coven-substrate workflow state.
+            "goal" => return GoalCommand.execute(rest, ctx).await,
             // Read-only listings — use the in-process client.
             "sessions" => {
                 let include_archived = rest.split_whitespace().any(|t| t == "--all" || t == "-a");
@@ -9400,7 +9452,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         }),
         Box::new(NamedCommandAdapter {
             slash_name: "pr-comments",
-            slash_hidden: false,
+            slash_hidden: true,
             target_name: "pr-comments",
             slash_aliases: &[],
             slash_description: "Get comments from a GitHub pull request",

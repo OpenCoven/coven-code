@@ -70,10 +70,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("connect", "Connect an AI provider"),
     (
         "coven",
-        "Drive the local Coven daemon (sessions, harness runs, rituals)",
+        "Drive the local Coven daemon (sessions, runs, rituals, goals)",
     ),
     ("diff", "Inspect the current git diff"),
-    ("doctor", "Run diagnostics"),
     ("effort", "Set effort level (low/medium/high/max)"),
     ("exit", "Quit Coven Code"),
     (
@@ -86,7 +85,6 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("fast", "Toggle fast mode"),
     ("feedback", "Open session feedback survey"),
-    ("goal", "Set or view the current session goal"),
     (
         "handoff",
         "Hand off current session context to a Coven familiar",
@@ -107,20 +105,15 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("plan", "Enter plan mode (read-only)"),
     ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
     (
-        "pr-comments",
-        "Read or post comments on the active GitHub PR",
-    ),
-    (
         "providers",
         "List AI providers; refresh clears auth and model caches",
     ),
     ("quit", "Exit Coven Code"),
-    (
-        "reload-plugins",
-        "Reload the active session plugin registry",
-    ),
     ("resume", "Resume a previous session"),
-    ("review", "Review changes (git diff)"),
+    (
+        "review",
+        "Review changes (git diff), security/ultra variants, PR comments",
+    ),
     (
         "rewind",
         "Rewind the conversation or roll back file changes",
@@ -133,14 +126,16 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("settings", "Open settings"),
     ("skills", "List and manage skills"),
-    ("status", "Show the current session status"),
+    (
+        "status",
+        "Show session status; /status doctor runs diagnostics",
+    ),
     ("survey", "Open session feedback survey"),
     ("tasks", "Manage tracked background tasks"),
     (
-        "think-back",
-        "Show extended-thinking traces from previous responses",
+        "thinking",
+        "Configure extended thinking; back shows previous traces",
     ),
-    ("thinking", "Configure extended thinking for the session"),
     (
         "update",
         "Check for updates and upgrade to the latest version",
@@ -2468,6 +2463,11 @@ impl App {
             };
         }
         if !args.trim().is_empty() && matches!(cmd, "usage" | "session") {
+            return false;
+        }
+        // /review comments reads PR comments via the command layer; other
+        // /review forms keep opening the diff viewer.
+        if cmd == "review" && args.trim().split_whitespace().next() == Some("comments") {
             return false;
         }
         // /export copy reuses the live clipboard intercept; every other
