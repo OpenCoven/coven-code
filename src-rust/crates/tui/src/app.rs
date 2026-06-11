@@ -2450,16 +2450,63 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
-        if !args.trim().is_empty() && matches!(cmd, "config" | "settings" | "usage") {
+        let args_trimmed = args.trim();
+        // Folded subcommands (issue #73) open the same TUI surfaces as their
+        // former top-level names, so e.g. `/config theme` still gets the
+        // picker and `/usage stats` still gets the stats dialog.
+        let (sub, sub_rest) = match args_trimmed.split_once(char::is_whitespace) {
+            Some((s, r)) => (s, r.trim()),
+            None => (args_trimmed, ""),
+        };
+        match (cmd, sub, sub_rest) {
+            ("usage", "stats", _) => return self.intercept_slash_command("stats"),
+            ("config" | "settings", "theme", "") => {
+                return self.intercept_slash_command("theme")
+            }
+            ("config" | "settings", "keybindings", _) => {
+                return self.intercept_slash_command("keybindings")
+            }
+            ("config" | "settings", "import" | "import-config", _) => {
+                return self.intercept_slash_command("import-config")
+            }
+            ("export", "copy", "") => return self.intercept_slash_command("copy"),
+            ("effort", "fast", _) => return self.intercept_slash_command("fast"),
+            _ => {}
+        }
+        if !args_trimmed.is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }
-        if cmd == "mcp" && !args.trim().is_empty() {
+        if cmd == "mcp" && !args_trimmed.is_empty() {
             return false;
         }
-        if cmd == "agents" && args.trim() == "reset" {
+        if cmd == "agents" && args_trimmed == "reset" {
             self.open_agents_menu();
             self.agents_menu.route = AgentsRoute::ResetConfirm;
             return true;
+        }
+        // Commands whose argument forms are handled by the commands crate
+        // (subcommand folds from issues #59/#73): only the bare form keeps
+        // its TUI overlay/intercept behavior.
+        if !args_trimmed.is_empty()
+            && matches!(
+                cmd,
+                "rewind"
+                    | "session"
+                    | "remote"
+                    | "export"
+                    | "review"
+                    | "agent"
+                    | "agents"
+                    | "status"
+                    | "thinking"
+                    | "think"
+                    | "plugin"
+                    | "plugins"
+                    | "effort"
+                    | "login"
+            )
+        {
+            return false;
         }
         if cmd == "handoff" {
             let familiar = args.trim().to_string();
@@ -7661,6 +7708,35 @@ role = "Research"
         let mut app = make_app();
         assert!(!app.intercept_slash_command_with_args("mcp", "auth mcphub"));
         assert!(!app.mcp_view.visible);
+    }
+
+    #[test]
+    fn argument_forms_reach_command_layer() {
+        let mut app = make_app();
+        // Folded subcommand forms must not be swallowed by the bare-name
+        // TUI intercepts (issues #59/#73).
+        assert!(!app.intercept_slash_command_with_args("rewind", "list"));
+        assert!(!app.rewind_flow.visible);
+        assert!(!app.intercept_slash_command_with_args("session", "rename my-title"));
+        assert!(!app.session_browser.visible);
+        assert!(!app.intercept_slash_command_with_args("export", "copy 2"));
+        assert!(!app.export_dialog.visible);
+        assert!(!app.intercept_slash_command_with_args("review", "security"));
+        assert!(!app.intercept_slash_command_with_args("status", "doctor"));
+        assert!(!app.intercept_slash_command_with_args("thinking", "back"));
+        // Bare forms keep their overlays.
+        assert!(app.intercept_slash_command_with_args("rewind", ""));
+        assert!(app.rewind_flow.visible);
+    }
+
+    #[test]
+    fn folded_subcommands_open_legacy_tui_surfaces() {
+        let mut app = make_app();
+        assert!(app.intercept_slash_command_with_args("usage", "stats"));
+        assert!(app.stats_dialog.visible);
+        app.stats_dialog.close();
+        assert!(app.intercept_slash_command_with_args("config", "theme"));
+        assert!(app.theme_screen.visible);
     }
 
     #[test]
