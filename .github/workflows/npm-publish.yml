@@ -263,9 +263,35 @@ jobs:
 
             echo "${package_name}@${VERSION} is not published yet; publishing."
             prepare_package "$package_name"
+            publish_args=(--provenance)
             if [[ "$package_name" == @*/* ]]; then
-              (cd npm && npm publish --access public --provenance)
+              publish_args=(--access public --provenance)
+            fi
+
+            # The pre-publish `npm view` guard above can race npm's
+            # read-after-write propagation when this workflow's two triggers
+            # (release.yml dispatch + workflow_run) fire back-to-back: the
+            # concurrency group serializes the *runs*, but a publish that
+            # landed seconds ago may not be visible to `npm view` yet. In
+            # that case our own publish fails with E403 "cannot publish over
+            # the previously published versions" — which means the version
+            # is already on the registry, i.e. success. Treat it as such.
+            publish_log="$(mktemp)"
+            if (cd npm && npm publish "${publish_args[@]}") 2>&1 | tee "$publish_log"; then
+              echo "${package_name}@${VERSION} published."
+            elif grep -q "cannot publish over the previously published versions" "$publish_log"; then
+              echo "${package_name}@${VERSION} was already published by a concurrent run; treating as success."
             else
-              (cd npm && npm publish --provenance)
+              # Last resort: give the registry a moment and re-check whether
+              # the version exists before declaring failure.
+              for _ in 1 2 3; do
+                sleep 5
+                if npm view "${package_name}@${VERSION}" version >/dev/null 2>&1; then
+                  echo "${package_name}@${VERSION} is on the registry; treating as success."
+                  continue 2
+                fi
+              done
+              echo "::error::npm publish failed for ${package_name}@${VERSION}; see log above."
+              exit 1
             fi
           done
