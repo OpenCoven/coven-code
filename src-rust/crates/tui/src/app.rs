@@ -150,16 +150,12 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
 
 fn help_command_category(name: &str) -> &'static str {
     match name {
-        "connect" | "model" | "providers" | "refresh" | "fast" | "effort" => "Model & Provider",
-        "diff" | "review" | "rewind" | "export" | "copy" | "share" => "Review & History",
-        "usage" | "doctor" | "status" | "stats" => "Diagnostics",
-        "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
-            "Workspace"
-        }
-        "agent" | "agents" | "memory" | "plugin" | "feedback" | "survey" => "Tools",
-        "session" | "resume" | "fork" | "clear" | "compact" | "whisper" | "quit" | "exit" => {
-            "Session"
-        }
+        "connect" | "model" | "providers" | "fast" | "effort" => "Model & Provider",
+        "diff" | "review" | "rewind" | "export" => "Review & History",
+        "usage" | "status" => "Diagnostics",
+        "config" | "settings" | "hooks" | "mcp" => "Workspace",
+        "agent" | "memory" | "plugin" | "feedback" | "survey" => "Tools",
+        "session" | "resume" | "clear" | "compact" | "whisper" | "quit" | "exit" => "Session",
         "coven" | "handoff" | "familiar" => "Coven Substrate",
         _ => "Commands",
     }
@@ -2467,7 +2463,7 @@ impl App {
         }
         // /review comments reads PR comments via the command layer; other
         // /review forms keep opening the diff viewer.
-        if cmd == "review" && args.trim().split_whitespace().next() == Some("comments") {
+        if cmd == "review" && args.split_whitespace().next() == Some("comments") {
             return false;
         }
         // /export copy reuses the live clipboard intercept; every other
