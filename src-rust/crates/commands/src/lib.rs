@@ -5959,14 +5959,120 @@ mod chrome_cdp {
     // Public helpers called from the SlashCommand impl
     // -----------------------------------------------------------------------
 
-    /// Connect to Chrome at the given port.
-    /// Picks the first available target (tab/page).
-    pub async fn connect(port: u16) -> anyhow::Result<String> {
+    /// Look up an executable on PATH.
+    fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    }
+
+    /// Locate a Chrome/Chromium-family binary on this machine.
+    fn find_chrome_binary() -> Option<std::path::PathBuf> {
+        let candidates: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ]
+        } else if cfg!(target_os = "windows") {
+            &[
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            ]
+        } else {
+            &[
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ]
+        };
+        candidates
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.is_file())
+            .or_else(|| {
+                [
+                    "google-chrome",
+                    "google-chrome-stable",
+                    "chromium",
+                    "chromium-browser",
+                    "chrome",
+                ]
+                .iter()
+                .find_map(|name| which_in_path(name))
+            })
+    }
+
+    /// Launch Chrome with remote debugging enabled on `port`.
+    ///
+    /// Uses a dedicated profile dir: Chrome silently ignores
+    /// --remote-debugging-port when it would join an already-running instance,
+    /// so a separate --user-data-dir is required to guarantee a fresh process
+    /// that actually opens the port.
+    fn launch_chrome(port: u16) -> anyhow::Result<std::path::PathBuf> {
+        let bin = find_chrome_binary().ok_or_else(|| {
+            anyhow::anyhow!("no Chrome/Chromium binary found on this machine")
+        })?;
+        let profile_dir = std::env::temp_dir().join(format!("coven-chrome-cdp-{}", port));
+        std::fs::create_dir_all(&profile_dir)?;
+        std::process::Command::new(&bin)
+            .arg(format!("--remote-debugging-port={}", port))
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("about:blank")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch {}: {}", bin.display(), e))?;
+        Ok(bin)
+    }
+
+    /// Fetch the DevTools target list from a debugging endpoint.
+    async fn fetch_tabs(client: &reqwest::Client, port: u16) -> anyhow::Result<Value> {
         let http_url = format!("http://localhost:{}/json/list", port);
+        Ok(client.get(&http_url).send().await?.json().await?)
+    }
+
+    /// Connect to Chrome at the given port, auto-launching it if nothing is
+    /// listening there. Picks the first available target (tab/page).
+    pub async fn connect(port: u16) -> anyhow::Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()?;
-        let tabs: Value = client.get(&http_url).send().await?.json().await?;
+
+        let mut launched: Option<std::path::PathBuf> = None;
+        let tabs: Value = match fetch_tabs(&client, port).await {
+            Ok(t) => t,
+            Err(first_err) => {
+                // Nothing listening — launch Chrome ourselves, then poll until
+                // the DevTools endpoint comes up (or ~15s elapse).
+                let bin = launch_chrome(port).map_err(|launch_err| {
+                    anyhow::anyhow!("{first_err}; auto-launch failed: {launch_err}")
+                })?;
+                launched = Some(bin);
+                let mut tabs = None;
+                for _ in 0..60 {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if let Ok(t) = fetch_tabs(&client, port).await {
+                        tabs = Some(t);
+                        break;
+                    }
+                }
+                tabs.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "launched Chrome but the DevTools endpoint on port {} never came up",
+                        port
+                    )
+                })?
+            }
+        };
 
         let ws_url = tabs
             .as_array()
@@ -6008,10 +6114,19 @@ mod chrome_cdp {
 
         store_session(session);
 
-        Ok(format!(
-            "Connected to Chrome on port {} (tab: {})",
-            port, tab_url
-        ))
+        Ok(match launched {
+            Some(bin) => {
+                let name = bin
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Chrome".to_string());
+                format!(
+                    "Launched {} with remote debugging and connected on port {} (tab: {})",
+                    name, port, tab_url
+                )
+            }
+            None => format!("Connected to Chrome on port {} (tab: {})", port, tab_url),
+        })
     }
 
     /// Disconnect the current session.
@@ -6208,11 +6323,12 @@ impl SlashCommand for ChromeCommand {
     }
     fn help(&self) -> &str {
         "Usage: /chrome <subcommand> [args]\n\n\
-         Control a running Chrome/Chromium browser via CDP.\n\n\
-         First, launch Chrome with remote debugging enabled:\n\
-           chrome --remote-debugging-port=9222 --no-first-run\n\n\
+         Control a Chrome/Chromium browser via CDP.\n\n\
+         `/chrome connect` attaches to a Chrome already running with\n\
+         --remote-debugging-port, or auto-launches one (with a dedicated\n\
+         profile) if nothing is listening.\n\n\
          Subcommands:\n\
-           /chrome connect [--port 9222]      — connect to Chrome\n\
+           /chrome connect [--port 9222]      — connect (auto-launches Chrome)\n\
            /chrome navigate <url>             — navigate to URL\n\
            /chrome screenshot                 — take screenshot, save to temp file\n\
            /chrome click <selector>           — click CSS selector\n\
@@ -6256,7 +6372,7 @@ impl SlashCommand for ChromeCommand {
                     Ok(msg) => CommandResult::Message(msg),
                     Err(e) => CommandResult::Error(format!(
                         "Failed to connect to Chrome on port {}: {}\n\n\
-                         Make sure Chrome is running with:\n\
+                         Auto-launch was attempted. To start Chrome manually, run:\n\
                            chrome --remote-debugging-port={} --no-first-run",
                         port, e, port
                     )),

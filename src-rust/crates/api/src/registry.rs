@@ -272,6 +272,21 @@ pub fn provider_from_config(
         "codex" | "openai-codex" => {
             CodexProvider::from_stored().map(|provider| Arc::new(provider) as Arc<dyn LlmProvider>)
         }
+        // User-supplied OpenAI-compatible endpoint. An API key is optional —
+        // self-hosted gateways (LiteLLM, vLLM, etc.) often need none — so build
+        // it from the configured base URL regardless and only attach a key when
+        // present. Falling into the generic `_` arm would drop it whenever no
+        // key is set, leaving the model picker unable to list models.
+        "custom-openai" => {
+            let mut provider = match api_base {
+                Some(base) => providers::custom_openai_with_url(base),
+                None => providers::custom_openai(),
+            };
+            if let Some(key) = api_key {
+                provider = provider.with_api_key(key);
+            }
+            Some(Arc::new(provider))
+        }
         _ => api_key.and_then(|key| provider_from_key(provider_id, key)),
     }
 }
@@ -766,5 +781,31 @@ impl ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claurst_core::config::{Config, ProviderConfig};
+
+    #[test]
+    fn custom_openai_registers_without_api_key() {
+        // A user-supplied OpenAI-compatible endpoint with only a base URL (no
+        // key) must still build — self-hosted gateways often need no key, and
+        // dropping it leaves the model picker unable to list models.
+        let mut config = Config::default();
+        config.provider = Some("custom-openai".to_string());
+        config.provider_configs.insert(
+            "custom-openai".to_string(),
+            ProviderConfig {
+                api_base: Some("http://localhost:4000/v1".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let provider = provider_from_config(&config, "custom-openai")
+            .expect("custom-openai should register with a base URL and no key");
+        assert_eq!(provider.id(), &"custom-openai");
     }
 }

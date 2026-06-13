@@ -1101,14 +1101,14 @@ async fn main() -> anyhow::Result<()> {
     let provider_registry = std::sync::Arc::new(provider_registry);
     query_config.provider_registry = Some(provider_registry.clone());
 
-    // Wire in the named agent (--agent flag).
-    // Merge built-in default agents + settings agents + Coven familiars.
-    // Familiar ids keep their trusted access tier over project settings.
-    let tools = if let Some(ref agent_name) = cli.agent {
-        query_config.agent_name = Some(agent_name.clone());
+    // Wire in the named agent. An explicit --agent wins; otherwise a configured
+    // familiar is also the active agent so the prompt matches the visible card.
+    let startup_agent = startup_agent_name(cli.agent.as_deref(), config.familiar.as_deref());
+    let tools = if let Some(agent_key) = startup_agent {
         let all_agents =
             claurst_core::coven_shared::default_agents_with_familiars_and_config(&config.agents);
-        if let Some(def) = all_agents.get(agent_name) {
+        query_config.agent_name = Some(agent_key.clone());
+        if let Some(def) = all_agents.get(&agent_key) {
             let access = def.access.clone();
             query_config.agent_definition = Some(def.clone());
             // Override max_turns from agent definition when specified.
@@ -1119,7 +1119,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             eprintln!(
                 "Warning: unknown agent '{}'. Run /agent to see available agents.",
-                agent_name
+                agent_key
             );
             tools
         }
@@ -1697,6 +1697,10 @@ fn resolve_tui_agent_mode(
         .cloned()
 }
 
+fn startup_agent_name(cli_agent: Option<&str>, familiar: Option<&str>) -> Option<String> {
+    cli_agent.or(familiar).map(|name| name.to_lowercase())
+}
+
 /// Filter the tool list based on the agent's access level.
 /// - "full"        → all tools allowed (no filtering)
 /// - "read-only"   → only ReadOnly/None permission tools and AskUserQuestion
@@ -2250,6 +2254,11 @@ async fn run_interactive(
     // Set agent mode from the --agent flag (carried on query_config).
     if let Some(ref agent_name) = base_query_config.agent_name {
         app.agent_mode = Some(agent_name.clone());
+        if app.config.familiar.as_ref().map(|id| id.to_lowercase())
+            != Some(agent_name.to_lowercase())
+        {
+            app.config.familiar = None;
+        }
     }
 
     // Mirror TS BypassPermissionsModeDialog.tsx startup gate
@@ -5282,6 +5291,22 @@ mod tests {
             .expect("custom project agent should resolve");
         assert_eq!(def.access, "full");
         assert_eq!(def.prompt.as_deref(), Some("custom prompt"));
+    }
+
+    #[test]
+    fn startup_agent_defaults_to_configured_familiar() {
+        assert_eq!(
+            startup_agent_name(None, Some("Echo")),
+            Some("echo".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_agent_prefers_explicit_agent_over_familiar() {
+        assert_eq!(
+            startup_agent_name(Some("Explore"), Some("Echo")),
+            Some("explore".to_string())
+        );
     }
 
     #[test]

@@ -2302,6 +2302,7 @@ impl App {
         let idx = MODES.iter().position(|&m| m == current).unwrap_or(0);
         let next = MODES[(idx + 1) % MODES.len()];
         self.agent_mode = Some(next.to_string());
+        self.config.familiar = None;
         self.agent_mode_changed = true;
         self.accent_color = accent_for_mode(Some(next));
 
@@ -5328,6 +5329,7 @@ impl App {
                 self.status_message = Some(format!("Switched to {} familiar.", label));
             }
             None => {
+                self.config.familiar = None;
                 self.agent_mode = None;
                 self.agent_mode_changed = true;
                 self.accent_color = accent_for_mode(None);
@@ -7412,6 +7414,19 @@ mod tests {
             preset_name: Some("test".to_string()),
             executor_isolation: true,
         }
+    }
+
+    #[test]
+    fn cycle_agent_mode_clears_visible_familiar() {
+        let mut app = make_app();
+        app.config.familiar = Some("echo".to_string());
+        app.agent_mode = Some("echo".to_string());
+
+        app.cycle_agent_mode();
+
+        assert_eq!(app.agent_mode.as_deref(), Some("plan"));
+        assert!(app.config.familiar.is_none());
+        assert!(app.agent_mode_changed);
     }
 
     #[test]
