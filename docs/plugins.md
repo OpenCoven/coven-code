@@ -4,6 +4,14 @@ Coven Code's plugin system lets you extend the agent with additional slash comma
 
 ---
 
+## First-Party Marketplace
+
+The OpenCoven first-party marketplace lives under `marketplace/`. Its canonical source is `marketplace/catalog.json`, which generates installable Coven Code plugin packages in `marketplace/plugins/` plus compatibility exports for Codex, MCP-only clients, and Cave role-affinity views.
+
+See [Marketplace](./marketplace.md) for the package layout, seeded integrations, trust levels, and sync command.
+
+---
+
 ## Plugin Discovery
 
 Plugins are loaded from the `~/.coven-code/plugins/` directory. Each subdirectory that contains a valid `plugin.toml` or `plugin.json` manifest is treated as a plugin.

@@ -1,0 +1,68 @@
+{
+  "name": "sequential-thinking",
+  "version": "0.1.0",
+  "description": "Structured reasoning support through the MCP reference Sequential Thinking server.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "reasoning",
+    "planning",
+    "thinking",
+    "reference-mcp"
+  ],
+  "capabilities": [
+    "mcp"
+  ],
+  "marketplaceId": "opencoven/sequential-thinking",
+  "x-coven": {
+    "displayName": "Sequential Thinking",
+    "category": "Core MCP",
+    "trust": "reference-local",
+    "sourceRefs": [
+      "https://github.com/modelcontextprotocol/servers"
+    ],
+    "roleAffinity": [
+      {
+        "familiar": "astra",
+        "roles": [
+          "strategic-navigator",
+          "coordination-layer"
+        ]
+      },
+      {
+        "familiar": "cody",
+        "roles": [
+          "debugger",
+          "code-reviewer"
+        ]
+      },
+      {
+        "familiar": "sage",
+        "roles": [
+          "researcher"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": true,
+      "rolePatch": true
+    }
+  },
+  "mcpServers": {
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "type": "stdio"
+    }
+  }
+}

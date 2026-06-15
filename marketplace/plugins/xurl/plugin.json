@@ -1,0 +1,45 @@
+{
+  "name": "xurl",
+  "version": "0.1.0",
+  "description": "X/Twitter drafting, lookup, and approved-post workflows for Charm's social voice lane.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "x",
+    "twitter",
+    "social",
+    "posting",
+    "devrel"
+  ],
+  "capabilities": [
+    "network",
+    "shell"
+  ],
+  "marketplaceId": "opencoven/xurl",
+  "x-coven": {
+    "displayName": "xurl",
+    "category": "Social",
+    "trust": "local-tool",
+    "sourceRefs": [],
+    "roleAffinity": [
+      {
+        "familiar": "charm",
+        "roles": [
+          "social-voice",
+          "devrel-liaison"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": false,
+      "rolePatch": true
+    }
+  }
+}

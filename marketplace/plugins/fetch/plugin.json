@@ -1,0 +1,69 @@
+{
+  "name": "fetch",
+  "version": "0.1.0",
+  "description": "Web content retrieval through the MCP reference Fetch server.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "fetch",
+    "web",
+    "http",
+    "research",
+    "reference-mcp"
+  ],
+  "capabilities": [
+    "network",
+    "mcp"
+  ],
+  "marketplaceId": "opencoven/fetch",
+  "x-coven": {
+    "displayName": "Fetch",
+    "category": "Core MCP",
+    "trust": "reference-local",
+    "sourceRefs": [
+      "https://github.com/modelcontextprotocol/servers"
+    ],
+    "roleAffinity": [
+      {
+        "familiar": "sage",
+        "roles": [
+          "researcher",
+          "librarian"
+        ]
+      },
+      {
+        "familiar": "charm",
+        "roles": [
+          "copywriter",
+          "devrel-liaison"
+        ]
+      },
+      {
+        "familiar": "cody",
+        "roles": [
+          "debugger"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": true,
+      "rolePatch": true
+    }
+  },
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "type": "stdio"
+    }
+  }
+}

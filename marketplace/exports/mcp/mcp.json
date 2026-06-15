@@ -1,0 +1,99 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "type": "stdio",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+    "gmail": {
+      "command": "gws",
+      "args": [
+        "mcp",
+        "-s",
+        "gmail"
+      ],
+      "type": "stdio"
+    },
+    "google-calendar": {
+      "command": "gws",
+      "args": [
+        "mcp",
+        "-s",
+        "calendar"
+      ],
+      "type": "stdio"
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "type": "http"
+    },
+    "canva": {
+      "url": "https://mcp.canva.com/mcp",
+      "type": "http"
+    },
+    "vercel": {
+      "url": "https://mcp.vercel.com",
+      "type": "http"
+    },
+    "asana": {
+      "url": "https://mcp.asana.com/v2/mcp",
+      "type": "http"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${COVEN_MCP_FILESYSTEM_ROOT}"
+      ],
+      "type": "stdio"
+    },
+    "git": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "${COVEN_MCP_GIT_REPOSITORY}"
+      ],
+      "type": "stdio"
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "type": "stdio"
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "type": "stdio"
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "type": "stdio"
+    },
+    "time": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-time",
+        "--local-timezone",
+        "${COVEN_MCP_LOCAL_TIMEZONE}"
+      ],
+      "type": "stdio"
+    }
+  }
+}

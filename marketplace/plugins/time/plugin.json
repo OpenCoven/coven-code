@@ -1,0 +1,78 @@
+{
+  "name": "time",
+  "version": "0.1.0",
+  "description": "Timezone conversion and current-time lookup through the MCP reference Time server.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "time",
+    "timezone",
+    "calendar",
+    "reference-mcp"
+  ],
+  "capabilities": [
+    "mcp"
+  ],
+  "marketplaceId": "opencoven/time",
+  "x-coven": {
+    "displayName": "Time",
+    "category": "Core MCP",
+    "trust": "reference-local",
+    "sourceRefs": [
+      "https://github.com/modelcontextprotocol/servers"
+    ],
+    "roleAffinity": [
+      {
+        "familiar": "astra",
+        "roles": [
+          "strategic-navigator",
+          "coordination-layer"
+        ]
+      },
+      {
+        "familiar": "kitty",
+        "roles": [
+          "general-helper"
+        ]
+      },
+      {
+        "familiar": "charm",
+        "roles": [
+          "devrel-liaison"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": true,
+      "rolePatch": true
+    }
+  },
+  "mcpServers": {
+    "time": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-time",
+        "--local-timezone",
+        "${COVEN_MCP_LOCAL_TIMEZONE}"
+      ],
+      "type": "stdio"
+    }
+  },
+  "userConfig": {
+    "local_timezone": {
+      "type": "string",
+      "title": "Local Timezone",
+      "description": "IANA timezone used as the default local timezone.",
+      "required": false,
+      "default": "America/Chicago",
+      "sensitive": false
+    }
+  }
+}

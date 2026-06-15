@@ -1,0 +1,24 @@
+{
+  "name": "xurl",
+  "version": "0.1.0",
+  "description": "X/Twitter drafting, lookup, and approved-post workflows for Charm's social voice lane.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "xurl",
+    "shortDescription": "X/Twitter drafting, lookup, and approved-post workflows for Charm's social voice lane.",
+    "longDescription": "Use xurl only for approved X/Twitter workflows and keep drafting separate from posting.",
+    "developerName": "OpenCoven",
+    "category": "Social",
+    "capabilities": [
+      "x",
+      "twitter",
+      "social",
+      "posting",
+      "devrel"
+    ],
+    "defaultPrompt": "Help me use xurl safely."
+  }
+}
