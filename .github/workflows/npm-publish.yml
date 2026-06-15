@@ -263,9 +263,9 @@ jobs:
 
             echo "${package_name}@${VERSION} is not published yet; publishing."
             prepare_package "$package_name"
-            publish_args=(--provenance)
+            publish_args=(--provenance --ignore-scripts)
             if [[ "$package_name" == @*/* ]]; then
-              publish_args=(--access public --provenance)
+              publish_args=(--access public --provenance --ignore-scripts)
             fi
 
             # The pre-publish `npm view` guard above can race npm's
