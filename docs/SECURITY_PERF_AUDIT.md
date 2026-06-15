@@ -133,7 +133,7 @@ Each `SP-n` is a self-contained subprompt: run it, let it land with its verifica
 
 ### Phase 0 — Safety nets (do first; everything else rides on these)
 - [x] **SP-0.1** Add a `write_secret_file(path, bytes)` helper in `core` that writes then `chmod 0600` (and `0700` dirs), reusing `accounts::set_user_only_perms`. Add unit tests asserting mode on Unix. *(enables SEC-CRED-2)* — `core/src/secret_file.rs` (sync + async, 3 tests).
-- [ ] **SP-0.2** Add regression tests for the Bash classifier covering chaining/prefix bypasses (`echo hi; rm -rf ~`, `true && rm -rf /`, `FOO=1 rm -rf ~`, `$(rm -rf ~)`) — they should FAIL now, documenting SEC-EXEC-1. *(TDD anchor for SP-3.1)*
+- [x] **SP-0.2** Add regression tests for the Bash classifier covering chaining/prefix bypasses (`echo hi; rm -rf ~`, `true && rm -rf /`, `FOO=1 rm -rf ~`, `$(rm -rf ~)`) — they should FAIL now, documenting SEC-EXEC-1. *(TDD anchor for SP-3.1)* — 6 `#[ignore]`d anchor tests in `bash_classifier.rs`; 5 fail under `--ignored` today. SP-3.1 un-ignores them.
 - [ ] **SP-0.3** Add a `SessionMeta` golden test + a benchmark/asserting test that `list_sessions` does not deserialize message bodies (e.g. via a large fixture session + timing or a deserialize-counter). *(TDD anchor for SP-2.2)*
 
 ### Phase 1 — Critical security: plugin trust model
