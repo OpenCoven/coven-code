@@ -913,8 +913,8 @@ mod tests {
     }
 
     #[test]
-    fn test_render_app_uses_explicit_rgb_background() {
-        let backend = TestBackend::new(120, 40);
+    fn test_render_app_uses_true_rgb_shell_background() {
+        let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = make_app();
 
@@ -922,8 +922,11 @@ mod tests {
             .draw(|frame| crate::render::render_app(frame, &app))
             .unwrap();
 
-        let background_cell = terminal.backend().buffer().cell((10, 20)).unwrap();
-        assert_eq!(background_cell.bg, Color::Rgb(0, 0, 0));
+        let buffer = terminal.backend().buffer();
+        let bg = crate::overlays::COVEN_CODE_APP_BG;
+
+        assert_eq!(buffer[(0, 12)].bg, bg);
+        assert_eq!(buffer[(119, 12)].bg, bg);
     }
 
     #[test]

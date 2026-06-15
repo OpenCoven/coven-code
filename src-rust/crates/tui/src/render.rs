@@ -38,7 +38,7 @@ use crate::onboarding_dialog::render_onboarding_dialog;
 use crate::overage_upsell::render_overage_upsell;
 use crate::overlays::{
     render_global_search, render_help_overlay, render_history_search_overlay, render_rewind_flow,
-    COVEN_CODE_ACCENT, COVEN_CODE_MUTED,
+    COVEN_CODE_ACCENT, COVEN_CODE_APP_BG, COVEN_CODE_MUTED, COVEN_CODE_TEXT,
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
@@ -75,7 +75,6 @@ const SPINNER: &[char] = &[
     '\u{2736}', '\u{2733}', '\u{2722}', '\u{00b7}',
 ];
 const COVEN_VIOLET: Color = Color::Rgb(184, 175, 220);
-const APP_BACKGROUND: Color = Color::Rgb(0, 0, 0);
 const SPINNER_FRAME_DIVISOR: u64 = 2;
 // 11 rows: 1 (top border) + 1 (Welcome) + 1 (blank) + 4 (familiar card) +
 // 1 (Status header in right column) + 4 (Model/Provider/Daemon/Familiar) +
@@ -454,10 +453,10 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     let size = frame.area();
     app.last_selectable_area.set(size);
 
-    // Fill the entire frame with explicit RGB black so terminal palette remaps
-    // and default colors do not tint cells not covered by widgets.
+    // Fill the entire frame with a true RGB app background so terminal theme
+    // palette overrides for ANSI black do not bleed through the TUI shell.
     frame.render_widget(
-        Block::default().style(Style::default().bg(APP_BACKGROUND).fg(Color::White)),
+        Block::default().style(Style::default().bg(COVEN_CODE_APP_BG).fg(COVEN_CODE_TEXT)),
         size,
     );
 
@@ -3096,7 +3095,7 @@ pub fn render_full_status_line(
 
     let line = Line::from(spans);
     Paragraph::new(line)
-        .style(Style::default().bg(Color::Black))
+        .style(Style::default().bg(COVEN_CODE_APP_BG))
         .render(area, buf);
 }
 

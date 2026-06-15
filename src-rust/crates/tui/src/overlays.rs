@@ -13,6 +13,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 pub const COVEN_CODE_ACCENT: Color = Color::Rgb(139, 92, 246);
+pub const COVEN_CODE_APP_BG: Color = Color::Rgb(10, 10, 14);
 pub const COVEN_CODE_PANEL_BG: Color = Color::Rgb(20, 20, 28);
 pub const COVEN_CODE_PANEL_BORDER: Color = Color::Rgb(72, 72, 80);
 pub const COVEN_CODE_TEXT: Color = Color::Rgb(235, 235, 240);
