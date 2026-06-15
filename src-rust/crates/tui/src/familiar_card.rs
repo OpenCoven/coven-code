@@ -7,13 +7,12 @@
 //! eye row while the assistant is in the `Loading` state; other surfaces pass
 //! `CompanionPose::Static` and stay still.
 //!
-//! Built-in archetypes dispatch to the pixel-art builders in
-//! [`crate::mascot`]. Procedural archetypes ([`Archetype::SigilCrystal`] etc.)
-//! draw a colored frame around the familiar's emoji so any user-defined entry
-//! from `~/.coven/familiars.toml` gets first-class visual identity.
+//! Every archetype ([`Archetype::SigilCrystal`] etc.) draws a colored frame
+//! around the familiar's emoji, so any entry from `~/.coven/familiars.toml`
+//! gets first-class visual identity and nothing inherits a built-in persona.
 
 use crate::familiar_theme::{Archetype, FamiliarPalette, FamiliarTheme};
-use crate::mascot::{archetype_lines, CompanionPose};
+use crate::mascot::CompanionPose;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -240,24 +239,38 @@ fn access_line(theme: &FamiliarTheme, primary: Color, inner_w: u16) -> Line<'sta
 
 fn glyph_lines(theme: &FamiliarTheme, pose: &CompanionPose) -> Vec<Line<'static>> {
     match theme.archetype {
-        Archetype::SigilCrystal => sigil_crystal(&theme.palette, &theme.emoji),
-        Archetype::SigilHex => sigil_hex(&theme.palette, &theme.emoji),
-        Archetype::SigilRune => sigil_rune(&theme.palette, &theme.emoji),
-        Archetype::SigilSeal => sigil_seal(&theme.palette, &theme.emoji),
-        _ => archetype_lines(theme.archetype, &theme.palette, pose).to_vec(),
+        Archetype::SigilCrystal => sigil_crystal(&theme.palette, &theme.emoji, pose),
+        Archetype::SigilHex => sigil_hex(&theme.palette, &theme.emoji, pose),
+        Archetype::SigilRune => sigil_rune(&theme.palette, &theme.emoji, pose),
+        Archetype::SigilSeal => sigil_seal(&theme.palette, &theme.emoji, pose),
     }
 }
 
-// ── Procedural sigils for user-defined familiars ─────────────────────────────
-//
-// Each sigil is 11 visible cells wide × 4 rows so it slots in next to the
-// hand-crafted built-ins without changing the bordered layout.  The emoji
-// (2 cells wide on most terminals) is rendered as its own span; the
-// surrounding frame characters are colored in the resolved palette.
+/// Accent color for a sigil's decorative row, pulsed by the companion pose.
+///
+/// The glyph text never changes width — only the accent row's color shifts
+/// between the bright accent and the dimmer primary — so an `Idle` card
+/// breathes softly and a stalled `Loading` card pulses faster, while a
+/// `Static` card stays bright. This is the only animation; it is identical for
+/// every familiar and tied to no named persona.
+fn pulse_accent(p: &FamiliarPalette, pose: &CompanionPose) -> Color {
+    match pose {
+        CompanionPose::Idle { frame } if matches!(frame % 120, 90..=95) => p.primary,
+        CompanionPose::Loading { frame } if (frame / 5) % 2 == 1 => p.primary,
+        _ => p.accent,
+    }
+}
 
-fn sigil_crystal(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
+// ── Procedural sigils ────────────────────────────────────────────────────────
+//
+// Each sigil is 11 visible cells wide × 4 rows so it slots into the bordered
+// layout consistently.  The emoji (2 cells wide on most terminals) is rendered
+// as its own span; the surrounding frame characters are colored in the
+// resolved palette.
+
+fn sigil_crystal(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(p.accent);
+    let accent = Style::default().fg(pulse_accent(p, pose));
     vec![
         Line::from(Span::styled(
             "    \u{2581}\u{2580}\u{2581}    ".to_string(),
@@ -275,9 +288,9 @@ fn sigil_crystal(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     ]
 }
 
-fn sigil_hex(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
+fn sigil_hex(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(p.accent);
+    let accent = Style::default().fg(pulse_accent(p, pose));
     vec![
         Line::from(Span::styled(
             "   \u{256d}\u{2500}\u{2500}\u{2500}\u{256e}   ".to_string(),
@@ -295,9 +308,9 @@ fn sigil_hex(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     ]
 }
 
-fn sigil_rune(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
+fn sigil_rune(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(p.accent);
+    let accent = Style::default().fg(pulse_accent(p, pose));
     vec![
         Line::from(Span::styled(
             "    \u{258e}   \u{258e}   ".to_string(),
@@ -315,9 +328,9 @@ fn sigil_rune(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
     ]
 }
 
-fn sigil_seal(p: &FamiliarPalette, emoji: &str) -> Vec<Line<'static>> {
+fn sigil_seal(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
     let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(p.accent);
+    let accent = Style::default().fg(pulse_accent(p, pose));
     vec![
         Line::from(Span::styled(
             "    \u{2726} \u{2726}    ".to_string(),
@@ -421,23 +434,23 @@ mod tests {
 
     #[test]
     fn render_card_compact_is_glyph_only() {
-        let t = familiar_theme::resolve("kitty", &[]);
+        let t = familiar_theme::resolve("alpha", &[]);
         let lines = render_card(&t, CardSize::Compact, &CompanionPose::Static);
-        // Built-in archetypes return 5 rows (4 content + 1 blank); compact passes through.
+        // Sigil archetypes return 4 content rows; compact passes through.
         assert!(lines.len() >= 4);
     }
 
     #[test]
     fn render_card_standard_has_border() {
-        let t = familiar_theme::resolve("nova", &[]);
+        let t = familiar_theme::resolve("beta", &[]);
         let lines = render_card(&t, CardSize::Standard, &CompanionPose::Static);
-        // Top border + 5 glyph rows + access row + bottom border = at least 8.
+        // Top border + glyph rows + access row + bottom border = at least 7.
         assert!(lines.len() >= 7);
     }
 
     #[test]
     fn render_card_large_includes_rule_row() {
-        let t = familiar_theme::resolve("sage", &[]);
+        let t = familiar_theme::resolve("gamma", &[]);
         let lines = render_card(&t, CardSize::Large, &CompanionPose::Static);
         // Large has at least one more row than Standard (the rule + role region).
         let standard = render_card(&t, CardSize::Standard, &CompanionPose::Static).len();

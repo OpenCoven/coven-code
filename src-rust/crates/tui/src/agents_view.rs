@@ -730,8 +730,8 @@ mod tests {
 
     fn status(status: &str, active_sessions: u32) -> coven_shared::FamiliarStatus {
         coven_shared::FamiliarStatus {
-            id: "sage".to_string(),
-            display_name: "Sage".to_string(),
+            id: "wisp".to_string(),
+            display_name: "Wisp".to_string(),
             emoji: String::new(),
             status: status.to_string(),
             active_sessions,
@@ -763,12 +763,12 @@ mod tests {
     #[test]
     fn familiar_id_from_source_parses_coven_familiar_prefix() {
         assert_eq!(
-            familiar_id_from_source("coven:familiar:cody"),
-            Some("cody".to_string())
+            familiar_id_from_source("coven:familiar:ember"),
+            Some("ember".to_string())
         );
         assert_eq!(
-            familiar_id_from_source("coven:familiar:Nova"),
-            Some("nova".to_string())
+            familiar_id_from_source("coven:familiar:Onyx"),
+            Some("onyx".to_string())
         );
         assert_eq!(familiar_id_from_source("user"), None);
         assert_eq!(familiar_id_from_source("plugin:foo"), None);
@@ -807,8 +807,8 @@ mod tests {
     #[test]
     fn familiar_as_agent_def_matches_core_conversion() {
         let fam = coven_shared::CovenFamiliar {
-            id: "Cody".to_string(),
-            display_name: Some("Cody".to_string()),
+            id: "Ember".to_string(),
+            display_name: Some("Ember".to_string()),
             emoji: Some("⚡".to_string()),
             role: Some("Code".to_string()),
             description: Some("Builds and ships.".to_string()),
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn familiar_as_agent_def_defaults_access_to_read_only() {
         let fam = coven_shared::CovenFamiliar {
-            id: "sage".to_string(),
+            id: "wisp".to_string(),
             display_name: None,
             emoji: None,
             role: None,
@@ -842,12 +842,12 @@ mod tests {
     #[test]
     fn confirm_selection_returns_familiar_id_from_list_route() {
         let mut state = AgentsMenuState::new();
-        state.definitions = vec![user_def("review"), familiar_def("cody", "Cody")];
+        state.definitions = vec![user_def("review"), familiar_def("ember", "Ember")];
         state.route = AgentsRoute::List;
         // selected_row 0 = "Create new"; row 1 = reset; row 2 = first def; row 3 = familiar.
         state.selected_row = 3;
         let result = state.confirm_selection();
-        assert_eq!(result, Some(("cody".to_string(), "Cody".to_string())));
+        assert_eq!(result, Some(("ember".to_string(), "Ember".to_string())));
         // List route is unchanged — caller is responsible for closing the menu.
         assert!(matches!(state.route, AgentsRoute::List));
     }
@@ -876,10 +876,10 @@ mod tests {
     #[test]
     fn confirm_selection_returns_familiar_id_from_detail_route() {
         let mut state = AgentsMenuState::new();
-        state.definitions = vec![familiar_def("nova", "Nova")];
+        state.definitions = vec![familiar_def("onyx", "Onyx")];
         state.route = AgentsRoute::Detail(0);
         let result = state.confirm_selection();
-        assert_eq!(result, Some(("nova".to_string(), "Nova".to_string())));
+        assert_eq!(result, Some(("onyx".to_string(), "Onyx".to_string())));
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn delete_selected_definition_rejects_coven_familiar() {
         let mut state = AgentsMenuState::new();
-        state.definitions = vec![familiar_def("nova", "Nova")];
+        state.definitions = vec![familiar_def("onyx", "Onyx")];
         state.route = AgentsRoute::List;
         state.selected_row = 2;
 
