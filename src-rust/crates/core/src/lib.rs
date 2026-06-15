@@ -30,6 +30,7 @@ pub mod device_code;
 // Utility modules ported from src/utils/
 pub mod auto_mode;
 pub mod crypto_utils;
+pub mod secret_file;
 pub mod format_utils;
 pub mod spinner;
 pub mod status_notices;
