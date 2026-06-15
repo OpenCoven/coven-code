@@ -1,0 +1,69 @@
+{
+  "name": "memory",
+  "version": "0.1.0",
+  "description": "Knowledge-graph memory through the MCP reference Memory server.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "memory",
+    "knowledge-graph",
+    "recall",
+    "reference-mcp"
+  ],
+  "capabilities": [
+    "read_files",
+    "write_files",
+    "mcp"
+  ],
+  "marketplaceId": "opencoven/memory",
+  "x-coven": {
+    "displayName": "Memory",
+    "category": "Core MCP",
+    "trust": "reference-local",
+    "sourceRefs": [
+      "https://github.com/modelcontextprotocol/servers"
+    ],
+    "roleAffinity": [
+      {
+        "familiar": "echo",
+        "roles": [
+          "archivist",
+          "retrospector"
+        ]
+      },
+      {
+        "familiar": "sage",
+        "roles": [
+          "librarian"
+        ]
+      },
+      {
+        "familiar": "astra",
+        "roles": [
+          "strategic-navigator"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": true,
+      "rolePatch": true
+    }
+  },
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "type": "stdio"
+    }
+  }
+}

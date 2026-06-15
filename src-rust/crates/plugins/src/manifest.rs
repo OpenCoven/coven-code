@@ -444,3 +444,42 @@ fn normalize_manifest_json(mut v: serde_json::Value) -> serde_json::Value {
 
     serde_json::Value::Object(obj.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PluginManifest;
+    use std::path::Path;
+
+    #[test]
+    fn generated_marketplace_plugin_manifests_parse() {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("crate lives under src-rust/crates/plugins");
+        let plugins_dir = repo_root.join("marketplace").join("plugins");
+        let entries =
+            std::fs::read_dir(&plugins_dir).expect("marketplace/plugins directory exists");
+
+        let mut parsed = 0;
+        for entry in entries {
+            let entry = entry.expect("marketplace plugin entry is readable");
+            let manifest_path = entry.path().join("plugin.json");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&manifest_path).expect("plugin manifest is readable");
+            let manifest = PluginManifest::from_json(&bytes)
+                .unwrap_or_else(|err| panic!("{} failed to parse: {err}", manifest_path.display()));
+            assert_eq!(
+                manifest.name,
+                entry.file_name().to_string_lossy(),
+                "manifest name should match package directory"
+            );
+            parsed += 1;
+        }
+
+        assert_eq!(parsed, 14);
+    }
+}

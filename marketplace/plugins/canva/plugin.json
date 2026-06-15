@@ -1,0 +1,72 @@
+{
+  "name": "canva",
+  "version": "0.1.0",
+  "description": "Design search, creation, export, brand, and asset workflows through Canva's official remote MCP server.",
+  "author": {
+    "name": "OpenCoven"
+  },
+  "homepage": "https://opencoven.ai",
+  "repository": "https://github.com/OpenCoven/coven-code",
+  "license": "GPL-3.0",
+  "keywords": [
+    "canva",
+    "design",
+    "assets",
+    "brand",
+    "export"
+  ],
+  "capabilities": [
+    "network",
+    "mcp"
+  ],
+  "marketplaceId": "opencoven/canva",
+  "x-coven": {
+    "displayName": "Canva",
+    "category": "Design",
+    "trust": "official-remote",
+    "sourceRefs": [
+      "https://www.canva.dev/docs/mcp/"
+    ],
+    "roleAffinity": [
+      {
+        "familiar": "charm",
+        "roles": [
+          "copywriter",
+          "social-voice",
+          "devrel-liaison"
+        ]
+      },
+      {
+        "familiar": "sage",
+        "roles": [
+          "librarian"
+        ]
+      },
+      {
+        "familiar": "astra",
+        "roles": [
+          "strategic-navigator"
+        ]
+      },
+      {
+        "familiar": "kitty",
+        "roles": [
+          "general-helper"
+        ]
+      }
+    ],
+    "compatibility": {
+      "covenCaveCanonical": true,
+      "covenCode": true,
+      "codex": true,
+      "mcp": true,
+      "rolePatch": true
+    }
+  },
+  "mcpServers": {
+    "canva": {
+      "url": "https://mcp.canva.com/mcp",
+      "type": "http"
+    }
+  }
+}

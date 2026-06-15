@@ -1,0 +1,176 @@
+{
+  "name": "opencoven-first-party",
+  "interface": {
+    "displayName": "OpenCoven First-Party"
+  },
+  "plugins": [
+    {
+      "name": "github",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/github"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "gmail",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/gmail"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "google-calendar",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/google-calendar"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "linear",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/linear"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Project Management"
+    },
+    {
+      "name": "canva",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/canva"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Design"
+    },
+    {
+      "name": "vercel",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/vercel"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "asana",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/asana"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Project Management"
+    },
+    {
+      "name": "xurl",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/xurl"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Social"
+    },
+    {
+      "name": "filesystem",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/filesystem"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    },
+    {
+      "name": "git",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    },
+    {
+      "name": "fetch",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/fetch"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    },
+    {
+      "name": "memory",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/memory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    },
+    {
+      "name": "sequential-thinking",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/sequential-thinking"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    },
+    {
+      "name": "time",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/time"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Core MCP"
+    }
+  ]
+}
