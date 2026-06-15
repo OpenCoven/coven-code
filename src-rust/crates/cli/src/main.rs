@@ -2511,6 +2511,10 @@ async fn run_interactive(
 
         let evt_opt: Option<Event> = if let Some(e) = synthetic_event {
             Some(e)
+        } else if let Some(k) = app.take_pending_key() {
+            // Replay a key that try_detect_paste_burst saved when a non-character
+            // key terminated a paste burst on the previous iteration.
+            Some(Event::Key(k))
         } else if crossterm::event::poll(Duration::from_millis(16))? {
             Some(event::read()?)
         } else {
@@ -2525,6 +2529,29 @@ async fn run_interactive(
                     if key.kind != crossterm::event::KeyEventKind::Press {
                         continue;
                     }
+
+                    // ---- Paste-burst detection ----------------------------------------
+                    // When bracketed paste is unavailable (Windows Terminal Ctrl+V, or
+                    // any terminal that doesn't deliver Event::Paste), the clipboard
+                    // content arrives as raw character events — every `\n` fires as
+                    // Enter and submits the prompt, so a multi-line paste lands as
+                    // several separate messages. Coalesce a rapid char burst into one
+                    // paste. Mirrors the fallback in claurst_tui::app's TUI loop.
+                    if matches!(
+                        key.modifiers,
+                        crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
+                    ) {
+                        if let KeyCode::Char(c) = key.code {
+                            if app.prompt_is_accepting_text() && !app.any_modal_open() {
+                                if let Some(burst) = app.try_detect_paste_burst(c) {
+                                    app.handle_paste_data(burst);
+                                    app.refresh_prompt_input();
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // -------------------------------------------------------------------
 
                     // Ctrl+C and Ctrl+D: exit confirmation handling
                     if handle_exit_key(&mut app, key, &cancel) {

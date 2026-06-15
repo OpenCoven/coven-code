@@ -6279,7 +6279,7 @@ impl App {
     ///
     /// Otherwise the text goes through the normal `prompt_input.paste()` path
     /// which applies the multi-line summary placeholder for large pastes.
-    fn handle_paste_data(&mut self, data: String) {
+    pub fn handle_paste_data(&mut self, data: String) {
         use crate::image_paste::PastedImage;
         use crate::prompt_input::detect_pasted_path;
 
@@ -6322,7 +6322,7 @@ impl App {
 
     /// Returns `true` when the app is in a state where the prompt can accept
     /// regular text input — used to gate paste-burst detection.
-    fn prompt_is_accepting_text(&self) -> bool {
+    pub fn prompt_is_accepting_text(&self) -> bool {
         !self.is_streaming
             && self.permission_request.is_none()
             && !self.ask_user_dialog.visible
@@ -6330,6 +6330,13 @@ impl App {
             && !self.settings_screen.visible
             && !self.theme_screen.visible
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
+    }
+
+    /// Take any key event saved by `try_detect_paste_burst` when a non-character
+    /// key terminated a paste burst.  The caller should replay it as the next
+    /// event at the top of its event loop.
+    pub fn take_pending_key(&mut self) -> Option<crossterm::event::KeyEvent> {
+        self.pending_key.take()
     }
 
     /// Drain any immediately-available key events from the crossterm event
@@ -6350,7 +6357,7 @@ impl App {
     /// single keystroke.  If a non-character key is encountered while
     /// draining, it is stored in `self.pending_key` and will be replayed at
     /// the top of the next event-loop iteration.
-    fn try_detect_paste_burst(&mut self, first: char) -> Option<String> {
+    pub fn try_detect_paste_burst(&mut self, first: char) -> Option<String> {
         use crossterm::event::{Event, KeyCode, KeyEventKind};
 
         // Minimum number of chars (including `first`) to classify as a paste.
