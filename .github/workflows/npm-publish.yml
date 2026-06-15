@@ -261,8 +261,8 @@ jobs:
             echo "${package_name}@${VERSION} is not published yet; publishing."
             prepare_package "$package_name"
             if [[ "$package_name" == @*/* ]]; then
-              (cd npm && npm publish --access public --provenance)
+              (cd npm && npm publish --access public --provenance --ignore-scripts)
             else
-              (cd npm && npm publish --provenance)
+              (cd npm && npm publish --provenance --ignore-scripts)
             fi
           done
