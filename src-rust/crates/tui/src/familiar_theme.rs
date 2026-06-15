@@ -1,15 +1,13 @@
-//! Familiar theming — resolves any familiar id (built-in or user-defined from
+//! Familiar theming — resolves any familiar id (user-defined in
 //! `~/.coven/familiars.toml`) to a stable [`FamiliarTheme`] used by
 //! [`crate::familiar_card`] when composing the static themed card shown in the
 //! welcome panel, F2 switcher, and `/agents` detail view.
 //!
-//! Built-in familiars (`kitty`, `nova`, `cody`, `charm`, `sage`, `astra`,
-//! `echo`) get hand-tuned palettes + their existing pixel-art archetypes.
-//!
-//! User-defined familiars get a procedurally derived palette + sigil
-//! archetype hashed from the lowercased id so the same familiar always
-//! looks the same across sessions and machines without persisting extra
-//! state in `familiars.toml`.
+//! There is no built-in roster: nothing ships with a named familiar, so a
+//! fresh install never inherits one. Every familiar gets a procedurally
+//! derived palette + sigil archetype hashed from the lowercased id, so the
+//! same familiar always looks the same across sessions and machines without
+//! persisting extra state in `familiars.toml`.
 //!
 //! The access tier flows through verbatim from `coven_shared` — it drives the
 //! coloured tier dot drawn on the card.
@@ -52,19 +50,11 @@ impl FamiliarPalette {
 
 // ── Archetype ────────────────────────────────────────────────────────────────
 
-/// Which renderer in [`crate::mascot`] / [`crate::familiar_card`] draws the
-/// glyph body. The first seven variants map to the hand-crafted built-ins;
-/// `SigilCrystal`/`SigilHex`/`SigilRune`/`SigilSeal` are procedural frames
-/// used for any user-defined familiar.
+/// Which procedural frame in [`crate::familiar_card`] draws the glyph body.
+/// One of these is picked for every familiar by hashing its id, so each
+/// familiar gets a stable sigil without any named persona being baked in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archetype {
-    Cat,
-    SorceressCrown,
-    Robot,
-    Heart,
-    WizardBook,
-    Moon,
-    Ghost,
     SigilCrystal,
     SigilHex,
     SigilRune,
@@ -102,64 +92,10 @@ impl FamiliarTheme {
     }
 }
 
-// ── Built-in palettes ────────────────────────────────────────────────────────
-
-/// Palettes for the seven hand-crafted built-ins. Each one breaks the old
-/// uniform violet so familiars are visually distinct at a glance.
-const BUILTIN_PALETTES: &[(&str, FamiliarPalette, Archetype, &str, &str)] = &[
-    (
-        "kitty",
-        FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250), (196, 181, 253)),
-        Archetype::Cat,
-        "Kitty",
-        "\u{1f431}",
-    ),
-    (
-        "nova",
-        FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138), (254, 240, 138)),
-        Archetype::SorceressCrown,
-        "Nova",
-        "\u{1f451}",
-    ),
-    (
-        "cody",
-        FamiliarPalette::from_rgb((34, 211, 238), (165, 243, 252), (165, 243, 252)),
-        Archetype::Robot,
-        "Cody",
-        "\u{1f4bb}",
-    ),
-    (
-        "charm",
-        FamiliarPalette::from_rgb((236, 72, 153), (251, 207, 232), (251, 207, 232)),
-        Archetype::Heart,
-        "Charm",
-        "\u{2728}",
-    ),
-    (
-        "sage",
-        FamiliarPalette::from_rgb((16, 185, 129), (167, 243, 208), (167, 243, 208)),
-        Archetype::WizardBook,
-        "Sage",
-        "\u{1f33f}",
-    ),
-    (
-        "astra",
-        FamiliarPalette::from_rgb((99, 102, 241), (199, 210, 254), (199, 210, 254)),
-        Archetype::Moon,
-        "Astra",
-        "\u{1f319}",
-    ),
-    (
-        "echo",
-        FamiliarPalette::from_rgb((20, 184, 166), (153, 246, 228), (153, 246, 228)),
-        Archetype::Ghost,
-        "Echo",
-        "\u{1f47b}",
-    ),
-];
+// ── Procedural palettes ──────────────────────────────────────────────────────
 
 /// Eight-color palette table used to pick a deterministic accent for any
-/// user-defined familiar by hashing its id.
+/// familiar by hashing its id.
 const PROCEDURAL_PALETTES: &[FamiliarPalette] = &[
     FamiliarPalette::from_rgb((139, 92, 246), (167, 139, 250), (196, 181, 253)), // violet
     FamiliarPalette::from_rgb((245, 197, 24), (253, 230, 138), (254, 240, 138)), // gold
@@ -180,43 +116,25 @@ const PROCEDURAL_ARCHETYPES: &[Archetype] = &[
 
 /// Resolve a familiar id to its theme.
 ///
-/// Built-in ids win first. Anything else is matched against the supplied
-/// `daemon_familiars` (callers pass [`coven_shared::load_familiars`] output).
-/// Unknown ids fall back to the `kitty` theme so the welcome panel never
-/// renders blank.
+/// Ids present in the supplied `daemon_familiars` (callers pass
+/// [`coven_shared::load_familiars`] output) use that definition's display
+/// name, emoji, role, and access tier. Any other id is derived straight from
+/// the id string so the welcome panel still renders — there is no named
+/// fallback, so an unknown id never resolves to someone else's familiar.
 pub fn resolve(id: &str, daemon_familiars: &[CovenFamiliar]) -> FamiliarTheme {
     let lc = id.to_lowercase();
-    if let Some(theme) = builtin(&lc) {
-        return theme;
-    }
     if let Some(def) = daemon_familiars.iter().find(|f| f.id.to_lowercase() == lc) {
         return procedural(def);
     }
-    builtin("kitty").expect("kitty is always present in BUILTIN_PALETTES")
-}
-
-fn builtin(id: &str) -> Option<FamiliarTheme> {
-    BUILTIN_PALETTES
-        .iter()
-        .find(|(slug, _, _, _, _)| *slug == id)
-        .map(|(slug, palette, arch, name, emoji)| FamiliarTheme {
-            id: (*slug).to_string(),
-            display_name: (*name).to_string(),
-            emoji: (*emoji).to_string(),
-            role: None,
-            access: builtin_access(slug).to_string(),
-            palette: *palette,
-            archetype: *arch,
-        })
-}
-
-/// Built-in tier defaults match the recommendation table in `docs/familiars.md`:
-/// `cody`, `nova`, `kitty` get `full`; the research-leaning rest stay read-only.
-fn builtin_access(id: &str) -> &'static str {
-    match id {
-        "kitty" | "cody" | "nova" => "full",
-        _ => "read-only",
-    }
+    procedural(&CovenFamiliar {
+        id: id.to_string(),
+        display_name: None,
+        emoji: None,
+        role: None,
+        description: None,
+        pronouns: None,
+        access: None,
+    })
 }
 
 fn procedural(def: &CovenFamiliar) -> FamiliarTheme {
@@ -263,22 +181,46 @@ mod tests {
     }
 
     #[test]
-    fn builtin_resolution() {
-        let t = resolve("kitty", &[]);
-        assert_eq!(t.id, "kitty");
-        assert!(matches!(t.archetype, Archetype::Cat));
+    fn roster_definition_is_used() {
+        let mut f = fake_familiar("planner");
+        f.display_name = Some("Planner".to_string());
+        let t = resolve("planner", &[f]);
+        assert_eq!(t.id, "planner");
+        assert_eq!(t.display_name, "Planner");
+        // Every familiar resolves to a procedural sigil archetype.
+        assert!(matches!(
+            t.archetype,
+            Archetype::SigilCrystal
+                | Archetype::SigilHex
+                | Archetype::SigilRune
+                | Archetype::SigilSeal
+        ));
     }
 
     #[test]
-    fn case_insensitive_lookup() {
-        let t = resolve("KITTY", &[]);
-        assert_eq!(t.id, "kitty");
-    }
-
-    #[test]
-    fn unknown_falls_back_to_kitty() {
+    fn unknown_id_renders_without_named_fallback() {
+        // An id that isn't in the roster derives a theme from itself rather
+        // than inheriting any built-in persona.
         let t = resolve("does-not-exist", &[]);
-        assert_eq!(t.id, "kitty");
+        assert_eq!(t.id, "does-not-exist");
+        assert!(matches!(
+            t.archetype,
+            Archetype::SigilCrystal
+                | Archetype::SigilHex
+                | Archetype::SigilRune
+                | Archetype::SigilSeal
+        ));
+    }
+
+    #[test]
+    fn unknown_id_is_stable() {
+        let a = resolve("solo", &[]);
+        let b = resolve("solo", &[]);
+        assert_eq!(format!("{:?}", a.archetype), format!("{:?}", b.archetype));
+        assert_eq!(
+            format!("{:?}", a.palette.primary),
+            format!("{:?}", b.palette.primary)
+        );
     }
 
     #[test]
@@ -296,12 +238,17 @@ mod tests {
 
     #[test]
     fn eye_socket_palette_varies_by_familiar() {
-        let kitty = resolve("kitty", &[]);
-        let cody = resolve("cody", &[]);
-
-        assert_ne!(
-            kitty.palette.eye_socket, cody.palette.eye_socket,
-            "eye sockets should use each familiar palette instead of one hardcoded violet"
+        // The eye socket follows each familiar's palette rather than one
+        // shared hardcoded violet, so across a spread of ids more than one
+        // distinct eye socket shows up.
+        let ids = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        let sockets: std::collections::HashSet<String> = ids
+            .iter()
+            .map(|id| format!("{:?}", resolve(id, &[]).palette.eye_socket))
+            .collect();
+        assert!(
+            sockets.len() > 1,
+            "eye sockets should follow each familiar's palette, got {sockets:?}"
         );
     }
 

@@ -99,9 +99,9 @@ mod tests {
 
     #[test]
     fn handoff_context_handles_empty_messages() {
-        let ctx = build_handoff_context(&[], "sage");
-        assert!(ctx.contains("**Familiar:** sage"));
-        assert!(ctx.contains("Continue this work as sage"));
+        let ctx = build_handoff_context(&[], "wisp");
+        assert!(ctx.contains("**Familiar:** wisp"));
+        assert!(ctx.contains("Continue this work as wisp"));
         assert!(ctx.contains("(unknown topic)"));
     }
 
@@ -111,7 +111,7 @@ mod tests {
             Message::user("Fix the login bug"),
             Message::assistant("I'll inspect auth"),
         ];
-        let ctx = build_handoff_context(&msgs, "astra");
+        let ctx = build_handoff_context(&msgs, "onyx");
         assert!(ctx.contains("> **User**: Fix the login bug"));
         assert!(ctx.contains("> **Assistant**: I'll inspect auth"));
         assert!(ctx.contains("The user was working on: Fix the login bug"));
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn truncate_chars_does_not_split_unicode_boundaries() {
-        let text = "sage 🌿 keeps context";
-        assert_eq!(truncate_chars(text, 6), "sage 🌿...");
+        let text = "wisp 🌿 keeps context";
+        assert_eq!(truncate_chars(text, 6), "wisp 🌿...");
     }
 }

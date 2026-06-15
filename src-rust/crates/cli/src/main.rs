@@ -5323,15 +5323,15 @@ mod tests {
     #[test]
     fn startup_agent_defaults_to_configured_familiar() {
         assert_eq!(
-            startup_agent_name(None, Some("Echo")),
-            Some("echo".to_string())
+            startup_agent_name(None, Some("Wisp")),
+            Some("wisp".to_string())
         );
     }
 
     #[test]
     fn startup_agent_prefers_explicit_agent_over_familiar() {
         assert_eq!(
-            startup_agent_name(Some("Explore"), Some("Echo")),
+            startup_agent_name(Some("Explore"), Some("Wisp")),
             Some("explore".to_string())
         );
     }
@@ -5424,8 +5424,8 @@ mod tests {
                 "issue_body": "Tokens expire early."
             },
             "familiar": {
-                "id": "cody",
-                "display_name": "Cody",
+                "id": "ember",
+                "display_name": "Ember",
                 "model": "anthropic/claude-sonnet-4-6",
                 "skills": ["systematic-debugging"]
             },
@@ -5459,7 +5459,7 @@ mod tests {
     #[test]
     fn github_output_envelope_includes_git_summary() {
         let git = GitResultSummary {
-            branch: Some("cody/fix-auth-refresh".to_string()),
+            branch: Some("ember/fix-auth-refresh".to_string()),
             commits: vec![GitCommitSummary {
                 sha: "abc123".to_string(),
                 message: "fix auth refresh".to_string(),
@@ -5470,7 +5470,7 @@ mod tests {
         let envelope = github_output_envelope(true, &git);
 
         assert_eq!(envelope["status"], "success");
-        assert_eq!(envelope["branch"], "cody/fix-auth-refresh");
+        assert_eq!(envelope["branch"], "ember/fix-auth-refresh");
         assert_eq!(envelope["commits"][0]["sha"], "abc123");
         assert_eq!(envelope["files_changed"][0], "src/auth.rs");
         assert_eq!(envelope["exit_reason"], serde_json::Value::Null);

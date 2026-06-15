@@ -4832,16 +4832,18 @@ impl App {
                         Some("No saved familiars. Add ~/.coven/familiars.toml first.".to_string());
                 } else {
                     self.familiar_switcher_open = true;
-                    let current = self.config.familiar.as_deref().unwrap_or("kitty");
-                    if let Some(idx) = self
-                        .familiar_switcher_list
-                        .iter()
-                        .position(|id| id == current)
-                    {
-                        self.familiar_switcher_idx = idx;
-                    } else {
-                        self.familiar_switcher_idx = 0;
-                    }
+                    // Highlight the active familiar if one is set; otherwise
+                    // start at the top. No built-in default is assumed.
+                    self.familiar_switcher_idx = self
+                        .config
+                        .familiar
+                        .as_deref()
+                        .and_then(|current| {
+                            self.familiar_switcher_list
+                                .iter()
+                                .position(|id| id == current)
+                        })
+                        .unwrap_or(0);
                 }
             }
             KeyCode::Char('?')
@@ -7426,8 +7428,8 @@ mod tests {
     #[test]
     fn cycle_agent_mode_clears_visible_familiar() {
         let mut app = make_app();
-        app.config.familiar = Some("echo".to_string());
-        app.agent_mode = Some("echo".to_string());
+        app.config.familiar = Some("wisp".to_string());
+        app.agent_mode = Some("wisp".to_string());
 
         app.cycle_agent_mode();
 
@@ -7447,7 +7449,7 @@ mod tests {
         std::fs::create_dir_all(&project).expect("project dir");
         std::fs::write(
             coven_home.join("familiars.toml"),
-            "[[familiar]]\nid = \"nova\"\n",
+            "[[familiar]]\nid = \"ember\"\n",
         )
         .expect("familiar roster");
         let guard = EnvGuard::set(&home, &coven_home);
@@ -7457,16 +7459,16 @@ mod tests {
         app.config
             .agents
             .insert("custom".to_string(), test_agent_definition());
-        app.config.familiar = Some("nova".to_string());
+        app.config.familiar = Some("ember".to_string());
         app.config.managed_agents = Some(test_managed_agents());
         app.config.permission_mode = claurst_core::config::PermissionMode::Plan;
-        app.agent_mode = Some("nova".to_string());
+        app.agent_mode = Some("ember".to_string());
         app.agent_mode_changed = false;
         app.accent_color = ACCENT_PLAN;
         app.plan_mode = true;
         app.managed_agents_active = true;
         app.familiar_switcher_open = true;
-        app.familiar_switcher_list = vec!["nova".to_string(), "kitty".to_string()];
+        app.familiar_switcher_list = vec!["ember".to_string(), "onyx".to_string()];
         app.familiar_switcher_idx = 1;
 
         app.reset_agents_and_familiars();
@@ -7510,7 +7512,7 @@ mod tests {
         let coven_home = temp.path().join("coven");
         std::fs::create_dir_all(&home).expect("home dir");
         std::fs::create_dir_all(&coven_home).expect("coven home dir");
-        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("sage"));
+        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("ember"));
 
         let app = make_app();
 
@@ -7529,18 +7531,18 @@ mod tests {
             coven_home.join("familiars.toml"),
             r#"
 [[familiar]]
-id = "sage"
-display_name = "Sage"
+id = "wisp"
+display_name = "Wisp"
 role = "Research"
 "#,
         )
         .expect("familiars file");
-        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("sage"));
+        let _guard = EnvGuard::set_with_user(&home, &coven_home, Some("wisp"));
 
         let app = make_app();
 
-        assert_eq!(app.config.familiar.as_deref(), Some("sage"));
-        assert_eq!(app.familiar_switcher_list, vec!["sage".to_string()]);
+        assert_eq!(app.config.familiar.as_deref(), Some("wisp"));
+        assert_eq!(app.familiar_switcher_list, vec!["wisp".to_string()]);
     }
 
     #[test]

@@ -42,9 +42,9 @@ Workspace Agents                    ← .coven-code/agents/*.md
   • my-custom-agent   default · user
 
 ✨ Coven Familiars                  ← ~/.coven/familiars.toml
-  ★ Nova      ✨ Orchestrator — Your personal AI ...
-  ★ Sage      🧙 Research — Deep reasoning and ...
-  ★ Cody      🤖 Code — Focused implementation ...
+  ★ Dev       🤖 Code — Focused implementation ...
+  ★ Research  🧙 Research — Deep reasoning and ...
+  ★ Writer    ✍️ Writing — Docs and communication ...
 ```
 
 Select a familiar to see its full detail view, including persona preview and the suggested `--agent` invocation.
@@ -170,8 +170,8 @@ The `access` field controls **which tools** a familiar may invoke once you selec
 
 | Tier | What the familiar can do | Typical role |
 |---|---|---|
-| `full` | Read, write, and execute — full tool set (Edit/Write/Bash/etc.) | Build-tier familiars: `cody`, `nova`, `kitty` |
-| `read-only` | Read & search the workspace plus `AskUserQuestion`, no writes or shell. **Default.** | Research/strategy familiars: `sage`, `astra`, `echo` |
+| `full` | Read, write, and execute — full tool set (Edit/Write/Bash/etc.) | Build-tier familiars that edit and run code |
+| `read-only` | Read & search the workspace plus `AskUserQuestion`, no writes or shell. **Default.** | Research / strategy familiars |
 | `search-only` | Narrow read+search whitelist: `Grep`, `Glob`, `Read`, `WebSearch`, `WebFetch`. No writes or shell. | Pure-research personas with minimal codebase footprint |
 
 > **Unknown values fail closed.** Case and surrounding whitespace are normalized silently — `"READ-ONLY"`, `"Read-Only"`, and `" full "` all map to their canonical tier. Anything else (a typo like `"readonly"`, an invented tier like `"super-admin"`, an empty string) is treated as `"read-only"` and a warning is printed to stderr. Typos cannot silently grant write/exec power.
@@ -197,15 +197,15 @@ The `access` field controls **which tools** a familiar may invoke once you selec
 ```toml
 # Build-tier — can edit and run.
 [[familiar]]
-id = "cody"
-display_name = "Cody"
+id = "dev"
+display_name = "Dev"
 role = "Code"
 access = "full"
 
 # Research-tier — read-only by default (no `access` line needed).
 [[familiar]]
-id = "sage"
-display_name = "Sage"
+id = "research"
+display_name = "Research"
 role = "Research"
 ```
 
@@ -255,7 +255,7 @@ Every saved familiar from `~/.coven/familiars.toml` renders as a **static themed
 2. The **F2 switcher popup**: one row per saved familiar, each painted in that familiar's accent palette with a coloured tier dot.
 3. The **`/agents` detail view**: the card appears above the persona preview when you select a familiar-sourced agent.
 
-The glyph itself does **not** animate. The only motion is a quarter-block eye spinner that kicks in when the assistant has gone quiet for ~3 seconds, so you still get a "thinking" signal without a walking mascot pulling attention from the work area.
+The glyph is a procedural sigil framing the familiar's emoji. Its accent colour pulses gently while idle and pulses faster when the assistant has gone quiet for ~3 seconds, so you get a "thinking" signal without a walking mascot pulling attention from the work area.
 
 Cards adapt to available room:
 
@@ -263,21 +263,15 @@ Cards adapt to available room:
 - **Standard** (default): glyph + name + tier dot inside a rounded border.
 - **Large** (wide terminals): adds the role line and an accent rule under the glyph.
 
-### Built-in glyphs
+### Procedural glyphs
 
-| ID | Concept | Accent |
-|---|---|---|
-| `kitty` | Cat head — ears, whiskers, square eyes (default) | violet |
-| `nova` | Crowned sorceress with star sparkles | gold |
-| `cody` | Robot face — antenna, bracket eyes, code body | cyan |
-| `charm` | Heart with sparkle dots | pink |
-| `sage` | Wizard hat + star + open book | emerald |
-| `astra` | Crescent moon + compass star + orbit | indigo |
-| `echo` | Round ghost + bracket eyes + echo dots | teal |
-
-### User-defined familiars
-
-Any familiar declared in `~/.coven/familiars.toml` automatically gets a procedurally-generated card. The accent palette and sigil frame (crystal, hexagon, rune, or seal) are picked deterministically from the familiar's `id`, so the same familiar looks the same across sessions and machines without storing extra config. The familiar's `emoji` is rendered inside the frame.
+There is **no built-in roster** — nothing ships with a named familiar, so a
+fresh install never inherits one. Every familiar declared in
+`~/.coven/familiars.toml` automatically gets a procedurally-generated card. The
+accent palette and sigil frame (crystal, hexagon, rune, or seal) are picked
+deterministically from the familiar's `id`, so the same familiar looks the same
+across sessions and machines without storing extra config. The familiar's
+`emoji` is rendered inside the frame.
 
 If you want a hand-crafted image instead of the procedural sigil, drop a PNG/JPG/WebP at `~/.coven/assets/familiars/<id>.<ext>`. When the terminal supports Kitty or Sixel inline graphics, that image takes precedence over the card.
 
@@ -287,14 +281,14 @@ Set `familiar` in your settings:
 
 ```json
 {
-  "familiar": "nova"
+  "familiar": "dev"
 }
 ```
 
 Or run:
 
 ```
-coven-code config set familiar nova
+coven-code config set familiar dev
 ```
 
 When `~/.coven/familiars.toml` contains saved familiars, you can also press
@@ -317,8 +311,8 @@ agent markdown files, and saved agent/familiar settings. After reset the
 welcome panel renders `Familiar: none`, the footer shows no familiar label,
 and the F2 familiar switcher does not open until a saved familiar roster
 exists again. The `/familiar` command only selects familiars from
-`~/.coven/familiars.toml`; stale settings or built-in names are ignored when
-the roster file is absent.
+`~/.coven/familiars.toml`; stale settings are ignored when the roster file is
+absent.
 
 ---
 

@@ -3367,7 +3367,7 @@ mod welcome_tests {
         std::fs::create_dir_all(&coven_home).expect("coven home dir");
         let _guard = EnvGuard::set(&home, &coven_home);
 
-        let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
+        let app = make_test_app_with_model_and_familiar(None, None, Some("wisp"), None);
         assert_eq!(welcome_familiar_label(&app), "Familiar: none");
     }
 
@@ -3380,13 +3380,13 @@ mod welcome_tests {
         std::fs::create_dir_all(&coven_home).expect("coven home dir");
         std::fs::write(
             coven_home.join("familiars.toml"),
-            "[[familiar]]\nid = \"sage\"\nemoji = \"🌿\"\n",
+            "[[familiar]]\nid = \"wisp\"\nemoji = \"🌿\"\n",
         )
         .expect("familiar roster");
         let _guard = EnvGuard::set(&home, &coven_home);
 
-        let app = make_test_app_with_model_and_familiar(None, None, Some("sage"), None);
-        assert_eq!(welcome_familiar_label(&app), "Familiar: sage");
+        let app = make_test_app_with_model_and_familiar(None, None, Some("wisp"), None);
+        assert_eq!(welcome_familiar_label(&app), "Familiar: wisp");
     }
 
     #[test]
