@@ -30,6 +30,7 @@ pub mod device_code;
 // Utility modules ported from src/utils/
 pub mod auto_mode;
 pub mod crypto_utils;
+pub mod secret_file;
 pub mod format_utils;
 pub mod spinner;
 pub mod status_notices;
@@ -3496,6 +3497,73 @@ pub mod history {
                 false
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    mod session_meta_golden_tests {
+        //! TDD anchor for SP-2.2 (PERF-MEM-2). `list_sessions`/`search_sessions`
+        //! currently deserialize the FULL `ConversationSession` (every message +
+        //! checkpoint snapshot) just to read titles/dates. These golden tests pin
+        //! the contract SP-2.2 must implement: listing parses only a slim metadata
+        //! envelope, so it never touches message bodies — and a session whose
+        //! message body is unreadable still shows up with its title.
+        use super::*;
+        use serde::Deserialize;
+
+        /// Slim metadata shape SP-2.2 will introduce for list/search.
+        #[derive(Debug, Deserialize)]
+        struct SessionMetaProbe {
+            id: String,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            tags: Vec<String>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        /// Valid envelope, but `messages` is not a valid `Vec<Message>`. Today
+        /// `list_sessions` does `from_str::<ConversationSession>` and silently
+        /// SKIPS such a file (the `if let Ok(..)` arm), dropping it from the list.
+        const CORRUPT_BODY_SESSION: &str = r#"{
+            "id": "sess-1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-06-01T12:00:00Z",
+            "messages": "CORRUPT-NOT-AN-ARRAY",
+            "model": "claude-opus-4-8",
+            "title": "Important session",
+            "tags": ["keep", "review"]
+        }"#;
+
+        #[test]
+        fn full_parse_drops_session_with_unreadable_message_body() {
+            assert!(
+                serde_json::from_str::<ConversationSession>(CORRUPT_BODY_SESSION).is_err(),
+                "full ConversationSession parse should fail on an unreadable messages body \
+                 — this is why SP-2.2 must switch listing to a slim metadata parse"
+            );
+        }
+
+        #[test]
+        fn slim_meta_parse_recovers_metadata_without_touching_messages() {
+            let meta: SessionMetaProbe = serde_json::from_str(CORRUPT_BODY_SESSION)
+                .expect("slim metadata parse must succeed regardless of messages body");
+            assert_eq!(meta.id, "sess-1");
+            assert_eq!(meta.title.as_deref(), Some("Important session"));
+            assert_eq!(meta.tags, vec!["keep".to_string(), "review".to_string()]);
+            assert_eq!(meta.updated_at.to_rfc3339(), "2026-06-01T12:00:00+00:00");
+        }
+
+        #[test]
+        fn slim_meta_parse_round_trips_a_real_session() {
+            let mut s = ConversationSession::new("claude-opus-4-8".to_string());
+            s.title = Some("hello".to_string());
+            s.tags = vec!["t1".to_string()];
+            let json = serde_json::to_string(&s).unwrap();
+            let meta: SessionMetaProbe = serde_json::from_str(&json).unwrap();
+            assert_eq!(meta.id, s.id);
+            assert_eq!(meta.title.as_deref(), Some("hello"));
+            assert_eq!(meta.tags, vec!["t1".to_string()]);
+        }
     }
 }
 
