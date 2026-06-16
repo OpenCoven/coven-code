@@ -1767,14 +1767,11 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         "Tips for getting started",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )));
-    // Word-wrap the tip text into the right column width
+    // Word-wrap the tip text into the right column width, breaking on word
+    // boundaries (not mid-word) so the hint stays readable on narrow terminals.
     let right_w_usize = right_w.saturating_sub(1) as usize;
-    for chunk in tip_text
-        .chars()
-        .collect::<Vec<_>>()
-        .chunks(right_w_usize.max(1))
-    {
-        right_lines.push(Line::from(chunk.iter().collect::<String>()));
+    for line in crate::dialogs::word_wrap(&tip_text, right_w_usize.max(1)) {
+        right_lines.push(Line::from(line));
     }
     right_lines.push(Line::from(""));
     right_lines.push(Line::from(Span::styled(
@@ -2220,8 +2217,8 @@ fn should_render_status_row(app: &App) -> bool {
 
     app.voice_recording
         || app.last_turn_elapsed.is_some()
-        || (!app.is_streaming && app.status_message.is_some())
         || app.is_streaming
+        || app.status_message.is_some()
         || interesting_stream_status
 }
 

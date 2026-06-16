@@ -346,7 +346,7 @@ mod tests {
     use claurst_core::types::{ContentBlock, Role, ToolResultContent};
     use dialogs::PermissionRequest;
     use notifications::NotificationKind;
-    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
