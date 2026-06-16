@@ -1298,7 +1298,10 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         };
         lines.push(Line::from(vec![
             Span::styled(" Access     ", Style::default().fg(COVEN_CODE_MUTED)),
-            Span::styled(access.to_string(), access_style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                access.to_string(),
+                access_style.add_modifier(Modifier::BOLD),
+            ),
         ]));
     }
     if !def.tools.is_empty() {
