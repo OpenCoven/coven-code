@@ -10,8 +10,7 @@ use claurst_core::cost::CostTracker;
 use claurst_core::types::{ContentBlock, Message};
 use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
-#[allow(unused_imports)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -9055,11 +9054,106 @@ fn coven_read_calls_ledger(limit: usize) -> String {
     out
 }
 
+fn coven_executable_names() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut names = vec!["coven.exe".to_string(), "coven.cmd".to_string()];
+        if let Some(path_ext) = std::env::var_os("PATHEXT") {
+            for ext in std::env::split_paths(&path_ext) {
+                let ext = ext.to_string_lossy();
+                let ext = ext.trim();
+                if ext.is_empty() {
+                    continue;
+                }
+                let suffix = if ext.starts_with('.') {
+                    ext.to_ascii_lowercase()
+                } else {
+                    format!(".{}", ext.to_ascii_lowercase())
+                };
+                let candidate = format!("coven{suffix}");
+                if !names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&candidate))
+                {
+                    names.push(candidate);
+                }
+            }
+        }
+        names
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["coven".to_string()]
+    }
+}
+
+fn coven_binary_in_dir(dir: &Path) -> Option<PathBuf> {
+    for name in coven_executable_names() {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn coven_path_entry_is_trusted(dir: &Path, cwd: Option<&Path>) -> bool {
+    if !dir.is_absolute() {
+        return false;
+    }
+    if let Some(cwd) = cwd {
+        if let (Ok(canonical_dir), Ok(canonical_cwd)) = (dir.canonicalize(), cwd.canonicalize()) {
+            return canonical_dir != canonical_cwd;
+        }
+    }
+    true
+}
+
+fn coven_binary_from_path(path: Option<&std::ffi::OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
+    let path = path?;
+    for dir in std::env::split_paths(path) {
+        if !coven_path_entry_is_trusted(&dir, cwd) {
+            continue;
+        }
+        if let Some(candidate) = coven_binary_in_dir(&dir) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn coven_binary_path() -> Result<PathBuf, String> {
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(dir) = current_exe.parent() {
+            if let Some(candidate) = coven_binary_in_dir(dir) {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    coven_binary_from_path(
+        std::env::var_os("PATH").as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+    .ok_or_else(|| {
+        concat!(
+            "Could not find a trusted `coven` binary. For security, /coven shell-outs ignore ",
+            "the current directory and relative PATH entries. Install Coven in an absolute ",
+            "PATH directory, or run the `coven` command directly from a trusted terminal."
+        )
+        .to_string()
+    })
+}
+
 /// Spawn the `coven` binary with the given argv tail and capture stdout/stderr.
 /// Returns the combined human-readable output (or an explanatory error if the
 /// binary is missing).
 fn coven_shell_out(args: &[&str]) -> String {
-    let mut cmd = std::process::Command::new("coven");
+    let coven_bin = match coven_binary_path() {
+        Ok(path) => path,
+        Err(msg) => return msg,
+    };
+    let mut cmd = std::process::Command::new(coven_bin);
     cmd.args(args);
     match cmd.output() {
         Ok(out) => {
@@ -10929,6 +11023,45 @@ mod tests {
         let cmd = find_command("coven").unwrap();
         let result = cmd.execute("logs", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    fn write_fake_coven(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(coven_executable_names().remove(0));
+        std::fs::write(&path, "fake coven").unwrap();
+        path
+    }
+
+    #[test]
+    fn coven_binary_from_path_ignores_current_dir_and_relative_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let relative = tmp.path().join("relative-bin");
+        let trusted = tmp.path().join("trusted-bin");
+        let trusted_coven = write_fake_coven(&trusted);
+        write_fake_coven(&project);
+        write_fake_coven(&relative);
+
+        let path = std::env::join_paths([
+            project.as_path(),
+            Path::new("relative-bin"),
+            trusted.as_path(),
+        ])
+        .unwrap();
+
+        let resolved = coven_binary_from_path(Some(path.as_os_str()), Some(&project));
+        assert_eq!(resolved.as_deref(), Some(trusted_coven.as_path()));
+    }
+
+    #[test]
+    fn coven_binary_from_path_rejects_untrusted_entries_without_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        write_fake_coven(&project);
+
+        let path = std::env::join_paths([project.as_path(), Path::new(".")]).unwrap();
+
+        assert!(coven_binary_from_path(Some(path.as_os_str()), Some(&project)).is_none());
     }
 
     #[test]
