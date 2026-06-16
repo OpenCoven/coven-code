@@ -74,6 +74,16 @@ coven-code agents use raven</code></pre>
 
     <p>After <code>/familiar reset-roster</code> or <code>coven-code agents reset</code>, Coven Code removes <code>~/.coven/familiars.toml</code>, renders <code>Familiar: none</code>, hides the footer familiar label, and does not open the F2 switcher until the roster file is recreated.</p>
 
+    <h2>Testing Contract Adherence</h2>
+
+    <p>A Coven Code roster entry is not a full Familiar Contract package by itself. For adherence to <a href="https://github.com/OpenCoven/familiar-contract" target="_blank" rel="noopener">github.com/OpenCoven/familiar-contract</a>, validate the familiar directory that contains <code>SOUL.md</code>, <code>IDENTITY.md</code>, <code>MEMORY.md</code>, and <code>ward.toml</code>:</p>
+
+    <pre><code data-lang="bash">git clone https://github.com/OpenCoven/familiar-contract .tmp/familiar-contract
+cd .tmp/familiar-contract
+node validators/validate.js ../../familiars/dev</code></pre>
+
+    <p>The validator covers structural compliance for Named Identity, Defined Purpose, Bounded Authority, Persistent Memory, and Human Belonging. Also run a Coven Code activation smoke test to catch behavioral compliance drift against the declared identity and Ward.</p>
+
     <p>Install the daemon to unlock the full roster:</p>
 
     <pre><code data-lang="bash">npm install -g @opencoven/coven</code></pre>

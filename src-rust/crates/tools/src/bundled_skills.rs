@@ -272,6 +272,42 @@ a status table. When all agents have reported, print a final summary."#,
     },
 
     // -----------------------------------------------------------------------
+    // decision-followups
+    // -----------------------------------------------------------------------
+    BundledSkill {
+        name: "decision-followups",
+        description: "Offer concrete follow-up choices after decisions, recommendations, or plans.",
+        aliases: &["followups", "choices"],
+        when_to_use: Some("When the user wants consistent selectable next-step choices after a decision or recommendation."),
+        argument_hint: Some("[decision context]"),
+        prompt_template: r#"# Decision Follow-Ups
+
+Use this when a response gives the user a decision, recommendation, completed
+plan, or handoff where their next selection matters.
+
+## Practice
+
+1. State the decision or recommendation first.
+2. Offer 2-4 concise next-step choices with clear labels.
+3. Put the recommended choice first when there is a clear default.
+4. Use `AskUserQuestion` with an `options` array when the choice blocks action.
+5. If no tool call is needed, end with a compact choice list suitable for UI
+   follow-up pills.
+
+## Avoid
+
+- Open-ended "what would you like to do next?" when useful choices are known.
+- More than four options unless the user specifically needs a menu.
+- Follow-up choices when the next action is already authorized and obvious.
+
+## Decision Context
+
+$ARGUMENTS"#,
+        allowed_tools: Some(&["AskUserQuestion"]),
+        user_invocable: true,
+    },
+
+    // -----------------------------------------------------------------------
     // update-config
     // -----------------------------------------------------------------------
     BundledSkill {
@@ -505,6 +541,14 @@ mod tests {
         let skill = find_bundled_skill("mem");
         assert!(skill.is_some());
         assert_eq!(skill.unwrap().name, "remember");
+    }
+
+    #[test]
+    fn decision_followups_skill_is_available() {
+        let skill = find_bundled_skill("decision-followups").unwrap();
+        assert!(skill.user_invocable);
+        assert!(skill.prompt_template.contains("AskUserQuestion"));
+        assert!(skill.prompt_template.contains("options"));
     }
 
     #[test]

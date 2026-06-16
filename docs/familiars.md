@@ -247,6 +247,81 @@ Or check the [Coven documentation](https://opencoven.ai/docs) for installation i
 
 ---
 
+## Testing Familiar Contract adherence
+
+Coven Code can run a familiar from `~/.coven/familiars.toml`, but a roster entry
+alone is not a full Familiar Contract package. To claim adherence to the
+[Familiar Contract](https://github.com/OpenCoven/familiar-contract), keep the
+familiar's identity bundle in a directory with the contract artifacts:
+
+| Artifact | Contract role |
+|---|---|
+| `SOUL.md` | Named Identity and Defined Purpose: name, pronouns, core work, what the familiar is not, and boundaries |
+| `IDENTITY.md` | Stable machine-readable identity record |
+| `MEMORY.md` | Persistent Memory: curated continuity across sessions |
+| `ward.toml` | Bounded Authority and Human Belonging: protected surface, editable surface, approval tiers, familiar/person binding |
+
+Run the upstream validator from `github.com/OpenCoven/familiar-contract` against
+that directory:
+
+```bash
+git clone https://github.com/OpenCoven/familiar-contract .tmp/familiar-contract
+cd .tmp/familiar-contract
+node validators/validate.js ../../familiars/dev
+```
+
+The validator checks structural compliance for all five required properties:
+
+1. Named Identity
+2. Defined Purpose
+3. Bounded Authority
+4. Persistent Memory
+5. Human Belonging
+
+Add the validator to CI so contract drift fails before merge:
+
+```yaml
+# .github/workflows/familiar-contract.yml
+name: familiar-contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fetch Familiar Contract validator
+        run: git clone --depth 1 https://github.com/OpenCoven/familiar-contract .tmp/familiar-contract
+      - name: Validate familiar package
+        run: cd .tmp/familiar-contract && node validators/validate.js ../../familiars/dev
+```
+
+Structural compliance is necessary but not sufficient. Also test behavioral
+compliance in Coven Code by activating the familiar and asking it to state its
+name, purpose, boundaries, and person binding:
+
+```bash
+coven-code --agent "Dev" --print "State your name, purpose, boundaries, and who you belong to."
+```
+
+The response should match `SOUL.md`, `IDENTITY.md`, and `ward.toml`. If it
+contradicts those files, that is a behavioral compliance failure even when the
+validator passes.
+
+Protected-surface changes require human approval. Treat proposed edits to
+`SOUL.md`, `IDENTITY.md`, `MEMORY.md`, `ward.toml`, person binding, or the
+five-property compliance claim as blocked unless explicitly authorized by the
+person or team the familiar belongs to.
+
+---
+
 ## Familiar cards in the TUI
 
 Every saved familiar from `~/.coven/familiars.toml` renders as a **static themed card** in three places:

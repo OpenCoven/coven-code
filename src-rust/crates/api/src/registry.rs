@@ -794,8 +794,10 @@ mod tests {
         // A user-supplied OpenAI-compatible endpoint with only a base URL (no
         // key) must still build — self-hosted gateways often need no key, and
         // dropping it leaves the model picker unable to list models.
-        let mut config = Config::default();
-        config.provider = Some("custom-openai".to_string());
+        let mut config = Config {
+            provider: Some("custom-openai".to_string()),
+            ..Default::default()
+        };
         config.provider_configs.insert(
             "custom-openai".to_string(),
             ProviderConfig {

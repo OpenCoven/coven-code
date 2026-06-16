@@ -266,18 +266,20 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
         CORE_CAPABILITIES.to_string(),
         // 3. Tool use guidelines
         TOOL_USE_GUIDELINES.to_string(),
+        // 4. Follow-up choices after decisions
+        FOLLOW_UP_CHOICES.to_string(),
     ];
 
-    // 4. Executing actions with care
+    // 5. Executing actions with care
     parts.push(ACTIONS_SECTION.to_string());
 
-    // 5. Safety guidelines
+    // 6. Safety guidelines
     parts.push(SAFETY_GUIDELINES.to_string());
 
-    // 6. Cyber-risk instruction (owned by safeguards — do not edit)
+    // 7. Cyber-risk instruction (owned by safeguards — do not edit)
     parts.push(CYBER_RISK_INSTRUCTION.to_string());
 
-    // 7. Output style (cacheable when non-Default; its content is stable)
+    // 8. Output style (cacheable when non-Default; its content is stable)
     if let Some(style_text) = opts
         .custom_output_style_prompt
         .as_deref()
@@ -287,12 +289,12 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
         parts.push(format!("\n## Output Style\n{}", style_text));
     }
 
-    // 8. Coordinator mode (cacheable: content is constant)
+    // 9. Coordinator mode (cacheable: content is constant)
     if opts.coordinator_mode {
         parts.push(COORDINATOR_SYSTEM_PROMPT.to_string());
     }
 
-    // 9. Custom system prompt addition (appended to cacheable block)
+    // 10. Custom system prompt addition (appended to cacheable block)
     if let Some(custom) = &opts.custom_system_prompt {
         parts.push(format!(
             "\n<custom_instructions>\n{}\n</custom_instructions>",
@@ -497,6 +499,19 @@ const TOOL_USE_GUIDELINES: &str = r#"
 - Bash commands timeout after 2 minutes; use background mode for long operations
 "#;
 
+const FOLLOW_UP_CHOICES: &str = r#"
+## Follow-Up Choices
+
+When you give the user a decision, recommendation, or completed plan that needs
+their next choice, include concrete follow-up choices. Prefer 2-4 concise
+options with clear labels, ordered by your recommendation when one is obvious.
+
+In interactive sessions, use `AskUserQuestion` with an `options` array when the
+user's choice blocks the next action. When a tool call is unnecessary or
+unavailable, end with a compact choice list the UI can render as follow-up pills.
+Do not ask for choices when the next step is already authorized or obvious.
+"#;
+
 const ACTIONS_SECTION: &str = r#"
 ## Executing actions with care
 
@@ -556,6 +571,19 @@ mod tests {
         assert!(
             prompt.contains("Coven Code"),
             "Default prompt must contain attribution"
+        );
+    }
+
+    #[test]
+    fn test_default_prompt_requests_follow_up_choices_for_decisions() {
+        let prompt = build_system_prompt(&default_opts());
+        assert!(
+            prompt.contains("Follow-Up Choices"),
+            "Default prompt should include guidance for decision follow-up choices"
+        );
+        assert!(
+            prompt.contains("AskUserQuestion"),
+            "Default prompt should mention the interactive choice tool"
         );
     }
 
