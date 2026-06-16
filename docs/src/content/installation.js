@@ -44,14 +44,14 @@ export function render() {
 
     <h2>Via npm / bun</h2>
 
-    <pre><code data-lang="bash">npm install -g coven-code
+    <pre><code data-lang="bash">npm install -g @opencoven/coven-code
 # or
-bun install -g coven-code</code></pre>
+bun install -g @opencoven/coven-code</code></pre>
 
     <p>The postinstall script downloads the correct pre-built binary from GitHub Releases — no compilation needed. Or run without a permanent install:</p>
 
-    <pre><code data-lang="bash">npx coven-code
-bunx coven-code</code></pre>
+    <pre><code data-lang="bash">npx @opencoven/coven-code
+bunx @opencoven/coven-code</code></pre>
 
     <h2>Upgrading</h2>
 

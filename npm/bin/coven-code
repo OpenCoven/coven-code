@@ -12,7 +12,7 @@ const binary = path.join(__dirname, '..', 'native', `coven-code${ext}`);
 if (!fs.existsSync(binary)) {
   console.error(
     'coven-code: native binary not found.\n' +
-    'Try reinstalling: npm install -g coven-code\n' +
+    'Try reinstalling: npm install -g @opencoven/coven-code\n' +
     `Expected: ${binary}`
   );
   process.exit(1);

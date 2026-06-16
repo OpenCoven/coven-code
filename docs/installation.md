@@ -73,10 +73,10 @@ native binary for your platform from GitHub Releases — no compilation needed.
 
 ```bash
 # npm
-npm install -g coven-code
+npm install -g @opencoven/coven-code
 
 # bun
-bun install -g coven-code
+bun install -g @opencoven/coven-code
 ```
 
 After installation, run `coven-code` directly from your terminal.
@@ -84,8 +84,8 @@ After installation, run `coven-code` directly from your terminal.
 You can also run Coven Code without a permanent install:
 
 ```bash
-npx coven-code          # via npm
-bunx coven-code         # via bun
+npx @opencoven/coven-code          # via npm
+bunx @opencoven/coven-code         # via bun
 ```
 
 **Supported platforms via npm:**
