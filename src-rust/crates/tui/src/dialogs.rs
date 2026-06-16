@@ -333,7 +333,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 /// breaks but falling back to a hard character break when a single token is
 /// longer than `width`. Without the hard-break fallback, long unbreakable
 /// tokens (Windows paths, base64 blobs, URLs, …) overflow the dialog border.
-fn word_wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn word_wrap(text: &str, width: usize) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if width == 0 {
         return vec![text.to_string()];
@@ -1483,6 +1483,22 @@ mod tests {
                 "line wider than width: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn word_wrap_welcome_tip_keeps_words_intact() {
+        // The welcome-box "Tips for getting started" column reuses word_wrap so
+        // ordinary tip text never breaks mid-word on a narrow (~40 col) right
+        // column. Re-joining the wrapped lines with spaces must reproduce the
+        // original whitespace-separated words in order.
+        let tip = "Edit AGENTS.md to add instructions for Coven Code";
+        let wrapped = word_wrap(tip, 40);
+        assert!(wrapped.len() >= 2, "expected a wrap, got: {wrapped:?}");
+        assert_eq!(
+            wrapped.join(" ").split_whitespace().collect::<Vec<_>>(),
+            tip.split_whitespace().collect::<Vec<_>>(),
+            "words were split or reordered: {wrapped:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -6014,9 +6014,8 @@ mod chrome_cdp {
     /// so a separate --user-data-dir is required to guarantee a fresh process
     /// that actually opens the port.
     fn launch_chrome(port: u16) -> anyhow::Result<std::path::PathBuf> {
-        let bin = find_chrome_binary().ok_or_else(|| {
-            anyhow::anyhow!("no Chrome/Chromium binary found on this machine")
-        })?;
+        let bin = find_chrome_binary()
+            .ok_or_else(|| anyhow::anyhow!("no Chrome/Chromium binary found on this machine"))?;
         let profile_dir = std::env::temp_dir().join(format!("coven-chrome-cdp-{}", port));
         std::fs::create_dir_all(&profile_dir)?;
         std::process::Command::new(&bin)

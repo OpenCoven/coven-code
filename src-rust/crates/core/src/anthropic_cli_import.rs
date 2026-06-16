@@ -65,7 +65,12 @@ fn ant_credentials_dir() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn claude_code_keychain_json() -> Option<String> {
     let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -338,17 +343,11 @@ mod tests {
 
     #[test]
     fn read_first_ant_credential_prefers_default_profile() {
-        let dir = std::env::temp_dir().join(format!(
-            "coven-ant-import-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("coven-ant-import-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("alpha.json"),
-            r#"{"access_token":"from-alpha"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.join("alpha.json"), r#"{"access_token":"from-alpha"}"#).unwrap();
         std::fs::write(
             dir.join("default.json"),
             r#"{"access_token":"from-default"}"#,
