@@ -31,6 +31,40 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
 
+fn env_flag_is_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "off" | "no"
+    )
+}
+
+fn should_push_keyboard_enhancement<I, K, V>(env: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    // Cave embeds us in xterm.js. Its normal key input works, but the kitty
+    // "report all keys as escape codes" mode can make printable keys vanish.
+    let mut explicit = None;
+    let mut in_cave = false;
+    for (key, value) in env {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        if key == "COVEN_CODE_KEYBOARD_ENHANCEMENT" {
+            explicit = Some(env_flag_is_enabled(value));
+        }
+        if key == "COVENCAVE" && env_flag_is_enabled(value) {
+            in_cave = true;
+        }
+    }
+    explicit.unwrap_or(!in_cave)
+}
+
+fn should_push_keyboard_enhancement_for_process() -> bool {
+    should_push_keyboard_enhancement(std::env::vars())
+}
+
 // ---------------------------------------------------------------------------
 // Sub-modules
 // ---------------------------------------------------------------------------
@@ -271,16 +305,23 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
 
     #[cfg(not(target_os = "windows"))]
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-        ),
-    )?;
+    {
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+        )?;
+        if should_push_keyboard_enhancement_for_process() {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                ),
+            )?;
+        }
+    }
 
     // On Windows, keyboard enhancement is best-effort: conhost and older
     // terminal builds do not support the kitty keyboard protocol.
@@ -293,13 +334,15 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         // best-effort — modern Windows Terminal accepts it, conhost returns
         // "Keyboard progressive enhancement not implemented for the legacy
         // Windows API" which we ignore so the TUI can still start.
-        let _ = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-            ),
-        );
+        if should_push_keyboard_enhancement_for_process() {
+            let _ = execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                ),
+            );
+        }
     }
 
     set_terminal_title("\u{2728} Coven Code");
@@ -353,6 +396,36 @@ mod tests {
 
     fn make_app() -> App {
         App::new(Config::default(), CostTracker::new())
+    }
+
+    // ---- terminal capability policy --------------------------------------
+
+    #[test]
+    fn cave_embedded_terminal_disables_keyboard_enhancement() {
+        let env = [("COVENCAVE", "1")];
+
+        assert!(!should_push_keyboard_enhancement(env));
+    }
+
+    #[test]
+    fn regular_terminal_enables_keyboard_enhancement() {
+        let env: [(&str, &str); 0] = [];
+
+        assert!(should_push_keyboard_enhancement(env));
+    }
+
+    #[test]
+    fn explicit_opt_out_disables_keyboard_enhancement() {
+        let env = [("COVEN_CODE_KEYBOARD_ENHANCEMENT", "0")];
+
+        assert!(!should_push_keyboard_enhancement(env));
+    }
+
+    #[test]
+    fn explicit_opt_in_overrides_cave_embedded_terminal() {
+        let env = [("COVENCAVE", "1"), ("COVEN_CODE_KEYBOARD_ENHANCEMENT", "1")];
+
+        assert!(should_push_keyboard_enhancement(env));
     }
 
     // ---- input helpers ---------------------------------------------------
