@@ -8864,7 +8864,9 @@ fn coven_help_text() -> &'static str {
        /coven hooks-install            Install git hooks for the claim protocol\n\
      \n\
      Harness adapters & maintenance\n\
-       /coven adapter list|doctor [id]\n\
+       /coven adapter list [--json]    List configured harness adapters\n\
+       /coven adapter doctor [id]      Diagnose configured harness adapters\n\
+       /coven adapter install <id>     Install a trusted local adapter recipe\n\
        /coven logs prune [--days N]\n\
        /coven wt <branch>|--list|--doctor|--prune-merged|--prune-stale [DAYS]\n\
      \n\
@@ -9621,7 +9623,7 @@ impl SlashCommand for CovenCommand {
             "adapter" => {
                 if rest.is_empty() {
                     return CommandResult::Error(
-                        "Usage: /coven adapter list [--json] | adapter doctor [id]".to_string(),
+                        "Usage: /coven adapter list [--json] | adapter doctor [id] | adapter install <id>".to_string(),
                     );
                 }
                 let mut argv: Vec<&str> = vec!["adapter"];
@@ -10995,6 +10997,10 @@ mod tests {
                 for verb in ["calls", "claim", "hooks-install", "adapter", "logs", "wt"] {
                     assert!(msg.contains(verb), "help should mention {verb}: {msg}");
                 }
+                assert!(
+                    msg.contains("/coven adapter install <id>"),
+                    "help should show the adapter install path: {msg}"
+                );
             }
             other => panic!("expected Message, got {:?}", other),
         }
@@ -11013,7 +11019,15 @@ mod tests {
         let mut ctx = make_ctx();
         let cmd = find_command("coven").unwrap();
         let result = cmd.execute("adapter", &mut ctx).await;
-        assert!(matches!(result, CommandResult::Error(_)));
+        match result {
+            CommandResult::Error(msg) => {
+                assert!(
+                    msg.contains("adapter install <id>"),
+                    "usage should include adapter install: {msg}"
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
     }
 
     #[tokio::test]
