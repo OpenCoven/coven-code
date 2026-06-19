@@ -81,6 +81,30 @@ cargo build --release --package claurst   # binary outputs as coven-code
 
 ---
 
+## CLI Flags
+
+| Flag | Short | Description |
+|---|---|---|
+| `--model <MODEL>` | `-m` | Model to use (e.g. `claude-sonnet-4-5`, `gpt-4o`) |
+| `--provider <PROVIDER>` | | LLM provider: `anthropic`, `openai`, `ollama`, `groq`, etc. (env: `COVEN_CODE_PROVIDER`) |
+| `--resume [<ID>]` | | Resume a previous session by ID; omit ID to resume the most recent |
+| `--print` | `-p` | Print mode: send prompt and exit (non-interactive / headless) |
+| `--permission-mode <MODE>` | | `default`, `accept-edits`, `bypass-permissions`, or `plan` |
+| `--max-turns <N>` | | Maximum agentic turns before stopping (default: 10) |
+| `--system-prompt <PROMPT>` | `-s` | Override the system prompt |
+| `--append-system-prompt <PROMPT>` | | Append text to the system prompt |
+| `--no-claude-md` | | Disable AGENTS.md memory file injection |
+| `--output-format <FMT>` | | Output format: `text` (default), `json`, or `stream-json` |
+| `--api-key <KEY>` | | API key for the active provider (overrides env vars) |
+| `--api-base <URL>` | | Override the provider API base URL (env: `COVEN_CODE_API_BASE`) |
+| `--fallback-model <MODEL>` | | Fallback model when the primary is overloaded or unavailable |
+| `--max-budget-usd <USD>` | | Abort the query loop when spend exceeds this amount |
+| `--agent <AGENT>` | `-A` | Named agent profile to use (e.g. `build`, `plan`, `explore`) |
+| `--verbose` | `-v` | Enable verbose logging |
+| `--version` | `-V` | Print version |
+
+---
+
 ## Configuration
 
 Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own API key for whichever provider you use. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
