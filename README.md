@@ -26,6 +26,15 @@ Recent highlights:
 
 ---
 
+## Requirements
+
+| Requirement        | Notes                                           |
+| ------------------ | ----------------------------------------------- |
+| **Node.js 18+**    | Required for the npm package                    |
+| **An API key**     | For whichever provider you want to use          |
+
+---
+
 ## Getting Started
 
 ### Install
