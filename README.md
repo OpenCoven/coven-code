@@ -28,40 +28,19 @@ Recent highlights:
 
 ## Getting Started
 
-### Quick install (Linux / macOS)
-
-```bash
-curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
-```
-
-### Quick install (Windows PowerShell)
-
-```powershell
-irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
-```
-
-This drops `coven-code` into `~/.coven-code/bin` (or `%USERPROFILE%\.coven-code\bin` on Windows) and adds it to your `PATH`. Open a new terminal and run `coven-code`.
-
-### npm / Bun
+### Install
 
 ```bash
 npm install -g @opencoven/coven-code
-
-bun install -g @opencoven/coven-code
 ```
 
-```bash
-npx @opencoven/coven-code
-bunx @opencoven/coven-code
-```
+Then open a new terminal and run `coven-code`.
 
 ### Upgrade
 
 ```bash
-coven-code upgrade
+npm install -g @opencoven/coven-code@latest
 ```
-
-Pin a version: `coven-code upgrade --version 0.1.0`.
 
 ---
 
