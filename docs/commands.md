@@ -1074,7 +1074,9 @@ the slash invocation acts as the confirmation).
                                           parallel-work claim protocol
 /coven hooks-install                     install pre-commit/pre-push
                                           hooks for the claim protocol
-/coven adapter list|doctor [id]          inspect harness adapters
+/coven adapter list [--json]             list configured harness adapters
+/coven adapter doctor [id]               diagnose configured harness adapters
+/coven adapter install <id>              install a trusted local adapter recipe
 /coven logs prune [--days N]             prune session logs
 /coven wt <branch> | --list | --doctor | --prune-merged | --prune-stale [DAYS]
                                           worktree management
