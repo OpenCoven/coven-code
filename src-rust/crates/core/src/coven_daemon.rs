@@ -286,7 +286,10 @@ impl DaemonClient {
     /// Chosen short so a missing daemon shows up as offline in < 1
     /// frame; callers that need correctness over latency should use
     /// [`Self::check_reachability`] with an explicit budget.
-    #[cfg(unix)]
+    ///
+    /// Not gated on `cfg(unix)`: [`Self::is_online`] references it on every
+    /// platform, even though the non-unix [`Self::check_reachability`] path
+    /// ignores the timeout and reports `Offline` outright.
     const DEFAULT_TIMEOUT_MS: u64 = 200;
 
     /// Per-call timeout for substantive request/response verbs routed through
