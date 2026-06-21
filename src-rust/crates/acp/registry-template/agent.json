@@ -1,7 +1,7 @@
 {
   "id": "coven-code",
   "name": "Coven Code",
-  "version": "0.0.31",
+  "version": "0.0.32",
   "description": "Open-source, multi-provider agentic coding TUI built in Rust (OpenCoven fork of Coven Code). Multi-provider routing (Anthropic, OpenAI, Google, Groq, Ollama, OpenAI-compatible, \u2026), full MCP support, plugin system, companion mascot, chat forking, memory consolidation. No telemetry.",
   "repository": "https://github.com/OpenCoven/coven-code",
   "website": "https://opencoven.ai",
@@ -18,35 +18,35 @@
   "distribution": {
     "binary": {
       "darwin-aarch64": {
-        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.31/coven-code-macos-aarch64.tar.gz",
+        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.32/coven-code-macos-aarch64.tar.gz",
         "cmd": "./coven-code",
         "args": [
           "acp"
         ]
       },
       "darwin-x86_64": {
-        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.31/coven-code-macos-x86_64.tar.gz",
+        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.32/coven-code-macos-x86_64.tar.gz",
         "cmd": "./coven-code",
         "args": [
           "acp"
         ]
       },
       "linux-aarch64": {
-        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.31/coven-code-linux-aarch64.tar.gz",
+        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.32/coven-code-linux-aarch64.tar.gz",
         "cmd": "./coven-code",
         "args": [
           "acp"
         ]
       },
       "linux-x86_64": {
-        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.31/coven-code-linux-x86_64.tar.gz",
+        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.32/coven-code-linux-x86_64.tar.gz",
         "cmd": "./coven-code",
         "args": [
           "acp"
         ]
       },
       "windows-x86_64": {
-        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.31/coven-code-windows-x86_64.zip",
+        "archive": "https://github.com/OpenCoven/coven-code/releases/download/v0.0.32/coven-code-windows-x86_64.zip",
         "cmd": "./coven-code.exe",
         "args": [
           "acp"
