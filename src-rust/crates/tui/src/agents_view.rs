@@ -87,7 +87,6 @@ pub struct AgentInfo {
     /// Brief description or last output snippet.
     pub last_output: Option<String>,
     /// Role in the managed agent architecture.
-    #[allow(dead_code)]
     pub agent_role: AgentRole,
     /// Model name used by this agent.
     pub model_name: Option<String>,

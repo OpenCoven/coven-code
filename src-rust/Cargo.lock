@@ -644,17 +644,12 @@ version = "0.0.30"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
- "async-trait",
- "chrono",
  "claurst-api",
  "claurst-core",
  "claurst-mcp",
- "claurst-plugins",
  "claurst-query",
  "claurst-tools",
  "dashmap",
- "dirs",
- "futures",
  "parking_lot",
  "serde",
  "serde_json",
@@ -672,22 +667,18 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "base64",
  "bytes",
  "chrono",
  "claurst-core",
  "futures",
  "hex",
  "hmac",
- "once_cell",
  "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tracing",
  "url",
  "urlencoding",
@@ -700,14 +691,9 @@ name = "claurst-bridge"
 version = "0.0.30"
 dependencies = [
  "anyhow",
- "async-trait",
  "base64",
  "chrono",
- "claurst-api",
- "claurst-core",
- "claurst-query",
  "dirs",
- "futures",
  "hex",
  "hostname",
  "parking_lot",
@@ -716,9 +702,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
@@ -730,8 +714,6 @@ version = "0.0.30"
 dependencies = [
  "anyhow",
  "chrono",
- "claurst-core",
- "hex",
  "serde",
  "serde_json",
  "tempfile",
@@ -747,21 +729,17 @@ dependencies = [
  "base64",
  "chrono",
  "claurst-api",
- "claurst-bridge",
  "claurst-core",
  "claurst-mcp",
  "claurst-plugins",
- "claurst-query",
  "claurst-tools",
  "claurst-tui",
  "dirs",
  "futures",
- "hostname",
  "once_cell",
  "open",
  "parking_lot",
  "qrcode",
- "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -769,7 +747,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]
@@ -792,7 +769,6 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
- "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
@@ -825,7 +801,6 @@ dependencies = [
  "getrandom 0.2.17",
  "once_cell",
  "open",
- "parking_lot",
  "reqwest",
  "rmcp",
  "serde",
@@ -834,11 +809,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tracing",
  "url",
  "urlencoding",
- "uuid",
 ]
 
 [[package]]
@@ -846,7 +819,6 @@ name = "claurst-plugins"
 version = "0.0.30"
 dependencies = [
  "anyhow",
- "async-trait",
  "claurst-core",
  "dirs",
  "futures",
@@ -878,17 +850,12 @@ dependencies = [
  "claurst-core",
  "claurst-plugins",
  "claurst-tools",
- "dashmap",
  "dirs",
  "futures",
- "once_cell",
- "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
@@ -898,10 +865,8 @@ dependencies = [
 name = "claurst-tools"
 version = "0.0.30"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
- "bytes",
  "chrono",
  "claurst-api",
  "claurst-core",
@@ -914,23 +879,17 @@ dependencies = [
  "image",
  "nix 0.29.0",
  "once_cell",
- "open",
  "parking_lot",
  "portable-pty",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
- "similar",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
  "walkdir",
- "which",
  "xcap",
 ]
 
@@ -950,7 +909,6 @@ dependencies = [
  "crossterm 0.29.0",
  "dashmap",
  "dirs",
- "futures",
  "hound",
  "icy_sixel",
  "image",
@@ -3757,18 +3715,6 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
-dependencies = [
- "dyn-clone",
- "schemars_derive 0.8.22",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
@@ -3787,21 +3733,9 @@ checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
  "dyn-clone",
  "ref-cast",
- "schemars_derive 1.2.1",
+ "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn",
 ]
 
 [[package]]

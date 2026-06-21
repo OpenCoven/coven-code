@@ -76,11 +76,11 @@ const SPINNER: &[char] = &[
 ];
 const COVEN_VIOLET: Color = Color::Rgb(184, 175, 220);
 const SPINNER_FRAME_DIVISOR: u64 = 2;
-// 11 rows: 1 (top border) + 1 (Welcome) + 1 (blank) + 4 (familiar card) +
-// 1 (Status header in right column) + 4 (Model/Provider/Daemon/Familiar) +
-// 1 (bottom border) ≈ 11 rows. The right column packs Tips above Status;
-// the box fits all of it cleanly.
-const WELCOME_BOX_HEIGHT: u16 = 11;
+// 13 rows leave an 11-row interior. Left column: Welcome (1) + blank (1) +
+// avatar (4) + blank (1) + metadata (3) + optional Goal (1). Right column:
+// Tips header (1) + tip (1-2) + rule (1) + What's new header (1) + 3 highlights
+// + "/release-notes" footer (1). Both fit cleanly inside the interior.
+const WELCOME_BOX_HEIGHT: u16 = 13;
 // Cap the welcome box width on large terminals so it doesn't stretch
 // edge-to-edge; everything inside fits comfortably within 120 columns.
 const WELCOME_BOX_MAX_WIDTH: u16 = 120;
@@ -1627,6 +1627,85 @@ fn visible_familiar(app: &App) -> Option<claurst_core::coven_shared::CovenFamili
         .find(|familiar| familiar.id == id)
 }
 
+/// Friendly, human-facing model name for the welcome panel: turns a raw id
+/// like `claude-opus-4-8` into `Opus 4.8`, and appends `(1M context)` when the
+/// id carries the long-context `[1m]` marker. Unknown ids pass through.
+fn friendly_model_label(app: &App) -> String {
+    friendly_model_from_id(&welcome_model_label(app))
+}
+
+/// Pure mapping from a raw model id to a friendly label (see
+/// [`friendly_model_label`]). Split out so it can be tested without an `App`.
+fn friendly_model_from_id(raw: &str) -> String {
+    let lc = raw.to_lowercase();
+    let one_m = lc.contains("[1m]") || lc.contains("-1m") || lc.ends_with("1m");
+    for (key, disp) in [
+        ("opus", "Opus"),
+        ("sonnet", "Sonnet"),
+        ("haiku", "Haiku"),
+        ("fable", "Fable"),
+    ] {
+        if let Some(idx) = lc.find(key) {
+            let rest = &lc[idx + key.len()..];
+            let ver: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            let ver = ver.trim_matches('-').replace('-', ".");
+            let base = if ver.is_empty() {
+                disp.to_string()
+            } else {
+                format!("{disp} {ver}")
+            };
+            return if one_m {
+                format!("{base} (1M context)")
+            } else {
+                base
+            };
+        }
+    }
+    raw.to_string()
+}
+
+/// The current working directory with `$HOME` abbreviated to `~`, shown as the
+/// workspace line on the welcome panel.
+fn welcome_cwd_label() -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .unwrap_or_default();
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() && cwd.starts_with(&home) {
+            return format!("~{}", &cwd[home.len()..]);
+        }
+    }
+    cwd
+}
+
+/// Capitalize the first character (e.g. `anthropic` → `Anthropic`).
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Truncate `s` to at most `max` display cells, appending `…` when cut.
+fn truncate_meta(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let take = max.saturating_sub(1).max(1);
+        let mut out: String = s.chars().take(take).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // --- Box dimensions ---
     // Fixed height; width capped so the box doesn't stretch edge-to-edge on
@@ -1718,7 +1797,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
     frame.render_widget(Paragraph::new(divider_lines), h_chunks[1]);
 
-    // --- Left column ---
+    // --- Left column: centered identity, 8-bit avatar, and metadata ---
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .ok()
@@ -1729,7 +1808,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         "Welcome back!".to_string()
     };
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
-    let card_size = familiar_card::pick_size(left_w);
+    let left_w_usize = left_w as usize;
 
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
@@ -1741,23 +1820,55 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     left_lines.push(Line::from(""));
     if let Some(familiar) = visible_familiar(app) {
         let familiar_name = familiar.id.as_str();
-        let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
         if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
             left_lines.push(Line::from(Span::raw(seq)));
         } else {
-            left_lines.extend(familiar_card::render_card(
+            let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
+            left_lines.extend(familiar_card::render_avatar(
                 &theme,
-                card_size,
                 &app.companion_current_pose,
             ));
         }
+        left_lines.push(Line::from(""));
+    }
+    // Gray metadata block mirroring the reference layout: model, provider ·
+    // daemon state, and the working directory.
+    let meta_style = Style::default().fg(Color::Gray);
+    left_lines.push(Line::from(Span::styled(
+        truncate_meta(&friendly_model_label(app), left_w_usize),
+        meta_style,
+    )));
+    let daemon = welcome_daemon_label();
+    let provider_line = format!(
+        "{} \u{00b7} {}",
+        title_case(&welcome_provider_label(app)),
+        if daemon.contains("online") {
+            "online"
+        } else {
+            "offline"
+        }
+    );
+    left_lines.push(Line::from(Span::styled(
+        truncate_meta(&provider_line, left_w_usize),
+        meta_style,
+    )));
+    left_lines.push(Line::from(Span::styled(
+        truncate_meta(&welcome_cwd_label(), left_w_usize),
+        Style::default().fg(Color::DarkGray),
+    )));
+    if let Some(goal) = app.active_goal_badge.as_deref().filter(|s| !s.is_empty()) {
+        left_lines.push(Line::from(Span::styled(
+            truncate_meta(&format!("Goal: {goal}"), left_w_usize),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
     }
     frame.render_widget(
-        Paragraph::new(left_lines).wrap(Wrap { trim: false }),
+        Paragraph::new(left_lines).alignment(Alignment::Center),
         h_chunks[0],
     );
 
-    // --- Right column ---
+    // --- Right column: Tips + What's new, left-aligned like the image ---
+    let right_w_usize = right_w.saturating_sub(1).max(1) as usize;
     let tip_text = claurst_core::tips::select_tip(0)
         .map(|t| t.content.to_string())
         .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string());
@@ -1767,61 +1878,34 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         "Tips for getting started",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )));
-    // Word-wrap the tip text into the right column width, breaking on word
-    // boundaries (not mid-word) so the hint stays readable on narrow terminals.
-    let right_w_usize = right_w.saturating_sub(1) as usize;
-    for line in crate::dialogs::word_wrap(&tip_text, right_w_usize.max(1)) {
-        right_lines.push(Line::from(line));
+    // Word-wrap the tip on word boundaries so it stays readable when narrow.
+    for line in crate::dialogs::word_wrap(&tip_text, right_w_usize) {
+        right_lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::Gray),
+        )));
     }
-    right_lines.push(Line::from(""));
+    // Divider rule between the two sections (matches the reference image).
     right_lines.push(Line::from(Span::styled(
-        "Status",
+        "\u{2500}".repeat(right_w_usize),
+        Style::default().fg(accent),
+    )));
+    right_lines.push(Line::from(Span::styled(
+        "What's new",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )));
-    let model = welcome_model_label(app);
-    let provider = welcome_provider_label(app);
-    let daemon = welcome_daemon_label();
-    right_lines.push(Line::from(Span::styled(
-        format!("Model:    {model}"),
-        Style::default().fg(Color::Gray),
-    )));
-    right_lines.push(Line::from(Span::styled(
-        format!("Provider: {provider}"),
-        Style::default().fg(Color::Gray),
-    )));
-    let daemon_style = if daemon.contains("online") {
-        Style::default().fg(accent)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    right_lines.push(Line::from(Span::styled(daemon, daemon_style)));
-    if let Some(familiar) = visible_familiar(app) {
-        right_lines.push(Line::from(vec![
-            Span::styled(
-                format!("Familiar: {} ", familiar.id),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled("(F2 to switch)", Style::default().fg(Color::DarkGray)),
-        ]));
-    } else {
+    for item in claurst_core::constants::WHATS_NEW.iter().take(3) {
         right_lines.push(Line::from(Span::styled(
-            "Familiar: none",
-            Style::default().fg(Color::DarkGray),
+            truncate_meta(item, right_w_usize),
+            Style::default().fg(Color::Gray),
         )));
     }
-    if let Some(goal) = app.active_goal_badge.as_deref().filter(|s| !s.is_empty()) {
-        let truncated = if goal.chars().count() > right_w_usize.saturating_sub(8) {
-            let take = right_w_usize.saturating_sub(9).max(8);
-            let s: String = goal.chars().take(take).collect();
-            format!("{s}…")
-        } else {
-            goal.to_string()
-        };
-        right_lines.push(Line::from(Span::styled(
-            format!("Goal:     {truncated}"),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        )));
-    }
+    right_lines.push(Line::from(Span::styled(
+        "/release-notes for more",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
 
     frame.render_widget(
         Paragraph::new(right_lines).wrap(Wrap { trim: false }),
@@ -3532,6 +3616,66 @@ mod welcome_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn friendly_model_label_maps_known_families() {
+        assert_eq!(friendly_model_from_id("claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(friendly_model_from_id("claude-sonnet-4-6"), "Sonnet 4.6");
+        assert_eq!(
+            friendly_model_from_id("claude-haiku-4-5-20251001"),
+            "Haiku 4.5.20251001"
+        );
+        assert_eq!(friendly_model_from_id("claude-fable-5"), "Fable 5");
+        // The 1M long-context marker is surfaced.
+        assert_eq!(
+            friendly_model_from_id("claude-opus-4-8[1m]"),
+            "Opus 4.8 (1M context)"
+        );
+        // Unknown ids pass through untouched.
+        assert_eq!(friendly_model_from_id("some-other-model"), "some-other-model");
+    }
+
+    #[test]
+    fn title_case_capitalizes_first_char() {
+        assert_eq!(title_case("anthropic"), "Anthropic");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn truncate_meta_appends_ellipsis_when_cut() {
+        assert_eq!(truncate_meta("short", 10), "short");
+        assert_eq!(truncate_meta("toolongvalue", 5), "tool\u{2026}");
+        assert_eq!(truncate_meta("anything", 0), "");
+    }
+
+    #[test]
+    fn welcome_box_shows_whats_new_and_release_notes() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 14)).expect("terminal");
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+
+        terminal
+            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .expect("draw welcome");
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..14 {
+            for x in 0..120 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Welcome back"), "missing greeting:\n{text}");
+        assert!(
+            text.contains("Tips for getting started"),
+            "missing tips header:\n{text}"
+        );
+        assert!(text.contains("What's new"), "missing what's new:\n{text}");
+        assert!(
+            text.contains("/release-notes for more"),
+            "missing release-notes footer:\n{text}"
+        );
     }
 
     #[test]

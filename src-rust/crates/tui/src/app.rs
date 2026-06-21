@@ -135,6 +135,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "update",
         "Check for updates and upgrade to the latest version",
     ),
+    ("release-notes", "Show recent Coven Code highlights"),
     ("usage", "Detailed per-call token usage breakdown"),
     ("version", "Display the current Coven Code version"),
     (

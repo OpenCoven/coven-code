@@ -91,7 +91,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 getrandom = { workspace = true }
 url = { workspace = true }
-schemars = { workspace = true }
 reqwest = { workspace = true }
 urlencoding = { workspace = true }
 glob = { workspace = true }

@@ -214,6 +214,7 @@ pub struct ModelCommand;
 pub struct ConfigCommand;
 pub struct ColorCommand;
 pub struct VersionCommand;
+pub struct ReleaseNotesCommand;
 pub struct ResumeCommand;
 pub struct StatusCommand;
 pub struct DiffCommand;
@@ -1313,6 +1314,35 @@ impl SlashCommand for VersionCommand {
         CommandResult::Message(format!(
             "Coven Code v{}",
             claurst_core::constants::APP_VERSION
+        ))
+    }
+}
+
+// ---- /release-notes ------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for ReleaseNotesCommand {
+    fn name(&self) -> &str {
+        "release-notes"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["whats-new", "changelog"]
+    }
+    fn description(&self) -> &str {
+        "Show recent Coven Code highlights"
+    }
+
+    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        let body = claurst_core::constants::WHATS_NEW
+            .iter()
+            .map(|item| format!("  • {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        CommandResult::Message(format!(
+            "What's new in Coven Code v{}\n{}\n{}",
+            claurst_core::constants::APP_VERSION,
+            "─".repeat(40),
+            body
         ))
     }
 }
@@ -9005,14 +9035,10 @@ fn coven_read_calls_ledger(limit: usize) -> String {
         Ok(v) => v,
         Err(e) => return format!("Could not parse {}: {e}", path.display()),
     };
-    let calls = value
-        .get("calls")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if calls.is_empty() {
-        return "Delegation ledger is empty.".to_string();
-    }
+    let calls = match value.get("calls").and_then(|v| v.as_array()) {
+        Some(c) if !c.is_empty() => c,
+        _ => return "Delegation ledger is empty.".to_string(),
+    };
     let total = calls.len();
     let take = limit.max(1).min(total);
     let mut out = String::new();
@@ -9445,8 +9471,9 @@ impl SlashCommand for CovenCommand {
                                 .seq
                                 .map(|n| n.to_string())
                                 .unwrap_or_else(|| "?".to_string());
-                            let payload = if ev.payload_json.len() > 36 {
-                                format!("{}…", &ev.payload_json[..36])
+                            let payload = if ev.payload_json.chars().count() > 36 {
+                                let s: String = ev.payload_json.chars().take(36).collect();
+                                format!("{s}…")
                             } else {
                                 ev.payload_json.clone()
                             };
@@ -9665,6 +9692,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ConfigCommand),
         Box::new(PluginCommand),
         Box::new(VersionCommand),
+        Box::new(ReleaseNotesCommand),
         Box::new(ResumeCommand),
         Box::new(ReloadPluginsCommand),
         Box::new(StatusCommand),

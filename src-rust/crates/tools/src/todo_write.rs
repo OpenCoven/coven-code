@@ -101,7 +101,6 @@ struct TodoItem {
     content: String,
     status: TodoStatus,
     #[serde(default)]
-    #[allow(dead_code)]
     priority: Option<String>,
 }
 

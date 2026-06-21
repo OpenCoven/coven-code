@@ -238,12 +238,13 @@ fn access_line(theme: &FamiliarTheme, primary: Color, inner_w: u16) -> Line<'sta
 // ── Glyph dispatch ───────────────────────────────────────────────────────────
 
 fn glyph_lines(theme: &FamiliarTheme, pose: &CompanionPose) -> Vec<Line<'static>> {
-    match theme.archetype {
-        Archetype::SigilCrystal => sigil_crystal(&theme.palette, &theme.emoji, pose),
-        Archetype::SigilHex => sigil_hex(&theme.palette, &theme.emoji, pose),
-        Archetype::SigilRune => sigil_rune(&theme.palette, &theme.emoji, pose),
-        Archetype::SigilSeal => sigil_seal(&theme.palette, &theme.emoji, pose),
-    }
+    pixel_avatar(avatar_grid(theme.archetype), &theme.palette, pose)
+}
+
+/// Public entry for surfaces that want the bare 8-bit avatar rows without the
+/// bordered card chrome. The welcome panel centers these directly.
+pub fn render_avatar(theme: &FamiliarTheme, pose: &CompanionPose) -> Vec<Line<'static>> {
+    glyph_lines(theme, pose)
 }
 
 /// Accent color for a sigil's decorative row, pulsed by the companion pose.
@@ -261,108 +262,159 @@ fn pulse_accent(p: &FamiliarPalette, pose: &CompanionPose) -> Color {
     }
 }
 
-// ── Procedural sigils ────────────────────────────────────────────────────────
+// ── 8-bit pixel-art avatars ──────────────────────────────────────────────────
 //
-// Each sigil is 11 visible cells wide × 4 rows so it slots into the bordered
-// layout consistently.  The emoji (2 cells wide on most terminals) is rendered
-// as its own span; the surrounding frame characters are colored in the
-// resolved palette.
+// Each avatar is an 11-wide × 8-tall pixel grid drawn with Unicode half-block
+// cells (`▀`/`▄`) so eight pixel rows pack into the four glyph rows the card
+// layout reserves. There is a small, curated, fully-functional set — four
+// distinct creatures — rather than an open-ended procedural space, and every
+// familiar's palette recolors whichever avatar its archetype maps to. Pixels
+// are addressed by a single ASCII key per cell:
+//
+//   ' ' transparent   'P' body (primary)   'A' accent (pulsed)
+//   'E' eye            'S' eye highlight    'O' outline (dimmed body)
 
-fn sigil_crystal(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
-    let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(pulse_accent(p, pose));
-    vec![
-        Line::from(Span::styled(
-            "    \u{2581}\u{2580}\u{2581}    ".to_string(),
-            frame,
-        )),
-        emoji_row(p, emoji, "  \u{25e2}", "\u{25e3}  "),
-        Line::from(Span::styled(
-            "    \u{2580}\u{2581}\u{2580}    ".to_string(),
-            frame,
-        )),
-        Line::from(Span::styled(
-            "     \u{2022} \u{2022}    ".to_string(),
-            accent,
-        )),
-    ]
+/// Map an archetype to its 11×8 pixel grid. Reuses the four stable archetype
+/// slots so [`crate::familiar_theme`] keeps hashing ids across the same four
+/// buckets — only the art behind each slot changed.
+fn avatar_grid(archetype: Archetype) -> &'static [&'static str; 8] {
+    match archetype {
+        Archetype::SigilCrystal => &AVATAR_CRITTER,
+        Archetype::SigilHex => &AVATAR_CAT,
+        Archetype::SigilRune => &AVATAR_OWL,
+        Archetype::SigilSeal => &AVATAR_GOLEM,
+    }
 }
 
-fn sigil_hex(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
-    let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(pulse_accent(p, pose));
-    vec![
-        Line::from(Span::styled(
-            "   \u{256d}\u{2500}\u{2500}\u{2500}\u{256e}   ".to_string(),
-            frame,
-        )),
-        emoji_row(p, emoji, "   \u{2502}", "\u{2502}    "),
-        Line::from(Span::styled(
-            "   \u{2570}\u{2500}\u{2500}\u{2500}\u{256f}   ".to_string(),
-            frame,
-        )),
-        Line::from(Span::styled(
-            "     \u{2024}\u{2024}\u{2024}    ".to_string(),
-            accent,
-        )),
-    ]
+// A round-bodied critter with a little run of legs.
+static AVATAR_CRITTER: [&str; 8] = [
+    "   PPPPP   ",
+    "  PPAAAPP  ",
+    " PPPPPPPPP ",
+    " PEPPPPPEP ",
+    " PPPPPPPPP ",
+    " OPPPPPPPO ",
+    "  PP P PP  ",
+    "  P  P  P  ",
+];
+
+// Pointed ears, wide face, accent cheeks.
+static AVATAR_CAT: [&str; 8] = [
+    " PP     PP ",
+    " PPP   PPP ",
+    " PPPPPPPPP ",
+    " PEPPPPPEP ",
+    " PPPAPPAPP ",
+    " PPPPPPPPP ",
+    "  PPPPPPP  ",
+    "   P   P   ",
+];
+
+// Owl with ear tufts, big socketed eyes, a centered beak.
+static AVATAR_OWL: [&str; 8] = [
+    "  PP   PP  ",
+    " PPPPPPPPP ",
+    " PSEPPPESP ",
+    " PSEPPPESP ",
+    " PPPAPPP P ",
+    " PPPPPPPPP ",
+    "  PPPPPPP  ",
+    "  A     A  ",
+];
+
+// Blocky golem with rectangular eyes and accent rivets.
+static AVATAR_GOLEM: [&str; 8] = [
+    "  PPPPPPP  ",
+    " PPPPPPPPP ",
+    " PEEPPPEEP ",
+    " PEEPPPEEP ",
+    " PPPPPPPPP ",
+    " PAPPPPPAP ",
+    " PPPPPPPPP ",
+    "  P P P P  ",
+];
+
+/// What the eyes are doing this frame, derived from the companion pose.
+#[derive(Clone, Copy)]
+enum Eyes {
+    Open,
+    Closed,
+    Alert,
 }
 
-fn sigil_rune(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
-    let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(pulse_accent(p, pose));
-    vec![
-        Line::from(Span::styled(
-            "    \u{258e}   \u{258e}   ".to_string(),
-            frame,
-        )),
-        emoji_row(p, emoji, "    \u{258e}", "\u{258e}    "),
-        Line::from(Span::styled(
-            "    \u{2594}\u{2594}\u{2594}\u{2594}\u{2594}   ".to_string(),
-            frame,
-        )),
-        Line::from(Span::styled(
-            "     \u{2500} \u{2500}    ".to_string(),
-            accent,
-        )),
-    ]
+fn eye_state(pose: &CompanionPose) -> Eyes {
+    match pose {
+        // A short blink near the end of each idle cycle.
+        CompanionPose::Idle { frame } if frame % 150 >= 145 => Eyes::Closed,
+        CompanionPose::Loading { .. } => Eyes::Alert,
+        _ => Eyes::Open,
+    }
 }
 
-fn sigil_seal(p: &FamiliarPalette, emoji: &str, pose: &CompanionPose) -> Vec<Line<'static>> {
-    let frame = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(pulse_accent(p, pose));
-    vec![
-        Line::from(Span::styled(
-            "    \u{2726} \u{2726}    ".to_string(),
-            accent,
-        )),
-        emoji_row(p, emoji, "   \u{2727}", "\u{2727}    "),
-        Line::from(Span::styled(
-            "    \u{2726} \u{2726}    ".to_string(),
-            accent,
-        )),
-        Line::from(Span::styled(
-            "    \u{2500}\u{2500}\u{2500}\u{2500}    ".to_string(),
-            frame,
-        )),
-    ]
+/// Dim an RGB color toward black by `factor` (0.0 = black, 1.0 = unchanged).
+/// Non-RGB colors pass through unchanged.
+fn dim(c: Color, factor: f32) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * factor) as u8,
+            (g as f32 * factor) as u8,
+            (b as f32 * factor) as u8,
+        ),
+        other => other,
+    }
 }
 
-/// Compose a row with a 2-cell emoji centered between two frame slugs and
-/// pad to 11 visible cells.
-fn emoji_row(p: &FamiliarPalette, emoji: &str, left: &str, right: &str) -> Line<'static> {
-    let frame_style = Style::default().fg(p.primary).add_modifier(Modifier::BOLD);
-    // Visible width = left_chars + 2 (emoji) + right_chars. Pad to 11.
-    let left_w = left.chars().count();
-    let right_w = right.chars().count();
-    let used = left_w + 2 + right_w;
-    let pad_right = 11usize.saturating_sub(used);
-    Line::from(vec![
-        Span::styled(left.to_string(), frame_style),
-        Span::raw(emoji.to_string()),
-        Span::styled(right.to_string(), frame_style),
-        Span::raw(" ".repeat(pad_right)),
-    ])
+/// Resolve one pixel key to its color, or `None` for a transparent cell.
+fn pixel_color(key: u8, p: &FamiliarPalette, pose: &CompanionPose) -> Option<Color> {
+    let eyes = eye_state(pose);
+    match key {
+        b' ' => None,
+        b'P' => Some(p.primary),
+        b'A' => Some(pulse_accent(p, pose)),
+        b'O' => Some(dim(p.primary, 0.45)),
+        b'E' => Some(match eyes {
+            Eyes::Open => p.eye_bg,
+            Eyes::Closed => p.primary, // lid down
+            Eyes::Alert => p.accent,
+        }),
+        b'S' => Some(match eyes {
+            Eyes::Closed => p.primary,
+            _ => p.eye_socket,
+        }),
+        _ => Some(p.primary),
+    }
+}
+
+/// Render an 11×8 pixel grid into four half-block glyph rows. Each output cell
+/// stacks two vertical pixels: the upper pixel is the foreground of `▀`, the
+/// lower pixel its background (or `▄` / blank when one side is transparent), so
+/// the avatar stays exactly 11 cells wide — matching the card layout math.
+fn pixel_avatar(
+    grid: &[&str; 8],
+    palette: &FamiliarPalette,
+    pose: &CompanionPose,
+) -> Vec<Line<'static>> {
+    let mut rows = Vec::with_capacity(4);
+    for r in 0..4 {
+        let top = grid[r * 2].as_bytes();
+        let bot = grid[r * 2 + 1].as_bytes();
+        let mut spans = Vec::with_capacity(11);
+        for c in 0..11 {
+            let t = pixel_color(top.get(c).copied().unwrap_or(b' '), palette, pose);
+            let b = pixel_color(bot.get(c).copied().unwrap_or(b' '), palette, pose);
+            let span = match (t, b) {
+                (None, None) => Span::raw(" "),
+                (Some(t), None) => Span::styled("\u{2580}".to_string(), Style::default().fg(t)),
+                (None, Some(b)) => Span::styled("\u{2584}".to_string(), Style::default().fg(b)),
+                (Some(t), Some(b)) => {
+                    Span::styled("\u{2580}".to_string(), Style::default().fg(t).bg(b))
+                }
+            };
+            spans.push(span);
+        }
+        rows.push(Line::from(spans));
+    }
+    rows
 }
 
 // ── Width helpers ────────────────────────────────────────────────────────────
@@ -461,5 +513,40 @@ mod tests {
     fn unknown_familiar_falls_back_without_panic() {
         let t = familiar_theme::resolve("definitely-not-real", &[]);
         let _ = render_card(&t, CardSize::Large, &CompanionPose::Static);
+    }
+
+    #[test]
+    fn avatar_is_four_rows_eleven_cells_wide() {
+        let t = familiar_theme::resolve("avatar-test", &[]);
+        let rows = render_avatar(&t, &CompanionPose::Static);
+        assert_eq!(rows.len(), 4, "avatar must pack 8 pixel rows into 4 glyphs");
+        for row in &rows {
+            assert_eq!(
+                visible_width(row),
+                11,
+                "every avatar row must stay 11 cells wide for the card layout"
+            );
+        }
+    }
+
+    #[test]
+    fn every_archetype_grid_is_well_formed() {
+        for grid in [&AVATAR_CRITTER, &AVATAR_CAT, &AVATAR_OWL, &AVATAR_GOLEM] {
+            assert_eq!(grid.len(), 8);
+            for row in grid.iter() {
+                assert_eq!(row.len(), 11, "grid row {row:?} must be 11 cells");
+            }
+        }
+    }
+
+    #[test]
+    fn blink_closes_eyes_without_changing_width() {
+        let t = familiar_theme::resolve("blinker", &[]);
+        let open = render_avatar(&t, &CompanionPose::Idle { frame: 0 });
+        let closed = render_avatar(&t, &CompanionPose::Idle { frame: 149 });
+        // A blink must not resize the avatar.
+        for (a, b) in open.iter().zip(closed.iter()) {
+            assert_eq!(visible_width(a), visible_width(b));
+        }
     }
 }

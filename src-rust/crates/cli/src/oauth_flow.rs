@@ -38,7 +38,6 @@ struct CreateApiKeyResponse {
 #[derive(Debug, Clone)]
 pub struct LoginResult {
     /// The credential to use: either an API key or Bearer token.
-    #[allow(dead_code)]
     pub credential: String,
     /// When true, present as `Authorization: Bearer <credential>`.
     pub use_bearer_auth: bool,

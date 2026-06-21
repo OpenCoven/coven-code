@@ -289,10 +289,20 @@ impl DaemonClient {
     #[cfg(unix)]
     const DEFAULT_TIMEOUT_MS: u64 = 200;
 
-    /// Open a fresh `UnixStream` connection with the default short timeout.
+    /// Per-call timeout for substantive request/response verbs routed through
+    /// [`Self::request`] (`create_session`, `session_log`, `session_events`,
+    /// `capabilities`, `control_action`, …). These can legitimately take
+    /// longer than the [`Self::DEFAULT_TIMEOUT_MS`] poll budget on a busy
+    /// daemon, so they get a wider budget to avoid spurious `Transport`
+    /// timeouts. The quick-poll path ([`Self::is_online`]) keeps the short
+    /// budget via [`Self::check_reachability`].
+    #[cfg(unix)]
+    const REQUEST_TIMEOUT_MS: u64 = 5000;
+
+    /// Open a fresh `UnixStream` connection with the request timeout budget.
     #[cfg(unix)]
     fn connect(&self) -> std::io::Result<UnixStream> {
-        self.connect_with_timeout(Duration::from_millis(Self::DEFAULT_TIMEOUT_MS))
+        self.connect_with_timeout(Duration::from_millis(Self::REQUEST_TIMEOUT_MS))
     }
 
     /// Open a fresh `UnixStream` connection with a caller-supplied timeout.
@@ -404,7 +414,10 @@ impl DaemonClient {
     /// default short timeout; callers that need to distinguish "offline"
     /// from "busy" should use [`Self::check_reachability`] instead.
     pub fn is_online(&self) -> bool {
-        self.get("/api/v1/familiars").is_ok()
+        matches!(
+            self.check_reachability(Duration::from_millis(Self::DEFAULT_TIMEOUT_MS)),
+            DaemonReachability::Online
+        )
     }
 
     /// Three-valued reachability probe. Spends up to `timeout` waiting for
