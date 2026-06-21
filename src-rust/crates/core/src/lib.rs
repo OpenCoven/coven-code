@@ -2084,13 +2084,17 @@ pub mod constants {
     pub const FABLE_MODEL: &str = "claude-fable-5";
 
     /// Recent highlights surfaced under "What's new" on the welcome panel and
-    /// in full by the `/release-notes` slash command. Newest first; the
-    /// welcome panel shows the first few (truncated) and points at
-    /// `/release-notes` for the rest.
+    /// in full by the `/release-notes` slash command. Newest first, led by the
+    /// current release's highlights; the welcome panel shows the first few
+    /// (truncated) and points at `/release-notes` for the rest. Keep this in
+    /// sync with the GitHub release notes when cutting a version.
     pub const WHATS_NEW: &[&str] = &[
         "8-bit pixel-art familiar avatars now front the welcome panel, recolored per familiar",
         "Welcome panel redesigned into a two-column identity + tips layout",
         "Press F2 from the welcome screen to switch the active familiar",
+        "Run /release-notes (aka /whats-new, /changelog) to catch up on highlights in-app",
+        "Steadier daemon status — a busy daemon no longer flickers to offline",
+        "Leaner build — pruned unused workspace dependencies across crates",
         "Sub-agents and parallel teams via /agents and the Team tool",
         "Run /init to generate an AGENTS.md with instructions for Coven Code",
     ];
