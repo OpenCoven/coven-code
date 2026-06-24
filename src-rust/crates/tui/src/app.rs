@@ -158,7 +158,9 @@ pub fn slash_command_category(name: &str) -> &'static str {
             "Conversation"
         }
         "model" | "config" | "settings" | "theme" | "color" | "vim" | "fast" | "effort"
-        | "voice" | "statusline" | "output-style" | "keybindings" | "sandbox" => "Settings",
+        | "voice" | "statusline" | "output-style" | "keybindings" | "splash" | "sandbox" => {
+            "Settings"
+        }
         "cost" | "usage" | "context" | "stats" => "Usage & Cost",
         "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
         "login" | "logout" | "switch" | "refresh" | "permissions" | "connect" | "providers" => {
@@ -3006,12 +3008,22 @@ impl App {
             } else {
                 settings.disabled_skills.insert(name.clone());
             }
-            let _ = settings.save_sync();
-            self.status_message = Some(format!(
-                "Skill '{}' {}.",
-                name,
-                if enabled { "enabled" } else { "disabled" }
-            ));
+            match settings.save_sync() {
+                Ok(()) => {
+                    self.status_message = Some(format!(
+                        "Skill '{}' {}.",
+                        name,
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                }
+                Err(e) => {
+                    // Persisting failed — revert the in-memory toggle so the
+                    // on-screen state stays consistent with disk, and report it.
+                    self.skills_picker.toggle_selected();
+                    self.status_message =
+                        Some(format!("Failed to save skill '{}': {}", name, e));
+                }
+            }
         }
     }
 

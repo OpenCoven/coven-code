@@ -72,8 +72,10 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
     let mut local = SkillIndex::default();
 
     // Skills the user toggled off in the `/skills` picker are excluded from the
-    // always-on index so they no longer consume context tokens.
-    let disabled = claurst_core::config::Settings::load_sync()
+    // always-on index so they no longer consume context tokens. Use the async
+    // loader since this runs on the Tokio runtime.
+    let disabled = claurst_core::config::Settings::load()
+        .await
         .map(|s| s.disabled_skills)
         .unwrap_or_default();
 

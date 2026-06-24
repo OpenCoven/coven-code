@@ -155,7 +155,9 @@ fn skill_search_dirs(ctx: &ToolContext) -> Vec<PathBuf> {
 
 async fn list_skills(dirs: &[PathBuf]) -> ToolResult {
     // Skills toggled off in the `/skills` picker are hidden from the model.
-    let disabled = claurst_core::config::Settings::load_sync()
+    // Use the async loader so we don't block the runtime from this async fn.
+    let disabled = claurst_core::config::Settings::load()
+        .await
         .map(|s| s.disabled_skills)
         .unwrap_or_default();
 
