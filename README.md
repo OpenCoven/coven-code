@@ -43,7 +43,7 @@ Recent highlights:
 npm install -g @opencoven/coven-code
 ```
 
-Then open a new terminal and run `coven-code`.
+Then open a new terminal and run `coven-code`. `coven-cave` is also installed as an alias for the same CLI.
 
 ### Upgrade
 
@@ -74,7 +74,7 @@ Each archive contains a single `coven-code` (or `coven-code.exe`) binary.
 ```bash
 git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
-cargo build --release --package claurst   # binary outputs as coven-code
+cargo build --release --package claurst   # binary outputs as coven-code; coven-cave is an alias target
 ```
 
 > Internal Rust crate names (`claurst-core`, `claurst-tui`, etc.) are preserved from upstream for merge-friendliness. The compiled binary is named `coven-code`.

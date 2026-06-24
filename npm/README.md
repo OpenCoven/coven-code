@@ -20,6 +20,7 @@ On install, the correct pre-built native binary for your platform is automatical
 
 ```bash
 coven-code                    # interactive TUI
+coven-cave                    # alias for coven-code
 coven-code -p "fix this bug"  # headless one-shot
 ```
 
