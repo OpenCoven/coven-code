@@ -1619,6 +1619,40 @@ pub fn accent_for_mode(mode: Option<&str>) -> Color {
     }
 }
 
+/// Pick a foreground color that reads clearly on top of `bg`.
+///
+/// Returns explicit `Color::Rgb` black or white (never the indexed
+/// `Color::Black`/`Color::White`) so terminals don't brighten a *bold* indexed
+/// black into low-contrast gray — the cause of the washed-out badge text. The
+/// choice is made by comparing WCAG relative-luminance contrast ratios, so it
+/// stays correct if the accent palette changes.
+pub fn readable_fg_on(bg: Color) -> Color {
+    let (r, g, b) = match bg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        // Non-RGB backgrounds (themes/indexed): default to black, which reads
+        // on the light/mid accent tones used here.
+        _ => return Color::Rgb(0, 0, 0),
+    };
+
+    fn channel_lum(c: u8) -> f32 {
+        let c = c as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let lum = 0.2126 * channel_lum(r) + 0.7152 * channel_lum(g) + 0.0722 * channel_lum(b);
+    let black_contrast = (lum + 0.05) / 0.05;
+    let white_contrast = 1.05 / (lum + 0.05);
+    if black_contrast >= white_contrast {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    }
+}
+
 fn format_elapsed_ms(ms: u128) -> String {
     let total_secs = ((ms + 500) / 1000) as u64; // round to nearest second
     if total_secs < 60 {

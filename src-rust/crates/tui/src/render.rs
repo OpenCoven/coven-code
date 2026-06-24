@@ -3,7 +3,9 @@
 use std::cell::RefCell;
 
 use crate::agents_view::render_agents_menu;
-use crate::app::{App, ContextMenuKind, SystemAnnotation, SystemMessageStyle, ToolStatus};
+use crate::app::{
+    readable_fg_on, App, ContextMenuKind, SystemAnnotation, SystemMessageStyle, ToolStatus,
+};
 use crate::ask_user_dialog::render_ask_user_dialog;
 use crate::bypass_permissions_dialog::render_bypass_permissions_dialog;
 use crate::context_viz::render_context_viz;
@@ -2153,7 +2155,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                 Span::styled(
                     format!(" {} ", agent_mode.to_uppercase()),
                     Style::default()
-                        .fg(Color::Black)
+                        .fg(readable_fg_on(pink))
                         .bg(pink)
                         .add_modifier(Modifier::BOLD),
                 ),
@@ -2181,7 +2183,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                 Span::styled(
                     " /connect ",
                     Style::default()
-                        .fg(Color::Black)
+                        .fg(readable_fg_on(pink))
                         .bg(pink)
                         .add_modifier(Modifier::BOLD),
                 ),
