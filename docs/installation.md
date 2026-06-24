@@ -1,9 +1,9 @@
 # Coven Code Installation Guide
 
-Coven Code is a Rust reimplementation of the Claude Code CLI. The fastest way
-to install it is via the one-liner installers below. They drop the binary
-into `~/.coven-code/bin` (or `%USERPROFILE%\.coven-code\bin` on Windows) and add
-that directory to your `PATH` automatically.
+Coven Code is a Rust reimplementation of the Claude Code CLI. The recommended
+npm install path is the Coven package, which installs the `coven` CLI. Run
+`coven` with no arguments, or `coven tui` explicitly, to open the interactive
+Coven Code UI.
 
 ---
 
@@ -23,6 +23,39 @@ possible; on Linux it links against the system glibc.
 ---
 
 ## Quick install (recommended)
+
+If you have Node.js or Bun installed, install the Coven CLI globally:
+
+```bash
+# npm
+npm install -g @opencoven/coven
+
+# bun
+bun install -g @opencoven/coven
+```
+
+After installation, run:
+
+```bash
+coven
+# or explicitly:
+coven tui
+```
+
+The installed command is `coven`. Use `coven doctor` to inspect local setup,
+`coven daemon start` to start the local daemon, and
+`coven run <harness> "<task>"` for direct harness sessions.
+
+You can also run Coven without a permanent install:
+
+```bash
+npx @opencoven/coven          # via npm
+bunx @opencoven/coven         # via bun
+```
+
+---
+
+## Standalone Coven Code binary
 
 ### Linux / macOS
 
@@ -65,11 +98,11 @@ Example: `curl -fsSL https://.../install.sh | bash -s -- --version 0.1.0`
 
 ---
 
-## Via npm / bun
+## Coven Code npm package
 
-If you have Node.js or Bun installed, you can install Coven Code as a global
-package. The postinstall script automatically downloads the correct pre-built
-native binary for your platform from GitHub Releases — no compilation needed.
+The lower-level Coven Code npm package installs the `coven-code` binary
+directly. Prefer `@opencoven/coven` for the user-facing `coven` CLI unless you
+specifically need the underlying Coven Code binary.
 
 ```bash
 # npm
@@ -104,14 +137,12 @@ bunx @opencoven/coven-code         # via bun
 Once installed, upgrade in place at any time:
 
 ```bash
-coven-code upgrade               # to the latest release
-coven-code upgrade --version 0.1.0   # pin to a specific version
-coven-code upgrade --force       # reinstall the same version
+npm install -g @opencoven/coven@latest
+# or
+bun install -g @opencoven/coven@latest
 ```
 
-The upgrade command downloads the matching archive from GitHub, extracts the
-new binary, and replaces the running executable atomically. Settings in
-`~/.coven-code/` are preserved.
+Settings in `~/.coven/` and `~/.coven-code/` are preserved.
 
 ---
 
@@ -194,14 +225,17 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-### Option A: Install via Cargo
+### Option A: Install from a clone
 
 ```bash
-cargo install coven-code --force
+git clone https://github.com/OpenCoven/coven-code.git
+cd coven-code/src-rust
+cargo install --path crates/cli --locked
 ```
 
-This downloads, compiles, and installs the binary to `~/.cargo/bin/coven-code`.
-That directory is added to `PATH` automatically by `rustup`.
+This compiles the `claurst` package and installs the `coven-code` binary to
+`~/.cargo/bin/coven-code`. That directory is added to `PATH` automatically by
+`rustup`.
 
 ### Option B: Clone and Build
 
@@ -210,10 +244,10 @@ git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
 
 # Debug build (fast to compile, larger binary, extra runtime checks)
-cargo build --package coven-code
+cargo build --package claurst
 
 # Release build (optimised, smaller, suitable for everyday use)
-cargo build --release --package coven-code
+cargo build --release --package claurst
 ```
 
 The release binary is placed at:
@@ -252,8 +286,8 @@ sudo pacman -S alsa-lib openssl
 To enable a feature:
 
 ```bash
-cargo build --release --package coven-code --features voice
-cargo build --release --package coven-code --features dev_full
+cargo build --release --package claurst --features voice
+cargo build --release --package claurst --features dev_full
 ```
 
 ### Cross-compiling for Linux aarch64
@@ -264,7 +298,7 @@ aarch64 Linux builds. To reproduce it locally:
 ```bash
 cargo install cross --git https://github.com/cross-rs/cross
 cd src-rust
-cross build --release --locked --package coven-code --target aarch64-unknown-linux-gnu
+cross build --release --locked --package claurst --target aarch64-unknown-linux-gnu
 ```
 
 `cross` manages the Docker sysroot, OpenSSL, and ALSA headers automatically.
@@ -273,16 +307,16 @@ cross build --release --locked --package coven-code --target aarch64-unknown-lin
 
 ## Shell Completions
 
-Coven Code does not currently ship a dedicated `completions` subcommand. All
-flags can be discovered via `coven-code --help`. If you want basic tab completion
+Coven does not currently ship a dedicated `completions` subcommand. All
+flags can be discovered via `coven --help`. If you want basic tab completion
 in bash or zsh you can use the generic completion helper built into your shell:
 
 ```bash
 # bash — add to ~/.bashrc
-complete -C coven-code coven-code
+complete -C coven coven
 
 # zsh — add to ~/.zshrc (requires compinit)
-compdef _gnu_generic coven-code
+compdef _gnu_generic coven
 ```
 
 Richer completion scripts may be added in a future release.
@@ -292,15 +326,24 @@ Richer completion scripts may be added in a future release.
 ## Upgrading a source install
 
 ```bash
-cargo install coven-code --force
+cd coven-code/src-rust
+cargo install --path crates/cli --locked --force
 ```
 
-For binary installs (the recommended path), use `coven-code upgrade` — see
-the [Upgrading](#upgrading) section above.
+For npm or bun installs, reinstall the `@opencoven/coven` package — see the
+[Upgrading](#upgrading) section above.
 
 ---
 
 ## Uninstalling
+
+If you used the recommended npm or bun package, remove it globally:
+
+```bash
+npm uninstall -g @opencoven/coven
+# or
+bun remove -g @opencoven/coven
+```
 
 If you used the install script, remove the install directory:
 
@@ -320,7 +363,7 @@ rm ~/.local/bin/coven-code                  # if installed user-local
 To also remove all settings and session data:
 
 ```bash
-rm -rf ~/.coven-code
+rm -rf ~/.coven ~/.coven-code
 ```
 
 You may also want to remove the `# coven-code` PATH line that the installer

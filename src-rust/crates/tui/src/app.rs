@@ -91,6 +91,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Cast a speech incantation (caveman, rocky) or lift it with off",
     ),
     ("init", "Initialize AGENTS.md for this project"),
+    (
+        "learn",
+        "Codify the script/workflow we just built into a reusable skill",
+    ),
     ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
@@ -154,7 +158,9 @@ pub fn slash_command_category(name: &str) -> &'static str {
             "Conversation"
         }
         "model" | "config" | "settings" | "theme" | "color" | "vim" | "fast" | "effort"
-        | "voice" | "statusline" | "output-style" | "keybindings" | "sandbox" => "Settings",
+        | "voice" | "statusline" | "output-style" | "keybindings" | "splash" | "sandbox" => {
+            "Settings"
+        }
         "cost" | "usage" | "context" | "stats" => "Usage & Cost",
         "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
         "login" | "logout" | "switch" | "refresh" | "permissions" | "connect" | "providers" => {
@@ -167,7 +173,9 @@ pub fn slash_command_category(name: &str) -> &'static str {
         "session" | "resume" | "search" | "share" | "rename" => "Sessions & Remote",
         "help" | "exit" | "quit" | "feedback" | "survey" | "bug" => "General",
         "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
-        "copy" | "skills" | "plugin" | "reload-plugins" | "whisper" | "incant" => "Tools & Extras",
+        "copy" | "skills" | "learn" | "plugin" | "reload-plugins" | "whisper" | "incant" => {
+            "Tools & Extras"
+        }
         "coven" | "familiar" | "familiars" | "handoff" => "Coven",
         _ => "Other",
     }
@@ -1314,6 +1322,8 @@ pub struct App {
     pub onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState,
     /// Effort-level picker (/effort with no args).
     pub effort_picker: crate::effort_picker::EffortPickerState,
+    /// Interactive skills picker (/skills).
+    pub skills_picker: crate::skills_picker::SkillsPickerState,
     /// API key input dialog (opened from /connect for key-based providers).
     pub key_input_dialog: crate::key_input_dialog::KeyInputDialogState,
     /// Custom provider dialog for URL + API key input.
@@ -1798,6 +1808,7 @@ impl App {
             file_injection_force: false,
             onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState::new(),
             effort_picker: crate::effort_picker::EffortPickerState::new(),
+            skills_picker: crate::skills_picker::SkillsPickerState::new(),
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
             custom_provider_dialog: crate::custom_provider_dialog::CustomProviderDialogState::new(),
             free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState::new(),
@@ -2492,6 +2503,11 @@ impl App {
             ("effort", "fast", _) => return self.intercept_slash_command("fast"),
             _ => {}
         }
+        // `/skills` opens the interactive picker; `/skills <query>` pre-filters.
+        if cmd == "skills" {
+            self.open_skills_picker(args_trimmed);
+            return true;
+        }
         if !args_trimmed.is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }
@@ -2879,7 +2895,16 @@ impl App {
         self.theme_screen.close();
     }
 
-    pub fn any_modal_open(&self) -> bool {
+    /// Whether a *blocking* overlay currently owns keyboard input — i.e. the
+    /// prompt is not the active text target.
+    ///
+    /// This is the single source of truth for "an overlay captures input": any
+    /// new picker/dialog added here automatically stops prompt text (including
+    /// paste-burst capture) from leaking while it is open — see
+    /// [`Self::prompt_is_accepting_text`]. It excludes the passive notices
+    /// (overage / voice / memory), which render as overlays but let the user
+    /// keep typing underneath.
+    pub fn any_blocking_modal_open(&self) -> bool {
         self.permission_request.is_some()
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2895,9 +2920,6 @@ impl App {
             || self.feedback_survey.visible
             || self.memory_file_selector.visible
             || self.hooks_config_menu.visible
-            || self.overage_upsell.visible
-            || self.voice_mode_notice.visible
-            || self.memory_update_notification.visible
             || self.import_config_dialog.visible
             || self.invalid_config_dialog.visible
             || self.bypass_permissions_dialog.visible
@@ -2918,7 +2940,17 @@ impl App {
             || self.context_viz.visible
             || self.mcp_approval.visible
             || self.file_injection_dialog.visible
+            || self.skills_picker.visible
             || self.context_menu_state.is_some()
+    }
+
+    pub fn any_modal_open(&self) -> bool {
+        // Passive notices don't capture input but still render as overlays, so
+        // they count as a modal for rendering purposes only.
+        self.any_blocking_modal_open()
+            || self.overage_upsell.visible
+            || self.voice_mode_notice.visible
+            || self.memory_update_notification.visible
     }
 
     fn dismiss_error_notifications(&mut self) {
@@ -2957,6 +2989,41 @@ impl App {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    /// Build the skill list from settings + cwd and open the `/skills` picker.
+    fn open_skills_picker(&mut self, filter: &str) {
+        let settings = Settings::load_sync().unwrap_or_default();
+        let cwd = self.project_root();
+        let rows = crate::skills_picker::build_skill_rows(&cwd, &settings);
+        self.skills_picker.open(rows, filter);
+    }
+
+    /// Toggle the selected skill's enabled state and persist it to settings.
+    fn toggle_selected_skill(&mut self) {
+        if let Some((name, enabled)) = self.skills_picker.toggle_selected() {
+            let mut settings = Settings::load_sync().unwrap_or_default();
+            if enabled {
+                settings.disabled_skills.remove(&name);
+            } else {
+                settings.disabled_skills.insert(name.clone());
+            }
+            match settings.save_sync() {
+                Ok(()) => {
+                    self.status_message = Some(format!(
+                        "Skill '{}' {}.",
+                        name,
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                }
+                Err(e) => {
+                    // Persisting failed — revert the in-memory toggle so the
+                    // on-screen state stays consistent with disk, and report it.
+                    self.skills_picker.toggle_selected();
+                    self.status_message = Some(format!("Failed to save skill '{}': {}", name, e));
+                }
+            }
+        }
     }
 
     fn refresh_global_search(&mut self) {
@@ -3691,6 +3758,23 @@ impl App {
                 KeyCode::Left => {
                     self.onboarding_dialog.prev_page();
                 }
+                _ => {}
+            }
+            return false;
+        }
+
+        // Skills picker dialog (/skills).
+        if self.skills_picker.visible {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc => self.skills_picker.close(),
+                KeyCode::Up => self.skills_picker.select_prev(),
+                KeyCode::Down => self.skills_picker.select_next(),
+                KeyCode::Char('p') if ctrl => self.skills_picker.select_prev(),
+                KeyCode::Char('n') if ctrl => self.skills_picker.select_next(),
+                KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected_skill(),
+                KeyCode::Backspace => self.skills_picker.pop_filter_char(),
+                KeyCode::Char(c) if !ctrl => self.skills_picker.push_filter_char(c),
                 _ => {}
             }
             return false;
@@ -6360,12 +6444,12 @@ impl App {
     /// Returns `true` when the app is in a state where the prompt can accept
     /// regular text input — used to gate paste-burst detection.
     pub fn prompt_is_accepting_text(&self) -> bool {
+        // Gate on the shared blocking-modal predicate rather than a parallel
+        // hand-list: any overlay that captures input (skills/model pickers,
+        // command palette, dialogs, …) automatically blocks prompt text and
+        // paste-burst capture while it is open.
         !self.is_streaming
-            && self.permission_request.is_none()
-            && !self.ask_user_dialog.visible
-            && !self.history_search_overlay.visible
-            && !self.settings_screen.visible
-            && !self.theme_screen.visible
+            && !self.any_blocking_modal_open()
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
     }
 

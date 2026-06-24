@@ -21,7 +21,7 @@ export function renderHero(starCount) {
               <span class="hero-star-badge px-1.5 py-px rounded-lg text-[11.5px] font-semibold tabular-nums" ${starCount ? '' : 'style="display:none"'}>${starCount ? formatStars(starCount) : ''}</span>
             </a>
             <button id="hero-copy-btn" title="Copy to clipboard" class="hero-install-btn group inline-flex items-center gap-2.5 rounded-[10px] px-5 h-10 cursor-pointer">
-              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g coven-code</code>
+              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g @opencoven/coven</code>
               <svg class="hero-copy-icon text-text-dimmer group-hover:text-accent transition-colors" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               <svg class="hero-check-icon hidden text-text-secondary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
             </button>

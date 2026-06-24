@@ -30,8 +30,8 @@ pub mod device_code;
 // Utility modules ported from src/utils/
 pub mod auto_mode;
 pub mod crypto_utils;
-pub mod secret_file;
 pub mod format_utils;
+pub mod secret_file;
 pub mod spinner;
 pub mod status_notices;
 pub mod token_budget;
@@ -98,7 +98,9 @@ pub use types::{
 
 // Skill discovery: filesystem and git URL skill loading.
 pub mod skill_discovery;
-pub use skill_discovery::{discover_skills, parse_skill_file, DiscoveredSkill};
+pub use skill_discovery::{
+    discover_skills, estimate_tokens, parse_skill_file, DiscoveredSkill, SkillScope,
+};
 
 // Coven daemon shared state — read-only bridge to ~/.coven/.
 pub mod coven_shared;
@@ -992,6 +994,13 @@ pub mod config {
         /// Defaults to "kitty" (the Coven Code cat). Set via `"familiar": "nova"` in settings.json.
         #[serde(default)]
         pub familiar: Option<String>,
+        /// Whether to show the empty-session welcome/splash panel. Defaults to true.
+        #[serde(
+            default,
+            rename = "showSplash",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub show_splash: Option<bool>,
         /// Skill-discovery configuration (copied from Settings on load).
         #[serde(default)]
         pub skills: SkillsConfig,
@@ -1118,6 +1127,11 @@ pub mod config {
         /// Names of plugins that have been explicitly disabled by the user.
         #[serde(default, rename = "disabledPlugins")]
         pub disabled_plugins: std::collections::HashSet<String>,
+        /// Names of skills the user has toggled off in the `/skills` picker.
+        /// Disabled skills are excluded from the model-facing skill list and
+        /// the always-on skill index so they no longer consume context tokens.
+        #[serde(default, rename = "disabledSkills")]
+        pub disabled_skills: std::collections::HashSet<String>,
         /// Whether the user has completed the first-launch onboarding flow.
         /// Mirrors TS `hasAcknowledgedSafetyNotice` / `hasCompletedOnboarding`.
         #[serde(default, rename = "hasCompletedOnboarding")]
@@ -1217,6 +1231,11 @@ pub mod config {
         pub fn completion_toast_enabled(&self) -> bool {
             self.completion_toast.unwrap_or(true)
         }
+
+        /// Whether a skill is enabled (not toggled off in the `/skills` picker).
+        pub fn is_skill_enabled(&self, name: &str) -> bool {
+            !self.disabled_skills.contains(name)
+        }
     }
 
     /// A user-defined slash command template.
@@ -1295,6 +1314,11 @@ pub mod config {
     }
 
     impl Config {
+        /// Whether the empty-session welcome/splash panel should render.
+        pub fn show_splash_enabled(&self) -> bool {
+            self.show_splash.unwrap_or(true)
+        }
+
         pub fn selected_provider_id(&self) -> &str {
             self.provider
                 .as_deref()
@@ -1776,6 +1800,7 @@ pub mod config {
                 commands: merge_map(base.config.commands, over.config.commands),
                 agents: merge_map(base.config.agents, over.config.agents),
                 familiar: over.config.familiar.or(base.config.familiar),
+                show_splash: over.config.show_splash.or(base.config.show_splash),
                 skills: {
                     let mut paths = base.config.skills.paths;
                     for p in over.config.skills.paths {
@@ -1831,6 +1856,11 @@ pub mod config {
                 disabled_plugins: {
                     let mut s = base.disabled_plugins;
                     s.extend(over.disabled_plugins);
+                    s
+                },
+                disabled_skills: {
+                    let mut s = base.disabled_skills;
+                    s.extend(over.disabled_skills);
                     s
                 },
                 has_completed_onboarding: over.has_completed_onboarding

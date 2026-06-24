@@ -41,6 +41,7 @@ export const STATIC_PALETTE_ITEMS = [
     ['/config voice',    'Config',          'Voice input mode'],
     ['/config terminal-setup','Config',     'Run terminal capability checks'],
     ['/config keybindings','Config',        'Open the interactive keybinding editor'],
+    ['/splash',         'Config',          'Show, hide, or toggle the welcome splash screen'],
     ['/permissions',     'Config',          'Manage tool permission rules'],
     ['/hooks',           'Config',          'Inspect active hooks'],
     ['/mcp',             'Config',          'Manage MCP servers'],

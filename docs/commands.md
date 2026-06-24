@@ -282,7 +282,7 @@ Common keys:
 | `outputStyle` | Output rendering style |
 | `autoApprove` | Auto-approve tool calls |
 
-Subcommands: `/config keybindings`, `/config theme [name]`, `/config output-style [style]`, `/config import`, `/config advisor [model|off]`, `/config color`, `/config vim`, `/config voice`, `/config statusline`, `/config terminal-setup` — each documented below or under [Display & Terminal](#display--terminal).
+Subcommands: `/config keybindings`, `/config theme [name]`, `/config output-style [style]`, `/config import`, `/config advisor [model|off]`, `/config color`, `/config vim`, `/config voice`, `/config statusline`, `/config terminal-setup` — each documented below or under [Display & Terminal](#display--terminal). Use `/splash` for the empty-session welcome panel.
 
 `/config import` imports user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. It replaces the former `/import-config` command.
 
@@ -297,6 +297,19 @@ Open the interactive keybinding configurator. Displays all bound actions with th
 ```
 
 See [keybindings.md](./keybindings.md) for the full keybindings reference.
+
+---
+
+### /splash
+
+Show, hide, or toggle the empty-session welcome/splash panel. The setting is written to `~/.coven-code/settings.json` under `config.showSplash`.
+
+```
+/splash                 — toggle the splash screen
+/splash show            — show it
+/splash hide            — hide it
+/splash status          — show current state
+```
 
 ---
 

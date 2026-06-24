@@ -3,7 +3,7 @@ export const meta = { title: 'Installation' };
 export function render() {
   return `
     <h1>Installation</h1>
-    <p class="lead">A statically-linked Rust binary with no runtime dependencies. Install via the official installer script, npm, or build from source.</p>
+    <p class="lead">Install the Coven CLI with npm or bun, then run <code>coven</code> or <code>coven tui</code> to open the interactive Coven Code UI.</p>
 
     <h2>System Requirements</h2>
 
@@ -19,6 +19,17 @@ export function render() {
     </table>
 
     <h2>Quick Install</h2>
+
+    <pre><code data-lang="bash">npm install -g @opencoven/coven
+# or
+bun install -g @opencoven/coven</code></pre>
+
+    <p>The installed command is <code>coven</code>. Run <code>coven</code> with no arguments, or <code>coven tui</code> explicitly, for the interactive UI. Use <code>coven doctor</code> to inspect local setup, <code>coven daemon start</code> to start the local daemon, and <code>coven run &lt;harness&gt; "&lt;task&gt;"</code> for direct harness sessions.</p>
+
+    <pre><code data-lang="bash">npx @opencoven/coven
+bunx @opencoven/coven</code></pre>
+
+    <h2>Standalone Coven Code Binary</h2>
 
     <h3>Linux / macOS</h3>
 
@@ -42,7 +53,9 @@ export function render() {
       </tbody>
     </table>
 
-    <h2>Via npm / bun</h2>
+    <h2>Coven Code npm Package</h2>
+
+    <p>Prefer <code>@opencoven/coven</code> for the user-facing <code>coven</code> CLI. The lower-level Coven Code package installs the <code>coven-code</code> binary directly.</p>
 
     <pre><code data-lang="bash">npm install -g @opencoven/coven-code
 # or
@@ -55,11 +68,11 @@ bunx @opencoven/coven-code</code></pre>
 
     <h2>Upgrading</h2>
 
-    <pre><code data-lang="bash">coven-code upgrade                  # to the latest release
-coven-code upgrade --version 0.1.0  # pin to a specific version
-coven-code upgrade --force          # reinstall the same version</code></pre>
+    <pre><code data-lang="bash">npm install -g @opencoven/coven@latest
+# or
+bun install -g @opencoven/coven@latest</code></pre>
 
-    <p>Settings under <code>~/.coven-code/</code> are preserved.</p>
+    <p>Settings under <code>~/.coven/</code> and <code>~/.coven-code/</code> are preserved.</p>
 
     <h2>Manual Install</h2>
 
@@ -78,9 +91,11 @@ coven-code upgrade --force          # reinstall the same version</code></pre>
 
     <h2>From Source</h2>
 
-    <h3>Via Cargo</h3>
+    <h3>From a Clone</h3>
 
-    <pre><code data-lang="bash">cargo install --git https://github.com/OpenCoven/coven-code coven-code-cli</code></pre>
+    <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
+cd coven-code/src-rust
+cargo install --path crates/cli --locked</code></pre>
 
     <h3>Clone and Build</h3>
 
@@ -88,10 +103,10 @@ coven-code upgrade --force          # reinstall the same version</code></pre>
 cd coven-code/src-rust
 
 # Debug build (fast to compile, larger binary)
-cargo build
+cargo build --package claurst
 
 # Release build (optimised, smaller, for everyday use)
-cargo build --release</code></pre>
+cargo build --release --package claurst</code></pre>
 
     <h3>Linux System Dependencies</h3>
 
@@ -106,18 +121,24 @@ sudo pacman -S base-devel pkgconf openssl</code></pre>
 
     <h2>Shell Completions</h2>
 
+    <p>Coven does not currently ship a dedicated completions subcommand. All flags can be discovered via <code>coven --help</code>. If you want basic tab completion in bash or zsh, use the generic completion helper built into your shell:</p>
+
     <pre><code data-lang="bash"># bash — add to ~/.bashrc
-eval "$(coven-code completion bash)"
+complete -C coven coven
 
 # zsh — add to ~/.zshrc (requires compinit)
-eval "$(coven-code completion zsh)"</code></pre>
+compdef _gnu_generic coven</code></pre>
 
     <h2>Uninstalling</h2>
 
-    <pre><code data-lang="bash">rm -rf ~/.coven-code              # Linux / macOS
+    <pre><code data-lang="bash">npm uninstall -g @opencoven/coven
+# or
+bun remove -g @opencoven/coven
+
+rm -rf ~/.coven ~/.coven-code     # Linux / macOS
 
 # Windows (PowerShell):
-Remove-Item -Recurse -Force $env:USERPROFILE\\.coven-code</code></pre>
+Remove-Item -Recurse -Force $env:USERPROFILE\\.coven, $env:USERPROFILE\\.coven-code</code></pre>
 
     <p>See <a href="https://github.com/OpenCoven/coven-code/blob/main/docs/installation.md" target="_blank" rel="noopener">the full installation reference</a> for cross-compiling to Linux aarch64, optional cargo features, and user-local installs without sudo.</p>
   `;

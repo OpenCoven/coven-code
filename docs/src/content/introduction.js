@@ -7,7 +7,7 @@ export function render() {
 
     <p>You give Coven Code a task in natural language. It plans, reads and writes files, runs shell commands, searches the web, and iterates — all inside your terminal, with every step visible in real time.</p>
 
-    <pre><code data-lang="bash">$ coven-code "add input validation to the signup form"</code></pre>
+    <pre><code data-lang="bash">$ coven run codex "add input validation to the signup form"</code></pre>
 
     <p>It reads your codebase, implements the change across multiple files, runs your tests, and reports back — without you leaving the terminal.</p>
 

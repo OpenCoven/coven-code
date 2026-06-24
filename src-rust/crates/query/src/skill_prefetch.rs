@@ -71,6 +71,14 @@ pub type SharedSkillIndex = Arc<RwLock<SkillIndex>>;
 pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
     let mut local = SkillIndex::default();
 
+    // Skills the user toggled off in the `/skills` picker are excluded from the
+    // always-on index so they no longer consume context tokens. Use the async
+    // loader since this runs on the Tokio runtime.
+    let disabled = claurst_core::config::Settings::load()
+        .await
+        .map(|s| s.disabled_skills)
+        .unwrap_or_default();
+
     // 1. User-defined skills: ~/.coven-code/skills/*.md + {project_root}/.coven-code/skills/*.md
     let search_dirs: Vec<std::path::PathBuf> = {
         let mut dirs = Vec::new();
@@ -87,7 +95,9 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "md") {
                     if let Some(skill) = load_skill_from_file(&path) {
-                        local.insert(skill);
+                        if !disabled.contains(&skill.name) {
+                            local.insert(skill);
+                        }
                     }
                 }
             }
@@ -107,7 +117,9 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
                 if path.extension().is_some_and(|e| e == "md") {
                     if let Some(mut skill) = load_skill_from_file(&path) {
                         skill.source = "bundled".to_string();
-                        local.insert(skill);
+                        if !disabled.contains(&skill.name) {
+                            local.insert(skill);
+                        }
                     }
                 }
             }

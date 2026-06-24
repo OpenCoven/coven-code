@@ -221,6 +221,7 @@ pub struct DiffCommand;
 pub struct GoalCommand;
 pub struct MemoryCommand;
 pub struct BugCommand;
+pub struct LearnCommand;
 pub struct UsageCommand;
 pub struct DoctorCommand;
 pub struct LoginCommand;
@@ -250,6 +251,7 @@ pub struct ReloadPluginsCommand;
 pub struct ThemeCommand;
 pub struct OutputStyleCommand;
 pub struct KeybindingsCommand;
+pub struct SplashCommand;
 // Batch-1 new commands
 pub struct ContextCommand;
 pub struct CopyCommand;
@@ -1111,6 +1113,68 @@ impl SlashCommand for ColorCommand {
             )),
             Err(e) => CommandResult::Error(format!("Failed to save color: {}", e)),
         }
+    }
+}
+
+// ---- /splash -------------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for SplashCommand {
+    fn name(&self) -> &str {
+        "splash"
+    }
+
+    fn aliases(&self) -> Vec<&str> {
+        vec!["welcome-screen"]
+    }
+
+    fn description(&self) -> &str {
+        "Show, hide, or toggle the empty-session splash screen"
+    }
+
+    fn help(&self) -> &str {
+        "Usage: /splash [show|hide|toggle|status]\n\n\
+         Controls the empty-session welcome/splash panel. With no argument,\n\
+         toggles the current setting. The setting is persisted to\n\
+         ~/.coven-code/settings.json."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let arg = args.trim().to_lowercase();
+        let current = ctx.config.show_splash_enabled();
+
+        if arg == "status" {
+            return CommandResult::Message(format!(
+                "Splash screen is {}.\nUse /splash show, /splash hide, or /splash toggle.",
+                if current { "shown" } else { "hidden" }
+            ));
+        }
+
+        let new_state = match arg.as_str() {
+            "" | "toggle" => !current,
+            "show" | "on" | "true" | "enable" | "enabled" => true,
+            "hide" | "off" | "false" | "disable" | "disabled" => false,
+            _ => {
+                return CommandResult::Error("Usage: /splash [show|hide|toggle|status]".to_string())
+            }
+        };
+
+        let mut new_config = ctx.config.clone();
+        new_config.show_splash = Some(new_state);
+        if let Err(err) = save_settings_mutation(|settings| {
+            settings.config.show_splash = Some(new_state);
+        }) {
+            return CommandResult::Error(format!("Failed to save splash setting: {}", err));
+        }
+
+        CommandResult::ConfigChangeMessage(
+            new_config,
+            if new_state {
+                "Splash screen shown.".to_string()
+            } else {
+                "Splash screen hidden. Run /splash show to restore it.".to_string()
+            },
+        )
     }
 }
 
@@ -3198,6 +3262,118 @@ impl SlashCommand for InitCommand {
             Ok(()) => CommandResult::Message(format!("Created AGENTS.md at {}", path.display())),
             Err(e) => CommandResult::Error(format!("Failed to create AGENTS.md: {}", e)),
         }
+    }
+}
+
+// ---- /learn --------------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for LearnCommand {
+    fn name(&self) -> &str {
+        "learn"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["scribe"]
+    }
+    fn description(&self) -> &str {
+        "Codify a script or workflow we just built into a reusable skill (Hermes)"
+    }
+    fn help(&self) -> &str {
+        "Usage: /learn [name] [path-or-description]\n\n\
+         Summons Hermes — the coven's scribe — to watch the work that just\n\
+         reached completion and transcribe its procedure into a reusable Skill.\n\
+         The model distils the most recent script or workflow into a\n\
+         `.coven-code/skills/<name>/SKILL.md` that future sessions can invoke as\n\
+         `/<name>` or via the Skill tool, and that you can toggle in /skills.\n\n\
+         - /learn                       infer the target from this conversation\n\
+         - /learn deploy-staging        suggest the skill name explicitly\n\
+         - /learn deploy scripts/deploy.sh   name + the exact script to wrap\n\n\
+         Hermes only authors the skill — it does not re-run the wrapped script."
+    }
+
+    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        let args = args.trim();
+
+        // The subject framing + step-1 instruction differ depending on whether
+        // the user pointed Hermes at a specific target or left it to infer one.
+        let (subject_block, locate_step) = if args.is_empty() {
+            (
+                "No target was named, so infer it: the script or workflow we most \
+                 recently implemented together in THIS conversation."
+                    .to_string(),
+                "Look back over this conversation for the most recent script or \
+                 workflow we built. Inspect `git diff`, the files edited earlier in \
+                 the session, and anything under `scripts/` to pin down the exact \
+                 entrypoint — the command line, file path, and arguments it takes."
+                    .to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "The user pointed Hermes at: `{args}`. Treat this as the skill \
+                     name and/or the path or description of the script/workflow to wrap."
+                ),
+                format!(
+                    "Resolve `{args}` to a concrete script or workflow: if it is a \
+                     path, read that file; if it is a name or description, find the \
+                     matching work we just implemented (check `git diff`, recently \
+                     edited files, and `scripts/`). Pin down the exact entrypoint — \
+                     command line, file path, and arguments."
+                ),
+            )
+        };
+
+        let prompt = format!(
+            "🪶 **/learn — Hermes, scribe of the coven.** Codify what we just built \
+             into a reusable skill.\n\n\
+             <role>\n\
+             Act as Hermes: the messenger who watches a piece of work reach \
+             completion and transcribes its procedure into a portable, reusable \
+             Skill that future sessions — and the model itself — can invoke on \
+             demand. You are not re-doing the work; you are distilling it into a \
+             durable artifact.\n\
+             </role>\n\n\
+             <subject>\n{subject_block}\n</subject>\n\n\
+             Follow these steps exactly:\n\n\
+             1. **Identify the script/workflow.** {locate_step} Then restate, in one \
+             or two sentences, what it does and the concrete way it is invoked.\n\n\
+             2. **Name it.** Choose a short kebab-case skill `name`, a single-line \
+             `description` (this lives in always-on context — keep it tight), and a \
+             `when-to-use` trigger describing the situations that should reach for it.\n\n\
+             3. **Author the skill file** at `.coven-code/skills/<name>/SKILL.md` \
+             (create the directory if needed) with this exact shape:\n\n\
+             ```\n\
+             ---\n\
+             name: <kebab-name>\n\
+             description: <one line>\n\
+             when-to-use: <trigger>\n\
+             ---\n\n\
+             # <Title>\n\n\
+             <2-4 sentence overview of what running this skill accomplishes.>\n\n\
+             ## Steps\n\
+             1. <exact command(s) to run, with the real paths and flags>\n\
+             ...\n\n\
+             ## Inputs\n\
+             <Use the literal token $ARGUMENTS where the skill should accept \
+             runtime arguments.>\n\n\
+             ## Guardrails\n\
+             - <preconditions, what NOT to do, how to verify success>\n\
+             ```\n\n\
+             Bake the real command, paths, and flags from step 1 into the body — \
+             not placeholders. A fresh session with no other context should be able \
+             to run the script correctly from this file alone.\n\n\
+             4. **Verify discovery.** Confirm the file parses as a skill: \
+             frontmatter delimited by `---`, with `name` and `description` present. \
+             It is auto-discovered under the project `.coven-code/skills/` root.\n\n\
+             5. **Report.** Print the final path and a one-line summary. Tell the \
+             user they can invoke it as `/<name>` (it joins the skill set on the next \
+             launch), that the model can call it via the Skill tool, and that \
+             `/skills` lets them toggle it or inspect its token cost.\n\n\
+             Do NOT run the wrapped script now — Hermes only writes the skill. Keep \
+             the frontmatter `description` short to respect the always-on context budget."
+        );
+
+        CommandResult::UserMessage(prompt)
     }
 }
 
@@ -9707,6 +9883,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(RefreshCommand),
         Box::new(IncantCommand),
         Box::new(InitCommand),
+        Box::new(LearnCommand),
         Box::new(ReviewCommand),
         Box::new(HooksCommand),
         Box::new(ImportConfigCommand),
@@ -9720,6 +9897,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ThemeCommand),
         Box::new(OutputStyleCommand),
         Box::new(KeybindingsCommand),
+        Box::new(SplashCommand),
         // New commands
         Box::new(ExportCommand),
         Box::new(ShareCommand),
@@ -10116,6 +10294,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_learn_resolves_and_emits_skill_prompt() {
+        // Resolvable by name and by alias.
+        assert!(find_command("learn").is_some());
+        assert!(find_command("scribe").is_some());
+
+        let mut ctx = make_ctx();
+
+        // No args → infer the target from the conversation.
+        let result = LearnCommand.execute("", &mut ctx).await;
+        let CommandResult::UserMessage(prompt) = result else {
+            panic!("expected UserMessage");
+        };
+        assert!(prompt.contains("Hermes"), "names the Hermes persona");
+        assert!(
+            prompt.contains(".coven-code/skills/<name>/SKILL.md"),
+            "writes to the discoverable skill path"
+        );
+        assert!(prompt.contains("when-to-use"), "instructs full frontmatter");
+        assert!(
+            prompt.contains("No target was named"),
+            "empty args → infer-from-conversation framing"
+        );
+
+        // Explicit target → echoed into both the subject and locate steps.
+        let result = LearnCommand
+            .execute("deploy scripts/deploy.sh", &mut ctx)
+            .await;
+        let CommandResult::UserMessage(prompt) = result else {
+            panic!("expected UserMessage");
+        };
+        assert!(
+            prompt.contains("scripts/deploy.sh"),
+            "interpolates the user-supplied target"
+        );
+    }
+
     #[test]
     fn test_find_command_by_name() {
         assert!(find_command("help").is_some());
@@ -10124,6 +10339,45 @@ mod tests {
         assert!(find_command("model").is_some());
         assert!(find_command("refresh").is_some());
         assert!(find_command("version").is_some());
+    }
+
+    #[tokio::test]
+    async fn splash_command_hides_and_persists_welcome_screen() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        ctx.config.show_splash = Some(true);
+
+        let command = find_command("splash").expect("/splash command");
+        let result = command.execute("hide", &mut ctx).await;
+
+        match result {
+            CommandResult::ConfigChangeMessage(config, message) => {
+                assert_eq!(config.show_splash, Some(false));
+                assert!(message.contains("hidden"));
+            }
+            other => panic!("expected ConfigChangeMessage, got {other:?}"),
+        }
+
+        let settings = Settings::load_sync().expect("settings load");
+        assert_eq!(settings.config.show_splash, Some(false));
+    }
+
+    #[tokio::test]
+    async fn splash_command_toggles_by_default() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        ctx.config.show_splash = Some(true);
+
+        let command = find_command("splash").expect("/splash command");
+        let result = command.execute("", &mut ctx).await;
+
+        match result {
+            CommandResult::ConfigChangeMessage(config, message) => {
+                assert_eq!(config.show_splash, Some(false));
+                assert!(message.contains("hidden"));
+            }
+            other => panic!("expected ConfigChangeMessage, got {other:?}"),
+        }
     }
 
     #[test]

@@ -517,6 +517,11 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "md") {
                 if let Some(def) = parse_agent_def(&path) {
+                    // Reserved names are limited to the user; never surface a
+                    // workspace agent that claims one.
+                    if coven_shared::is_disallowed_agent_name(&def.name) {
+                        continue;
+                    }
                     defs.push(def);
                 }
             }
@@ -537,6 +542,13 @@ pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefini
 
         for fam in &familiars {
             let display = fam.display_name.as_deref().unwrap_or(&fam.id).to_string();
+            // Reserved familiar names are limited to the user — never surface a
+            // familiar that claims one, by id or display name.
+            if coven_shared::is_disallowed_familiar_name(&fam.id)
+                || coven_shared::is_disallowed_familiar_name(&display)
+            {
+                continue;
+            }
             // Skip if user already defined an agent with the same display name.
             if familiar_names.contains(&display.to_lowercase()) {
                 continue;
