@@ -304,7 +304,6 @@ fn read_and_parse(path: &Path) -> Option<DiscoveredSkill> {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Top-level discovery
 // ---------------------------------------------------------------------------
@@ -559,7 +558,10 @@ mod tests {
         let content =
             "---\nname: brainstorm\ndescription: Explore ideas\nwhen-to-use: before any creative work\n---\nBody.";
         let skill = parse_skill_file(content, &PathBuf::from("x.md")).unwrap();
-        assert_eq!(skill.when_to_use.as_deref(), Some("before any creative work"));
+        assert_eq!(
+            skill.when_to_use.as_deref(),
+            Some("before any creative work")
+        );
     }
 
     #[test]

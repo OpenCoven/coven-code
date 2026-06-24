@@ -251,6 +251,7 @@ pub struct ReloadPluginsCommand;
 pub struct ThemeCommand;
 pub struct OutputStyleCommand;
 pub struct KeybindingsCommand;
+pub struct SplashCommand;
 // Batch-1 new commands
 pub struct ContextCommand;
 pub struct CopyCommand;
@@ -1112,6 +1113,68 @@ impl SlashCommand for ColorCommand {
             )),
             Err(e) => CommandResult::Error(format!("Failed to save color: {}", e)),
         }
+    }
+}
+
+// ---- /splash -------------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for SplashCommand {
+    fn name(&self) -> &str {
+        "splash"
+    }
+
+    fn aliases(&self) -> Vec<&str> {
+        vec!["welcome-screen"]
+    }
+
+    fn description(&self) -> &str {
+        "Show, hide, or toggle the empty-session splash screen"
+    }
+
+    fn help(&self) -> &str {
+        "Usage: /splash [show|hide|toggle|status]\n\n\
+         Controls the empty-session welcome/splash panel. With no argument,\n\
+         toggles the current setting. The setting is persisted to\n\
+         ~/.coven-code/settings.json."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let arg = args.trim().to_lowercase();
+        let current = ctx.config.show_splash_enabled();
+
+        if arg == "status" {
+            return CommandResult::Message(format!(
+                "Splash screen is {}.\nUse /splash show, /splash hide, or /splash toggle.",
+                if current { "shown" } else { "hidden" }
+            ));
+        }
+
+        let new_state = match arg.as_str() {
+            "" | "toggle" => !current,
+            "show" | "on" | "true" | "enable" | "enabled" => true,
+            "hide" | "off" | "false" | "disable" | "disabled" => false,
+            _ => {
+                return CommandResult::Error("Usage: /splash [show|hide|toggle|status]".to_string())
+            }
+        };
+
+        let mut new_config = ctx.config.clone();
+        new_config.show_splash = Some(new_state);
+        if let Err(err) = save_settings_mutation(|settings| {
+            settings.config.show_splash = Some(new_state);
+        }) {
+            return CommandResult::Error(format!("Failed to save splash setting: {}", err));
+        }
+
+        CommandResult::ConfigChangeMessage(
+            new_config,
+            if new_state {
+                "Splash screen shown.".to_string()
+            } else {
+                "Splash screen hidden. Run /splash show to restore it.".to_string()
+            },
+        )
     }
 }
 
@@ -9834,6 +9897,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ThemeCommand),
         Box::new(OutputStyleCommand),
         Box::new(KeybindingsCommand),
+        Box::new(SplashCommand),
         // New commands
         Box::new(ExportCommand),
         Box::new(ShareCommand),
@@ -10275,6 +10339,45 @@ mod tests {
         assert!(find_command("model").is_some());
         assert!(find_command("refresh").is_some());
         assert!(find_command("version").is_some());
+    }
+
+    #[tokio::test]
+    async fn splash_command_hides_and_persists_welcome_screen() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        ctx.config.show_splash = Some(true);
+
+        let command = find_command("splash").expect("/splash command");
+        let result = command.execute("hide", &mut ctx).await;
+
+        match result {
+            CommandResult::ConfigChangeMessage(config, message) => {
+                assert_eq!(config.show_splash, Some(false));
+                assert!(message.contains("hidden"));
+            }
+            other => panic!("expected ConfigChangeMessage, got {other:?}"),
+        }
+
+        let settings = Settings::load_sync().expect("settings load");
+        assert_eq!(settings.config.show_splash, Some(false));
+    }
+
+    #[tokio::test]
+    async fn splash_command_toggles_by_default() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        ctx.config.show_splash = Some(true);
+
+        let command = find_command("splash").expect("/splash command");
+        let result = command.execute("", &mut ctx).await;
+
+        match result {
+            CommandResult::ConfigChangeMessage(config, message) => {
+                assert_eq!(config.show_splash, Some(false));
+                assert!(message.contains("hidden"));
+            }
+            other => panic!("expected ConfigChangeMessage, got {other:?}"),
+        }
     }
 
     #[test]

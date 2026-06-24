@@ -93,8 +93,6 @@ pub mod dialogs;
 pub mod diff_viewer;
 /// Effort-level picker dialog (/effort).
 pub mod effort_picker;
-/// Interactive skills picker dialog (/skills).
-pub mod skills_picker;
 /// MCP elicitation dialog (form-based user input requested by MCP servers).
 pub mod elicitation_dialog;
 /// Export format picker dialog (/export).
@@ -167,6 +165,8 @@ pub mod session_branching;
 pub mod session_browser;
 /// Full-screen tabbed settings interface.
 pub mod settings_screen;
+/// Interactive skills picker dialog (/skills).
+pub mod skills_picker;
 /// Stats dialog with token usage and cost charts.
 pub mod stats_dialog;
 /// Task progress overlay (Ctrl+T) — shows task status with inline toggle.

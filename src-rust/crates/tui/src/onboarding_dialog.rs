@@ -187,6 +187,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
     // Theme pink — matches the header and mascot
     let pink = Color::Rgb(139, 92, 246);
     let dim = Color::Rgb(100, 100, 100);
+    let esc_red = Color::Red;
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -202,6 +203,19 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    Paragraph::new(Line::from(Span::styled(
+        " esc ",
+        Style::default().fg(esc_red).add_modifier(Modifier::BOLD),
+    )))
+    .render(
+        Rect {
+            x: area.x + area.width.saturating_sub(6),
+            y: area.y,
+            width: 5,
+            height: 1,
+        },
+        frame.buffer_mut(),
+    );
 
     let sep = "  ─────────────────────────────────────────────────";
 
@@ -577,17 +591,38 @@ mod tests {
                 render_onboarding_dialog(frame, &state, frame.area());
             })
             .unwrap();
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .clone()
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width as usize;
+        let rows: Vec<String> = buffer
             .content()
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
             .collect();
+        let content = rows.join("\n");
         // Free Mode hint is present and precedes every provider.
         let free = content.find("Free Mode").expect("Free Mode hint missing");
         assert!(content.contains("/connect"));
+        let (title_y, title_row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("Connect a Provider"))
+            .expect("provider setup title row missing");
+        assert!(
+            title_row.contains("esc"),
+            "provider setup title should render an esc hint in the top corner, got {title_row:?}"
+        );
+        let esc_byte = title_row
+            .find("esc")
+            .expect("provider setup title row missing esc hint");
+        let esc_x = title_row[..esc_byte].chars().count();
+        for offset in 0..3 {
+            let cell = &buffer.content()[title_y * width + esc_x + offset];
+            assert_eq!(cell.fg, Color::Red, "provider setup esc hint should be red");
+        }
         // Neutral ordering: no-key local provider first, then alphabetical.
         let positions: Vec<usize> = ["Ollama", "Anthropic", "Google", "Groq", "OpenAI"]
             .iter()

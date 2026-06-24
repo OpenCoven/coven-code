@@ -237,7 +237,10 @@ pub fn render_skills_picker(frame: &mut Frame, state: &SkillsPickerState, area: 
                 format!(" {} ", cursor),
                 Style::default().fg(COVEN_CODE_ACCENT),
             ),
-            Span::styled(format!("{}  ", state_glyph), Style::default().fg(state_color)),
+            Span::styled(
+                format!("{}  ", state_glyph),
+                Style::default().fg(state_color),
+            ),
             Span::styled(row.name.clone(), name_style),
             Span::styled(
                 format!("  · {} · ~{} tok", row.scope_label, row.est_tokens),
@@ -345,7 +348,8 @@ mod tests {
         s.open(rows(), "");
         let backend = TestBackend::new(100, 30);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render_skills_picker(f, &s, f.area())).unwrap();
+        term.draw(|f| render_skills_picker(f, &s, f.area()))
+            .unwrap();
 
         let rendered = term
             .backend()

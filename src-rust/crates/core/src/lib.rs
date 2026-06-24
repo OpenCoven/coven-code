@@ -30,8 +30,8 @@ pub mod device_code;
 // Utility modules ported from src/utils/
 pub mod auto_mode;
 pub mod crypto_utils;
-pub mod secret_file;
 pub mod format_utils;
+pub mod secret_file;
 pub mod spinner;
 pub mod status_notices;
 pub mod token_budget;
@@ -994,6 +994,13 @@ pub mod config {
         /// Defaults to "kitty" (the Coven Code cat). Set via `"familiar": "nova"` in settings.json.
         #[serde(default)]
         pub familiar: Option<String>,
+        /// Whether to show the empty-session welcome/splash panel. Defaults to true.
+        #[serde(
+            default,
+            rename = "showSplash",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub show_splash: Option<bool>,
         /// Skill-discovery configuration (copied from Settings on load).
         #[serde(default)]
         pub skills: SkillsConfig,
@@ -1307,6 +1314,11 @@ pub mod config {
     }
 
     impl Config {
+        /// Whether the empty-session welcome/splash panel should render.
+        pub fn show_splash_enabled(&self) -> bool {
+            self.show_splash.unwrap_or(true)
+        }
+
         pub fn selected_provider_id(&self) -> &str {
             self.provider
                 .as_deref()
@@ -1788,6 +1800,7 @@ pub mod config {
                 commands: merge_map(base.config.commands, over.config.commands),
                 agents: merge_map(base.config.agents, over.config.agents),
                 familiar: over.config.familiar.or(base.config.familiar),
+                show_splash: over.config.show_splash.or(base.config.show_splash),
                 skills: {
                     let mut paths = base.config.skills.paths;
                     for p in over.config.skills.paths {

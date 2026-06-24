@@ -3020,8 +3020,7 @@ impl App {
                     // Persisting failed — revert the in-memory toggle so the
                     // on-screen state stays consistent with disk, and report it.
                     self.skills_picker.toggle_selected();
-                    self.status_message =
-                        Some(format!("Failed to save skill '{}': {}", name, e));
+                    self.status_message = Some(format!("Failed to save skill '{}': {}", name, e));
                 }
             }
         }

@@ -1070,7 +1070,9 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
 
     let notice_lines = startup_notice_lines(app, content_area.width);
     let header_height = WELCOME_BOX_HEIGHT + notice_lines.len() as u16;
-    let show_logo_header = content_area.height >= header_height + 3 && content_area.width >= 60;
+    let show_splash = app.config.show_splash_enabled();
+    let show_logo_header =
+        show_splash && content_area.height >= header_height + 3 && content_area.width >= 60;
     let (logo_area, notices_area, msg_area) = if show_logo_header {
         let splits = Layout::default()
             .direction(Direction::Vertical)
@@ -1097,7 +1099,8 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(na) = notices_area {
             render_startup_notices(frame, app, na);
         }
-    } else if app.messages.is_empty()
+    } else if show_splash
+        && app.messages.is_empty()
         && app.streaming_text.is_empty()
         && app.streaming_thinking.is_empty()
         && app.tool_use_blocks.is_empty()
@@ -3626,6 +3629,28 @@ mod welcome_tests {
     }
 
     #[test]
+    fn welcome_screen_can_be_hidden_by_config() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
+        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        app.config.show_splash = Some(false);
+
+        terminal
+            .draw(|frame| render_app(frame, &app))
+            .expect("draw app");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!rendered.contains("Welcome back"));
+        assert!(!rendered.contains("What's new"));
+    }
+
+    #[test]
     fn friendly_model_label_maps_known_families() {
         assert_eq!(friendly_model_from_id("claude-opus-4-8"), "Opus 4.8");
         assert_eq!(friendly_model_from_id("claude-sonnet-4-6"), "Sonnet 4.6");
@@ -3640,7 +3665,10 @@ mod welcome_tests {
             "Opus 4.8 (1M context)"
         );
         // Unknown ids pass through untouched.
-        assert_eq!(friendly_model_from_id("some-other-model"), "some-other-model");
+        assert_eq!(
+            friendly_model_from_id("some-other-model"),
+            "some-other-model"
+        );
     }
 
     #[test]

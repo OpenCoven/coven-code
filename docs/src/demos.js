@@ -251,6 +251,7 @@ export function registerDemos(Alpine) {
         { id: '/config voice', category: 'Config', desc: 'Voice input mode' },
         { id: '/config terminal-setup', category: 'Config', desc: 'Run terminal capability checks' },
         { id: '/config keybindings', category: 'Config', desc: 'Open the interactive keybinding editor' },
+        { id: '/splash', category: 'Config', desc: 'Show, hide, or toggle the welcome splash screen' },
         { id: '/permissions', category: 'Config', desc: 'Manage tool permission rules' },
         { id: '/hooks', category: 'Config', desc: 'Inspect active hooks' },
         { id: '/mcp', category: 'Config', desc: 'Manage MCP servers' },

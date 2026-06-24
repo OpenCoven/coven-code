@@ -40,15 +40,15 @@ Recent highlights:
 ### Install
 
 ```bash
-npm install -g @opencoven/coven-code
+npm install -g @opencoven/coven
 ```
 
-Then open a new terminal and run `coven-code`.
+Then open a new terminal and run `coven` or `coven tui`.
 
 ### Upgrade
 
 ```bash
-npm install -g @opencoven/coven-code@latest
+npm install -g @opencoven/coven@latest
 ```
 
 ---

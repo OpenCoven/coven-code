@@ -17,7 +17,7 @@ Coven Code is a high-performance Rust reimplementation of Claude Code — a term
 You give Coven Code a task in natural language. It plans, reads and writes files, runs shell commands, searches the web, and iterates — all inside your terminal, with every step visible in real time.
 
 ```
-$ coven-code "add input validation to the signup form"
+$ coven run codex "add input validation to the signup form"
 ```
 
 Coven Code reads your codebase, implements the change across multiple files, runs your tests, and reports back — without you leaving the terminal.
@@ -73,17 +73,12 @@ Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85
 
 ```bash
 # Linux / macOS
-curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
+npm install -g @opencoven/coven
 ```
 
-```powershell
-# Windows (PowerShell)
-irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
-```
-
-The installer auto-detects your platform/arch, drops `coven-code` into
-`~/.coven-code/bin/`, and adds it to your `PATH`. See
-[Installation](installation) for flags, manual download, and uninstall steps.
+The package installs the `coven` CLI. Run `coven` with no arguments, or
+`coven tui` explicitly, for the interactive UI. See [Installation](installation)
+for npm, bun, standalone binary, and source install options.
 
 **2. Set your API key**
 
@@ -94,13 +89,13 @@ export ANTHROPIC_API_KEY=sk-ant-...
 **3. Run interactively**
 
 ```bash
-coven-code
+coven
 ```
 
-Or send a single prompt and exit:
+Or launch a direct harness session:
 
 ```bash
-coven-code --print "explain the auth module"
+coven run codex "explain the auth module"
 ```
 
 ---
@@ -142,17 +137,17 @@ See [Providers](providers) for setup instructions for every supported provider.
 
 | Mode | Command | Use case |
 |------|---------|----------|
-| Interactive TUI | `coven-code` | Day-to-day coding |
-| Single prompt | `coven-code "task"` | Quick one-shot tasks |
-| Headless print | `coven-code --print "task"` | Scripts, CI |
-| JSON output | `coven-code --output-format json "task"` | Machine consumption |
-| Stream JSON | `coven-code --output-format stream-json "task"` | Real-time piping |
+| Interactive TUI | `coven` or `coven tui` | Day-to-day coding |
+| Direct harness run | `coven run codex "task"` | Quick one-shot tasks |
+| Claude Code run | `coven run claude "task"` | Use Claude Code through Coven |
+| Session browser | `coven sessions` | Rejoin, view, archive, or delete sessions |
+| Stream JSON | `coven run codex "task" --stream-json` | Real-time piping |
 
 ---
 
 ## The welcome screen
 
-When you launch `coven-code` interactively, the home screen opens with a single rounded panel titled `Coven Code v<version>`. It's the at-a-glance status surface — every value comes from another subsystem, so use it as a jumping-off point rather than a source of truth.
+When you launch the interactive UI with `coven` or `coven tui`, the home screen opens with a single rounded panel titled `Coven Code v<version>`. It's the at-a-glance status surface — every value comes from another subsystem, so use it as a jumping-off point rather than a source of truth.
 
 **Left column** — your familiar's portrait (animated glyph for built-ins, static card for daemon-registered familiars) under a `Welcome back <user>!` greeting. The art is driven by the `"familiar"` field in your settings; see [Coven Familiars](familiars).
 
