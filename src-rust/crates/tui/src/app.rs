@@ -1314,6 +1314,8 @@ pub struct App {
     pub onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState,
     /// Effort-level picker (/effort with no args).
     pub effort_picker: crate::effort_picker::EffortPickerState,
+    /// Interactive skills picker (/skills).
+    pub skills_picker: crate::skills_picker::SkillsPickerState,
     /// API key input dialog (opened from /connect for key-based providers).
     pub key_input_dialog: crate::key_input_dialog::KeyInputDialogState,
     /// Custom provider dialog for URL + API key input.
@@ -1619,6 +1621,40 @@ pub fn accent_for_mode(mode: Option<&str>) -> Color {
     }
 }
 
+/// Pick a foreground color that reads clearly on top of `bg`.
+///
+/// Returns explicit `Color::Rgb` black or white (never the indexed
+/// `Color::Black`/`Color::White`) so terminals don't brighten a *bold* indexed
+/// black into low-contrast gray — the cause of the washed-out badge text. The
+/// choice is made by comparing WCAG relative-luminance contrast ratios, so it
+/// stays correct if the accent palette changes.
+pub fn readable_fg_on(bg: Color) -> Color {
+    let (r, g, b) = match bg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        // Non-RGB backgrounds (themes/indexed): default to black, which reads
+        // on the light/mid accent tones used here.
+        _ => return Color::Rgb(0, 0, 0),
+    };
+
+    fn channel_lum(c: u8) -> f32 {
+        let c = c as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let lum = 0.2126 * channel_lum(r) + 0.7152 * channel_lum(g) + 0.0722 * channel_lum(b);
+    let black_contrast = (lum + 0.05) / 0.05;
+    let white_contrast = 1.05 / (lum + 0.05);
+    if black_contrast >= white_contrast {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    }
+}
+
 fn format_elapsed_ms(ms: u128) -> String {
     let total_secs = ((ms + 500) / 1000) as u64; // round to nearest second
     if total_secs < 60 {
@@ -1764,6 +1800,7 @@ impl App {
             file_injection_force: false,
             onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState::new(),
             effort_picker: crate::effort_picker::EffortPickerState::new(),
+            skills_picker: crate::skills_picker::SkillsPickerState::new(),
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
             custom_provider_dialog: crate::custom_provider_dialog::CustomProviderDialogState::new(),
             free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState::new(),
@@ -2458,6 +2495,11 @@ impl App {
             ("effort", "fast", _) => return self.intercept_slash_command("fast"),
             _ => {}
         }
+        // `/skills` opens the interactive picker; `/skills <query>` pre-filters.
+        if cmd == "skills" {
+            self.open_skills_picker(args_trimmed);
+            return true;
+        }
         if !args_trimmed.is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }
@@ -2923,6 +2965,32 @@ impl App {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    /// Build the skill list from settings + cwd and open the `/skills` picker.
+    fn open_skills_picker(&mut self, filter: &str) {
+        let settings = Settings::load_sync().unwrap_or_default();
+        let cwd = self.project_root();
+        let rows = crate::skills_picker::build_skill_rows(&cwd, &settings);
+        self.skills_picker.open(rows, filter);
+    }
+
+    /// Toggle the selected skill's enabled state and persist it to settings.
+    fn toggle_selected_skill(&mut self) {
+        if let Some((name, enabled)) = self.skills_picker.toggle_selected() {
+            let mut settings = Settings::load_sync().unwrap_or_default();
+            if enabled {
+                settings.disabled_skills.remove(&name);
+            } else {
+                settings.disabled_skills.insert(name.clone());
+            }
+            let _ = settings.save_sync();
+            self.status_message = Some(format!(
+                "Skill '{}' {}.",
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            ));
+        }
     }
 
     fn refresh_global_search(&mut self) {
@@ -3657,6 +3725,23 @@ impl App {
                 KeyCode::Left => {
                     self.onboarding_dialog.prev_page();
                 }
+                _ => {}
+            }
+            return false;
+        }
+
+        // Skills picker dialog (/skills).
+        if self.skills_picker.visible {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc => self.skills_picker.close(),
+                KeyCode::Up => self.skills_picker.select_prev(),
+                KeyCode::Down => self.skills_picker.select_next(),
+                KeyCode::Char('p') if ctrl => self.skills_picker.select_prev(),
+                KeyCode::Char('n') if ctrl => self.skills_picker.select_next(),
+                KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected_skill(),
+                KeyCode::Backspace => self.skills_picker.pop_filter_char(),
+                KeyCode::Char(c) if !ctrl => self.skills_picker.push_filter_char(c),
                 _ => {}
             }
             return false;

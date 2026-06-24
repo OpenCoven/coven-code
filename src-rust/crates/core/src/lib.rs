@@ -98,7 +98,9 @@ pub use types::{
 
 // Skill discovery: filesystem and git URL skill loading.
 pub mod skill_discovery;
-pub use skill_discovery::{discover_skills, parse_skill_file, DiscoveredSkill};
+pub use skill_discovery::{
+    discover_skills, estimate_tokens, parse_skill_file, DiscoveredSkill, SkillScope,
+};
 
 // Coven daemon shared state — read-only bridge to ~/.coven/.
 pub mod coven_shared;
@@ -1118,6 +1120,11 @@ pub mod config {
         /// Names of plugins that have been explicitly disabled by the user.
         #[serde(default, rename = "disabledPlugins")]
         pub disabled_plugins: std::collections::HashSet<String>,
+        /// Names of skills the user has toggled off in the `/skills` picker.
+        /// Disabled skills are excluded from the model-facing skill list and
+        /// the always-on skill index so they no longer consume context tokens.
+        #[serde(default, rename = "disabledSkills")]
+        pub disabled_skills: std::collections::HashSet<String>,
         /// Whether the user has completed the first-launch onboarding flow.
         /// Mirrors TS `hasAcknowledgedSafetyNotice` / `hasCompletedOnboarding`.
         #[serde(default, rename = "hasCompletedOnboarding")]
@@ -1216,6 +1223,11 @@ pub mod config {
         /// Whether to show completion toasts (default: enabled).
         pub fn completion_toast_enabled(&self) -> bool {
             self.completion_toast.unwrap_or(true)
+        }
+
+        /// Whether a skill is enabled (not toggled off in the `/skills` picker).
+        pub fn is_skill_enabled(&self, name: &str) -> bool {
+            !self.disabled_skills.contains(name)
         }
     }
 
@@ -1831,6 +1843,11 @@ pub mod config {
                 disabled_plugins: {
                     let mut s = base.disabled_plugins;
                     s.extend(over.disabled_plugins);
+                    s
+                },
+                disabled_skills: {
+                    let mut s = base.disabled_skills;
+                    s.extend(over.disabled_skills);
                     s
                 },
                 has_completed_onboarding: over.has_completed_onboarding

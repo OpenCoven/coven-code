@@ -154,9 +154,17 @@ fn skill_search_dirs(ctx: &ToolContext) -> Vec<PathBuf> {
 }
 
 async fn list_skills(dirs: &[PathBuf]) -> ToolResult {
-    // Start with the bundled skills.
+    // Skills toggled off in the `/skills` picker are hidden from the model.
+    let disabled = claurst_core::config::Settings::load_sync()
+        .map(|s| s.disabled_skills)
+        .unwrap_or_default();
+
+    // Start with the bundled skills (minus any the user disabled).
     let mut lines: Vec<String> = Vec::new();
-    let bundled = user_invocable_skills();
+    let bundled: Vec<(&str, &str)> = user_invocable_skills()
+        .into_iter()
+        .filter(|(name, _)| !disabled.contains(*name))
+        .collect();
     for (name, desc) in &bundled {
         lines.push(format!("  {} — {} [bundled]", name, desc));
     }
@@ -172,9 +180,10 @@ async fn list_skills(dirs: &[PathBuf]) -> ToolResult {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         let name = stem.to_string();
                         // Deduplicate — project-level shadows user-level;
-                        // bundled skills shadow everything.
+                        // bundled skills shadow everything; disabled skills hide.
                         if !disk_skills.iter().any(|(n, _)| n == &name)
                             && !bundled_names.contains(&name.as_str())
+                            && !disabled.contains(&name)
                         {
                             disk_skills.push((name, path));
                         }

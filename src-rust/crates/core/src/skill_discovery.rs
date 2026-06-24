@@ -1,12 +1,23 @@
 //! Skill discovery: load custom prompt-template skills from markdown files
 //! on disk and (optionally) from git URLs.
 //!
-//! Search priority (first match wins for a given skill name):
-//!   1. Project `.coven-code/skills/` — walk up from `cwd`
-//!   2. Project `.agents/skills/`  — walk up from `cwd`
-//!   3. Global `~/.coven-code/skills/`
+//! Skills are inherited from several environments so coven-code surfaces the
+//! same skill set as the surrounding tooling. Search priority (first match
+//! wins for a given skill name):
+//!   1. Project (walk up from `cwd`):
+//!        `.coven-code/skills/`, `.agents/skills/`, `.claude/skills/`
+//!   2. User (home dir):
+//!        `~/.coven-code/skills/`, `~/.claude/skills/`, `~/.codex/prompts/`
+//!   3. Plugin: `~/.claude/plugins/*/skills/`
 //!   4. Configured extra paths from `SkillsConfig.paths`
 //!   5. Git-URL repos from `SkillsConfig.urls` (cloned once, then cached)
+//!
+//! Two on-disk layouts are supported per root:
+//!   - **Directory layout** (`<name>/SKILL.md`) — used by Claude / superpowers
+//!     plugins. Frontmatter `name` / `description` / `when-to-use`.
+//!   - **Flat layout** (`<name>.md`) — used by coven skills and Codex prompts
+//!     (`~/.codex/prompts/`). Codex prompts have no frontmatter, so the file
+//!     stem is the name and the first body line is the description.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,17 +26,68 @@ use std::path::{Path, PathBuf};
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Where a discovered skill came from. Drives the scope label shown in the
+/// `/skills` picker (`builtin` is reserved for in-binary bundled skills, which
+/// are not produced by this module).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillScope {
+    /// Found under a project directory (walked up from cwd).
+    Project,
+    /// Found under the user's home directory.
+    User,
+    /// Contributed by an installed plugin.
+    Plugin,
+}
+
+impl SkillScope {
+    /// Short word rendered in the picker (`project` / `user` / `plugin`).
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillScope::Project => "project",
+            SkillScope::User => "user",
+            SkillScope::Plugin => "plugin",
+        }
+    }
+}
+
+/// Rough token estimate for a string, mirroring the `chars / 4` convention
+/// used elsewhere in the codebase (see `token_budget`).
+pub fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
 /// A discovered skill loaded from a markdown file.
 #[derive(Debug, Clone)]
 pub struct DiscoveredSkill {
-    /// Skill name (from `name:` frontmatter or file stem).
+    /// Skill name (from `name:` frontmatter or file stem / dir name).
     pub name: String,
-    /// One-line description (from `description:` frontmatter or default).
+    /// One-line description (from `description:` frontmatter or first body line).
     pub description: String,
+    /// Optional "when to use" guidance from frontmatter.
+    pub when_to_use: Option<String>,
     /// The prompt body after stripping frontmatter.
     pub template: String,
     /// Absolute path to the source `.md` file.
     pub source_path: PathBuf,
+    /// Which environment this skill was inherited from.
+    pub scope: SkillScope,
+    /// Human label of the origin (`coven`, `claude`, `codex`, or plugin name).
+    pub origin: String,
+    /// Estimated always-on context cost (name + description + when-to-use).
+    pub est_tokens: usize,
+}
+
+impl DiscoveredSkill {
+    /// Recompute `est_tokens` from the current metadata fields.
+    fn recompute_tokens(&mut self) {
+        let meta = format!(
+            "{} {} {}",
+            self.name,
+            self.description,
+            self.when_to_use.as_deref().unwrap_or("")
+        );
+        self.est_tokens = estimate_tokens(&meta);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -34,40 +96,33 @@ pub struct DiscoveredSkill {
 
 /// Parse a skill markdown file.
 ///
-/// Expects optional YAML frontmatter delimited by `---`.
-/// Returns `None` when the file is empty after trimming.
+/// Expects optional YAML frontmatter delimited by `---`. When `description`
+/// is absent (e.g. Codex prompts), it falls back to the first non-empty,
+/// non-heading body line. Returns `None` when the file is empty after trimming.
+///
+/// `scope` / `origin` are stamped to defaults here; the scanning layer
+/// (`scan_skill_root`) overrides them for each root.
 pub fn parse_skill_file(content: &str, path: &Path) -> Option<DiscoveredSkill> {
     let content = content.trim();
     if content.is_empty() {
         return None;
     }
 
-    let (name, description, template) = if let Some(after_open) = content.strip_prefix("---") {
-        // Accept both `\n---` and `\r\n---` as closing delimiter.
-        if let Some(close_pos) = after_open.find("\n---") {
-            let frontmatter = &after_open[..close_pos];
-            let rest = after_open[close_pos + 4..].trim_start_matches(['\r', '\n']);
-
-            let mut name: Option<String> = None;
-            let mut description: Option<String> = None;
-
-            for line in frontmatter.lines() {
-                let line = line.trim();
-                if let Some(v) = line.strip_prefix("name:") {
-                    name = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-                } else if let Some(v) = line.strip_prefix("description:") {
-                    description = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-                }
+    let (name, description, when_to_use, template) =
+        if let Some(after_open) = content.strip_prefix("---") {
+            // Accept both `\n---` and `\r\n---` as closing delimiter.
+            if let Some(close_pos) = after_open.find("\n---") {
+                let frontmatter = &after_open[..close_pos];
+                let rest = after_open[close_pos + 4..].trim_start_matches(['\r', '\n']);
+                let (name, description, when_to_use) = parse_frontmatter(frontmatter);
+                (name, description, when_to_use, rest.to_string())
+            } else {
+                // Malformed frontmatter — treat entire content as template.
+                (None, None, None, content.to_string())
             }
-
-            (name, description, rest.to_string())
         } else {
-            // Malformed frontmatter — treat entire content as template.
-            (None, None, content.to_string())
-        }
-    } else {
-        (None, None, content.to_string())
-    };
+            (None, None, None, content.to_string())
+        };
 
     let name = name.unwrap_or_else(|| {
         path.file_stem()
@@ -75,26 +130,118 @@ pub fn parse_skill_file(content: &str, path: &Path) -> Option<DiscoveredSkill> {
             .unwrap_or("unnamed")
             .to_string()
     });
-    let description = description.unwrap_or_else(|| "Custom skill".to_string());
+    // Fall back to the first meaningful body line so frontmatter-less skills
+    // (Codex prompts, bare `.md` files) still get a useful one-liner.
+    let description = description
+        .filter(|d| !d.is_empty())
+        .or_else(|| first_body_line(&template))
+        .unwrap_or_else(|| "Custom skill".to_string());
 
     if template.is_empty() && name.is_empty() {
         return None;
     }
 
-    Some(DiscoveredSkill {
+    let mut skill = DiscoveredSkill {
         name,
         description,
+        when_to_use,
         template,
         source_path: path.to_path_buf(),
-    })
+        scope: SkillScope::User,
+        origin: String::new(),
+        est_tokens: 0,
+    };
+    skill.recompute_tokens();
+    Some(skill)
+}
+
+/// Strip surrounding single/double quotes and whitespace from a frontmatter
+/// value.
+fn unquote(v: &str) -> String {
+    v.trim().trim_matches('"').trim_matches('\'').to_string()
+}
+
+/// Parse the YAML frontmatter for `name`, `description`, and `when-to-use`,
+/// handling both inline values (`description: text`) and block scalars
+/// (`description: |` / `>` followed by indented continuation lines, as used by
+/// the Claude/superpowers skill set). Block scalars are folded to a single
+/// space-joined line — enough for display and token estimation.
+fn parse_frontmatter(frontmatter: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut name = None;
+    let mut description = None;
+    let mut when_to_use = None;
+
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i];
+        let indent = raw.len() - raw.trim_start().len();
+        i += 1;
+
+        let Some((key, val)) = raw.trim().split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if !matches!(key, "name" | "description" | "when-to-use" | "when_to_use") {
+            continue;
+        }
+        let val = val.trim();
+
+        // Block scalar: empty value or a `|` / `>` indicator → gather the
+        // following lines that are indented deeper than this key.
+        let value = if val.is_empty() || val.starts_with('|') || val.starts_with('>') {
+            let mut parts: Vec<String> = Vec::new();
+            while i < lines.len() {
+                let cont = lines[i];
+                if cont.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                let cont_indent = cont.len() - cont.trim_start().len();
+                if cont_indent > indent {
+                    parts.push(cont.trim().to_string());
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            parts.join(" ")
+        } else {
+            unquote(val)
+        };
+
+        match key {
+            "name" => name = Some(value),
+            "description" => description = Some(value),
+            _ => when_to_use = Some(value),
+        }
+    }
+
+    (name, description, when_to_use)
+}
+
+/// First non-empty, non-heading line of a body, truncated to 200 chars.
+fn first_body_line(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let t = line.trim().trim_start_matches('#').trim();
+        if !t.is_empty() {
+            let truncated: String = t.chars().take(200).collect();
+            return Some(truncated);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
 // Directory scanning
 // ---------------------------------------------------------------------------
 
-/// Scan a single directory for `*.md` skill files.
-fn scan_dir(dir: &Path) -> Vec<DiscoveredSkill> {
+/// Scan a single skill root, handling both layouts:
+///   - flat `<name>.md` files directly in `dir`
+///   - `<name>/SKILL.md` directories (Claude / superpowers / plugins)
+///
+/// Each returned skill is stamped with `scope` and `origin`.
+fn scan_skill_root(dir: &Path, scope: SkillScope, origin: &str) -> Vec<DiscoveredSkill> {
     let mut skills = Vec::new();
     if !dir.is_dir() {
         return skills;
@@ -110,22 +257,53 @@ fn scan_dir(dir: &Path) -> Vec<DiscoveredSkill> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    if let Some(skill) = parse_skill_file(&content, &path) {
-                        skills.push(skill);
+        let parsed = if path.is_dir() {
+            // Directory layout: look for SKILL.md (case-insensitive on the stem)
+            // and default the name to the directory name.
+            let skill_md = path.join("SKILL.md");
+            let skill_md = if skill_md.is_file() {
+                Some(skill_md)
+            } else {
+                let alt = path.join("skill.md");
+                alt.is_file().then_some(alt)
+            };
+            skill_md.and_then(|p| read_and_parse(&p)).map(|mut s| {
+                // Prefer the directory name when frontmatter omitted `name:`.
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if s.name == "SKILL" || s.name == "skill" {
+                        s.name = dir_name.to_string();
+                        s.recompute_tokens();
                     }
                 }
-                Err(err) => {
-                    tracing::debug!(path = %path.display(), error = %err, "skill_discovery: read failed");
-                }
-            }
+                s
+            })
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            read_and_parse(&path)
+        } else {
+            None
+        };
+
+        if let Some(mut skill) = parsed {
+            skill.scope = scope;
+            skill.origin = origin.to_string();
+            skills.push(skill);
         }
     }
 
     skills
 }
+
+/// Read a file and parse it into a skill, logging read failures.
+fn read_and_parse(path: &Path) -> Option<DiscoveredSkill> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => parse_skill_file(&content, path),
+        Err(err) => {
+            tracing::debug!(path = %path.display(), error = %err, "skill_discovery: read failed");
+            None
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Top-level discovery
@@ -142,7 +320,7 @@ pub fn discover_skills(
     let mut all: HashMap<String, DiscoveredSkill> = HashMap::new();
     let mut warn_duplicates: Vec<String> = Vec::new();
 
-    // Inline closure: insert a batch, warning on duplicates.
+    // Inline closure: insert a batch, warning on duplicates (first wins).
     let mut add = |skills: Vec<DiscoveredSkill>| {
         for skill in skills {
             if let Some(existing) = all.get(&skill.name) {
@@ -162,8 +340,21 @@ pub fn discover_skills(
     {
         let mut dir: &Path = cwd;
         loop {
-            add(scan_dir(&dir.join(".coven-code").join("skills")));
-            add(scan_dir(&dir.join(".agents").join("skills")));
+            add(scan_skill_root(
+                &dir.join(".coven-code").join("skills"),
+                SkillScope::Project,
+                "coven",
+            ));
+            add(scan_skill_root(
+                &dir.join(".agents").join("skills"),
+                SkillScope::Project,
+                "agents",
+            ));
+            add(scan_skill_root(
+                &dir.join(".claude").join("skills"),
+                SkillScope::Project,
+                "claude",
+            ));
             match dir.parent() {
                 Some(parent) if parent != dir => dir = parent,
                 _ => break,
@@ -171,12 +362,47 @@ pub fn discover_skills(
         }
     }
 
-    // ---- 2. Global skills: ~/.coven-code/skills/ --------------------------------
+    // ---- 2. User skills: home directory -------------------------------------
     if let Some(home) = dirs::home_dir() {
-        add(scan_dir(&home.join(".coven-code").join("skills")));
+        add(scan_skill_root(
+            &home.join(".coven-code").join("skills"),
+            SkillScope::User,
+            "coven",
+        ));
+        add(scan_skill_root(
+            &home.join(".claude").join("skills"),
+            SkillScope::User,
+            "claude",
+        ));
+        // OpenAI Codex custom prompts (flat `.md`, no frontmatter).
+        add(scan_skill_root(
+            &home.join(".codex").join("prompts"),
+            SkillScope::User,
+            "codex",
+        ));
+
+        // ---- 3. Plugin skills: ~/.claude/plugins/*/skills/ -----------------
+        let plugins_root = home.join(".claude").join("plugins");
+        if let Ok(entries) = std::fs::read_dir(&plugins_root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let origin = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("plugin")
+                        .to_string();
+                    add(scan_skill_root(
+                        &p.join("skills"),
+                        SkillScope::Plugin,
+                        &origin,
+                    ));
+                }
+            }
+        }
     }
 
-    // ---- 3. Configured extra paths ------------------------------------------
+    // ---- 4. Configured extra paths ------------------------------------------
     for path_str in &config_skills.paths {
         let path = Path::new(path_str);
         let path = if path.is_absolute() {
@@ -184,10 +410,10 @@ pub fn discover_skills(
         } else {
             cwd.join(path)
         };
-        add(scan_dir(&path));
+        add(scan_skill_root(&path, SkillScope::User, "config"));
     }
 
-    // ---- 4. Git URL skills (cached) -----------------------------------------
+    // ---- 5. Git URL skills (cached) -----------------------------------------
     for url in &config_skills.urls {
         if let Some(git_skills) = fetch_git_skills(url) {
             add(git_skills);
@@ -258,8 +484,12 @@ fn fetch_git_skills(url: &str) -> Option<Vec<DiscoveredSkill>> {
     }
 
     // Scan repo root and optional `skills/` subdirectory.
-    let mut skills = scan_dir(&repo_dir);
-    skills.extend(scan_dir(&repo_dir.join("skills")));
+    let mut skills = scan_skill_root(&repo_dir, SkillScope::User, repo_name);
+    skills.extend(scan_skill_root(
+        &repo_dir.join("skills"),
+        SkillScope::User,
+        repo_name,
+    ));
     Some(skills)
 }
 
@@ -299,13 +529,72 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_no_frontmatter_uses_stem() {
+    fn test_parse_no_frontmatter_uses_stem_and_first_line() {
+        // Codex-style flat prompt: no frontmatter, description from first line.
         let content = "Do something useful.";
         let path = PathBuf::from("my-skill.md");
         let skill = parse_skill_file(content, &path).unwrap();
         assert_eq!(skill.name, "my-skill");
-        assert_eq!(skill.description, "Custom skill");
+        assert_eq!(skill.description, "Do something useful.");
         assert_eq!(skill.template, "Do something useful.");
+        assert!(skill.est_tokens > 0);
+    }
+
+    #[test]
+    fn test_parse_when_to_use_frontmatter() {
+        let content =
+            "---\nname: brainstorm\ndescription: Explore ideas\nwhen-to-use: before any creative work\n---\nBody.";
+        let skill = parse_skill_file(content, &PathBuf::from("x.md")).unwrap();
+        assert_eq!(skill.when_to_use.as_deref(), Some("before any creative work"));
+    }
+
+    #[test]
+    fn test_parse_block_scalar_description() {
+        // Mirrors the Claude/superpowers `description: |` block-scalar layout.
+        let content = "---\nversion: 0.3.0\nname: higgs\ndescription: |\n  First line of the description.\n  Second line continues here.\n---\n# Body\nstuff";
+        let skill = parse_skill_file(content, &PathBuf::from("higgs/SKILL.md")).unwrap();
+        assert_eq!(skill.name, "higgs");
+        assert_eq!(
+            skill.description,
+            "First line of the description. Second line continues here."
+        );
+        // Token estimate should reflect the full folded description, not just "|".
+        assert!(skill.est_tokens >= 12, "got {}", skill.est_tokens);
+    }
+
+    #[test]
+    fn test_estimate_tokens_monotonic() {
+        assert!(estimate_tokens("a much longer string here") > estimate_tokens("short"));
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_scan_skill_root_directory_layout() {
+        let tmp = make_temp_dir();
+        // <root>/brainstorming/SKILL.md  (name omitted → dir name used)
+        write_file(
+            tmp.path(),
+            "brainstorming/SKILL.md",
+            "---\ndescription: Turn ideas into designs\n---\nDo the thing.",
+        );
+        let skills = scan_skill_root(tmp.path(), SkillScope::Plugin, "superpowers");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "brainstorming");
+        assert_eq!(skills[0].scope, SkillScope::Plugin);
+        assert_eq!(skills[0].origin, "superpowers");
+        assert_eq!(skills[0].description, "Turn ideas into designs");
+    }
+
+    #[test]
+    fn test_discover_stamps_project_scope() {
+        let tmp = make_temp_dir();
+        let skills_dir = tmp.path().join(".coven-code").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        write_file(&skills_dir, "myskill.md", "---\nname: myskill\n---\nDo it.");
+
+        let config = crate::config::SkillsConfig::default();
+        let discovered = discover_skills(tmp.path(), &config);
+        assert_eq!(discovered["myskill"].scope, SkillScope::Project);
     }
 
     #[test]
@@ -344,7 +633,7 @@ mod tests {
         write_file(tmp.path(), "debug.md", "Debug help.");
         write_file(tmp.path(), "not-md.txt", "ignored");
 
-        let skills = scan_dir(tmp.path());
+        let skills = scan_skill_root(tmp.path(), SkillScope::User, "");
         assert_eq!(skills.len(), 2);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"review"));
@@ -353,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_scan_dir_nonexistent_returns_empty() {
-        let skills = scan_dir(Path::new("/nonexistent/path/xyz"));
+        let skills = scan_skill_root(Path::new("/nonexistent/path/xyz"), SkillScope::User, "");
         assert!(skills.is_empty());
     }
 
