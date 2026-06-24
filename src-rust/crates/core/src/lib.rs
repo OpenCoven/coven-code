@@ -2119,6 +2119,10 @@ pub mod constants {
     /// (truncated) and points at `/release-notes` for the rest. Keep this in
     /// sync with the GitHub release notes when cutting a version.
     pub const WHATS_NEW: &[&str] = &[
+        "/skills opens an interactive picker that inherits skills from Claude, Codex, and your other tools",
+        "Run Coven Code as `coven` — shorter command, with the `coven-cave` alias",
+        "Crisper input badge — the mode and model labels now read clearly on every accent color",
+        "Team memory sync now blocks files containing secrets before they upload",
         "8-bit pixel-art familiar avatars now front the welcome panel, recolored per familiar",
         "Welcome panel redesigned into a two-column identity + tips layout",
         "Press F2 from the welcome screen to switch the active familiar",
