@@ -50,10 +50,12 @@ impl SkillScope {
     }
 }
 
-/// Rough token estimate for a string using the common `chars / 4`
-/// approximation. This is an estimate for display only, not an exact count.
+/// Rough token estimate for a string, for display only (not an exact count).
+///
+/// Delegates to the canonical [`crate::message_utils::estimate_tokens`] so the
+/// token heuristic stays single-sourced and user-facing counts don't drift.
 pub fn estimate_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
+    crate::message_utils::estimate_tokens(text) as usize
 }
 
 /// A discovered skill loaded from a markdown file.
@@ -97,8 +99,9 @@ impl DiscoveredSkill {
 /// Parse a skill markdown file.
 ///
 /// Expects optional YAML frontmatter delimited by `---`. When `description`
-/// is absent (e.g. Codex prompts), it falls back to the first non-empty,
-/// non-heading body line. Returns `None` when the file is empty after trimming.
+/// is absent (e.g. Codex prompts), it falls back to the first non-empty body
+/// line (with any leading `#` heading markers stripped). Returns `None` when
+/// the file is empty after trimming.
 ///
 /// `scope` / `origin` are stamped to defaults here; the scanning layer
 /// (`scan_skill_root`) overrides them for each root.
@@ -124,7 +127,9 @@ pub fn parse_skill_file(content: &str, path: &Path) -> Option<DiscoveredSkill> {
             (None, None, None, content.to_string())
         };
 
-    let name = name.unwrap_or_else(|| {
+    // Treat a present-but-empty `name:` as missing so it can't become an
+    // empty HashMap key that breaks dedupe/lookup; fall back to the file stem.
+    let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| {
         path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unnamed")
@@ -220,7 +225,8 @@ fn parse_frontmatter(frontmatter: &str) -> (Option<String>, Option<String>, Opti
     (name, description, when_to_use)
 }
 
-/// First non-empty, non-heading line of a body, truncated to 200 chars.
+/// First non-empty line of a body, with any leading `#` heading markers
+/// stripped, truncated to 200 chars.
 fn first_body_line(body: &str) -> Option<String> {
     for line in body.lines() {
         let t = line.trim().trim_start_matches('#').trim();
