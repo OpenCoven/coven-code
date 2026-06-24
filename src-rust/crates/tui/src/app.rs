@@ -91,6 +91,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Cast a speech incantation (caveman, rocky) or lift it with off",
     ),
     ("init", "Initialize AGENTS.md for this project"),
+    (
+        "learn",
+        "Codify the script/workflow we just built into a reusable skill",
+    ),
     ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
@@ -167,7 +171,9 @@ pub fn slash_command_category(name: &str) -> &'static str {
         "session" | "resume" | "search" | "share" | "rename" => "Sessions & Remote",
         "help" | "exit" | "quit" | "feedback" | "survey" | "bug" => "General",
         "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
-        "copy" | "skills" | "plugin" | "reload-plugins" | "whisper" | "incant" => "Tools & Extras",
+        "copy" | "skills" | "learn" | "plugin" | "reload-plugins" | "whisper" | "incant" => {
+            "Tools & Extras"
+        }
         "coven" | "familiar" | "familiars" | "handoff" => "Coven",
         _ => "Other",
     }
@@ -2887,7 +2893,16 @@ impl App {
         self.theme_screen.close();
     }
 
-    pub fn any_modal_open(&self) -> bool {
+    /// Whether a *blocking* overlay currently owns keyboard input — i.e. the
+    /// prompt is not the active text target.
+    ///
+    /// This is the single source of truth for "an overlay captures input": any
+    /// new picker/dialog added here automatically stops prompt text (including
+    /// paste-burst capture) from leaking while it is open — see
+    /// [`Self::prompt_is_accepting_text`]. It excludes the passive notices
+    /// (overage / voice / memory), which render as overlays but let the user
+    /// keep typing underneath.
+    pub fn any_blocking_modal_open(&self) -> bool {
         self.permission_request.is_some()
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2903,9 +2918,6 @@ impl App {
             || self.feedback_survey.visible
             || self.memory_file_selector.visible
             || self.hooks_config_menu.visible
-            || self.overage_upsell.visible
-            || self.voice_mode_notice.visible
-            || self.memory_update_notification.visible
             || self.import_config_dialog.visible
             || self.invalid_config_dialog.visible
             || self.bypass_permissions_dialog.visible
@@ -2928,6 +2940,15 @@ impl App {
             || self.file_injection_dialog.visible
             || self.skills_picker.visible
             || self.context_menu_state.is_some()
+    }
+
+    pub fn any_modal_open(&self) -> bool {
+        // Passive notices don't capture input but still render as overlays, so
+        // they count as a modal for rendering purposes only.
+        self.any_blocking_modal_open()
+            || self.overage_upsell.visible
+            || self.voice_mode_notice.visible
+            || self.memory_update_notification.visible
     }
 
     fn dismiss_error_notifications(&mut self) {
@@ -6412,15 +6433,12 @@ impl App {
     /// Returns `true` when the app is in a state where the prompt can accept
     /// regular text input — used to gate paste-burst detection.
     pub fn prompt_is_accepting_text(&self) -> bool {
+        // Gate on the shared blocking-modal predicate rather than a parallel
+        // hand-list: any overlay that captures input (skills/model pickers,
+        // command palette, dialogs, …) automatically blocks prompt text and
+        // paste-burst capture while it is open.
         !self.is_streaming
-            && self.permission_request.is_none()
-            && !self.ask_user_dialog.visible
-            && !self.history_search_overlay.visible
-            && !self.settings_screen.visible
-            && !self.theme_screen.visible
-            && !self.skills_picker.visible
-            && !self.model_picker.visible
-            && !self.command_palette.visible
+            && !self.any_blocking_modal_open()
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
     }
 
