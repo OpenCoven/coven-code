@@ -50,8 +50,8 @@ impl SkillScope {
     }
 }
 
-/// Rough token estimate for a string, mirroring the `chars / 4` convention
-/// used elsewhere in the codebase (see `token_budget`).
+/// Rough token estimate for a string using the common `chars / 4`
+/// approximation. This is an estimate for display only, not an exact count.
 pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
@@ -258,7 +258,7 @@ fn scan_skill_root(dir: &Path, scope: SkillScope, origin: &str) -> Vec<Discovere
     for entry in entries.flatten() {
         let path = entry.path();
         let parsed = if path.is_dir() {
-            // Directory layout: look for SKILL.md (case-insensitive on the stem)
+            // Directory layout: look for `SKILL.md` (or lowercase `skill.md`)
             // and default the name to the directory name.
             let skill_md = path.join("SKILL.md");
             let skill_md = if skill_md.is_file() {

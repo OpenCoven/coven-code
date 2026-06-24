@@ -40,7 +40,9 @@ coven-code today. We also lack the interactive, searchable, toggleable
 
 `DiscoveredSkill` gains:
 
-- `scope: SkillScope` — new enum `{ Bundled, Project, User, Plugin }`.
+- `scope: SkillScope` — new enum `{ Project, User, Plugin }`. (Bundled
+  in-binary skills are not produced by `discover_skills`; the picker merges
+  them in separately and renders them with a `builtin` label — see §4.)
 - `origin: String` — human label of where it came from: `"claude"`, `"codex"`,
   `"coven"`, or the plugin directory name. Used only for diagnostics/tooltip;
   the picker renders the `scope` word.
@@ -54,8 +56,11 @@ higher-priority source keeps the entry):
 | 1 | Project | `.coven-code/skills/`, `.agents/skills/`, `.claude/skills/` (walk up from cwd) |
 | 2 | User    | `~/.coven-code/skills/`, `~/.claude/skills/`, `~/.codex/prompts/` |
 | 3 | Plugin  | `~/.claude/plugins/*/skills/` and coven plugin-registry skill paths |
-| 4 | Bundled | in-binary `BUNDLED_SKILLS` (merged at the listing layer, not in this fn) |
 | —  | Config  | existing `SkillsConfig.paths` (User scope) and `urls` (User scope) |
+
+In-binary `BUNDLED_SKILLS` are not a `SkillScope` / not returned by
+`discover_skills`; the picker merges them in at the listing layer and renders
+them with a `builtin` label (see §4).
 
 Two on-disk layouts:
 
