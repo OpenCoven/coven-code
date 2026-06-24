@@ -24,7 +24,7 @@ are rebranded. This boundary is explicit and documented below.
 
 | Surface | File(s) | Current value |
 |---|---|---|
-| Binary name | `src-rust/crates/cli/Cargo.toml` `[[bin]]` | `coven-code` |
+| Binary name | `src-rust/crates/cli/src/main.rs`, `src-rust/crates/cli/src/bin/coven-cave.rs` | `coven-code`; `coven-cave` alias |
 | npm package | `npm/package.json` | `@opencoven/coven-code` |
 | Data/cache dirs | `src-rust/crates/core/src/snapshot/`, `skill_discovery.rs`, `update_check.rs`, `app.rs` | `coven-code/` |
 | Env var prefix | throughout `src-rust/` | `COVEN_CODE_*` |

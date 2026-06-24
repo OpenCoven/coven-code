@@ -168,17 +168,21 @@ function Install-FromBinary {
 
 function Install-Binary($source) {
     $target = Join-Path $InstallDir 'coven-code.exe'
+    $aliasTarget = Join-Path $InstallDir 'coven-cave.exe'
 
     # The currently running coven-code.exe (if any) holds an exclusive file lock on
     # Windows.  Try to swap by renaming the old one first.
-    if (Test-Path $target) {
-        $stale = "$target.old"
+    foreach ($path in @($target, $aliasTarget)) {
+        if (-not (Test-Path $path)) { continue }
+        $stale = "$path.old"
         if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
-        try { Move-Item -Force $target $stale } catch { }
+        try { Move-Item -Force $path $stale } catch { }
     }
 
     Copy-Item -Force $source $target
+    Copy-Item -Force $source $aliasTarget
     Write-Success "Installed: $target"
+    Write-Success "Installed alias: $aliasTarget"
 }
 
 # ----- PATH modification -----
@@ -241,6 +245,7 @@ Write-Host   "  `$env:ANTHROPIC_API_KEY = 'sk-ant-...'"
 Write-Host   ""
 Write-Muted  "  # Open a new terminal, then:"
 Write-Success "  coven-code             "
+Write-Success "  coven-cave             "
 Write-Muted  "  # or"
 Write-Success "  coven-code -p `"...`"      "
 Write-Host   ""

@@ -74,7 +74,7 @@ Each archive contains a single `coven-code` (or `coven-code.exe`) binary.
 ```bash
 git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
-cargo build --release --package claurst   # binary outputs as coven-code
+cargo build --release --package claurst   # binary outputs as coven-code; coven-cave is an alias target
 ```
 
 > Internal Rust crate names (`claurst-core`, `claurst-tui`, etc.) are preserved from upstream for merge-friendliness. The compiled binary is named `coven-code`.

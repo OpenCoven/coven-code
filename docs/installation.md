@@ -112,7 +112,8 @@ npm install -g @opencoven/coven-code
 bun install -g @opencoven/coven-code
 ```
 
-After installation, run `coven-code` directly from your terminal.
+After installation, run `coven-code` directly from your terminal. `coven-cave`
+is installed as an alias for the same CLI.
 
 You can also run Coven Code without a permanent install:
 
@@ -159,6 +160,7 @@ If you'd rather not run an install script, grab archives directly from
 | `coven-code-macos-aarch64.tar.gz` | macOS Apple Silicon |
 
 Every archive contains a single binary named `coven-code` (or `coven-code.exe`).
+The installers also place `coven-cave` on PATH as an alias for that binary.
 Extract it and put it somewhere on your `PATH`. For example on Linux:
 
 ```bash

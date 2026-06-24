@@ -13,6 +13,7 @@
 set -euo pipefail
 
 APP=coven-code
+ALIAS=coven-cave
 REPO=OpenCoven/coven-code
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -112,6 +113,9 @@ else
   chmod +x "${INSTALL_DIR}/${APP}"
 fi
 
+ln -sf "${APP}" "${INSTALL_DIR}/${ALIAS}" || cp "${INSTALL_DIR}/${APP}" "${INSTALL_DIR}/${ALIAS}"
+chmod +x "${INSTALL_DIR}/${ALIAS}"
+
 # PATH setup
 shell_rc=""
 case "${SHELL:-}" in
@@ -128,8 +132,10 @@ if [[ -n "$shell_rc" ]] && ! grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; th
 fi
 
 print_message success "${APP} v${specific_version} installed to ${INSTALL_DIR}/${APP}"
+print_message success "${ALIAS} alias installed to ${INSTALL_DIR}/${ALIAS}"
 echo ""
 echo -e "  ${GREEN}${APP}${NC}              ${MUTED}# Interactive TUI${NC}"
+echo -e "  ${GREEN}${ALIAS}${NC}              ${MUTED}# Alias for ${APP}${NC}"
 echo -e "  ${GREEN}${APP} -p \"...\"${NC}       ${MUTED}# Headless one-shot${NC}"
 echo ""
 echo -e "  ${MUTED}Restart your shell or run: source ${shell_rc:-~/.bashrc}${NC}"
