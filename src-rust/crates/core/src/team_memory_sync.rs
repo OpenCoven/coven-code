@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -361,6 +362,25 @@ impl TeamMemorySync {
                         .to_string_lossy()
                         .replace('\\', "/");
 
+                    // Enforce secret scanning before a file can ever be packed
+                    // for upload.  A file with detected secrets is blocked from
+                    // sync entirely.  Only the pattern labels and path are
+                    // logged — never the matched text — so the log itself does
+                    // not leak the credential.
+                    let secrets = scan_for_secrets(&content);
+                    if !secrets.is_empty() {
+                        let labels: Vec<&str> =
+                            secrets.iter().map(|m| m.label.as_str()).collect();
+                        warn!(
+                            "Blocking team memory file {:?} from sync: detected {} \
+                             ({} secret pattern(s))",
+                            key,
+                            labels.join(", "),
+                            labels.len(),
+                        );
+                        continue;
+                    }
+
                     let checksum = content_checksum(&content);
                     entries.push(TeamMemoryEntry {
                         key,
@@ -686,6 +706,61 @@ mod tests {
         let entries = sync.scan_local_files().await.unwrap();
         let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, vec!["a.md", "m.md", "z.md"]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_local_files_blocks_file_with_secret() {
+        let tmp = TempDir::new().unwrap();
+        // `AKIAIOSFODNN7EXAMPLE` is the canonical example AWS access key id and
+        // matches the AWS pattern in `scan_for_secrets`.
+        tokio::fs::write(
+            tmp.path().join("leak.md"),
+            "# Notes\n\nDeploy key: AKIAIOSFODNN7EXAMPLE\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(tmp.path().join("clean.md"), "# Clean\n\nnothing secret\n")
+            .await
+            .unwrap();
+
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let entries = sync.scan_local_files().await.unwrap();
+
+        // The clean file is uploaded; the secret-bearing file is blocked.
+        let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["clean.md"]);
+        assert!(
+            !keys.contains(&"leak.md"),
+            "file containing a secret must not be packed for upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_local_files_blocks_all_when_every_file_has_secret() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(
+            tmp.path().join("a.md"),
+            "token ghp_0123456789abcdefghijklmnopqrstuvwxyz\n",
+        )
+        .await
+        .unwrap();
+
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let entries = sync.scan_local_files().await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "no entries should survive when all contain secrets"
+        );
     }
 
     #[tokio::test]
