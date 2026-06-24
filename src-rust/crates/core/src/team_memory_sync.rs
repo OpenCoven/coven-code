@@ -369,8 +369,7 @@ impl TeamMemorySync {
                     // not leak the credential.
                     let secrets = scan_for_secrets(&content);
                     if !secrets.is_empty() {
-                        let labels: Vec<&str> =
-                            secrets.iter().map(|m| m.label.as_str()).collect();
+                        let labels: Vec<&str> = secrets.iter().map(|m| m.label.as_str()).collect();
                         warn!(
                             "Blocking team memory file {:?} from sync: detected {} \
                              ({} secret pattern(s))",

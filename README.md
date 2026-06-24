@@ -43,7 +43,7 @@ Recent highlights:
 npm install -g @opencoven/coven
 ```
 
-Then open a new terminal and run `coven` or `coven tui`.
+Then open a new terminal and run `coven` or `coven tui`. The lower-level `coven-code` binary and `coven-cave` alias are also installed for compatibility.
 
 ### Upgrade
 
