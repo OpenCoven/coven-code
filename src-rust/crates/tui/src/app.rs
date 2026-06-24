@@ -6420,6 +6420,7 @@ impl App {
             && !self.theme_screen.visible
             && !self.skills_picker.visible
             && !self.model_picker.visible
+            && !self.command_palette.visible
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
     }
 
