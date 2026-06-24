@@ -154,6 +154,12 @@ impl NamedCommand for AgentsCommand {
             }
             "create" => {
                 let name = args.get(1).copied().unwrap_or("my-agent");
+                if claurst_core::coven_shared::is_disallowed_familiar_name(name) {
+                    return CommandResult::Error(format!(
+                        "The name '{name}' is reserved and cannot be used for an agent or \
+                         familiar. Choose a different name."
+                    ));
+                }
                 CommandResult::Message(format!(
                     "Create a new agent by adding .coven-code/agents/{name}.md\n\
                      Template:\n\
@@ -174,6 +180,13 @@ impl NamedCommand for AgentsCommand {
                         )
                     }
                 };
+                // Block renaming/retargeting an agent onto a reserved name.
+                if claurst_core::coven_shared::is_disallowed_familiar_name(name) {
+                    return CommandResult::Error(format!(
+                        "The name '{name}' is reserved and cannot be used for an agent or \
+                         familiar. Choose a different name."
+                    ));
+                }
                 CommandResult::Message(format!(
                     "Edit .coven-code/agents/{name}.md in your editor to update the agent."
                 ))
