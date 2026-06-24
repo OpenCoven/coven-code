@@ -312,7 +312,7 @@ fn read_and_parse(path: &Path) -> Option<DiscoveredSkill> {
 /// Discover all skills from all configured sources.
 ///
 /// Returns a `HashMap` of `skill_name → DiscoveredSkill` (first match wins;
-/// duplicates from lower-priority sources are warned via `tracing::warn`).
+/// duplicates from lower-priority sources are logged at debug level).
 pub fn discover_skills(
     cwd: &Path,
     config_skills: &crate::config::SkillsConfig,
@@ -336,10 +336,17 @@ pub fn discover_skills(
         }
     };
 
+    let home = dirs::home_dir();
+
     // ---- 1. Project skills: walk up from cwd --------------------------------
+    // Stop at the home directory so home-level skill dirs are attributed to the
+    // User scope below (not "project") when the checkout lives under $HOME.
     {
         let mut dir: &Path = cwd;
         loop {
+            if home.as_deref() == Some(dir) {
+                break;
+            }
             add(scan_skill_root(
                 &dir.join(".coven-code").join("skills"),
                 SkillScope::Project,
@@ -363,11 +370,16 @@ pub fn discover_skills(
     }
 
     // ---- 2. User skills: home directory -------------------------------------
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         add(scan_skill_root(
             &home.join(".coven-code").join("skills"),
             SkillScope::User,
             "coven",
+        ));
+        add(scan_skill_root(
+            &home.join(".agents").join("skills"),
+            SkillScope::User,
+            "agents",
         ));
         add(scan_skill_root(
             &home.join(".claude").join("skills"),
@@ -420,9 +432,11 @@ pub fn discover_skills(
         }
     }
 
-    // Emit warnings for any duplicate skill names encountered.
+    // Duplicates are expected now that skills are inherited from several
+    // overlapping environments (e.g. the same skill in ~/.claude and
+    // ~/.agents), so log them at debug level rather than warn.
     for w in &warn_duplicates {
-        tracing::warn!("{}", w);
+        tracing::debug!("{}", w);
     }
 
     all

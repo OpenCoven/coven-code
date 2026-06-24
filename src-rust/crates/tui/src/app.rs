@@ -2926,6 +2926,7 @@ impl App {
             || self.context_viz.visible
             || self.mcp_approval.visible
             || self.file_injection_dialog.visible
+            || self.skills_picker.visible
             || self.context_menu_state.is_some()
     }
 
@@ -6417,6 +6418,7 @@ impl App {
             && !self.history_search_overlay.visible
             && !self.settings_screen.visible
             && !self.theme_screen.visible
+            && !self.skills_picker.visible
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
     }
 
