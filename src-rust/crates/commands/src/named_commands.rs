@@ -1024,10 +1024,11 @@ mod tests {
         let familiar_roster = coven_home.join("familiars.toml");
         std::fs::write(&global_agent, "global").expect("global agent");
         std::fs::write(&project_agent, "project").expect("project agent");
-        std::fs::write(&familiar_roster, "[[familiar]]\nid = \"nova\"\n").expect("familiar roster");
+        std::fs::write(&familiar_roster, "[[familiar]]\nid = \"orchestrator\"\n")
+            .expect("familiar roster");
 
         let settings = claurst_core::Settings {
-            familiar: Some("nova".to_string()),
+            familiar: Some("orchestrator".to_string()),
             ..Default::default()
         };
         settings.save_sync().expect("settings save");

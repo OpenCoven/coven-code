@@ -821,8 +821,8 @@ mod tests {
     fn familiar_status_deserializes_from_json() {
         let json = r#"[
             {
-                "id": "sage",
-                "display_name": "Sage",
+                "id": "researcher",
+                "display_name": "Researcher",
                 "emoji": "🌿",
                 "role": "researcher",
                 "description": "Deep research familiar",
@@ -831,7 +831,7 @@ mod tests {
                 "memory_freshness": "fresh"
             },
             {
-                "id": "kitty",
+                "id": "helper",
                 "status": "idle",
                 "active_sessions": 0
             }
@@ -851,8 +851,8 @@ mod tests {
             memory_freshness: raw[0].memory_freshness.clone().unwrap_or_default(),
             id: raw[0].id.clone(),
         };
-        assert_eq!(s0.id, "sage");
-        assert_eq!(s0.display_name, "Sage");
+        assert_eq!(s0.id, "researcher");
+        assert_eq!(s0.display_name, "Researcher");
         assert_eq!(s0.emoji, "🌿");
         assert_eq!(s0.status, "active");
         assert_eq!(s0.active_sessions, 2);
@@ -868,8 +868,8 @@ mod tests {
             memory_freshness: raw[1].memory_freshness.clone().unwrap_or_default(),
             id: raw[1].id.clone(),
         };
-        assert_eq!(s1.id, "kitty");
-        assert_eq!(s1.display_name, "kitty"); // falls back to id
+        assert_eq!(s1.id, "helper");
+        assert_eq!(s1.display_name, "helper"); // falls back to id
         assert_eq!(s1.active_sessions, 0);
     }
 
@@ -906,7 +906,7 @@ mod tests {
             assert!(request.starts_with("POST /api/v1/sessions HTTP/1.0"));
             assert!(request.contains("Host: localhost\r\n"));
             assert!(request.contains("Content-Type: application/json\r\n"));
-            assert!(request.contains("\"familiar\":\"sage\""));
+            assert!(request.contains("\"familiar\":\"researcher\""));
             assert!(request.contains("\"project_root\":\"/tmp/project\""));
             assert!(request.contains("\"initial_message\":\"handoff context\""));
             stream
@@ -919,7 +919,7 @@ mod tests {
         let client = DaemonClient { sock_path: sock };
         let session_id = client
             .create_session(CreateSessionRequest {
-                familiar: "sage".to_string(),
+                familiar: "researcher".to_string(),
                 project_root: "/tmp/project".to_string(),
                 harness: "openclaw".to_string(),
                 title: "Handoff from coven-code".to_string(),
