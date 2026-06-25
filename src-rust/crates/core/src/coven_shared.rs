@@ -101,16 +101,6 @@ pub fn resolve_access_tier(input: &str) -> &'static str {
 /// switcher never lists it. Callers go through [`is_disallowed_agent_name`].
 pub const DISALLOWED_AGENT_NAMES: &[&str] = &["val", "vale", "valentina"];
 
-/// Names that are strictly disallowed for **familiars** specifically (new or
-/// existing). These are in addition to [`DISALLOWED_AGENT_NAMES`], which apply
-/// to every agent kind. A workspace agent under `.coven-code/agents/` may
-/// still use one of these names — only Coven familiars are blocked.
-///
-/// Compared case-insensitively after trimming, via
-/// [`is_disallowed_familiar_name`].
-pub const DISALLOWED_FAMILIAR_NAMES: &[&str] =
-    &["nova", "echo", "sage", "kitty", "cody", "charm", "astra"];
-
 /// Whether `name` is a strictly disallowed name for any agent.
 ///
 /// Trims surrounding whitespace and compares case-insensitively against
@@ -124,14 +114,10 @@ pub fn is_disallowed_agent_name(name: &str) -> bool {
 
 /// Whether `name` is a strictly disallowed name for a **familiar**.
 ///
-/// Covers both [`DISALLOWED_FAMILIAR_NAMES`] and the broader
-/// [`DISALLOWED_AGENT_NAMES`] (anything banned for all agents is also banned
-/// for familiars). Applied wherever a familiar enters the system so the
-/// reserved names can never surface as a resolvable familiar.
+/// Familiar identities are declared in `~/.coven/familiars.toml`, not reserved
+/// in code. The only blocked values are names banned for every agent.
 pub fn is_disallowed_familiar_name(name: &str) -> bool {
-    let normalized = name.trim().to_ascii_lowercase();
-    DISALLOWED_FAMILIAR_NAMES.contains(&normalized.as_str())
-        || is_disallowed_agent_name(&normalized)
+    is_disallowed_agent_name(name)
 }
 
 /// One entry in `~/.coven/familiars.toml`.
@@ -246,8 +232,8 @@ pub fn default_agents_with_familiars(
     if let Some(fams) = load_familiars() {
         for fam in &fams {
             let (id, def) = familiar_to_agent_definition(fam);
-            // Familiars get the broader familiar ban (reserved familiar names
-            // plus the all-agent ban).
+            // Familiars are dynamic; only globally disallowed agent names are
+            // filtered here.
             if is_disallowed_familiar_name(&id) {
                 continue;
             }
@@ -288,8 +274,8 @@ pub fn default_agents_with_familiars_and_config(
     if let Some(fams) = load_familiars() {
         for fam in &fams {
             let (id, def) = familiar_to_agent_definition(fam);
-            // Familiars get the broader familiar ban (reserved familiar names
-            // plus the all-agent ban).
+            // Familiars are dynamic; only globally disallowed agent names are
+            // filtered here.
             if is_disallowed_familiar_name(&id) {
                 continue;
             }
@@ -421,16 +407,16 @@ mod tests {
                 home.join("familiars.toml"),
                 r#"
 [[familiar]]
-id = "nova"
-display_name = "Nova"
+id = "atlas"
+display_name = "Atlas"
 emoji = "👑"
 role = "Queen"
 description = "Test orchestrator"
 pronouns = "she/her"
 
 [[familiar]]
-id = "kitty"
-display_name = "Kitty"
+id = "ember"
+display_name = "Ember"
 role = "General Helper"
 "#,
             )
@@ -438,9 +424,9 @@ role = "General Helper"
         });
         let familiars = load_familiars().expect("should parse");
         assert_eq!(familiars.len(), 2);
-        assert_eq!(familiars[0].id, "nova");
+        assert_eq!(familiars[0].id, "atlas");
         assert_eq!(familiars[0].emoji.as_deref(), Some("👑"));
-        assert_eq!(familiars[1].id, "kitty");
+        assert_eq!(familiars[1].id, "ember");
         assert!(familiars[1].emoji.is_none());
     }
 
@@ -457,8 +443,8 @@ role = "General Helper"
                 home.join("familiars.toml"),
                 r#"
 [[familiar]]
-id = "sage"
-display_name = "Sage"
+id = "researcher"
+display_name = "Researcher"
 role = "Research"
 "#,
             )
@@ -477,11 +463,11 @@ role = "Research"
                 home.join("familiars.toml"),
                 r#"
 [[familiar]]
-id = "cody"
+id = "builder"
 access = "full"
 
 [[familiar]]
-id = "sage"
+id = "researcher"
 access = "read-only"
 
 [[familiar]]
@@ -500,8 +486,8 @@ access = "search-only"
     #[test]
     fn familiar_to_agent_definition_threads_access_tier() {
         let fam = CovenFamiliar {
-            id: "Cody".to_string(),
-            display_name: Some("Cody".to_string()),
+            id: "Builder".to_string(),
+            display_name: Some("Builder".to_string()),
             emoji: Some("⚡".to_string()),
             role: Some("Code".to_string()),
             description: Some("Builds and ships.".to_string()),
@@ -509,18 +495,18 @@ access = "search-only"
             access: Some("full".to_string()),
         };
         let (id, def) = familiar_to_agent_definition(&fam);
-        assert_eq!(id, "cody", "id should be lowercased for map keys");
+        assert_eq!(id, "builder", "id should be lowercased for map keys");
         assert_eq!(def.access, "full");
         assert!(def.visible);
         let prompt = def.prompt.as_deref().unwrap_or("");
-        assert!(prompt.contains("Cody"));
+        assert!(prompt.contains("Builder"));
         assert!(prompt.contains("Code"));
     }
 
     #[test]
     fn familiar_to_agent_definition_defaults_to_read_only() {
         let fam = CovenFamiliar {
-            id: "sage".to_string(),
+            id: "researcher".to_string(),
             display_name: None,
             emoji: None,
             role: None,
@@ -714,10 +700,10 @@ access = "read-only"
     }
 
     #[test]
-    fn disallowed_names_never_enter_runtime_agent_map() {
-        // A familiar claiming a reserved agent name (val) and reserved familiar
-        // names (sage / cody) must be filtered out of the merged runtime map,
-        // while a genuinely free name survives.
+    fn globally_disallowed_names_never_enter_runtime_agent_map() {
+        // A familiar claiming a reserved agent name (val) must be filtered out
+        // of the merged runtime map, while declared familiar ids are honored
+        // dynamically instead of blocked by a built-in roster.
         let _g = with_coven_home(|home| {
             fs::write(
                 home.join("familiars.toml"),
@@ -728,13 +714,13 @@ display_name = "Val"
 access = "full"
 
 [[familiar]]
-id = "sage"
-display_name = "Sage"
+id = "researcher"
+display_name = "Researcher"
 access = "full"
 
 [[familiar]]
-id = "cody"
-display_name = "Cody"
+id = "builder"
+display_name = "Builder"
 access = "full"
 
 [[familiar]]
@@ -769,12 +755,12 @@ access = "read-only"
             "valentina (reserved agent, via settings) filtered"
         );
         assert!(
-            !merged.contains_key("sage"),
-            "sage (reserved familiar) filtered"
+            merged.contains_key("researcher"),
+            "declared familiar id survives without a built-in roster"
         );
         assert!(
-            !merged.contains_key("cody"),
-            "cody (reserved familiar) filtered"
+            merged.contains_key("builder"),
+            "declared familiar id survives without a built-in roster"
         );
         assert!(merged.contains_key("willow"), "free name survives");
     }
@@ -783,9 +769,9 @@ access = "read-only"
     fn disallowed_name_helpers_are_case_insensitive() {
         assert!(is_disallowed_agent_name("Val"));
         assert!(is_disallowed_agent_name("  VALENTINA "));
-        assert!(!is_disallowed_agent_name("sage")); // familiar-only ban
-        assert!(is_disallowed_familiar_name("Sage"));
-        assert!(is_disallowed_familiar_name("ECHO"));
+        assert!(!is_disallowed_agent_name("researcher"));
+        assert!(!is_disallowed_familiar_name("Researcher"));
+        assert!(!is_disallowed_familiar_name("BUILDER"));
         assert!(is_disallowed_familiar_name("val")); // agent ban ⊆ familiar ban
         assert!(!is_disallowed_familiar_name("willow"));
     }

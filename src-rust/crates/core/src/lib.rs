@@ -990,8 +990,8 @@ pub mod config {
         #[serde(default)]
         pub agents: HashMap<String, AgentDefinition>,
         /// Active familiar — drives the mascot glyph in the welcome screen.
-        /// Valid values: "kitty" | "nova" | "cody" | "charm" | "sage" | "astra" | "echo".
-        /// Defaults to "kitty" (the Coven Code cat). Set via `"familiar": "nova"` in settings.json.
+        /// Values are user-defined familiar ids from `~/.coven/familiars.toml`.
+        /// Set via `"familiar": "<id>"` in settings.json.
         #[serde(default)]
         pub familiar: Option<String>,
         /// Whether to show the empty-session welcome/splash panel. Defaults to true.

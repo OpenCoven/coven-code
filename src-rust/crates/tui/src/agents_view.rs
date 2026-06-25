@@ -1271,7 +1271,7 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         Style::default().fg(COVEN_CODE_MUTED)
     };
     let source_label = if is_familiar {
-        // e.g. "coven:familiar:nova" -> "Coven Familiar · nova"
+        // e.g. "coven:familiar:researcher" -> "Coven Familiar · researcher"
         let id = def.source.trim_start_matches("coven:familiar:");
         format!("Coven Familiar · {}", id)
     } else {

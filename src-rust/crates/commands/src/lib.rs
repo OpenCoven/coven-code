@@ -10878,9 +10878,9 @@ mod tests {
 
     #[tokio::test]
     async fn familiar_empty_args_uses_saved_roster_only() {
-        let _guard = CommandEnvGuard::with_coven_home(Some("kitty"));
+        let _guard = CommandEnvGuard::with_coven_home(Some("helper"));
         let mut ctx = make_ctx();
-        ctx.config.familiar = Some("kitty".to_string());
+        ctx.config.familiar = Some("helper".to_string());
 
         assert!(current_familiar_roster().is_empty());
 
@@ -10890,7 +10890,7 @@ mod tests {
         match result {
             CommandResult::Message(msg) => {
                 assert!(msg.contains("Current familiar: none"), "{msg}");
-                assert!(!msg.contains("kitty"), "{msg}");
+                assert!(!msg.contains("helper"), "{msg}");
             }
             other => panic!("expected Message, got {other:?}"),
         }
@@ -10898,7 +10898,7 @@ mod tests {
 
     #[tokio::test]
     async fn familiar_auto_without_saved_roster_returns_error() {
-        let _guard = CommandEnvGuard::with_coven_home(Some("sage"));
+        let _guard = CommandEnvGuard::with_coven_home(Some("researcher"));
         let mut ctx = make_ctx();
         ctx.config.familiar = Some("existing".to_string());
 
@@ -10979,16 +10979,16 @@ mod tests {
         let guard = CommandEnvGuard::with_coven_home(None);
         std::fs::write(
             guard.coven_home().join("familiars.toml"),
-            "[[familiar]]\nid = \"nova\"\nrole = \"Queen\"\naccess = \"full\"\n",
+            "[[familiar]]\nid = \"orchestrator\"\nrole = \"Coordinator\"\naccess = \"full\"\n",
         )
         .expect("write roster");
 
         let mut ctx = make_ctx();
         let cmd = find_command("familiar").unwrap();
-        let result = cmd.execute("nova", &mut ctx).await;
+        let result = cmd.execute("orchestrator", &mut ctx).await;
         match result {
             CommandResult::ConfigChangeMessage(cfg, msg) => {
-                assert_eq!(cfg.familiar.as_deref(), Some("nova"));
+                assert_eq!(cfg.familiar.as_deref(), Some("orchestrator"));
                 assert!(msg.contains("[full]"), "{msg}");
             }
             other => panic!("expected ConfigChangeMessage, got {other:?}"),
@@ -11000,7 +11000,7 @@ mod tests {
         let guard = CommandEnvGuard::with_coven_home(None);
         std::fs::write(
             guard.coven_home().join("familiars.toml"),
-            "[[familiar]]\nid = \"sage\"\nrole = \"Research\"\n",
+            "[[familiar]]\nid = \"researcher\"\nrole = \"Research\"\n",
         )
         .expect("write roster");
 
@@ -11011,7 +11011,7 @@ mod tests {
             CommandResult::Message(msg) => {
                 // Access omitted in the roster file → fails closed to read-only,
                 // and the overview must say so.
-                assert!(msg.contains("sage"), "{msg}");
+                assert!(msg.contains("researcher"), "{msg}");
                 assert!(msg.contains("[read-only]"), "{msg}");
             }
             other => panic!("expected Message, got {other:?}"),
@@ -11375,17 +11375,17 @@ mod tests {
         let ledger = r#"{
           "version": 1,
           "calls": [
-            {"id":"a","callerFamiliarId":"nova","calleeFamiliarId":"sage",
+            {"id":"a","callerFamiliarId":"orchestrator","calleeFamiliarId":"researcher",
              "request":"first task","status":"completed","createdAt":"2026-06-07T00:00:00Z"},
-            {"id":"b","callerFamiliarId":"sage","calleeFamiliarId":"kitty",
+            {"id":"b","callerFamiliarId":"researcher","calleeFamiliarId":"helper",
              "request":"second task","status":"running","createdAt":"2026-06-07T00:01:00Z"}
           ]
         }"#;
         std::fs::write(guard.coven_home().join("cave-coven-calls.json"), ledger).unwrap();
         let out = coven_read_calls_ledger(20);
-        assert!(out.contains("nova"));
-        assert!(out.contains("sage"));
-        assert!(out.contains("kitty"));
+        assert!(out.contains("orchestrator"));
+        assert!(out.contains("researcher"));
+        assert!(out.contains("helper"));
         assert!(out.contains("running"));
     }
 

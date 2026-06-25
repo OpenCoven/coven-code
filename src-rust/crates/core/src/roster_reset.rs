@@ -217,7 +217,7 @@ mod tests {
         std::fs::write(project_agents.join("notes.txt"), "keep").expect("project keep");
         std::fs::write(
             coven_home.join("familiars.toml"),
-            "[[familiar]]\nid = \"nova\"\n",
+            "[[familiar]]\nid = \"orchestrator\"\n",
         )
         .expect("familiars");
 
@@ -227,8 +227,8 @@ mod tests {
             .config
             .agents
             .insert("nested".to_string(), test_agent());
-        settings.familiar = Some("nova".to_string());
-        settings.config.familiar = Some("sage".to_string());
+        settings.familiar = Some("orchestrator".to_string());
+        settings.config.familiar = Some("researcher".to_string());
         settings.managed_agents = Some(test_managed_agents());
         settings.config.managed_agents = Some(test_managed_agents());
         settings.save_sync().expect("settings save");
