@@ -654,29 +654,9 @@ impl ModelRegistry {
         // the registry from hijacking well-known models like claude-* or gpt-*.
         let canonical: Option<&'static str> = if model_name.starts_with("claude") {
             Some(ProviderId::ANTHROPIC)
-        } else if model_name.starts_with("gpt-")
-            || model_name.starts_with("o1")
-            || model_name.starts_with("o3")
-            || model_name.starts_with("o4")
-        {
-            Some(ProviderId::OPENAI)
-        } else if model_name.starts_with("gemini") || model_name.starts_with("gemma") {
-            Some(ProviderId::GOOGLE)
-        } else if model_name.starts_with("deepseek") {
-            Some(ProviderId::DEEPSEEK)
-        } else if model_name.starts_with("mistral")
-            || model_name.starts_with("codestral")
-            || model_name.starts_with("pixtral")
-        {
-            Some(ProviderId::MISTRAL)
-        } else if model_name.starts_with("grok") {
-            Some(ProviderId::XAI)
-        } else if model_name.starts_with("command-r") || model_name.starts_with("command-a") {
-            Some(ProviderId::COHERE)
-        } else if model_name.starts_with("sonar") {
-            Some(ProviderId::PERPLEXITY)
-        } else if model_name.starts_with("glm-") {
-            Some(ProviderId::ZAI)
+        } else if model_name.starts_with("gpt-") {
+            // Codex serves the gpt-* models via ChatGPT OAuth.
+            Some(ProviderId::CODEX)
         } else {
             None
         };
@@ -1068,26 +1048,8 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
 
 fn small_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
-        "anthropic" | "amazon-bedrock" | "github-copilot" | "azure" => {
-            &["claude-haiku-4", "claude-haiku-3-5", "claude-haiku"]
-        }
-        "openai" => &["gpt-5-mini", "gpt-4o-mini", "o4-mini", "o3-mini"],
-        "google" => &[
-            "gemini-2.5-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-        ],
-        "deepseek" => &["deepseek-v4-flash", "deepseek-chat"],
-        "mistral" => &["mistral-small", "mistral-nemo"],
-        "xai" => &["grok-3-mini", "grok-2-mini"],
-        "cohere" => &["command-r7b", "command-r"],
-        "groq" => &["llama-3.1-8b", "gemma2-9b"],
-        "openrouter" => &[
-            "anthropic/claude-haiku",
-            "openai/gpt-4o-mini",
-            "google/gemini-2.5-flash",
-        ],
-        "zai" => &["glm-5-turbo", "glm-4.7"],
+        "anthropic" => &["claude-haiku-4", "claude-haiku-3-5", "claude-haiku"],
+        "codex" | "openai" | "openai-codex" => &["gpt-5.1-codex-mini", "gpt-5-mini"],
         _ => &["mini", "haiku", "flash", "lite", "small", "nano"],
     }
 }
@@ -1139,7 +1101,9 @@ mod tests {
     #[test]
     fn well_known_providers_present() {
         let reg = ModelRegistry::new();
-        for pid in ["anthropic", "openai", "google", "openrouter", "groq"] {
+        // The bundled snapshot ships only Anthropic; Codex models are served
+        // from a curated in-code list, not the snapshot.
+        for pid in ["anthropic"] {
             assert!(
                 reg.provider(pid).is_some(),
                 "expected provider {pid} in bundled snapshot"
@@ -1197,13 +1161,10 @@ mod tests {
             reg.find_provider_for_model("claude-sonnet-4-6"),
             Some(ProviderId::new("anthropic"))
         );
+        // gpt-* models are served by Codex via ChatGPT OAuth.
         assert_eq!(
-            reg.find_provider_for_model("gpt-4o"),
-            Some(ProviderId::new("openai"))
-        );
-        assert_eq!(
-            reg.find_provider_for_model("gemini-2.5-pro"),
-            Some(ProviderId::new("google"))
+            reg.find_provider_for_model("gpt-5.2-codex"),
+            Some(ProviderId::new("codex"))
         );
     }
 

@@ -1,7 +1,7 @@
 // device_auth_dialog.rs — Device code / browser-based auth overlay.
 //
-// Provides a modal dialog that shows the device code flow status for GitHub
-// Copilot (RFC 8628) and browser-based OAuth for Anthropic.  The actual
+// Provides a modal dialog that shows the browser-based OAuth status for
+// Claude (Anthropic) and Codex (ChatGPT) sign-in.  The actual
 // network requests run in a background tokio task; this module only owns the
 // display state.
 

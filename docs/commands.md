@@ -181,12 +181,12 @@ List all configured AI providers and their connection status. Shows provider nam
 
 ### /connect
 
-Connect to a remote AI provider or configure a custom provider endpoint. Supports OpenAI-compatible APIs, Anthropic direct, and others.
+Select or reconnect the active provider. Supports Anthropic (Claude) and Codex.
 
 ```
 /connect
 /connect <provider-name>
-/connect openai https://api.openai.com/v1
+/connect anthropic
 ```
 
 ---
@@ -684,7 +684,7 @@ Configure the manager-executor agent architecture, where a manager model delegat
 /familiar managed budget <amount>                       — set total budget in USD (0 to clear)
 ```
 
-Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`). Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
+Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `anthropic/claude-sonnet-4-6`). Configuration persists to `~/.coven-code/settings.json` under `managed_agents`.
 
 > **Preview feature.** Behaviour may change across releases.
 
@@ -1237,5 +1237,5 @@ Some commands are available only under certain account or platform conditions:
 |---------|-------------|
 | `/effort fast` | Available when a fast-mode model is configured for the active provider |
 | `/sandbox` | Functional on macOS, Linux, WSL2 only; no-op on native Windows |
-| `/config voice` | Requires an audio backend plus `OPENAI_API_KEY` or `WHISPER_ENDPOINT_URL` for transcription |
+| `/config voice` | Requires an audio backend plus `WHISPER_ENDPOINT_URL` for transcription |
 | `/chrome` | Requires a running Chrome/Chromium instance launched with remote debugging enabled |

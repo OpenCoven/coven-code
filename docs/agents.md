@@ -67,7 +67,7 @@ coven-code --agent explore "find all usages of the deprecated config API"
 The `--agent` flag can be combined with `--provider` and `--model`:
 
 ```
-coven-code --agent plan --provider openai --model o3 "review this architecture"
+coven-code --agent plan --provider anthropic --model claude-opus-4-6 "review this architecture"
 ```
 
 ---

@@ -435,17 +435,17 @@ mod tests {
                 badge: None,
             },
             SelectItem {
-                id: "openai".into(),
-                title: "OpenAI".into(),
-                description: "GPT models".into(),
+                id: "codex".into(),
+                title: "Codex".into(),
+                description: "gpt-5.2-codex via ChatGPT".into(),
                 category: "Recommended".into(),
                 badge: None,
             },
             SelectItem {
-                id: "ollama".into(),
-                title: "Ollama".into(),
-                description: "Local inference + cloud models".into(),
-                category: "Local".into(),
+                id: "custom".into(),
+                title: "Custom".into(),
+                description: "Custom endpoint".into(),
+                category: "Other".into(),
                 badge: None,
             },
         ]
@@ -500,22 +500,21 @@ mod tests {
         state.open();
         assert_eq!(state.selected().unwrap().id, "anthropic");
         state.move_down();
-        assert_eq!(state.selected().unwrap().id, "openai");
+        assert_eq!(state.selected().unwrap().id, "codex");
         state.move_down();
-        assert_eq!(state.selected().unwrap().id, "ollama");
+        assert_eq!(state.selected().unwrap().id, "custom");
     }
 
     #[test]
     fn filter_reduces_results() {
         let mut state = DialogSelectState::new("Test", sample_items());
         state.open();
-        state.filter_push('l');
-        state.filter_push('o');
+        // Only the Codex entry mentions "ChatGPT".
         state.filter_push('c');
+        state.filter_push('h');
         state.filter_push('a');
-        state.filter_push('l');
-        // Only "Ollama" matches "local"
-        assert_eq!(state.selected().unwrap().id, "ollama");
+        state.filter_push('t');
+        assert_eq!(state.selected().unwrap().id, "codex");
     }
 
     #[test]
@@ -545,7 +544,7 @@ mod tests {
         let mut state = DialogSelectState::new("Test", sample_items());
         state.open();
         state.move_end();
-        assert_eq!(state.selected().unwrap().id, "ollama");
+        assert_eq!(state.selected().unwrap().id, "custom");
         state.move_home();
         assert_eq!(state.selected().unwrap().id, "anthropic");
     }

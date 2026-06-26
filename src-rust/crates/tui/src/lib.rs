@@ -81,9 +81,7 @@ pub mod bridge_state;
 pub mod bypass_permissions_dialog;
 /// Context window and rate-limit visualization overlay (/context).
 pub mod context_viz;
-/// Modal dialog for entering custom provider URL + API key.
-pub mod custom_provider_dialog;
-/// Device code / browser-based auth overlay (GitHub Copilot, Anthropic OAuth).
+/// Device code / browser-based auth overlay (Claude OAuth, Codex login).
 pub mod device_auth_dialog;
 /// Reusable fuzzy-search selection dialog widget.
 pub mod dialog_select;
@@ -111,8 +109,6 @@ pub mod figures;
 pub mod file_injection;
 /// File injection warning dialog (shown when oversized files detected).
 pub mod file_injection_dialog;
-/// Setup dialog for the composite "Free" provider (Zen → OpenRouter).
-pub mod free_mode_dialog;
 /// Coven familiar handoff command support.
 pub mod handoff;
 /// Read-only hooks configuration browser.
@@ -196,9 +192,6 @@ pub use app::{try_copy_to_clipboard, App};
 pub use bypass_permissions_dialog::{
     render_bypass_permissions_dialog, BypassPermissionsDialogState,
 };
-pub use custom_provider_dialog::{
-    render_custom_provider_dialog, CustomProviderDialogState, CustomProviderField,
-};
 pub use dialog_select::{render_dialog_select, DialogSelectState, SelectItem};
 pub use diff_viewer::{
     load_git_diff, parse_unified_diff, render_diff_dialog, DiffPane, DiffType, DiffViewerState,
@@ -208,7 +201,6 @@ pub use elicitation_dialog::{
     ElicitationResult,
 };
 pub use feedback_survey::{FeedbackResponse, FeedbackSurveyStage, FeedbackSurveyState};
-pub use free_mode_dialog::{render_free_mode_dialog, FreeModeDialogState, FreeModeField};
 pub use hooks_config_menu::{HookEntry, HooksConfigMenuState};
 pub use import_config_dialog::{render_import_config_dialog, ImportConfigDialogState};
 pub use input::{is_slash_command, parse_slash_command};
@@ -896,12 +888,13 @@ mod tests {
         assert_eq!(app.prompt_input.text, "src/main.rs:42");
     }
 
-    /// Welcome-screen status block snapshot test. Confirms that the
-    /// "Model:", "Provider:", "Daemon:", and "Familiar: <id>"
-    /// lines all reach the rendered buffer. These are the audit-flagged
-    /// first-screen affordances that prove a user can see, in under a
-    /// second, what model/provider/familiar they have configured and
-    /// whether the daemon is reachable.
+    /// Welcome-panel affordance snapshot test. The two-column welcome box
+    /// surfaces — at a glance, in under a second — the active model, the
+    /// provider, and daemon reachability. This guards those first-screen
+    /// affordances against regressions in the redesigned layout. (The
+    /// familiar is shown as an avatar in the full box and as a "Familiar:"
+    /// label in the narrow fallback, which is covered separately by
+    /// `welcome_small_terminal_fallback_carries_status_signals`.)
     #[test]
     fn welcome_screen_renders_status_block_with_key_affordances() {
         let backend = TestBackend::new(120, 24);
@@ -920,12 +913,27 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("");
-        for needle in ["Status", "Model:", "Provider:", "Daemon:", "Familiar:"] {
-            assert!(
-                rendered.contains(needle),
-                "welcome status block is missing {needle:?}.\n--- rendered buffer ---\n{rendered}"
-            );
-        }
+        // Header.
+        assert!(
+            rendered.contains("Coven Code"),
+            "welcome box is missing the Coven Code header.\n--- rendered buffer ---\n{rendered}"
+        );
+        // Provider (a fresh app defaults to Claude / Anthropic).
+        assert!(
+            rendered.contains("Anthropic"),
+            "welcome box is missing the provider label.\n--- rendered buffer ---\n{rendered}"
+        );
+        // Active model family (default model is a Claude Opus variant).
+        assert!(
+            rendered.contains("Opus"),
+            "welcome box is missing the model label.\n--- rendered buffer ---\n{rendered}"
+        );
+        // Daemon reachability, shown as the online/offline state on the
+        // provider line.
+        assert!(
+            rendered.contains("online") || rendered.contains("offline"),
+            "welcome box is missing daemon reachability.\n--- rendered buffer ---\n{rendered}"
+        );
     }
 
     /// Small-terminal fallback: when the welcome area is too short for

@@ -129,74 +129,13 @@ impl AuthStore {
                     return Some(key.clone());
                 }
                 StoredCredential::ApiKey { .. } => {}
-                StoredCredential::OAuthToken {
-                    access, refresh, ..
-                } if provider_id == "github-copilot" => {
-                    if !refresh.is_empty() {
-                        return Some(refresh.clone());
-                    }
-                    if !access.is_empty() {
-                        return Some(access.clone());
-                    }
-                }
                 _ => {}
             }
         }
         // Fall back to environment variable.
-        //
-        // These mappings must match the env var each provider's adapter
-        // actually reads in `crates/api/src/providers/openai_compat_providers.rs`
-        // (and the bespoke adapters next to it). When they drift, keys that
-        // were exported via env vars look "configured" to the dialog but
-        // resolve to empty at request time. If you add a provider there,
-        // mirror its env var here.
         let env_var = match provider_id {
             "anthropic" => "ANTHROPIC_API_KEY",
-            "openai" => "OPENAI_API_KEY",
-            "google" => "GOOGLE_API_KEY",
-            "groq" => "GROQ_API_KEY",
-            "cerebras" => "CEREBRAS_API_KEY",
-            "deepseek" => "DEEPSEEK_API_KEY",
-            "mistral" => "MISTRAL_API_KEY",
-            "xai" => "XAI_API_KEY",
-            "openrouter" => "OPENROUTER_API_KEY",
-            "togetherai" | "together-ai" => "TOGETHER_API_KEY",
-            "perplexity" => "PERPLEXITY_API_KEY",
-            "cohere" => "COHERE_API_KEY",
-            "deepinfra" => "DEEPINFRA_API_KEY",
-            "venice" => "VENICE_API_KEY",
-            "github-copilot" => "GITHUB_TOKEN",
-            "azure" => "AZURE_API_KEY",
-            "huggingface" => "HF_TOKEN",
-            "nvidia" => "NVIDIA_API_KEY",
-            "zai" => "ZAI_API_KEY",
-            "opencode-zen" | "opencode-go" => "OPENCODE_API_KEY",
-            "crof" => "CROF_API_KEY",
-            "sambanova" => "SAMBANOVA_API_KEY",
-            // qwen adapter reads DASHSCOPE_API_KEY (Alibaba's DashScope is the
-            // backing service), not QWEN_API_KEY.
-            "qwen" | "alibaba" => "DASHSCOPE_API_KEY",
-            "moonshot" | "moonshotai" => "MOONSHOT_API_KEY",
-            "zhipu" | "zhipuai" => "ZHIPU_API_KEY",
-            "siliconflow" => "SILICONFLOW_API_KEY",
-            "nebius" => "NEBIUS_API_KEY",
-            "novita" => "NOVITA_API_KEY",
-            "ovhcloud" => "OVHCLOUD_API_KEY",
-            "scaleway" => "SCALEWAY_API_KEY",
-            "vultr" | "vultr-ai" => "VULTR_API_KEY",
-            "baseten" => "BASETEN_API_KEY",
-            // friendli adapter reads FRIENDLI_TOKEN (Friendli's docs use that
-            // name), not FRIENDLI_API_KEY.
-            "friendli" => "FRIENDLI_TOKEN",
-            "upstage" => "UPSTAGE_API_KEY",
-            "stepfun" => "STEPFUN_API_KEY",
-            "fireworks" => "FIREWORKS_API_KEY",
-            "minimax" => "MINIMAX_API_KEY",
-            "synthetic" => "SYNTHETIC_API_KEY",
-            "routing" => "ROUTING_API_KEY",
-            "neuralwatt" => "NEURALWATT_API_KEY",
-            "custom-openai" => "CUSTOM_OPENAI_API_KEY",
-            "ollama" | "lm-studio" | "llama-cpp" => "", // No API key required
+            "openai" | "codex" | "openai-codex" => "OPENAI_API_KEY",
             _ => return None,
         };
         if env_var.is_empty() {
@@ -212,34 +151,16 @@ mod tests {
     use super::{AuthStore, StoredCredential};
 
     #[test]
-    fn github_copilot_oauth_prefers_refresh_token() {
-        let mut store = AuthStore::default();
-        store.credentials.insert(
-            "github-copilot".to_string(),
-            StoredCredential::OAuthToken {
-                access: "access-token".to_string(),
-                refresh: "refresh-token".to_string(),
-                expires: 0,
-            },
-        );
-
-        assert_eq!(
-            store.api_key_for("github-copilot").as_deref(),
-            Some("refresh-token")
-        );
-    }
-
-    #[test]
     fn api_key_for_regular_provider_uses_stored_key() {
         let mut store = AuthStore::default();
         store.credentials.insert(
-            "openrouter".to_string(),
+            "anthropic".to_string(),
             StoredCredential::ApiKey {
-                key: "or-key".to_string(),
+                key: "sk-ant-key".to_string(),
             },
         );
 
-        assert_eq!(store.api_key_for("openrouter").as_deref(), Some("or-key"));
+        assert_eq!(store.api_key_for("anthropic").as_deref(), Some("sk-ant-key"));
     }
 
     /// Atomic save: a concurrent racer that creates the file mid-flight

@@ -188,12 +188,8 @@ impl ModelPickerState {
                 // Bare model name — detect provider from model name
                 if m.contains("claude") {
                     "anthropic".to_string()
-                } else if m.starts_with("gpt") || m.starts_with("o3") || m.starts_with("o4") {
-                    "openai".to_string()
-                } else if m.contains("gemini") {
-                    "google".to_string()
-                } else if m.contains("minimax") {
-                    "minimax".to_string()
+                } else if m.starts_with("gpt") {
+                    "codex".to_string()
                 } else {
                     "other".to_string()
                 }
@@ -202,16 +198,14 @@ impl ModelPickerState {
         }
 
         // Define display order
-        let order = ["anthropic", "openai", "google", "ollama", "other"];
+        let order = ["anthropic", "codex", "other"];
         let mut sections = Vec::new();
         for provider in order {
             if let Some(models) = by_provider.remove(provider) {
                 sections.push(ProviderSection {
                     provider_name: match provider {
                         "anthropic" => "ANTHROPIC".to_string(),
-                        "openai" => "OPENAI".to_string(),
-                        "google" => "GOOGLE".to_string(),
-                        "ollama" => "OLLAMA".to_string(),
+                        "codex" => "CODEX".to_string(),
                         _ => provider.to_uppercase(),
                     },
                     models,
@@ -269,13 +263,6 @@ pub fn models_for_provider_from_registry(
     provider_id: &str,
     registry: &claurst_api::ModelRegistry,
 ) -> Vec<ModelEntry> {
-    // "free" is the composite Zen → OpenRouter provider; the upstream
-    // models.dev catalog has nothing under this id, so serve a curated list
-    // directly.  `free/auto` is the default routing entry; the rest pin a
-    // specific upstream model for users who care.
-    if provider_id == "free" {
-        return free_provider_models();
-    }
     // Codex (ChatGPT-authenticated OpenAI) is not in the models.dev catalog —
     // serve the curated CODEX_MODELS list so the picker isn't empty.
     if provider_id == "codex" {
@@ -334,18 +321,11 @@ pub fn models_for_provider_from_registry(
 /// placeholder for unknown providers.
 ///
 /// **Anthropic exception** — anthropic models are emitted bare (no
-/// `anthropic/` prefix) for backward-compatibility with config files that
-/// pre-date the multi-provider era.
-///
-/// **Free exception** — the composite Zen → OpenRouter provider ships with
-/// a synthetic `free/auto` default that the wrapper translates per upstream.
+/// `anthropic/` prefix) for backward-compatibility with older config files.
 pub fn default_model_for_provider(
     provider_id: &str,
     registry: &claurst_api::ModelRegistry,
 ) -> String {
-    if provider_id == "free" {
-        return "free/auto".to_string();
-    }
     if let Some(best) = registry.best_model_for_provider(provider_id) {
         if provider_id == "anthropic" {
             best
@@ -377,29 +357,6 @@ fn codex_provider_models() -> Vec<ModelEntry> {
             }
         })
         .collect()
-}
-
-/// Curated free-mode model list used by `models_for_provider_from_registry`.
-/// Always shows `free/auto` first; one pin entry per catalog upstream so the
-/// user can target a specific provider when they need to.
-fn free_provider_models() -> Vec<ModelEntry> {
-    let mut entries = vec![ModelEntry {
-        id: "free/auto".to_string(),
-        display_name: "Auto (round-robin across configured providers)".to_string(),
-        description: "stacks every free-tier key you've added · $0.00 per M".to_string(),
-        is_current: false,
-    }];
-
-    for upstream in claurst_api::FREE_CATALOG {
-        entries.push(ModelEntry {
-            id: format!("{}/{}", upstream.id, upstream.default_model),
-            display_name: format!("{} \u{2014} {}", upstream.title, upstream.default_model),
-            description: format!("{} · $0.00 per M", upstream.note),
-            is_current: false,
-        });
-    }
-
-    entries
 }
 
 /// State for the /model picker overlay.
@@ -1243,18 +1200,16 @@ mod tests {
     }
 
     #[test]
-    fn models_for_provider_openai() {
+    fn models_for_provider_codex() {
         let registry = claurst_api::ModelRegistry::new();
-        let models = models_for_provider_from_registry("openai", &registry);
+        let models = models_for_provider_from_registry("codex", &registry);
         assert!(!models.is_empty());
         // Must NOT contain Claude models
         assert!(!models.iter().any(|m| m.id.contains("claude")));
-        // Should contain at least one gpt-* or o-series id
+        // Should expose the curated gpt-*-codex model list.
         assert!(
-            models.iter().any(|m| m.id.starts_with("gpt-")
-                || m.id.starts_with("o3")
-                || m.id.starts_with("o4")),
-            "openai should expose at least one gpt/o-series model"
+            models.iter().any(|m| m.id.starts_with("gpt-")),
+            "codex should expose at least one gpt-* model"
         );
     }
 

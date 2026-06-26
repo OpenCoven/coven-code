@@ -1,7 +1,7 @@
 // device_code.rs — GitHub Device Code Flow (RFC 8628).
 //
 // Provides helpers for initiating a device authorization request and polling
-// for the resulting access token.  Used primarily for GitHub Copilot auth.
+// for the resulting access token.
 
 use serde::Deserialize;
 

@@ -9,7 +9,6 @@ use crate::app::{
 use crate::ask_user_dialog::render_ask_user_dialog;
 use crate::bypass_permissions_dialog::render_bypass_permissions_dialog;
 use crate::context_viz::render_context_viz;
-use crate::custom_provider_dialog::render_custom_provider_dialog;
 use crate::device_auth_dialog::render_device_auth_dialog;
 use crate::dialog_select::render_dialog_select;
 use crate::dialogs::{render_mcp_approval_dialog, render_permission_dialog};
@@ -704,17 +703,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_key_input_dialog(frame, &app.key_input_dialog, size);
     }
 
-    // Custom provider URL + API key dialog.
-    if app.custom_provider_dialog.visible {
-        render_custom_provider_dialog(frame, &app.custom_provider_dialog, size);
-    }
-
-    // "Free" composite-provider setup dialog (Zen + OpenRouter).
-    if app.free_mode_dialog.visible {
-        crate::free_mode_dialog::render_free_mode_dialog(frame, &app.free_mode_dialog, size);
-    }
-
-    // Device code / browser auth dialog (GitHub Copilot, Anthropic OAuth)
+    // Device code / browser auth dialog (Claude OAuth, Codex login)
     if app.device_auth_dialog.visible {
         render_device_auth_dialog(frame, &app.device_auth_dialog, size);
     }

@@ -1,6 +1,6 @@
 # Coven Code
 
-**Coven Code** is an open-source, multi-provider agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
+**Coven Code** is an open-source agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
 > **Attribution:** Coven Code is derived from Claurst v0.0.34 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
 
@@ -8,19 +8,18 @@
 
 ## What it is
 
-Multi-provider terminal coding agent with a rich ratatui TUI: chat forking, memory consolidation, diff viewer, plugin system, MCP support, session branching, and a mascot companion. No telemetry, no tracking.
+Terminal coding agent with a rich ratatui TUI: chat forking, memory consolidation, diff viewer, plugin system, MCP support, session branching, and a mascot companion. No telemetry, no tracking.
 
-**Supported providers:** Anthropic (Claude), OpenAI, Google (Gemini), Groq, Ollama, LM Studio, llama.cpp, OpenRouter, AWS Bedrock, Google Vertex, and any OpenAI-compatible endpoint.
+**Supported providers:** Anthropic (Claude) and Codex (OpenAI Codex via ChatGPT/Codex login).
 
 ---
 
 ## Status
 
-> **Beta (v0.0.34).** Core agent, multi-provider routing, and TUI are stable for daily use. Experimental features are flagged below.
+> **Beta (v0.0.34).** Core agent, provider routing, and TUI are stable for daily use. Experimental features are flagged below.
 
 Recent highlights:
 - **/share** — share sessions via unlisted GitHub Gists `[EXPERIMENTAL]`
-- **Free Mode** — try `/connect` for a free-tier agentic coding experience `[EXPERIMENTAL]`
 - **/goal** — `/goal <objective>` keeps the agent working across multiple turns `[EXPERIMENTAL]`
 - **/coven** — drive the local [Coven daemon](https://github.com/OpenCoven/coven) (sessions, harness runs, rituals) without leaving the TUI. `/coven` is the unified replacement for `coven-cli`'s interactive menu and the legacy `coven-tui` slash shell; when `coven-code` is on `PATH`, `coven` and `coven tui` exec into it automatically (opt out with `COVEN_LEGACY_TUI=1`). Run `/coven help` for the subcommand list.
 
@@ -31,7 +30,7 @@ Recent highlights:
 | Requirement        | Notes                                           |
 | ------------------ | ----------------------------------------------- |
 | **Node.js 18+**    | Required for the npm package                    |
-| **An API key**     | For whichever provider you want to use          |
+| **Credentials**    | An Anthropic API key (or OAuth login), or a Codex login |
 
 ---
 
@@ -85,8 +84,8 @@ cargo build --release --package claurst   # binary outputs as coven-code; coven-
 
 | Flag | Short | Description |
 |---|---|---|
-| `--model <MODEL>` | `-m` | Model to use (e.g. `claude-sonnet-4-5`, `gpt-4o`) |
-| `--provider <PROVIDER>` | | LLM provider: `anthropic`, `openai`, `ollama`, `groq`, etc. (env: `COVEN_CODE_PROVIDER`) |
+| `--model <MODEL>` | `-m` | Model to use (e.g. `claude-sonnet-4-6`, `claude-opus-4-6`) |
+| `--provider <PROVIDER>` | | LLM provider: `anthropic` or `codex` (env: `COVEN_CODE_PROVIDER`) |
 | `--resume [<ID>]` | | Resume a previous session by ID; omit ID to resume the most recent |
 | `--print` | `-p` | Print mode: send prompt and exit (non-interactive / headless) |
 | `--permission-mode <MODE>` | | `default`, `accept-edits`, `bypass-permissions`, or `plan` |
@@ -107,9 +106,9 @@ cargo build --release --package claurst   # binary outputs as coven-code; coven-
 
 ## Configuration
 
-Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own API key for whichever provider you use. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
+Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own Anthropic API key or Codex login. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
 
-Settings live in `~/.coven-code/settings.json`. Set your provider key in the environment or via `/config`:
+Settings live in `~/.coven-code/settings.json`. Set your Anthropic key in the environment or via `/config`:
 
 ```bash
 export ANTHROPIC_API_KEY=<your-key>
@@ -123,10 +122,11 @@ export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=<registered-client-id>
 coven-code auth login
 ```
 
-Or use a local model with no key at all:
+Or sign in to Codex with your ChatGPT/Codex subscription:
 
 ```bash
-coven-code --provider ollama
+coven-code codex login
+coven-code --provider codex
 ```
 
 Environment variable prefix: `COVEN_CODE_*` (e.g. `COVEN_CODE_SKIP_PROMPT_HISTORY=1`).
@@ -140,9 +140,9 @@ See [docs/providers.md](docs/providers.md) for the full provider reference.
 Quick example:
 
 ```bash
-coven-code --provider openai "refactor this module"
-coven-code --provider ollama "explain this function"
-coven-code --provider groq --model llama-3.3-70b-versatile "write tests"
+coven-code --provider anthropic "refactor this module"
+coven-code --provider codex "explain this function"
+coven-code --model claude-opus-4-6 "write tests"
 ```
 
 ---

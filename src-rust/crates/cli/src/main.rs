@@ -259,7 +259,7 @@ struct Cli {
     #[arg(long = "fallback-model")]
     fallback_model: Option<String>,
 
-    /// LLM provider to use (default: anthropic). Examples: openai, google, ollama
+    /// LLM provider to use (default: anthropic). Supported: anthropic, codex
     #[arg(long, env = "COVEN_CODE_PROVIDER")]
     provider: Option<String>,
 
@@ -764,12 +764,7 @@ async fn main() -> anyhow::Result<()> {
                 .parse()
                 .expect("valid rmcp directive"),
         )
-        // Suppress error/warn logs from providers and query — errors are already shown as error modals
-        .add_directive(
-            "claurst_api::providers::free=off"
-                .parse()
-                .expect("valid directive"),
-        )
+        // Suppress error/warn logs from query — errors are already shown as error modals
         .add_directive("claurst_query=off".parse().expect("valid directive"));
     tracing_subscriber::fmt()
         .with_env_filter(log_filter)
@@ -887,10 +882,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize API client.
     // Try config/env first; fall back to saved OAuth tokens.
-    // If no Anthropic credentials are found, check whether any other provider is
-    // configured (OpenAI, Google, Ollama, Groq, etc.) — if so, proceed without
-    // requiring Anthropic auth. Only launch the OAuth flow when Anthropic is
-    // explicitly the intended provider and no key exists at all.
+    // If no Anthropic credentials are found and Codex is the active provider,
+    // proceed without requiring Anthropic auth. Only launch the OAuth flow when
+    // Anthropic is explicitly the intended provider and no key exists at all.
     let active_provider = config.selected_provider_id();
     let (api_key, use_bearer_auth) = if active_provider == "anthropic" {
         match config.resolve_anthropic_auth_async().await {
@@ -899,12 +893,9 @@ async fn main() -> anyhow::Result<()> {
                 if is_headless {
                     anyhow::bail!(
                         "No API key found. Options:\n\
-                         - Set ANTHROPIC_API_KEY for Anthropic\n\
-                         - Set OPENAI_API_KEY for OpenAI\n\
-                         - Set GOOGLE_API_KEY for Google Gemini\n\
-                         - Set GROQ_API_KEY for Groq (fast, free tier available)\n\
-                         - Run `coven-code --provider ollama` for local models (no key needed)\n\
-                         - Configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, then run `coven-code auth login` for first-party Anthropic OAuth"
+                         - Set ANTHROPIC_API_KEY for Claude\n\
+                         - Configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, then run `coven-code auth login` to sign in to Claude\n\
+                         - Run `coven-code auth login --provider codex` to sign in to Codex with ChatGPT"
                     );
                 } else {
                     (String::new(), false)
@@ -926,11 +917,9 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to create API client")?,
     );
 
-    // Build provider registry: auto-registers all env-configured providers
-    // AND providers with keys stored in ~/.coven-code/auth.json (from /connect).
-    // Anthropic is always the default; additional providers (OpenAI, Google,
-    // Bedrock, Azure, Copilot, Cohere, local providers) are registered when
-    // their respective environment variables or auth store entries are found.
+    // Build provider registry: registers Claude (Anthropic) plus Codex when its
+    // OAuth tokens are present in ~/.coven-code/auth.json (from /connect).
+    // Anthropic is always the default.
     let provider_registry = claurst_api::ProviderRegistry::from_config(&config, client_config);
 
     let bridge_config = resolve_bridge_config(&settings, &api_key, use_bearer_auth, is_headless);
@@ -4066,56 +4055,6 @@ async fn run_interactive(
         if let Some(provider_id) = app.device_auth_pending.take() {
             let _tx = device_auth_tx.clone();
             match provider_id.as_str() {
-                "github-copilot" => {
-                    let tx2 = device_auth_tx.clone();
-                    // Use the OpenCode Copilot OAuth app (Ov23li8tweQw6odWQebz)
-                    // which is registered and authorised for the Copilot API.
-                    // Tokens from an unregistered app get "model not supported"
-                    // on every model.
-                    const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
-                    tokio::spawn(async move {
-                        // Step 1: Request device code
-                        match claurst_core::device_code::request_device_code(
-                            COPILOT_CLIENT_ID,
-                            "read:user",
-                            "https://github.com/login/device/code",
-                        )
-                        .await
-                        {
-                            Ok(resp) => {
-                                let _ = tx2
-                                    .send(DeviceAuthEvent::GotCode {
-                                        user_code: resp.user_code,
-                                        verification_uri: resp.verification_uri,
-                                        device_code: resp.device_code.clone(),
-                                        interval: resp.interval,
-                                    })
-                                    .await;
-                                // Step 2: Poll for access token
-                                match claurst_core::device_code::poll_for_token(
-                                    COPILOT_CLIENT_ID,
-                                    &resp.device_code,
-                                    "https://github.com/login/oauth/access_token",
-                                    resp.interval,
-                                    300,
-                                )
-                                .await
-                                {
-                                    Ok(token) => {
-                                        let _ =
-                                            tx2.send(DeviceAuthEvent::TokenReceived(token)).await;
-                                    }
-                                    Err(e) => {
-                                        let _ = tx2.send(DeviceAuthEvent::Error(e)).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = tx2.send(DeviceAuthEvent::Error(e)).await;
-                            }
-                        }
-                    });
-                }
                 "anthropic" | "anthropic-oauth" => {
                     let tx2 = device_auth_tx.clone();
                     // Anthropic subscription OAuth needs a registered Coven Code
@@ -4979,13 +4918,7 @@ fn remove_account(provider: &str, display_name: &str, id: &str) -> ! {
 
 fn provider_status_lookup_keys(provider_id: &str) -> Vec<&str> {
     match provider_id {
-        "togetherai" | "together-ai" => vec!["togetherai", "together-ai"],
-        "lmstudio" | "lm-studio" => vec!["lmstudio", "lm-studio"],
-        "llamacpp" | "llama-cpp" | "llama-server" => vec!["llamacpp", "llama-cpp", "llama-server"],
-        "moonshot" | "moonshotai" => vec!["moonshot", "moonshotai"],
-        "zhipu" | "zhipuai" => vec!["zhipu", "zhipuai"],
-        "vultr" | "vultr-ai" => vec!["vultr", "vultr-ai"],
-        "google" | "google-vertex" => vec!["google", "google-vertex"],
+        "codex" | "openai-codex" => vec!["codex", "openai-codex"],
         _ => vec![provider_id],
     }
 }
@@ -4993,13 +4926,7 @@ fn provider_status_lookup_keys(provider_id: &str) -> Vec<&str> {
 fn format_provider_name(provider_id: &str) -> String {
     match provider_id {
         "anthropic" => "Anthropic".to_string(),
-        "openai" => "OpenAI".to_string(),
-        "google" => "Google".to_string(),
-        "google-vertex" => "Google Vertex".to_string(),
-        "github-copilot" => "GitHub Copilot".to_string(),
-        "xai" => "xAI".to_string(),
-        "lmstudio" | "lm-studio" => "LM Studio".to_string(),
-        "llamacpp" | "llama-cpp" | "llama-server" => "llama.cpp".to_string(),
+        "codex" | "openai-codex" => "Codex".to_string(),
         other => other
             .split('-')
             .map(|part| {
@@ -5046,7 +4973,7 @@ async fn auth_status(json_output: bool) {
             }
             Some(claurst_core::StoredCredential::OAuthToken {
                 access, refresh, ..
-            }) if active_provider == "github-copilot"
+            }) if (active_provider == "codex" || active_provider == "openai-codex")
                 && (!access.is_empty() || !refresh.is_empty()) =>
             {
                 Some("stored token".to_string())

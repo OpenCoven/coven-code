@@ -143,10 +143,6 @@ pub enum SystemPromptPrefix {
     /// The CLI preset running within the Agent SDK
     /// (non-interactive + append_system_prompt set).
     SdkPreset,
-    /// Running on Vertex AI.
-    Vertex,
-    /// Running on AWS Bedrock.
-    Bedrock,
     /// Remote / headless CCR session.
     Remote,
 }
@@ -154,17 +150,6 @@ pub enum SystemPromptPrefix {
 impl SystemPromptPrefix {
     /// Detect from environment variables, mirroring `getCLISyspromptPrefix`.
     pub fn detect(is_non_interactive: bool, has_append_system_prompt: bool) -> Self {
-        // Vertex: always uses the default prefix.
-        if std::env::var("ANTHROPIC_VERTEX_PROJECT_ID").is_ok()
-            || std::env::var("CLOUD_ML_PROJECT_ID").is_ok()
-        {
-            return Self::Vertex;
-        }
-
-        if std::env::var("AWS_BEDROCK_MODEL_ID").is_ok() {
-            return Self::Bedrock;
-        }
-
         if std::env::var("COVEN_CODE_REMOTE").is_ok() {
             return Self::Remote;
         }
@@ -183,7 +168,7 @@ impl SystemPromptPrefix {
     /// The opening attribution string for this prefix variant.
     pub fn attribution_text(self) -> &'static str {
         match self {
-            Self::Cli | Self::Vertex | Self::Bedrock | Self::Remote => {
+            Self::Cli | Self::Remote => {
                 "You are Coven Code, an open-source agentic coding assistant by OpenCoven (based on Claurst/GPL-3.0)."
             }
             Self::SdkPreset => {

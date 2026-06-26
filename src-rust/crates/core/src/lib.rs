@@ -678,47 +678,7 @@ pub mod config {
     pub fn api_key_env_vars_for_provider(provider_id: &str) -> &'static [&'static str] {
         match provider_id {
             "anthropic" => &["ANTHROPIC_API_KEY"],
-            "openai" => &["OPENAI_API_KEY"],
-            "google" | "google-vertex" => &["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
-            "github-copilot" => &["GITHUB_TOKEN"],
-            "groq" => &["GROQ_API_KEY"],
-            "cerebras" => &["CEREBRAS_API_KEY"],
-            "sambanova" => &["SAMBANOVA_API_KEY"],
-            "deepseek" => &["DEEPSEEK_API_KEY"],
-            "mistral" => &["MISTRAL_API_KEY"],
-            "openrouter" => &["OPENROUTER_API_KEY"],
-            "togetherai" | "together-ai" => &["TOGETHER_API_KEY"],
-            "perplexity" => &["PERPLEXITY_API_KEY"],
-            "cohere" => &["COHERE_API_KEY"],
-            "xai" => &["XAI_API_KEY"],
-            "deepinfra" => &["DEEPINFRA_API_KEY"],
-            "azure" => &["AZURE_API_KEY"],
-            "gitlab" => &["GITLAB_TOKEN"],
-            "huggingface" => &["HF_TOKEN"],
-            "nvidia" => &["NVIDIA_API_KEY"],
-            "alibaba" | "qwen" => &["DASHSCOPE_API_KEY"],
-            "venice" => &["VENICE_API_KEY"],
-            "moonshot" | "moonshotai" => &["MOONSHOT_API_KEY"],
-            "zhipu" | "zhipuai" => &["ZHIPU_API_KEY"],
-            "zai" => &["ZAI_API_KEY"],
-            "siliconflow" => &["SILICONFLOW_API_KEY"],
-            "nebius" => &["NEBIUS_API_KEY"],
-            "novita" => &["NOVITA_API_KEY"],
-            "minimax" => &["MINIMAX_API_KEY"],
-            "ovhcloud" => &["OVHCLOUD_API_KEY"],
-            "scaleway" => &["SCALEWAY_API_KEY"],
-            "vultr" | "vultr-ai" => &["VULTR_API_KEY"],
-            "baseten" => &["BASETEN_API_KEY"],
-            "friendli" => &["FRIENDLI_TOKEN"],
-            "upstage" => &["UPSTAGE_API_KEY"],
-            "stepfun" => &["STEPFUN_API_KEY"],
-            "fireworks" => &["FIREWORKS_API_KEY"],
-            "cloudflare" | "cloudflare-ai-gateway" | "cloudflare-workers-ai" => {
-                &["CLOUDFLARE_API_TOKEN"]
-            }
-            "vercel" => &["AI_GATEWAY_API_KEY"],
-            "helicone" => &["HELICONE_API_KEY"],
-            "sap" | "sap-ai-core" => &["AICORE_SERVICE_KEY"],
+            "openai" | "codex" | "openai-codex" => &["OPENAI_API_KEY"],
             _ => &[],
         }
     }
@@ -730,11 +690,7 @@ pub mod config {
     pub fn api_base_env_var_for_provider(provider_id: &str) -> Option<&'static str> {
         match provider_id {
             "anthropic" => Some("ANTHROPIC_BASE_URL"),
-            "openai" => Some("OPENAI_BASE_URL"),
-            "minimax" => Some("MINIMAX_BASE_URL"),
-            "ollama" => Some("OLLAMA_HOST"),
-            "lmstudio" | "lm-studio" => Some("LM_STUDIO_HOST"),
-            "llamacpp" | "llama-cpp" | "llama-server" => Some("LLAMA_CPP_HOST"),
+            "openai" | "codex" | "openai-codex" => Some("OPENAI_BASE_URL"),
             _ => None,
         }
     }
@@ -742,11 +698,7 @@ pub mod config {
     pub fn default_api_base_for_provider(provider_id: &str) -> Option<&'static str> {
         match provider_id {
             "anthropic" => Some(crate::constants::ANTHROPIC_API_BASE),
-            "openai" => Some("https://api.openai.com"),
-            "minimax" => Some("https://api.minimax.io/anthropic"),
-            "ollama" => Some("http://localhost:11434"),
-            "lmstudio" | "lm-studio" => Some("http://localhost:1234"),
-            "llamacpp" | "llama-cpp" | "llama-server" => Some("http://localhost:8080"),
+            "openai" | "codex" | "openai-codex" => Some("https://api.openai.com"),
             _ => None,
         }
     }
@@ -865,37 +817,19 @@ pub mod config {
                 max_concurrent_executors: 6,
             },
             ManagedAgentPreset {
-                name: "google-tiered",
-                label: "Google Tiered",
-                description: "Gemini 2.5 Pro manages, Flash executes",
-                manager_model: "google/gemini-2.5-pro",
-                executor_model: "google/gemini-2.5-flash",
+                name: "codex-tiered",
+                label: "Codex Tiered",
+                description: "gpt-5.2-codex manages, gpt-5.1-codex-mini executes",
+                manager_model: "codex/gpt-5.2-codex",
+                executor_model: "codex/gpt-5.1-codex-mini",
                 executor_max_turns: 10,
                 max_concurrent_executors: 4,
             },
             ManagedAgentPreset {
-                name: "cross-opus-flash",
-                label: "Cross: Opus + Flash",
-                description: "Anthropic Opus manages, Google Flash executes (cheapest executors)",
-                manager_model: "anthropic/claude-opus-4-8",
-                executor_model: "google/gemini-2.5-flash",
-                executor_max_turns: 10,
-                max_concurrent_executors: 6,
-            },
-            ManagedAgentPreset {
-                name: "openai-tiered",
-                label: "OpenAI Tiered",
-                description: "o3 manages, gpt-4o executes",
-                manager_model: "openai/o3",
-                executor_model: "openai/gpt-4o",
-                executor_max_turns: 10,
-                max_concurrent_executors: 4,
-            },
-            ManagedAgentPreset {
-                name: "cross-openai-anthropic",
-                label: "Cross: OpenAI + Anthropic",
-                description: "o3 manages, Sonnet 4.6 executes",
-                manager_model: "openai/o3",
+                name: "cross-codex-anthropic",
+                label: "Cross: Codex + Claude",
+                description: "gpt-5.2-codex manages, Sonnet 4.6 executes",
+                manager_model: "codex/gpt-5.2-codex",
                 executor_model: "anthropic/claude-sonnet-4-6",
                 executor_max_turns: 10,
                 max_concurrent_executors: 4,
@@ -1340,28 +1274,7 @@ pub mod config {
                 return m;
             }
             match self.provider.as_deref() {
-                Some("openai") => "gpt-4o",
-                Some("google") => "gemini-2.5-flash",
-                Some("groq") => "llama-3.3-70b-versatile",
-                Some("cerebras") => "llama-3.3-70b",
-                Some("deepseek") => "deepseek-v4-pro",
-                Some("mistral") => "mistral-large-latest",
-                Some("xai") => "grok-2",
-                Some("openrouter") => "anthropic/claude-sonnet-4",
-                Some("togetherai") | Some("together-ai") => {
-                    "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-                }
-                Some("perplexity") => "sonar-pro",
-                Some("cohere") => "command-r-plus",
-                Some("deepinfra") => "meta-llama/Llama-3.3-70B-Instruct",
-                Some("github-copilot") => "gpt-4o",
-                Some("ollama") => "llama3.2",
-                Some("lmstudio") => "default",
-                Some("llamacpp") => "default",
-                Some("custom-openai") => "default",
-                Some("azure") => "gpt-4o",
-                Some("amazon-bedrock") => "anthropic.claude-sonnet-4-6-v1",
-                Some("venice") => "llama-3.3-70b",
+                Some("openai") | Some("codex") | Some("openai-codex") => "gpt-5.2-codex",
                 _ => crate::constants::DEFAULT_MODEL, // Anthropic default
             }
         }
@@ -2119,7 +2032,7 @@ pub mod constants {
     /// (truncated) and points at `/release-notes` for the rest. Keep this in
     /// sync with the GitHub release notes when cutting a version.
     pub const WHATS_NEW: &[&str] = &[
-        "/skills opens an interactive picker that inherits skills from Claude, Codex, and your other tools",
+        "/skills opens an interactive picker that inherits skills from Claude and Codex",
         "Run Coven Code as `coven` — shorter command, with the `coven-cave` alias",
         "Crisper input badge — the mode and model labels now read clearly on every accent color",
         "Team memory sync now blocks files containing secrets before they upload",
@@ -3625,22 +3538,7 @@ pub mod cost {
     use std::sync::Arc;
 
     /// Free upstream provider IDs used in the free provider system.
-    ///
-    /// These overlap with providers that appear in `api_key_env_vars_for_provider`.
-    /// When adding a provider to one, check whether it also belongs in the other.
-    const FREE_UPSTREAM_IDS: &[&str] = &[
-        "groq",
-        "cerebras",
-        "google",
-        "mistral",
-        "sambanova",
-        "nvidia",
-        "cohere",
-        "openrouter",
-        "opencode-zen",
-        "zai",
-        "zhipuai",
-    ];
+    const FREE_UPSTREAM_IDS: &[&str] = &[];
 
     /// Check if a model name is an upstream-prefixed free model (e.g., "groq/llama-3.3-70b-versatile").
     fn is_free_upstream_model(model: &str) -> bool {
@@ -4606,9 +4504,9 @@ mod tests {
         };
 
         let project = crate::config::Settings {
-            provider: Some("ollama".to_string()),
+            provider: Some("anthropic".to_string()),
             providers: std::collections::HashMap::from([(
-                "ollama".to_string(),
+                "anthropic".to_string(),
                 crate::config::ProviderConfig {
                     api_base: Some("https://attacker.example".to_string()),
                     api_key: Some("attacker-key".to_string()),
@@ -4639,8 +4537,8 @@ mod tests {
             Some("https://trusted.example")
         );
         assert_eq!(
-            config.resolve_provider_api_base("ollama").as_deref(),
-            Some("http://localhost:11434")
+            config.resolve_provider_api_base("anthropic").as_deref(),
+            Some(crate::constants::ANTHROPIC_API_BASE)
         );
         assert!(config.commands.contains_key("trusted"));
         assert!(config.commands.contains_key("project"));
@@ -5057,7 +4955,7 @@ mod tests {
 
     #[test]
     fn test_cost_tracker_free_model() {
-        let tracker = CostTracker::with_model("deepseek-v4-flash-free");
+        let tracker = CostTracker::with_model("some-model-free");
         tracker.add_usage(1000, 500, 200, 100);
         // Free models should have zero cost even with token usage
         assert_eq!(tracker.total_cost_usd(), 0.0);
@@ -5067,14 +4965,9 @@ mod tests {
     fn test_model_pricing_free_variants() {
         // Test that models ending with -free use FREE pricing
         assert_eq!(
-            cost::ModelPricing::for_model("deepseek-v4-flash-free"),
+            cost::ModelPricing::for_model("some-model-free"),
             cost::ModelPricing::FREE
         );
-        assert_eq!(
-            cost::ModelPricing::for_model("zen/minimax-m2.5-free"),
-            cost::ModelPricing::FREE
-        );
-
         // Test that models starting with free/ use FREE pricing
         assert_eq!(
             cost::ModelPricing::for_model("free/auto"),
@@ -5082,52 +4975,6 @@ mod tests {
         );
         assert_eq!(
             cost::ModelPricing::for_model("free/some-model"),
-            cost::ModelPricing::FREE
-        );
-
-        // Test that upstream-prefixed free models use FREE pricing
-        assert_eq!(
-            cost::ModelPricing::for_model("groq/llama-3.3-70b-versatile"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("cerebras/qwen-3-235b-a22b-instruct-2507"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("google/gemini-2.5-flash"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("mistral/mistral-large-latest"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("sambanova/Meta-Llama-3.3-70B-Instruct"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("nvidia/meta/llama-3.3-70b-instruct"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("cohere/command-r-plus"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("openrouter/free"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("opencode-zen/minimax-m2.5-free"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("zai/glm-4.6"),
-            cost::ModelPricing::FREE
-        );
-        assert_eq!(
-            cost::ModelPricing::for_model("zhipuai/glm-4.5"),
             cost::ModelPricing::FREE
         );
 

@@ -67,7 +67,7 @@ The `config` object holds runtime behaviour options.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `api_key` | string \| null | null | Anthropic API key. Overrides `ANTHROPIC_API_KEY` env var. Prefer the env var in shared environments. |
-| `model` | string \| null | provider default | Model ID to use. When absent, the provider's default is used (e.g. `claude-sonnet-4-6` for Anthropic, `gpt-4o` for OpenAI). |
+| `model` | string \| null | provider default | Model ID to use. When absent, the provider's default is used (e.g. `claude-sonnet-4-6` for Anthropic). |
 | `max_tokens` | integer \| null | 8192 | Maximum tokens per model response. |
 | `provider` | string \| null | `"anthropic"` | Active provider. See the [Providers](#providers) section. |
 
@@ -312,33 +312,15 @@ plugins simultaneously.
 
 ## Providers
 
-Coven Code can send requests to multiple LLM providers. Set the active provider
-via the `provider` key in settings or the `--provider` CLI flag.
+Coven Code supports two providers: **Anthropic** (Claude) and **Codex**. Set the
+active provider via the `provider` key in settings or the `--provider` CLI flag.
 
 ### Provider IDs
 
 | Provider ID | Default model |
 |-------------|--------------|
 | `anthropic` | `claude-sonnet-4-6` (or latest) |
-| `openai` | `gpt-4o` |
-| `google` | `gemini-2.5-flash` |
-| `groq` | `llama-3.3-70b-versatile` |
-| `cerebras` | `llama-3.3-70b` |
-| `deepseek` | `deepseek-chat` |
-| `mistral` | `mistral-large-latest` |
-| `xai` | `grok-2` |
-| `openrouter` | `anthropic/claude-sonnet-4` |
-| `togetherai` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
-| `perplexity` | `sonar-pro` |
-| `cohere` | `command-r-plus` |
-| `deepinfra` | `meta-llama/Llama-3.3-70B-Instruct` |
-| `github-copilot` | `gpt-4o` |
-| `ollama` | `llama3.2` |
-| `lmstudio` | `default` |
-| `llamacpp` | `default` |
-| `azure` | `gpt-4o` |
-| `amazon-bedrock` | `anthropic.claude-sonnet-4-6-v1` |
-| `venice` | `llama-3.3-70b` |
+| `codex` | `gpt-5-codex` (ChatGPT/Codex OAuth login) |
 
 ### Per-provider configuration
 
@@ -355,12 +337,7 @@ and `api_base` override the corresponding environment variables.
     "models_whitelist": [],
     "models_blacklist": []
   },
-  "openai": {
-    "api_key": "sk-...",
-    "enabled": true
-  },
-  "ollama": {
-    "api_base": "http://localhost:11434",
+  "codex": {
     "enabled": true
   }
 }
@@ -388,20 +365,6 @@ and `api_base` override the corresponding environment variables.
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api_base`. |
 | `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/goal` command and `GoalCompleteTool`). |
-| `OPENAI_API_KEY` | API key for the `openai` provider. |
-| `GOOGLE_API_KEY` | API key for the `google` provider. |
-| `GROQ_API_KEY` | API key for the `groq` provider. |
-| `XAI_API_KEY` | API key for the `xai` provider. |
-| `MISTRAL_API_KEY` | API key for the `mistral` provider. |
-| `OPENROUTER_API_KEY` | API key for the `openrouter` provider. |
-| `DEEPSEEK_API_KEY` | API key for the `deepseek` provider. |
-| `COHERE_API_KEY` | API key for the `cohere` provider. |
-| `DEEPINFRA_API_KEY` | API key for the `deepinfra` provider. |
-| `VENICE_API_KEY` | API key for the `venice` provider. |
-| `GITHUB_TOKEN` | Token for the `github-copilot` provider. |
-| `AZURE_API_KEY` | API key for the `azure` provider. |
-| `HF_TOKEN` | Token for the `huggingface` provider. |
-| `NVIDIA_API_KEY` | API key for the `nvidia` provider. |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |
@@ -616,12 +579,7 @@ matches. They are defined in the `formatter` map:
       "api_key": null,
       "enabled": true
     },
-    "openai": {
-      "api_key": "sk-...",
-      "enabled": true
-    },
-    "ollama": {
-      "api_base": "http://localhost:11434",
+    "codex": {
       "enabled": true
     }
   },

@@ -1,9 +1,9 @@
 # Coven Code Authentication Guide
 
-Coven Code needs credentials to call the Anthropic API (or another provider's
-API). This document covers every supported authentication method, multi-account
-profile switching, how tokens are stored, how to check and clear credentials,
-and how to authenticate with non-Anthropic providers.
+Coven Code needs credentials to call the Anthropic API (or sign in to Codex).
+This document covers every supported authentication method, multi-account
+profile switching, how tokens are stored, and how to check and clear
+credentials.
 
 ---
 
@@ -19,9 +19,7 @@ Coven Code checks for credentials in the following priority order:
 5. Legacy `~/.coven-code/oauth_tokens.json` (auto-migrated to a profile on first
    read)
 
-The first non-empty credential found is used. Provider-specific credentials
-(OpenAI, Google, etc.) follow the same pattern but use their own environment
-variables and provider config entries.
+The first non-empty credential found is used.
 
 Codex (OpenAI ChatGPT subscription) accounts follow a parallel system —
 multiple profiles stored under `~/.coven-code/accounts/codex/<id>/`, with the
@@ -279,15 +277,12 @@ needed.
 
 ---
 
-## Method 3: Device Code Flow
+## Method 3: Headless / CI
 
-The device code flow (RFC 8628) is designed for headless or server
-environments where opening a browser is not practical. Currently this flow
-is used internally for GitHub Copilot authentication.
-
-For headless environments without a Copilot subscription, the API key method
-(Method 1) is the recommended approach. Set `ANTHROPIC_API_KEY` in the
-environment before running Coven Code in a CI/CD or server context.
+For headless or server environments where opening a browser is not practical,
+the API key method (Method 1) is the recommended approach. Set
+`ANTHROPIC_API_KEY` in the environment before running Coven Code in a CI/CD or
+server context.
 
 ```bash
 # Headless / CI example
@@ -334,7 +329,7 @@ Contains the OpenAI access token, refresh token, account_id, and expiry.
 
 ### Provider credential store
 
-API keys for non-Anthropic providers without dedicated OAuth flows are stored in:
+API keys stored without going through an OAuth profile live in:
 
 ```
 ~/.coven-code/auth.json
@@ -346,19 +341,13 @@ This file is keyed by provider ID and contains either an `api` credential
 ```json
 {
   "credentials": {
-    "openai": { "type": "api", "key": "sk-..." },
-    "github-copilot": {
-      "type": "oauth",
-      "access": "...",
-      "refresh": "...",
-      "expires": 1700000000
-    }
+    "anthropic": { "type": "api", "key": "sk-ant-..." }
   }
 }
 ```
 
-> **Note:** `~/.coven-code/auth.json` is the multi-provider credential cache for
-> simple API-key providers. It is **distinct** from `~/.coven-code/accounts.json`,
+> **Note:** `~/.coven-code/auth.json` is the credential cache for simple
+> API-key storage. It is **distinct** from `~/.coven-code/accounts.json`,
 > which is the multi-account registry for Anthropic/Codex OAuth profiles.
 
 ---
@@ -464,104 +453,34 @@ authentication fails and you must run `coven-code auth login` (optionally with
 
 ---
 
-## Multiple Providers
+## Providers
 
-Coven Code supports simultaneous configuration of credentials for multiple
-providers. Each provider looks for credentials in this order:
+Coven Code supports two providers: **Anthropic** (Claude) and **Codex**.
+The active provider looks for credentials in this order:
 
 1. `api_key` in the provider's entry under `providers` in `settings.json`
 2. The provider-specific environment variable (see table below)
 3. The credential stored in `~/.coven-code/auth.json`
+4. The active OAuth profile under `~/.coven-code/accounts/<provider>/`
 
 ### Provider environment variables
 
 | Provider | Environment variable |
 |----------|---------------------|
 | `anthropic` | `ANTHROPIC_API_KEY` |
-| `openai` | `OPENAI_API_KEY` |
-| `google` | `GOOGLE_API_KEY` |
-| `groq` | `GROQ_API_KEY` |
-| `cerebras` | `CEREBRAS_API_KEY` |
-| `deepseek` | `DEEPSEEK_API_KEY` |
-| `mistral` | `MISTRAL_API_KEY` |
-| `xai` | `XAI_API_KEY` |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `togetherai` | `TOGETHER_API_KEY` |
-| `perplexity` | `PERPLEXITY_API_KEY` |
-| `cohere` | `COHERE_API_KEY` |
-| `deepinfra` | `DEEPINFRA_API_KEY` |
-| `venice` | `VENICE_API_KEY` |
-| `github-copilot` | `GITHUB_TOKEN` |
-| `azure` | `AZURE_API_KEY` |
-| `huggingface` | `HF_TOKEN` |
-| `nvidia` | `NVIDIA_API_KEY` |
+| `codex` | OAuth only (`coven-code codex login`) |
 
-### Example: multiple providers in settings.json
-
-```json
-{
-  "providers": {
-    "anthropic": {
-      "api_key": null,
-      "enabled": true
-    },
-    "openai": {
-      "api_key": "sk-...",
-      "enabled": true
-    },
-    "ollama": {
-      "api_base": "http://localhost:11434",
-      "enabled": true
-    },
-    "openrouter": {
-      "api_key": "sk-or-...",
-      "enabled": true,
-      "models_whitelist": ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
-    }
-  }
-}
-```
-
-Switch providers at runtime:
+### Switch providers at runtime
 
 ```bash
-# Use OpenAI for this session
-coven-code --provider openai --model gpt-4o "your prompt"
+# Use Anthropic for this session
+coven-code --provider anthropic "your prompt"
 
-# Use a local Ollama model (no API key needed)
-coven-code --provider ollama --model llama3.2 "your prompt"
+# Use Codex (requires a Codex OAuth login)
+coven-code --provider codex "your prompt"
 
 # Or via environment variable
-COVEN_CODE_PROVIDER=google coven-code "your prompt"
-```
-
----
-
-## Local Models (No API Key)
-
-Providers that run locally require no API key:
-
-**Ollama:**
-
-```bash
-# Install Ollama from https://ollama.ai and pull a model
-ollama pull llama3.2
-
-# Run Coven Code against it
-coven-code --provider ollama --model llama3.2
-```
-
-**LM Studio:**
-
-```bash
-# Start the LM Studio local server (default port 1234)
-coven-code --provider lmstudio
-```
-
-**llama.cpp server:**
-
-```bash
-coven-code --provider llamacpp --api-base http://localhost:8080
+COVEN_CODE_PROVIDER=codex coven-code "your prompt"
 ```
 
 ---

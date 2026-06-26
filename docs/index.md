@@ -38,8 +38,8 @@ Coven Code runs a multi-turn loop: it streams a response from the model, execute
 - **Desktop automation** — screenshot, click, type (optional feature)
 - **Task management** — create, track, and complete tasks
 
-### 15+ LLM providers
-Anthropic Claude (default), OpenAI, Google Gemini, AWS Bedrock, Azure OpenAI, Ollama, Groq, Mistral, DeepSeek, xAI, Cohere, OpenRouter, Together AI, Perplexity, GitHub Copilot, Cerebras, LM Studio, and LLaMA.cpp.
+### LLM providers
+Anthropic Claude (default) and Codex (OpenAI Codex via ChatGPT/Codex login).
 
 ### AMOLED terminal UI
 A ratatui-based TUI with real-time streaming, syntax-highlighted code blocks, diff viewer, permission dialogs, slash command autocomplete, session browser, and a full keybinding system.
@@ -122,14 +122,15 @@ See [Configuration](configuration) for the full reference.
 ## Using a different provider
 
 ```bash
-# Use Ollama with a local model
-coven-code --provider ollama --model llama3.2
+# Use Anthropic explicitly
+coven-code --provider anthropic --model claude-opus-4-6
 
-# Use OpenAI
-OPENAI_API_KEY=sk-... coven-code --provider openai --model gpt-4o
+# Use Codex (requires a Codex OAuth login)
+coven-code codex login
+coven-code --provider codex
 ```
 
-See [Providers](providers) for setup instructions for every supported provider.
+See [Providers](providers) for setup instructions for both supported providers.
 
 ---
 

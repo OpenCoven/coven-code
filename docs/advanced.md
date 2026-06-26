@@ -286,7 +286,7 @@ The manager model does not execute tools itself — it delegates to executor age
 /managed-agents configure isolation      on
 ```
 
-Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `openai/gpt-4o`).
+Model format: `provider/model` (e.g., `anthropic/claude-opus-4-6`, `anthropic/claude-sonnet-4-6`).
 
 ### Budget split policies
 

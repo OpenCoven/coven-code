@@ -37,8 +37,7 @@ use crate::provider_types::{
     StreamEvent, SystemPromptStyle,
 };
 
-// Re-use Copilot's message translation helpers via the public Copilot type.
-use crate::providers::copilot::CopilotProvider;
+use crate::providers::responses_input::to_responses_input;
 
 // ---------------------------------------------------------------------------
 // CodexProvider
@@ -253,8 +252,7 @@ impl CodexProvider {
 
     /// Build the Responses-API request body for Codex.
     fn build_responses_body(request: &ProviderRequest) -> Value {
-        // Re-use the same message translation that the Copilot provider uses.
-        let input = CopilotProvider::to_responses_input_pub(request);
+        let input = to_responses_input(request);
         let instructions = Self::system_prompt_to_text(request);
 
         let tools: Vec<Value> = request
@@ -399,7 +397,7 @@ impl CodexProvider {
     }
 
     // -----------------------------------------------------------------------
-    // Response parsing  (mirrors CopilotProvider::parse_responses_response)
+    // Response parsing for the OpenAI Responses API
     // -----------------------------------------------------------------------
 
     fn parse_responses_response(

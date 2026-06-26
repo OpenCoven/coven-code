@@ -73,9 +73,7 @@ pub use registry::ProviderRegistry;
 
 // Phase 1D re-exports — concrete provider adapters.
 pub use providers::AnthropicProvider;
-pub use providers::GoogleProvider;
-pub use providers::MinimaxProvider;
-pub use providers::OpenAiProvider;
+pub use providers::CodexProvider;
 
 // Phase 3 re-exports — model registry.
 pub use model_registry::{
@@ -86,25 +84,8 @@ pub use model_registry::{
 // Phase 6 re-exports — provider-aware error handling.
 pub use error_handling::{is_context_overflow, parse_error_response, RetryConfig};
 
-// Phase 2E re-exports — Azure, Bedrock, and GitHub Copilot providers.
-pub use providers::AzureProvider;
-pub use providers::BedrockProvider;
-pub use providers::CopilotProvider;
-
-// Phase 2B re-exports — OpenAI-compatible generic adapter + common factories.
-pub use providers::{
-    deepseek, groq, lm_studio, mistral, ollama, opencode_zen, openrouter, xai, OpenAiCompatProvider,
-};
-
-// Composite "Free" provider — stacks many free-tier upstreams behind one
-// `free/auto` model id.
-pub use providers::{FreeEntry, FreeProvider, FreeUpstream, FREE_CATALOG};
-
-// Phase 2D re-exports — Cohere native provider.
-pub use providers::CohereProvider;
-
 // Phase 4 re-exports — concrete message transformers.
-pub use transformers::{AnthropicTransformer, OpenAiChatTransformer};
+pub use transformers::AnthropicTransformer;
 
 // ---------------------------------------------------------------------------
 // request / response types
@@ -551,58 +532,13 @@ pub mod client {
             // Deferred key validation — fail here rather than at construction
             // so that non-Anthropic provider setups don't crash on startup.
             if self.config.api_key.is_empty() && self.config.provider != Provider::Codex {
-                // Check if this model might belong to another provider, giving
-                // the user a more actionable error message.
-                let model = &request.model;
-                let hint = if model.starts_with("gemini") || model.starts_with("gemma") {
-                    format!(
-                        "Model '{}' is a Google model. Use `--provider google` or set GOOGLE_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("gpt-")
-                    || model.starts_with("o1")
-                    || model.starts_with("o3")
-                    || model.starts_with("o4")
-                {
-                    format!(
-                        "Model '{}' is an OpenAI model. Use `--provider openai` or set OPENAI_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("deepseek") {
-                    format!(
-                        "Model '{}' is a DeepSeek model. Use `--provider deepseek` or set DEEPSEEK_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("grok") {
-                    format!(
-                        "Model '{}' is an xAI model. Use `--provider xai` or set XAI_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("mistral") || model.starts_with("codestral") {
-                    format!(
-                        "Model '{}' is a Mistral model. Use `--provider mistral` or set MISTRAL_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("command-") {
-                    format!(
-                        "Model '{}' is a Cohere model. Use `--provider cohere` or set COHERE_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("llama") {
-                    format!(
-                        "Model '{}' looks like a Llama model. Use `--provider groq` (set GROQ_API_KEY) or `--provider ollama` for local.",
-                        model
-                    )
-                } else {
-                    "Set ANTHROPIC_API_KEY, configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID \
-                     and run `coven-code auth login`, or use --provider to select a different \
-                     provider (e.g. --provider openai)."
-                        .to_string()
-                };
-                return Err(ClaudeError::Auth(format!(
-                    "No API key for the selected model. {}",
-                    hint
-                )));
+                return Err(ClaudeError::Auth(
+                    "No API key for the selected model. Sign in to Claude with \
+                     `coven-code auth login` (or set ANTHROPIC_API_KEY / configure \
+                     COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID), or use Codex with \
+                     `--provider codex` after running `coven-code auth login --provider codex`."
+                        .to_string(),
+                ));
             }
             // Route to Codex if configured
             if self.config.provider == Provider::Codex {
@@ -678,44 +614,13 @@ pub mod client {
         ) -> Result<mpsc::Receiver<streaming::AnthropicStreamEvent>, ClaudeError> {
             // Deferred key validation
             if self.config.api_key.is_empty() && self.config.provider != Provider::Codex {
-                let model = &request.model;
-                let hint = if model.starts_with("gemini") || model.starts_with("gemma") {
-                    format!(
-                        "Model '{}' is a Google model. Use `--provider google` or set GOOGLE_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("gpt-")
-                    || model.starts_with("o1")
-                    || model.starts_with("o3")
-                    || model.starts_with("o4")
-                {
-                    format!(
-                        "Model '{}' is an OpenAI model. Use `--provider openai` or set OPENAI_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("deepseek") {
-                    format!("Model '{}' is a DeepSeek model. Use `--provider deepseek` or set DEEPSEEK_API_KEY.", model)
-                } else if model.starts_with("grok") {
-                    format!(
-                        "Model '{}' is an xAI model. Use `--provider xai` or set XAI_API_KEY.",
-                        model
-                    )
-                } else if model.starts_with("mistral") || model.starts_with("codestral") {
-                    format!("Model '{}' is a Mistral model. Use `--provider mistral` or set MISTRAL_API_KEY.", model)
-                } else if model.starts_with("command-") {
-                    format!("Model '{}' is a Cohere model. Use `--provider cohere` or set COHERE_API_KEY.", model)
-                } else if model.starts_with("llama") {
-                    format!("Model '{}' looks like a Llama model. Use `--provider groq` or `--provider ollama` for local.", model)
-                } else {
-                    "Set ANTHROPIC_API_KEY, configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID \
-                     and run `coven-code auth login`, or use --provider to select a different \
-                     provider (e.g. --provider openai)."
-                        .to_string()
-                };
-                return Err(ClaudeError::Auth(format!(
-                    "No API key for the selected model. {}",
-                    hint
-                )));
+                return Err(ClaudeError::Auth(
+                    "No API key for the selected model. Sign in to Claude with \
+                     `coven-code auth login` (or set ANTHROPIC_API_KEY / configure \
+                     COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID), or use Codex with \
+                     `--provider codex` after running `coven-code auth login --provider codex`."
+                        .to_string(),
+                ));
             }
             // Codex provider doesn't support streaming yet
             if self.config.provider == Provider::Codex {

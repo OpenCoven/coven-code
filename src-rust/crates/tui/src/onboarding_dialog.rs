@@ -140,9 +140,8 @@ pub fn render_onboarding_dialog(frame: &mut Frame, state: &OnboardingDialogState
 
 /// A provider entry on the setup page.
 ///
-/// Ordering is deliberately neutral: Coven Code is multi-provider, so no
-/// vendor is privileged. Free Mode leads (zero-friction), then providers
-/// that need no API key, then key-based providers alphabetically.
+/// Coven Code supports two providers: Claude (Anthropic) and Codex. Claude
+/// leads, then Codex.
 struct ProviderEntry {
     name: &'static str,
     tagline: &'static str,
@@ -152,34 +151,16 @@ struct ProviderEntry {
 
 const PROVIDER_ENTRIES: &[ProviderEntry] = &[
     ProviderEntry {
-        name: "Ollama",
-        tagline: "  Local models · No key needed",
-        setup: "coven-code --provider ollama",
-        setup_suffix: "",
-    },
-    ProviderEntry {
-        name: "Anthropic",
-        tagline: "  Claude Opus · Sonnet · Haiku",
+        name: "Claude",
+        tagline: "  Opus · Sonnet · Haiku",
         setup: "ANTHROPIC_API_KEY",
-        setup_suffix: "  or configured OAuth",
+        setup_suffix: "  or sign in with Claude.ai",
     },
     ProviderEntry {
-        name: "Google",
-        tagline: "  Gemini 2.5 Pro · Flash",
-        setup: "set GOOGLE_API_KEY=<key>",
-        setup_suffix: "  then restart",
-    },
-    ProviderEntry {
-        name: "Groq",
-        tagline: "  Fast inference · Free tier · groq.com/keys",
-        setup: "set GROQ_API_KEY=<key>",
-        setup_suffix: "  then restart",
-    },
-    ProviderEntry {
-        name: "OpenAI",
-        tagline: "  GPT-4o · o3 · o4-mini",
-        setup: "set OPENAI_API_KEY=<key>",
-        setup_suffix: "  then restart",
+        name: "Codex",
+        tagline: "  gpt-5.2-codex via ChatGPT login",
+        setup: "coven-code auth login --provider codex",
+        setup_suffix: "",
     },
 ];
 
@@ -232,37 +213,6 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
             ),
         ]),
         Line::from(""),
-        // ── Free Mode — zero-friction entry point ─────────────
-        Line::from(vec![
-            Span::styled(
-                "  ★  ",
-                Style::default().fg(pink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Free Mode",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  Agentic coding · No API key (experimental)",
-                Style::default().fg(dim),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("     › ", Style::default().fg(pink)),
-            Span::styled(
-                "/connect",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  then pick \"Free\"", Style::default().fg(dim)),
-        ]),
-        Line::from(Span::styled(
-            sep,
-            Style::default().fg(Color::Rgb(45, 45, 55)),
-        )),
     ];
 
     for (i, entry) in PROVIDER_ENTRIES.iter().enumerate() {
@@ -298,18 +248,6 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
     }
 
     lines.extend([
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  + ", Style::default().fg(Color::Rgb(120, 120, 120))),
-            Span::styled(
-                "20+ more providers: ",
-                Style::default().fg(Color::Rgb(120, 120, 120)),
-            ),
-            Span::styled(
-                "coven-code --help",
-                Style::default().fg(Color::Rgb(150, 150, 150)),
-            ),
-        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  enter", Style::default().fg(pink)),
@@ -603,9 +541,6 @@ mod tests {
             })
             .collect();
         let content = rows.join("\n");
-        // Free Mode hint is present and precedes every provider.
-        let free = content.find("Free Mode").expect("Free Mode hint missing");
-        assert!(content.contains("/connect"));
         let (title_y, title_row) = rows
             .iter()
             .enumerate()
@@ -623,19 +558,10 @@ mod tests {
             let cell = &buffer.content()[title_y * width + esc_x + offset];
             assert_eq!(cell.fg, Color::Red, "provider setup esc hint should be red");
         }
-        // Neutral ordering: no-key local provider first, then alphabetical.
-        let positions: Vec<usize> = ["Ollama", "Anthropic", "Google", "Groq", "OpenAI"]
-            .iter()
-            .map(|name| {
-                content
-                    .find(name)
-                    .unwrap_or_else(|| panic!("{name} missing"))
-            })
-            .collect();
-        assert!(free < positions[0], "Free Mode should lead the page");
-        let mut sorted = positions.clone();
-        sorted.sort_unstable();
-        assert_eq!(positions, sorted, "providers out of neutral order");
+        // Claude leads, then Codex.
+        let claude = content.find("Claude").expect("Claude entry missing");
+        let codex = content.find("Codex").expect("Codex entry missing");
+        assert!(claude < codex, "Claude should precede Codex");
     }
 
     #[test]

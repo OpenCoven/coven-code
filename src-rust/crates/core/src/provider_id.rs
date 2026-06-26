@@ -30,55 +30,9 @@ impl ProviderId {
     // -----------------------------------------------------------------------
 
     pub const ANTHROPIC: &'static str = "anthropic";
-    pub const OPENAI: &'static str = "openai";
-    pub const GOOGLE: &'static str = "google";
-    pub const GOOGLE_VERTEX: &'static str = "google-vertex";
-    pub const AMAZON_BEDROCK: &'static str = "amazon-bedrock";
-    pub const AZURE: &'static str = "azure";
-    pub const GITHUB_COPILOT: &'static str = "github-copilot";
-    pub const MISTRAL: &'static str = "mistral";
-    pub const XAI: &'static str = "xai";
-    pub const GROQ: &'static str = "groq";
-    pub const DEEPINFRA: &'static str = "deepinfra";
-    pub const CEREBRAS: &'static str = "cerebras";
-    pub const COHERE: &'static str = "cohere";
-    pub const CROF: &'static str = "crof";
-    pub const TOGETHER_AI: &'static str = "together-ai";
-    pub const PERPLEXITY: &'static str = "perplexity";
-    pub const OPENROUTER: &'static str = "openrouter";
-    pub const OLLAMA: &'static str = "ollama";
-    pub const LM_STUDIO: &'static str = "lm-studio";
-    pub const LLAMA_CPP: &'static str = "llama-cpp";
-    pub const DEEPSEEK: &'static str = "deepseek";
-    pub const GITLAB: &'static str = "gitlab";
-    pub const CLOUDFLARE: &'static str = "cloudflare";
-    pub const VENICE: &'static str = "venice";
-    pub const SAP: &'static str = "sap";
-    pub const SAMBANOVA: &'static str = "sambanova";
-    pub const HUGGINGFACE: &'static str = "huggingface";
-    pub const NVIDIA: &'static str = "nvidia";
-    pub const SILICONFLOW: &'static str = "siliconflow";
-    pub const MOONSHOT: &'static str = "moonshotai";
-    pub const ZHIPU: &'static str = "zhipuai";
-    pub const ZAI: &'static str = "zai";
-    pub const NEBIUS: &'static str = "nebius";
-    pub const OVHCLOUD: &'static str = "ovhcloud";
-    pub const SCALEWAY: &'static str = "scaleway";
-    pub const VULTR: &'static str = "vultr";
-    pub const BASETEN: &'static str = "baseten";
-    pub const FRIENDLI: &'static str = "friendli";
-    pub const UPSTAGE: &'static str = "upstage";
-    pub const STEPFUN: &'static str = "stepfun";
-    pub const FIREWORKS: &'static str = "fireworks";
-    pub const NOVITA: &'static str = "novita";
-    pub const MINIMAX: &'static str = "minimax";
     pub const CODEX: &'static str = "codex";
-    pub const OPENCODE_GO: &'static str = "opencode-go";
-    pub const OPENCODE_ZEN: &'static str = "opencode-zen";
-    pub const SYNTHETIC: &'static str = "synthetic";
-    pub const ROUTING: &'static str = "routing";
-    pub const NEURALWATT: &'static str = "neuralwatt";
-    pub const FREE: &'static str = "free";
+    /// Underlying vendor id for Codex's gpt-* models.
+    pub const OPENAI: &'static str = "openai";
 }
 
 impl fmt::Display for ProviderId {

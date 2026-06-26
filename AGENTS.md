@@ -17,7 +17,7 @@ Agent-facing rules for working on Coven Code. Mirrors and extends `src-rust/.cla
 - Avoid speculative `.clone()` — borrow first, clone only when ownership is actually needed. Same applies to `.to_string()` on `&str`.
 - No `unsafe` blocks without a `// SAFETY:` comment explaining the invariant.
 - Single-line helper functions with a single call site are forbidden; inline them instead.
-- Don't guess external API shapes. Read the crate source under `~/.cargo/registry/` or check `cargo doc --open`. For Anthropic / OpenAI / Google wire formats, the `crates/api/src/providers/<provider>.rs` files are the authoritative reference inside this repo.
+- Don't guess external API shapes. Read the crate source under `~/.cargo/registry/` or check `cargo doc --open`. For Anthropic and Codex wire formats, the `crates/api/src/providers/<provider>.rs` files are the authoritative reference inside this repo.
 - **NEVER use type erasure to silence the compiler** — no `Box<dyn Any>`, no `serde_json::Value` shoved through a typed boundary just because the right type is annoying to derive. If a type is hard to express, ask the user.
 - NEVER remove or downgrade code to fix compiler errors from outdated dependencies; bump the dependency in `Cargo.toml` or `src-rust/Cargo.toml` workspace deps instead.
 - Always ask before removing functionality or code that appears to be intentional.
@@ -81,38 +81,13 @@ When creating issues, add labels that map to the relevant crate(s) — for examp
 
 When closing issues via commit, include `fixes #<number>` or `closes #<number>` in the commit message — GitHub closes the issue automatically on merge to main.
 
-### 1. Provider identifier (`crates/core/src/provider_id.rs`)
+## Providers
 
-Add a well-known constant on `ProviderId`, e.g. `pub const FOO: &'static str = "foo";`. Use the canonical name the provider publishes for its API.
-
-### 2. Provider implementation (`crates/api/src/providers/`)
-
-- OpenAI-compatible: add an entry to `openai_compat_providers.rs`. This is one line + an optional base-URL helper.
-- Custom wire format: create `crates/api/src/providers/<name>.rs` exposing a struct that implements `LlmProvider` (see `provider.rs`). Mirror the structure of `anthropic.rs` or `google.rs` — request shaping, response parsing, streaming SSE handling, tool conversion.
-- Add `pub mod <name>; pub use <name>::<Name>Provider;` to `providers/mod.rs`.
-
-### 3. Register the provider (`crates/api/src/registry.rs`)
-
-Import the new provider and add it to the registry construction. The registry hands back `Arc<dyn LlmProvider>` by id.
-
-### 4. Model registry (`crates/api/src/model_registry.rs`)
-
-Add the canonical model IDs and capability metadata (context window, supports thinking, supports vision, etc.).
-
-### 5. Auth & env detection (`crates/core/src/auth_store.rs`, related)
-
-If the provider uses an env var (e.g. `FOO_API_KEY`), wire it into the auth-store probe. For OAuth-style providers, see `codex_oauth.rs` and `device_code.rs` for the existing patterns.
-
-### 6. Tests
-
-- Add a smoke test in `crates/api/tests/` that exercises request shaping and response parsing against a mocked HTTP body. No live API calls — use the fixture pattern that the existing provider tests follow.
-- If the provider supports tool calls, add a tool-call round-trip fixture.
-- For OpenAI-compatible providers, the shared test in `crates/api/tests/openai_compat.rs` covers most paths; usually just adding a row to its provider matrix is enough.
-
-### 7. Documentation
-
-- `README.md`: add the provider to the "Supported Providers" list if it's user-visible.
-- `docs/providers.md`: setup instructions, env var, and `settings.json` shape.
+Coven Code supports exactly two providers: **Claude** (Anthropic) and **Codex**
+(OpenAI Codex via ChatGPT OAuth). The provider layer lives in
+`crates/api/src/providers/` (`anthropic.rs`, `codex.rs`) and is registered in
+`crates/api/src/registry.rs`. Auth flows live in `crates/core/src/oauth_config.rs`,
+`codex_oauth.rs`, and `device_code.rs`. Adding other providers is out of scope.
 
 ## Releasing
 

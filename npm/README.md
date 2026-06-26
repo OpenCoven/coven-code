@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/npm/v/@opencoven/coven-code?style=flat-square)](https://www.npmjs.com/package/@opencoven/coven-code)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/OpenCoven/coven-code/blob/main/LICENSE.md)
 
-**Coven Code** — open-source, multi-provider agentic coding TUI built in Rust.  
+**Coven Code** — open-source agentic coding TUI built in Rust.  
 OpenCoven fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta (GPL-3.0).
 
 ## Install
@@ -26,11 +26,11 @@ coven-code -p "fix this bug"  # headless one-shot
 
 ## Providers
 
-Supports Anthropic (Claude), OpenAI, Google Gemini, Groq, Ollama, LM Studio, OpenRouter, Bedrock, Vertex, and any OpenAI-compatible endpoint.
+Supports Anthropic (Claude) and Codex (OpenAI Codex via ChatGPT/Codex login).
 
 ```bash
-coven-code --provider openai "refactor this"
-coven-code --provider ollama --model llama3.2 "explain this"
+coven-code --provider anthropic "refactor this"
+coven-code --provider codex "explain this"
 ```
 
 ## Configuration

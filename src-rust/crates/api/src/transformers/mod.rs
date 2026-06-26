@@ -5,7 +5,5 @@
 // (to_provider) and provider JSON response → ProviderResponse (from_provider).
 
 pub mod anthropic;
-pub mod openai_chat;
 
 pub use anthropic::AnthropicTransformer;
-pub use openai_chat::OpenAiChatTransformer;

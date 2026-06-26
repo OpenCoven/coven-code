@@ -119,6 +119,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
+    ("splash", "Show, hide, or toggle the empty-session splash screen"),
     ("session", "Browse, rename, fork, branch, and tag sessions"),
     (
         "settings",
@@ -315,46 +316,6 @@ pub(crate) mod test_env {
 fn get_env_var_for_provider(id: &str) -> &'static str {
     match id {
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        "google" | "google-vertex" => "GOOGLE_API_KEY",
-        "github-copilot" => "GITHUB_TOKEN",
-        "groq" => "GROQ_API_KEY",
-        "cerebras" => "CEREBRAS_API_KEY",
-        "sambanova" => "SAMBANOVA_API_KEY",
-        "deepseek" => "DEEPSEEK_API_KEY",
-        "mistral" => "MISTRAL_API_KEY",
-        "openrouter" => "OPENROUTER_API_KEY",
-        "togetherai" => "TOGETHER_API_KEY",
-        "perplexity" => "PERPLEXITY_API_KEY",
-        "cohere" => "COHERE_API_KEY",
-        "xai" => "XAI_API_KEY",
-        "deepinfra" => "DEEPINFRA_API_KEY",
-        "azure" => "AZURE_API_KEY",
-        "amazon-bedrock" => "AWS_ACCESS_KEY_ID",
-        "sap-ai-core" => "AICORE_SERVICE_KEY",
-        "gitlab" => "GITLAB_TOKEN",
-        "cloudflare-ai-gateway" | "cloudflare-workers-ai" => "CLOUDFLARE_API_TOKEN",
-        "vercel" => "AI_GATEWAY_API_KEY",
-        "helicone" => "HELICONE_API_KEY",
-        "huggingface" => "HF_TOKEN",
-        "nvidia" => "NVIDIA_API_KEY",
-        "alibaba" => "DASHSCOPE_API_KEY",
-        "venice" => "VENICE_API_KEY",
-        "moonshotai" => "MOONSHOT_API_KEY",
-        "zhipuai" => "ZHIPU_API_KEY",
-        "zai" => "ZAI_API_KEY",
-        "siliconflow" => "SILICONFLOW_API_KEY",
-        "nebius" => "NEBIUS_API_KEY",
-        "novita" => "NOVITA_API_KEY",
-        "minimax" => "MINIMAX_API_KEY",
-        "ovhcloud" => "OVHCLOUD_API_KEY",
-        "scaleway" => "SCALEWAY_API_KEY",
-        "vultr" => "VULTR_API_KEY",
-        "baseten" => "BASETEN_API_KEY",
-        "friendli" => "FRIENDLI_TOKEN",
-        "upstage" => "UPSTAGE_API_KEY",
-        "stepfun" => "STEPFUN_API_KEY",
-        "fireworks" => "FIREWORKS_API_KEY",
         _ => "API_KEY",
     }
 }
@@ -364,27 +325,6 @@ fn get_env_var_for_provider(id: &str) -> &'static str {
 fn get_url_for_provider(id: &str) -> &'static str {
     match id {
         "anthropic" => "console.anthropic.com",
-        "openai" => "platform.openai.com/api-keys",
-        "google" => "aistudio.google.com/apikey",
-        "github-copilot" => "github.com/settings/tokens",
-        "groq" => "console.groq.com/keys",
-        "cerebras" => "cloud.cerebras.ai",
-        "sambanova" => "cloud.sambanova.ai",
-        "deepseek" => "platform.deepseek.com/api_keys",
-        "mistral" => "console.mistral.ai/api-keys",
-        "openrouter" => "openrouter.ai/keys",
-        "togetherai" => "api.together.xyz/settings/api-keys",
-        "perplexity" => "perplexity.ai/settings/api",
-        "cohere" => "dashboard.cohere.com/api-keys",
-        "xai" => "console.x.ai",
-        "deepinfra" => "deepinfra.com/dash/api_keys",
-        "azure" => "portal.azure.com",
-        "amazon-bedrock" => "console.aws.amazon.com/bedrock",
-        "minimax" => "platform.minimaxi.com",
-        "huggingface" => "huggingface.co/settings/tokens",
-        "nvidia" => "build.nvidia.com",
-        "venice" => "venice.ai/settings/api",
-        "zai" => "z.ai/manage-apikey/apikey-list",
         _ => "the provider's website",
     }
 }
@@ -418,395 +358,31 @@ fn import_config_picker_items() -> Vec<SelectItem> {
 fn provider_picker_items() -> Vec<SelectItem> {
     vec![
         SelectItem {
-            id: "free".into(),
-            title: "Free Mode".into(),
-            description: "OpenCode Zen → OpenRouter free fallback (no spend)".into(),
-            category: "Popular".into(),
-            badge: Some("FREE".into()),
-        },
-        SelectItem {
-            id: "openai".into(),
-            title: "OpenAI".into(),
-            description: "(API key)".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "openai-codex".into(),
-            title: "OpenAI Codex".into(),
-            description: "(ChatGPT Plus/Pro — browser login)".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "github-copilot".into(),
-            title: "GitHub Copilot".into(),
-            description: "(GitHub subscription or token)".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "google".into(),
-            title: "Google".into(),
-            description: "(API key)".into(),
-            category: "Popular".into(),
+            id: "anthropic-oauth".into(),
+            title: "Claude (subscription)".into(),
+            description: "Sign in with Claude.ai — browser login".into(),
+            category: "Claude".into(),
             badge: None,
         },
         SelectItem {
             id: "anthropic".into(),
-            title: "Anthropic".into(),
-            description: "(API key)".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "anthropic-oauth".into(),
-            title: "Anthropic (Claude subscription)".into(),
-            description: "(Sign in with Claude.ai — browser login)".into(),
-            category: "Popular".into(),
+            title: "Claude (API key)".into(),
+            description: "Anthropic API key".into(),
+            category: "Claude".into(),
             badge: None,
         },
         SelectItem {
             id: "anthropic-cli".into(),
-            title: "Anthropic CLI".into(),
-            description: "(Import login from Claude Code / ant CLI)".into(),
-            category: "Popular".into(),
+            title: "Claude CLI".into(),
+            description: "Import login from the Claude Code CLI".into(),
+            category: "Claude".into(),
             badge: None,
         },
         SelectItem {
-            id: "custom-openai".into(),
-            title: "Custom OpenAI-Compatible".into(),
-            description: "Custom URL + API key".into(),
-            category: "Advanced".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "openrouter".into(),
-            title: "OpenRouter".into(),
-            description: "100+ models with one key".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "vercel".into(),
-            title: "Vercel AI Gateway".into(),
-            description: "Gateway for AI SDK models".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "groq".into(),
-            title: "Groq".into(),
-            description: "Fast hosted inference".into(),
-            category: "Popular".into(),
-            badge: Some("FREE".into()),
-        },
-        SelectItem {
-            id: "ollama".into(),
-            title: "Ollama".into(),
-            description: "Local inference + cloud models".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "zai".into(),
-            title: "Z.AI".into(),
-            description: "GLM-5.1 / GLM-5 / GLM-4.7 Coding Plan".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "opencode-go".into(),
-            title: "OpenCode Go".into(),
-            description: "$10/mo flat-rate · Kimi · DeepSeek · GLM · MiniMax".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "opencode-zen".into(),
-            title: "OpenCode Zen".into(),
-            description: "Free models + paid · Nemotron · Ring · MiniMax · DeepSeek".into(),
-            category: "Popular".into(),
-            badge: Some("FREE".into()),
-        },
-        SelectItem {
-            id: "synthetic".into(),
-            title: "Synthetic.dev".into(),
-            description: "Hosted open weights".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "routing".into(),
-            title: "routing.run".into(),
-            description: "Hosted open weights · DeepSeek · Llama · Mixtral · Qwen".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "neuralwatt".into(),
-            title: "NeuralWatt".into(),
-            description: "Hosted open weights - energy-efficient".into(),
-            category: "Popular".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "cerebras".into(),
-            title: "Cerebras".into(),
-            description: "Fast hosted inference".into(),
-            category: "Other".into(),
-            badge: Some("FREE".into()),
-        },
-        SelectItem {
-            id: "sambanova".into(),
-            title: "SambaNova".into(),
-            description: "Fast hosted inference".into(),
-            category: "Other".into(),
-            badge: Some("FREE".into()),
-        },
-        SelectItem {
-            id: "lmstudio".into(),
-            title: "LM Studio".into(),
-            description: "Local model server".into(),
-            category: "Other".into(),
-            badge: Some("LOCAL".into()),
-        },
-        SelectItem {
-            id: "llamacpp".into(),
-            title: "llama.cpp".into(),
-            description: "Local inference server".into(),
-            category: "Other".into(),
-            badge: Some("LOCAL".into()),
-        },
-        SelectItem {
-            id: "deepseek".into(),
-            title: "DeepSeek".into(),
-            description: "Reasoning and coding models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "mistral".into(),
-            title: "Mistral".into(),
-            description: "Hosted Mistral models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "togetherai".into(),
-            title: "Together AI".into(),
-            description: "Open model hosting".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "perplexity".into(),
-            title: "Perplexity".into(),
-            description: "Search-augmented models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "cohere".into(),
-            title: "Cohere".into(),
-            description: "Command models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "xai".into(),
-            title: "xAI".into(),
-            description: "Grok models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "deepinfra".into(),
-            title: "DeepInfra".into(),
-            description: "Hosted open models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "azure".into(),
-            title: "Azure OpenAI".into(),
-            description: "Enterprise OpenAI deployments".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "amazon-bedrock".into(),
-            title: "AWS Bedrock".into(),
-            description: "Enterprise foundation models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "google-vertex".into(),
-            title: "Google Vertex AI".into(),
-            description: "Enterprise Google models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "sap-ai-core".into(),
-            title: "SAP AI Core".into(),
-            description: "Enterprise AI platform".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "gitlab".into(),
-            title: "GitLab Duo".into(),
-            description: "AI in GitLab".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "cloudflare-ai-gateway".into(),
-            title: "Cloudflare AI Gateway".into(),
-            description: "Gateway for multiple providers".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "cloudflare-workers-ai".into(),
-            title: "Cloudflare Workers AI".into(),
-            description: "Edge AI inference".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "helicone".into(),
-            title: "Helicone".into(),
-            description: "AI gateway and observability".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "huggingface".into(),
-            title: "Hugging Face".into(),
-            description: "Hosted community models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "nvidia".into(),
-            title: "NVIDIA".into(),
-            description: "Hosted NVIDIA models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "alibaba".into(),
-            title: "Alibaba".into(),
-            description: "Qwen and hosted models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "venice".into(),
-            title: "Venice AI".into(),
-            description: "Privacy-first AI".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "moonshotai".into(),
-            title: "Moonshot AI".into(),
-            description: "Hosted Moonshot models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "zhipuai".into(),
-            title: "Zhipu AI".into(),
-            description: "Hosted GLM models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "siliconflow".into(),
-            title: "SiliconFlow".into(),
-            description: "Hosted open models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "nebius".into(),
-            title: "Nebius".into(),
-            description: "Cloud inference".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "novita".into(),
-            title: "Novita".into(),
-            description: "Cloud inference".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "minimax".into(),
-            title: "MiniMax".into(),
-            description: "Anthropic-compatible (M2.7)".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "ovhcloud".into(),
-            title: "OVHcloud".into(),
-            description: "EU-hosted AI".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "scaleway".into(),
-            title: "Scaleway".into(),
-            description: "EU cloud AI".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "vultr".into(),
-            title: "Vultr".into(),
-            description: "Cloud inference".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "baseten".into(),
-            title: "Baseten".into(),
-            description: "Model serving".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "friendli".into(),
-            title: "Friendli".into(),
-            description: "Serverless inference".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "upstage".into(),
-            title: "Upstage".into(),
-            description: "Hosted Upstage models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "stepfun".into(),
-            title: "StepFun".into(),
-            description: "Hosted reasoning models".into(),
-            category: "Other".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "fireworks".into(),
-            title: "Fireworks AI".into(),
-            description: "Fast inference".into(),
-            category: "Other".into(),
+            id: "openai-codex".into(),
+            title: "Codex".into(),
+            description: "Sign in with ChatGPT — browser login".into(),
+            category: "Codex".into(),
             badge: None,
         },
     ]
@@ -1326,11 +902,7 @@ pub struct App {
     pub skills_picker: crate::skills_picker::SkillsPickerState,
     /// API key input dialog (opened from /connect for key-based providers).
     pub key_input_dialog: crate::key_input_dialog::KeyInputDialogState,
-    /// Custom provider dialog for URL + API key input.
-    pub custom_provider_dialog: crate::custom_provider_dialog::CustomProviderDialogState,
-    /// "Free" composite-provider setup dialog (warning + 2 API keys).
-    pub free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState,
-    /// Device code / browser auth dialog (GitHub Copilot device flow, Anthropic OAuth).
+    /// Device code / browser auth dialog (Claude OAuth, Codex login).
     pub device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState,
     /// When set, the main loop should spawn the async auth task for this provider.
     pub device_auth_pending: Option<String>,
@@ -1810,8 +1382,6 @@ impl App {
             effort_picker: crate::effort_picker::EffortPickerState::new(),
             skills_picker: crate::skills_picker::SkillsPickerState::new(),
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
-            custom_provider_dialog: crate::custom_provider_dialog::CustomProviderDialogState::new(),
-            free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState::new(),
             device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState::new(),
             device_auth_pending: None,
             pending_anthropic_cli_import: false,
@@ -2199,17 +1769,6 @@ impl App {
         self.open_model_picker_for_provider(&provider_id, Some(picker_title));
     }
 
-    fn persist_custom_provider_base_url(&self, base_url: &str) {
-        let mut settings = Settings::load_sync().unwrap_or_default();
-        let entry = settings
-            .providers
-            .entry("custom-openai".to_string())
-            .or_default();
-        entry.api_base = Some(base_url.to_string());
-        entry.enabled = true;
-        let _ = settings.save_sync();
-    }
-
     fn persist_provider_and_model(&self) {
         let mut settings = Settings::load_sync().unwrap_or_default();
         settings.provider = self.config.provider.clone();
@@ -2219,43 +1778,8 @@ impl App {
     }
 
     fn infer_provider_from_model(model: &str) -> Option<String> {
-        // Free-mode synthetic IDs always route back through the "free"
-        // composite provider so the Zen → OpenRouter fallback kicks in.
-        if model == "free/auto"
-            || model.starts_with("free/")
-            || model.starts_with("zen/")
-            || model.starts_with("opencode-zen/")
-        {
-            return Some("free".to_string());
-        }
         if let Some((provider, _)) = model.split_once('/') {
-            let known = [
-                "anthropic",
-                "openai",
-                "google",
-                "groq",
-                "cerebras",
-                "deepseek",
-                "mistral",
-                "xai",
-                "openrouter",
-                "github-copilot",
-                "codex",
-                "cohere",
-                "perplexity",
-                "togetherai",
-                "together-ai",
-                "deepinfra",
-                "venice",
-                "minimax",
-                "ollama",
-                "lmstudio",
-                "llamacpp",
-                "azure",
-                "amazon-bedrock",
-                "free",
-                "opencode-zen",
-            ];
+            let known = ["anthropic", "codex"];
             if known.contains(&provider) {
                 return Some(provider.to_string());
             }
@@ -2263,14 +1787,9 @@ impl App {
 
         if model.starts_with("claude") {
             Some("anthropic".to_string())
-        } else if model.starts_with("gpt-")
-            || model.starts_with("o1")
-            || model.starts_with("o3")
-            || model.starts_with("o4")
-        {
-            Some("openai".to_string())
-        } else if model.starts_with("gemini") || model.starts_with("gemma") {
-            Some("google".to_string())
+        } else if model.starts_with("gpt-") {
+            // Codex serves the gpt-* models via ChatGPT OAuth.
+            Some("codex".to_string())
         } else {
             None
         }
@@ -2407,8 +1926,7 @@ impl App {
             // Fallback: common defaults
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
-                "openai" => 128_000,
-                "google" => 1_048_576,
+                "codex" => 400_000,
                 _ => 128_000,
             };
         }
@@ -2463,9 +1981,6 @@ impl App {
         self.import_config_dialog = ImportConfigDialogState::new();
         self.model_picker = ModelPickerState::new();
         self.key_input_dialog = crate::key_input_dialog::KeyInputDialogState::new();
-        self.custom_provider_dialog =
-            crate::custom_provider_dialog::CustomProviderDialogState::new();
-        self.free_mode_dialog = crate::free_mode_dialog::FreeModeDialogState::new();
         self.device_auth_dialog = crate::device_auth_dialog::DeviceAuthDialogState::new();
         self.device_auth_pending = None;
         self.pending_mcp_panel_auth = None;
@@ -2888,8 +2403,6 @@ impl App {
         self.import_config_dialog.close();
         self.command_palette.close();
         self.key_input_dialog.close();
-        self.custom_provider_dialog.close();
-        self.free_mode_dialog.close();
         self.device_auth_dialog.close();
         self.settings_screen.close();
         self.theme_screen.close();
@@ -2928,8 +2441,6 @@ impl App {
             || self.import_config_picker.visible
             || self.connect_dialog.visible
             || self.key_input_dialog.visible
-            || self.custom_provider_dialog.visible
-            || self.free_mode_dialog.visible
             || self.device_auth_dialog.visible
             || self.command_palette.visible
             || self.elicitation.visible
@@ -3835,15 +3346,7 @@ impl App {
                             );
                             return false;
                         }
-                        let credential = if provider_id == "github-copilot" {
-                            claurst_core::StoredCredential::OAuthToken {
-                                access: token.clone(),
-                                refresh: token,
-                                expires: 0,
-                            }
-                        } else {
-                            claurst_core::StoredCredential::ApiKey { key: token }
-                        };
+                        let credential = claurst_core::StoredCredential::ApiKey { key: token };
                         self.auth_store.set(&provider_id, credential);
                         self.device_auth_pending = None;
                         self.device_auth_dialog.close();
@@ -3959,85 +3462,6 @@ impl App {
             return false;
         }
 
-        // "Free" composite-provider setup dialog (collects any subset of the
-        // free-tier upstream keys; min 1 to enable, more = better).
-        if self.free_mode_dialog.visible {
-            match key.code {
-                KeyCode::Esc => {
-                    self.free_mode_dialog.close();
-                }
-                KeyCode::Tab | KeyCode::Down => {
-                    self.free_mode_dialog.move_next();
-                }
-                KeyCode::BackTab | KeyCode::Up => {
-                    self.free_mode_dialog.move_prev();
-                }
-                KeyCode::Enter => {
-                    if self.free_mode_dialog.can_submit() {
-                        let values = self.free_mode_dialog.take_values();
-                        for (provider_id, key) in values {
-                            self.auth_store
-                                .set(provider_id, claurst_core::StoredCredential::ApiKey { key });
-                        }
-                        self.activate_provider(
-                            "free".to_string(),
-                            "Free Mode".to_string(),
-                            "Connected to",
-                        );
-                    } else {
-                        self.free_mode_dialog.move_next();
-                    }
-                }
-                KeyCode::Backspace => {
-                    self.free_mode_dialog.backspace();
-                }
-                KeyCode::Char(c) => {
-                    let c = normalize_char_with_shift(c, key.modifiers);
-                    self.free_mode_dialog.insert_char(c);
-                }
-                _ => {}
-            }
-            return false;
-        }
-
-        // Custom provider dialog (URL + API key for OpenAI-compatible providers)
-        if self.custom_provider_dialog.visible {
-            match key.code {
-                KeyCode::Esc => {
-                    self.custom_provider_dialog.close();
-                }
-                KeyCode::Tab | KeyCode::Down => {
-                    self.custom_provider_dialog.move_next_field();
-                }
-                KeyCode::Up => {
-                    self.custom_provider_dialog.move_prev_field();
-                }
-                KeyCode::Enter => {
-                    if self.custom_provider_dialog.can_submit() {
-                        let provider_id = self.custom_provider_dialog.provider_id.clone();
-                        let provider_name = self.custom_provider_dialog.provider_name.clone();
-                        let (base_url, api_key) = self.custom_provider_dialog.take_values();
-                        self.persist_custom_provider_base_url(&base_url);
-                        self.auth_store.set(
-                            &provider_id,
-                            claurst_core::StoredCredential::ApiKey { key: api_key },
-                        );
-                        self.activate_provider(provider_id, provider_name, "Connected to");
-                    } else {
-                        self.custom_provider_dialog.move_next_field();
-                    }
-                }
-                KeyCode::Backspace => {
-                    self.custom_provider_dialog.backspace();
-                }
-                KeyCode::Char(c) => {
-                    let c = normalize_char_with_shift(c, key.modifiers);
-                    self.custom_provider_dialog.insert_char(c);
-                }
-                _ => {}
-            }
-            return false;
-        }
 
         // Connect-a-provider dialog (/connect command)
         if self.connect_dialog.visible {
@@ -4074,90 +3498,33 @@ impl App {
                         self.connect_dialog.close();
 
                         match selected.id.as_str() {
-                            // Local providers — activate immediately, no key needed
-                            "ollama" | "lmstudio" | "llamacpp" => {
-                                self.activate_provider(
-                                    selected.id.clone(),
-                                    selected.title.clone(),
-                                    "Switched to",
-                                );
-                            }
-                            // "Free" composite mode — collects any subset of the
-                            // free-tier upstreams (min 1; more = better availability).
-                            "free" => {
-                                let existing: Vec<(&'static str, String)> =
-                                    claurst_api::FREE_CATALOG
-                                        .iter()
-                                        .filter_map(|upstream| {
-                                            let key = match upstream.id {
-                                                "opencode-zen" => self
-                                                    .auth_store
-                                                    .api_key_for(
-                                                        claurst_core::ProviderId::OPENCODE_ZEN,
-                                                    )
-                                                    .or_else(|| {
-                                                        self.auth_store.api_key_for(
-                                                            claurst_core::ProviderId::OPENCODE_GO,
-                                                        )
-                                                    }),
-                                                other => self.auth_store.api_key_for(other),
-                                            };
-                                            key.filter(|k| !k.is_empty()).map(|k| (upstream.id, k))
-                                        })
-                                        .collect();
-                                self.free_mode_dialog.open(&existing);
-                            }
                             "anthropic" => {
-                                // Anthropic: API key from console.anthropic.com.
+                                // Claude: API key from console.anthropic.com.
                                 self.key_input_dialog
                                     .open(selected.id.clone(), selected.title.clone());
                             }
                             "anthropic-oauth" => {
-                                // Anthropic subscription: browser OAuth flow
-                                // (spawned by the main loop, like OpenAI Codex).
+                                // Claude subscription: browser OAuth flow
+                                // (spawned by the main loop, like Codex).
                                 self.device_auth_dialog
                                     .open("anthropic-oauth".into(), selected.title.clone());
                                 self.device_auth_pending = Some("anthropic-oauth".to_string());
                             }
                             "anthropic-cli" => {
                                 // Import an existing OAuth login from a local
-                                // Anthropic CLI (Claude Code / ant). Handled by
-                                // the main loop (it's an async disk read).
+                                // Claude Code CLI. Handled by the main loop
+                                // (it's an async disk read).
                                 self.pending_anthropic_cli_import = true;
                                 self.status_message =
-                                    Some("Importing Anthropic credentials from local CLI…".into());
-                            }
-                            "custom-openai" => {
-                                let current_url = Settings::load_sync().ok().and_then(|settings| {
-                                    settings
-                                        .providers
-                                        .get("custom-openai")
-                                        .and_then(|p| p.api_base.clone())
-                                });
-                                self.custom_provider_dialog.open(
-                                    selected.id.clone(),
-                                    selected.title.clone(),
-                                    current_url,
-                                );
-                            }
-                            "github-copilot" => {
-                                // GitHub Copilot: device code flow
-                                self.device_auth_dialog
-                                    .open(selected.id.clone(), selected.title.clone());
-                                self.device_auth_pending = Some("github-copilot".to_string());
+                                    Some("Importing Claude credentials from local CLI…".into());
                             }
                             "codex" | "openai-codex" => {
-                                // OpenAI Codex: browser OAuth flow (spawned by main loop)
+                                // Codex: browser OAuth flow (spawned by main loop)
                                 self.device_auth_dialog
-                                    .open("openai-codex".into(), "OpenAI Codex".into());
+                                    .open("openai-codex".into(), "Codex".into());
                                 self.device_auth_pending = Some("openai-codex".to_string());
                             }
-                            // AWS Bedrock — accept a bearer token via key input dialog
-                            "amazon-bedrock" => {
-                                self.key_input_dialog
-                                    .open(selected.id.clone(), selected.title.clone());
-                            }
-                            // All other providers — open API key input dialog
+                            // Any other id — open API key input dialog
                             _ => {
                                 self.key_input_dialog
                                     .open(selected.id.clone(), selected.title.clone());
@@ -4325,12 +3692,8 @@ impl App {
                         }
                         // Store explicit selections in the canonical
                         // "provider/model" form for non-Anthropic providers.
-                        // The "free" composite's picker entries already carry
-                        // a routing prefix (`free/…`, `zen/…`, `openrouter/…`)
-                        // so re-prefixing would produce nonsense like
-                        // `free/free/auto`.
                         let provider = self.config.provider.as_deref().unwrap_or("anthropic");
-                        let full_model = if provider == "anthropic" || provider == "free" {
+                        let full_model = if provider == "anthropic" {
                             model_id.clone()
                         } else {
                             format!("{}/{}", provider, model_id)

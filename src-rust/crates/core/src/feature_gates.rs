@@ -141,18 +141,6 @@ pub fn parse_env_vars(args: &[String]) -> anyhow::Result<HashMap<String, String>
 }
 
 // ---------------------------------------------------------------------------
-// AWS region
-// ---------------------------------------------------------------------------
-
-/// Resolve the AWS region, checking `AWS_REGION` then `AWS_DEFAULT_REGION`,
-/// falling back to `"us-east-1"`.
-pub fn get_aws_region() -> String {
-    std::env::var("AWS_REGION")
-        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-        .unwrap_or_else(|_| "us-east-1".to_string())
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -236,17 +224,6 @@ mod tests {
     fn parse_env_vars_error_on_no_equals() {
         let args = vec!["NOEQUALSSIGN".to_string()];
         assert!(parse_env_vars(&args).is_err());
-    }
-
-    // --- get_aws_region ---
-
-    #[test]
-    fn aws_region_fallback() {
-        // Ensure the fallback works when neither env var is set.
-        // We can't easily unset env vars in tests, so we just verify the
-        // function returns a non-empty string.
-        let region = get_aws_region();
-        assert!(!region.is_empty());
     }
 
     // --- get_dynamic_config ---

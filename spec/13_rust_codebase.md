@@ -200,28 +200,15 @@ documentation should treat `AGENTS.md` as the current instruction filename.
 Provider modules currently include:
 
 - `anthropic`
-- `azure`
-- `bedrock`
 - `codex`
-- `cohere`
-- `copilot`
-- `free`
-- `google`
-- `minimax`
-- `openai`
-- `openai_compat`
-- `openai_compat_providers`
 
 The registry chooses runtime providers from explicit configuration, environment
 variables, the auth store, and provider-specific constructors. It supports
-Anthropic, OpenAI, Google, GitHub Copilot, Codex/OpenAI Codex, Cohere, Minimax,
-Azure, Bedrock, the free provider chain, and OpenAI-compatible providers such as
-OpenRouter.
+Anthropic (Claude) and Codex (OpenAI Codex via ChatGPT/Codex OAuth).
 
 `model_registry.rs` owns provider/model metadata and resolution. Bare model
-names are resolved through heuristics for well-known families (`claude-*`,
-`gpt-*`, `gemini*`, DeepSeek, Mistral, xAI, Cohere, Perplexity, Z.ai), while
-`provider/model` strings resolve directly.
+names are resolved through heuristics for well-known families (`claude-*`),
+while `provider/model` strings resolve directly.
 
 ---
 

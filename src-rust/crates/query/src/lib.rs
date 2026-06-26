@@ -1517,15 +1517,10 @@ pub async fn run_query_loop(
                     // available.  Return a clear error instead of silently falling
                     // through to the Anthropic client.
                     let hint = match provider_id_str.as_str() {
-                        "google" => "Set GOOGLE_API_KEY or run `coven-code auth login --provider google`.",
-                        "openai" => "Set OPENAI_API_KEY or run `coven-code auth login --provider openai`.",
-                        "groq" => "Set GROQ_API_KEY.",
-                        "mistral" => "Set MISTRAL_API_KEY.",
-                        "deepseek" => "Set DEEPSEEK_API_KEY.",
-                        "xai" => "Set XAI_API_KEY.",
-                        "github-copilot" => "Reconnect GitHub Copilot via /connect, or set GITHUB_TOKEN.",
-                        "cohere" => "Set COHERE_API_KEY.",
-                        _ => "Set the appropriate API key environment variable or use `coven-code auth login`.",
+                        "codex" | "openai-codex" => {
+                            "Run `coven-code auth login --provider codex` to sign in to Codex with ChatGPT."
+                        }
+                        _ => "Sign in to Claude with `coven-code auth login`, or use Codex with `coven-code auth login --provider codex`.",
                     };
                     error!(
                         provider = %provider_id_str,
