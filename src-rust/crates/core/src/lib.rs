@@ -4365,6 +4365,12 @@ pub mod tasks {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate the process-wide `ANTHROPIC_API_KEY`
+    /// environment variable. Without this, parallel test threads race on the
+    /// shared var — one test removing it while another asserts it resolves —
+    /// producing flaky failures. Hold the returned guard for the whole test.
+    static ANTHROPIC_API_KEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_message_user() {
         let msg = Message::user("hello");
@@ -4450,6 +4456,9 @@ mod tests {
 
     #[test]
     fn test_config_resolve_api_key_from_config() {
+        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // When config.api_key is set, it should be returned regardless of env var
         // (Config key takes priority — resolve_api_key returns it first)
         let orig = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -4468,6 +4477,9 @@ mod tests {
 
     #[test]
     fn test_config_resolve_api_key_none() {
+        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Temporarily ensure no env var override
         let orig = std::env::var("ANTHROPIC_API_KEY").ok();
         std::env::remove_var("ANTHROPIC_API_KEY");
@@ -4546,6 +4558,9 @@ mod tests {
 
     #[test]
     fn test_config_resolve_api_key_from_env() {
+        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let orig = std::env::var("ANTHROPIC_API_KEY").ok();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env-key");
 
