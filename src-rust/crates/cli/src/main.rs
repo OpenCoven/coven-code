@@ -247,6 +247,10 @@ struct Cli {
     #[arg(long = "bare", action = ArgAction::SetTrue)]
     bare: bool,
 
+    /// Run with hosted review memory isolation
+    #[arg(long = "hosted-review", env = "COVEN_CODE_HOSTED_REVIEW", action = ArgAction::SetTrue)]
+    hosted_review: bool,
+
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
     workload: Option<String>,
@@ -807,6 +811,9 @@ async fn main() -> anyhow::Result<()> {
     config.verbose = cli.verbose;
     config.output_format = cli.output_format.into();
     config.disable_claude_mds = cli.no_claude_md;
+    if cli.hosted_review {
+        config.hosted_review.enabled = true;
+    }
     if let Some(sp) = cli.system_prompt.clone() {
         config.custom_system_prompt = Some(sp);
     }
@@ -852,7 +859,11 @@ async fn main() -> anyhow::Result<()> {
 
     // --dump-system-prompt fast path
     if cli.dump_system_prompt {
-        let ctx = ContextBuilder::new(cwd.clone()).disable_claude_mds(config.disable_claude_mds);
+        let ctx = ContextBuilder::new(cwd.clone())
+            .disable_claude_mds(config.disable_claude_mds)
+            .memory_load_options(claurst_core::claudemd::MemoryLoadOptions::from_mode(
+                config.runtime_mode(),
+            ));
         let sys = ctx.build_system_context().await;
         let user = ctx.build_user_context().await;
         println!("{}\n\n{}", sys, user);
@@ -860,8 +871,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build context
-    let ctx_builder =
-        ContextBuilder::new(cwd.clone()).disable_claude_mds(config.disable_claude_mds);
+    let ctx_builder = ContextBuilder::new(cwd.clone())
+        .disable_claude_mds(config.disable_claude_mds)
+        .memory_load_options(claurst_core::claudemd::MemoryLoadOptions::from_mode(
+            config.runtime_mode(),
+        ));
     let system_ctx = ctx_builder.build_system_context().await;
     let user_ctx = ctx_builder.build_user_context().await;
 
@@ -2163,6 +2177,9 @@ async fn run_interactive(
         session.working_dir = Some(tool_ctx.working_dir.display().to_string());
         session
     };
+    if config.hosted_review_enabled() {
+        session.hosted_review = true;
+    }
     let initial_messages = session.messages.clone();
     let mut base_query_config = query_config;
     let mut live_config = config.clone();

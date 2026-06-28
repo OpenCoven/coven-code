@@ -119,7 +119,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("sandbox", "Toggle sandboxed shell execution"),
     ("search", "Search the codebase by natural language or regex"),
-    ("splash", "Show, hide, or toggle the empty-session splash screen"),
+    (
+        "splash",
+        "Show, hide, or toggle the empty-session splash screen",
+    ),
     ("session", "Browse, rename, fork, branch, and tag sessions"),
     (
         "settings",
@@ -3461,7 +3464,6 @@ impl App {
             }
             return false;
         }
-
 
         // Connect-a-provider dialog (/connect command)
         if self.connect_dialog.visible {

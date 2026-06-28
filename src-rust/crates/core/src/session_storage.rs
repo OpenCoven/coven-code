@@ -18,6 +18,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::hosted_review::{HostedReviewScope, RuntimeMode};
 use crate::types::Message;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,10 @@ pub struct TranscriptMessage {
     #[serde(default)]
     pub managed_session_id: Option<String>,
 
+    /// Marker for transcripts produced by hosted review mode.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hosted_review: bool,
+
     /// Catch-all for any other fields written by the TS CLI that we don't
     /// need to inspect.
     #[serde(flatten)]
@@ -154,6 +159,10 @@ pub struct TranscriptMessage {
 
 fn default_user_type() -> String {
     "external".to_string()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ---------------------------------------------------------------------------
@@ -234,9 +243,45 @@ pub fn transcript_dir(project_root: &Path) -> PathBuf {
     projects_dir().join(encoded)
 }
 
+pub fn transcript_dir_for_mode(
+    project_root: &Path,
+    mode: RuntimeMode,
+    scope: Option<&HostedReviewScope>,
+) -> crate::Result<PathBuf> {
+    match mode {
+        RuntimeMode::Local => Ok(transcript_dir(project_root)),
+        RuntimeMode::HostedReview => {
+            let scope = scope.ok_or_else(|| {
+                crate::ClaudeError::Config(
+                    "hosted review transcript persistence requires tenant scope and canonical repo identity"
+                        .to_string(),
+                )
+            })?;
+            Ok(projects_dir()
+                .join("hosted-review")
+                .join("tenants")
+                .join(crate::memdir::sanitize_path_component(&scope.tenant_id))
+                .join("repos")
+                .join(crate::memdir::sanitize_path_component(
+                    &scope.canonical_repo_identity,
+                ))
+                .join("transcripts"))
+        }
+    }
+}
+
 /// Returns the full path to a session's JSONL transcript file.
 pub fn transcript_path(project_root: &Path, session_id: &str) -> PathBuf {
     transcript_dir(project_root).join(format!("{}.jsonl", session_id))
+}
+
+pub fn transcript_path_for_mode(
+    project_root: &Path,
+    session_id: &str,
+    mode: RuntimeMode,
+    scope: Option<&HostedReviewScope>,
+) -> crate::Result<PathBuf> {
+    Ok(transcript_dir_for_mode(project_root, mode, scope)?.join(format!("{session_id}.jsonl")))
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +595,24 @@ pub fn make_user_entry(
     session_id: &str,
     cwd: &str,
 ) -> TranscriptEntry {
+    make_user_entry_for_mode(
+        message,
+        uuid,
+        parent_uuid,
+        session_id,
+        cwd,
+        RuntimeMode::Local,
+    )
+}
+
+pub fn make_user_entry_for_mode(
+    message: Message,
+    uuid: &str,
+    parent_uuid: Option<&str>,
+    session_id: &str,
+    cwd: &str,
+    mode: RuntimeMode,
+) -> TranscriptEntry {
     TranscriptEntry::User(TranscriptMessage {
         uuid: Some(uuid.to_string()),
         parent_uuid: parent_uuid.map(|s| s.to_string()),
@@ -563,6 +626,7 @@ pub fn make_user_entry(
         git_branch: None,
         agent_role: None,
         managed_session_id: None,
+        hosted_review: mode.is_hosted_review(),
         extra: Default::default(),
     })
 }
@@ -574,6 +638,24 @@ pub fn make_assistant_entry(
     parent_uuid: Option<&str>,
     session_id: &str,
     cwd: &str,
+) -> TranscriptEntry {
+    make_assistant_entry_for_mode(
+        message,
+        uuid,
+        parent_uuid,
+        session_id,
+        cwd,
+        RuntimeMode::Local,
+    )
+}
+
+pub fn make_assistant_entry_for_mode(
+    message: Message,
+    uuid: &str,
+    parent_uuid: Option<&str>,
+    session_id: &str,
+    cwd: &str,
+    mode: RuntimeMode,
 ) -> TranscriptEntry {
     TranscriptEntry::Assistant(TranscriptMessage {
         uuid: Some(uuid.to_string()),
@@ -588,6 +670,7 @@ pub fn make_assistant_entry(
         git_branch: None,
         agent_role: None,
         managed_session_id: None,
+        hosted_review: mode.is_hosted_review(),
         extra: Default::default(),
     })
 }
@@ -730,5 +813,55 @@ mod tests {
             .unwrap();
         let decoded = URL_SAFE_NO_PAD.decode(encoded_dir).unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), root.to_str().unwrap());
+    }
+
+    #[test]
+    fn hosted_transcript_path_requires_scope() {
+        let err = transcript_path_for_mode(
+            Path::new("/tmp/repo"),
+            "sess-1",
+            crate::hosted_review::RuntimeMode::HostedReview,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tenant scope"));
+    }
+
+    #[test]
+    fn hosted_transcript_path_uses_separate_namespace() {
+        let scope = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "github.com/OpenCoven/coven-code".to_string(),
+        );
+        let local = transcript_path(Path::new("/tmp/repo"), "sess-1");
+        let hosted = transcript_path_for_mode(
+            Path::new("/tmp/repo"),
+            "sess-1",
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&scope),
+        )
+        .unwrap();
+
+        assert_ne!(hosted, local);
+        assert!(hosted.to_string_lossy().contains("hosted-review"));
+        assert!(hosted.to_string_lossy().contains("tenant-a"));
+    }
+
+    #[test]
+    fn hosted_transcript_entries_are_marked() {
+        let msg = make_msg(Role::User);
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let entry = make_user_entry_for_mode(
+            msg,
+            &uuid,
+            None,
+            "sess-1",
+            "/repo",
+            crate::hosted_review::RuntimeMode::HostedReview,
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+
+        assert!(json.contains("\"hostedReview\":true"));
     }
 }

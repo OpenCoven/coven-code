@@ -102,6 +102,36 @@ See [Permission Modes](#permission-modes) for a full description of each value.
 | `custom_system_prompt` | string \| null | null | Replace the default Coven Code system prompt entirely with this text. |
 | `append_system_prompt` | string \| null | null | Append this text to the end of the assembled system prompt (after AGENTS.md content). |
 
+### Hosted review mode
+
+Hosted review mode is for service-hosted code review runs where the session must
+not inherit the operator's personal global memory.
+
+Enable it with any of:
+
+```bash
+coven-code --hosted-review
+COVEN_CODE_HOSTED_REVIEW=1 coven-code
+```
+
+Or in `settings.json`:
+
+```json
+{
+  "config": {
+    "hostedReview": {
+      "enabled": true
+    }
+  }
+}
+```
+
+When hosted review mode is active, Coven Code skips user-scope memory
+(`~/.coven-code/AGENTS.md` and `~/.coven-code/CLAUDE.md`) by default, marks
+new session artifacts as hosted review artifacts, and requires a tenant plus
+canonical repository identity before resolving hosted durable memory paths.
+Local-personal mode remains the default and continues to load user memory.
+
 ### Tool access
 
 | Key | Type | Default | Description |

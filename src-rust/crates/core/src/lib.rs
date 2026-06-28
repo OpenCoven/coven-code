@@ -47,6 +47,9 @@ pub mod remote_session;
 // AGENTS.md hierarchical memory loading (T4-1).
 pub mod claudemd;
 
+// Hosted review runtime isolation model.
+pub mod hosted_review;
+
 // Message manipulation utilities (T4-2).
 pub mod message_utils;
 
@@ -877,6 +880,7 @@ pub mod config {
 
     /// Top-level configuration values, merged from CLI args + settings file + env.
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[serde(default)]
     pub struct Config {
         pub api_key: Option<String>,
         pub model: Option<String>,
@@ -899,6 +903,14 @@ pub mod config {
         pub custom_system_prompt: Option<String>,
         pub append_system_prompt: Option<String>,
         pub disable_claude_mds: bool,
+        /// Hosted review isolation mode. Enabled by settings, CLI, or
+        /// COVEN_CODE_HOSTED_REVIEW=1.
+        #[serde(
+            default,
+            rename = "hostedReview",
+            skip_serializing_if = "crate::hosted_review::HostedReviewConfig::is_default"
+        )]
+        pub hosted_review: crate::hosted_review::HostedReviewConfig,
         pub project_dir: Option<PathBuf>,
         #[serde(default)]
         pub workspace_paths: Vec<PathBuf>,
@@ -1262,6 +1274,18 @@ pub mod config {
                         .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
                 })
                 .unwrap_or("anthropic")
+        }
+
+        pub fn runtime_mode(&self) -> crate::hosted_review::RuntimeMode {
+            if self.hosted_review_enabled() {
+                crate::hosted_review::RuntimeMode::HostedReview
+            } else {
+                crate::hosted_review::RuntimeMode::Local
+            }
+        }
+
+        pub fn hosted_review_enabled(&self) -> bool {
+            self.hosted_review.enabled || crate::hosted_review::env_enables_hosted_review()
         }
 
         /// Resolve the effective model, falling back to a provider-appropriate default.
@@ -1692,6 +1716,11 @@ pub mod config {
                     .or(base.config.append_system_prompt),
                 disable_claude_mds: over.config.disable_claude_mds
                     || base.config.disable_claude_mds,
+                hosted_review: if over.config.hosted_review.enabled {
+                    over.config.hosted_review
+                } else {
+                    base.config.hosted_review
+                },
                 project_dir: over.config.project_dir.or(base.config.project_dir),
                 workspace_paths: {
                     let mut v = base.config.workspace_paths;
@@ -2009,6 +2038,30 @@ pub mod config {
                 "trusted-project"
             );
         }
+
+        #[test]
+        fn hosted_review_config_deserializes_from_camel_case() {
+            let settings: Settings =
+                serde_json::from_str(r#"{"config":{"hostedReview":{"enabled":true}}}"#).unwrap();
+
+            assert!(settings.effective_config().hosted_review_enabled());
+        }
+
+        #[test]
+        fn hosted_review_env_enables_config() {
+            let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let original = std::env::var("COVEN_CODE_HOSTED_REVIEW").ok();
+            std::env::set_var("COVEN_CODE_HOSTED_REVIEW", "1");
+
+            assert!(Config::default().hosted_review_enabled());
+
+            match original {
+                Some(value) => std::env::set_var("COVEN_CODE_HOSTED_REVIEW", value),
+                None => std::env::remove_var("COVEN_CODE_HOSTED_REVIEW"),
+            }
+        }
     }
 }
 
@@ -2116,6 +2169,7 @@ pub mod context {
     pub struct ContextBuilder {
         cwd: PathBuf,
         disable_claude_mds: bool,
+        memory_load_options: crate::claudemd::MemoryLoadOptions,
     }
 
     impl ContextBuilder {
@@ -2123,11 +2177,17 @@ pub mod context {
             Self {
                 cwd,
                 disable_claude_mds: false,
+                memory_load_options: crate::claudemd::MemoryLoadOptions::local(),
             }
         }
 
         pub fn disable_claude_mds(mut self, val: bool) -> Self {
             self.disable_claude_mds = val;
+            self
+        }
+
+        pub fn memory_load_options(mut self, options: crate::claudemd::MemoryLoadOptions) -> Self {
+            self.memory_load_options = options;
             self
         }
 
@@ -2203,19 +2263,23 @@ pub mod context {
         /// Walk up from cwd looking for AGENTS.md files and the global one.
         async fn find_and_read_claude_md(&self) -> Option<String> {
             let mut claude_mds = vec![];
+            let mut loaded_scopes: Vec<&str> = Vec::new();
 
             // Global ~/.coven-code/AGENTS.md
-            if let Some(home) = dirs::home_dir() {
-                let global_claude_md = home
-                    .join(".coven-code")
-                    .join(crate::constants::CLAUDE_MD_FILENAME);
-                if global_claude_md.exists() {
-                    if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
-                        claude_mds.push(format!(
-                            "# Memory (from {})\n{}",
-                            global_claude_md.display(),
-                            content
-                        ));
+            if self.memory_load_options.allow_user_memory {
+                if let Some(home) = dirs::home_dir() {
+                    let global_claude_md = home
+                        .join(".coven-code")
+                        .join(crate::constants::CLAUDE_MD_FILENAME);
+                    if global_claude_md.exists() {
+                        if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
+                            loaded_scopes.push("user");
+                            claude_mds.push(format!(
+                                "# Memory (from {})\n{}",
+                                global_claude_md.display(),
+                                content
+                            ));
+                        }
                     }
                 }
             }
@@ -2227,6 +2291,7 @@ pub mod context {
                 let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
                 if candidate.exists() {
                     if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
+                        loaded_scopes.push("project");
                         project_mds.push(format!(
                             "# Project Memory (from {})\n{}",
                             candidate.display(),
@@ -2240,11 +2305,70 @@ pub mod context {
             project_mds.reverse();
             claude_mds.extend(project_mds);
 
+            if self.memory_load_options.mode.is_hosted_review() {
+                loaded_scopes.sort_unstable();
+                loaded_scopes.dedup();
+                let scopes = if loaded_scopes.is_empty() {
+                    "none".to_string()
+                } else {
+                    loaded_scopes.join(", ")
+                };
+                claude_mds.insert(
+                    0,
+                    format!(
+                        "# Hosted Review Mode\nMode: hosted-review\nLoaded AGENTS.md scopes: {scopes}"
+                    ),
+                );
+            }
+
             if claude_mds.is_empty() {
                 None
             } else {
                 Some(claude_mds.join("\n\n"))
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn hosted_review_context_skips_global_user_memory() {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join("AGENTS.md"), "project instructions").unwrap();
+
+            let home = tempfile::tempdir().unwrap();
+            let coven_code = home.path().join(".coven-code");
+            std::fs::create_dir_all(&coven_code).unwrap();
+            std::fs::write(coven_code.join("AGENTS.md"), "private user instructions").unwrap();
+
+            let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let original_home = std::env::var("HOME").ok();
+            std::env::set_var("HOME", home.path());
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let context = runtime.block_on(async {
+                ContextBuilder::new(project.path().to_path_buf())
+                    .memory_load_options(crate::claudemd::MemoryLoadOptions::hosted_review())
+                    .build_user_context()
+                    .await
+            });
+
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+
+            assert!(context.contains("Mode: hosted-review"));
+            assert!(context.contains("Loaded AGENTS.md scopes: project"));
+            assert!(context.contains("project instructions"));
+            assert!(!context.contains("private user instructions"));
         }
     }
 }
@@ -3220,6 +3344,9 @@ pub mod history {
         /// Remote bridge URL if this session is mirrored to a remote endpoint.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub remote_session_url: Option<String>,
+        /// Marker for sessions produced under hosted review isolation.
+        #[serde(default, rename = "hostedReview", skip_serializing_if = "is_false")]
+        pub hosted_review: bool,
         /// Accumulated USD cost for this session.
         #[serde(default)]
         pub total_cost: f64,
@@ -3252,6 +3379,7 @@ pub mod history {
                 branch_from: None,
                 branch_at_message: None,
                 remote_session_url: None,
+                hosted_review: false,
                 total_cost: 0.0,
                 total_tokens: 0,
                 checkpoints: vec![],
@@ -3427,6 +3555,7 @@ pub mod history {
             branch_from: Some(source_id.to_string()),
             branch_at_message: Some(clamped_idx),
             remote_session_url: None,
+            hosted_review: source.hosted_review,
             total_cost: 0.0,
             total_tokens: 0,
             checkpoints: vec![],
@@ -3460,6 +3589,10 @@ pub mod history {
                 false
             })
             .collect()
+    }
+
+    fn is_false(value: &bool) -> bool {
+        !*value
     }
 
     #[cfg(test)]

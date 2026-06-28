@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::hosted_review::{HostedReviewScope, RuntimeMode};
+
 // ---------------------------------------------------------------------------
 // Memory type taxonomy
 // ---------------------------------------------------------------------------
@@ -359,6 +361,49 @@ pub fn auto_memory_path(project_root: &Path) -> PathBuf {
     let sanitized = sanitize_path_component(&project_root.to_string_lossy());
 
     memory_base.join("projects").join(sanitized).join("memory")
+}
+
+/// Compute the auto-memory directory for a runtime mode.
+///
+/// Hosted review mode requires a tenant and canonical repository identity
+/// before it may resolve a durable memory namespace.
+pub fn auto_memory_path_for_mode(
+    project_root: &Path,
+    mode: RuntimeMode,
+    scope: Option<&HostedReviewScope>,
+) -> crate::Result<PathBuf> {
+    match mode {
+        RuntimeMode::Local => Ok(auto_memory_path(project_root)),
+        RuntimeMode::HostedReview => {
+            let scope = scope.ok_or_else(|| {
+                crate::ClaudeError::Config(
+                    "hosted review memory persistence requires tenant scope and canonical repo identity"
+                        .to_string(),
+                )
+            })?;
+            Ok(hosted_memory_path(scope))
+        }
+    }
+}
+
+pub fn ensure_auto_memory_dir_exists_for_mode(
+    project_root: &Path,
+    mode: RuntimeMode,
+    scope: Option<&HostedReviewScope>,
+) -> crate::Result<PathBuf> {
+    let path = auto_memory_path_for_mode(project_root, mode, scope)?;
+    ensure_memory_dir_exists(&path);
+    Ok(path)
+}
+
+fn hosted_memory_path(scope: &HostedReviewScope) -> PathBuf {
+    crate::config::Settings::config_dir()
+        .join("hosted-review")
+        .join("tenants")
+        .join(sanitize_path_component(&scope.tenant_id))
+        .join("repos")
+        .join(sanitize_path_component(&scope.canonical_repo_identity))
+        .join("memory")
 }
 
 /// Sanitize an arbitrary string into a directory-name-safe component.
@@ -891,5 +936,42 @@ mod tests {
         // function handles Some(false) without panicking.
         // (The full env-var paths are integration-tested separately.)
         let _ = is_auto_memory_enabled(Some(false));
+    }
+
+    #[test]
+    fn hosted_memory_path_requires_scope() {
+        let project = PathBuf::from("/tmp/repo");
+        let err = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tenant scope"));
+    }
+
+    #[test]
+    fn hosted_memory_path_uses_separate_namespace() {
+        let project = PathBuf::from("/tmp/repo");
+        let scope = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "github.com/OpenCoven/coven-code".to_string(),
+        );
+
+        let local = auto_memory_path(&project);
+        let hosted = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&scope),
+        )
+        .unwrap();
+
+        assert_ne!(hosted, local);
+        assert!(hosted.to_string_lossy().contains("hosted-review"));
+        assert!(hosted.to_string_lossy().contains("tenant-a"));
+        assert!(hosted
+            .to_string_lossy()
+            .contains("github.com_OpenCoven_coven-code"));
     }
 }

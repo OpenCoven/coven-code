@@ -520,6 +520,20 @@ The `InstructionsLoaded` hook event fires for every file that is loaded, with th
 
 The `/memory` command opens the memory management UI for viewing, editing, and organising instruction files.
 
+### Hosted review memory isolation
+
+Local-personal mode is the default. It loads managed, user, project, and local
+instruction scopes so a developer's personal `~/.coven-code/AGENTS.md` can
+shape their own sessions.
+
+Hosted review mode is enabled with `--hosted-review`,
+`COVEN_CODE_HOSTED_REVIEW=1`, or `config.hostedReview.enabled`. In this mode,
+Coven Code does not load user-scope memory by default. The prompt records that
+hosted review mode is active and lists the AGENTS.md scopes that were loaded.
+Durable hosted memory and transcript namespaces are separated under a hosted
+review path and require tenant scope plus a canonical repository identity before
+they can be resolved for persistence.
+
 ---
 
 ## Security and permissions

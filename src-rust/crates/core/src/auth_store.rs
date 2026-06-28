@@ -160,7 +160,10 @@ mod tests {
             },
         );
 
-        assert_eq!(store.api_key_for("anthropic").as_deref(), Some("sk-ant-key"));
+        assert_eq!(
+            store.api_key_for("anthropic").as_deref(),
+            Some("sk-ant-key")
+        );
     }
 
     /// Atomic save: a concurrent racer that creates the file mid-flight
