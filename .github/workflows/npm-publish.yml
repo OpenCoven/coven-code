@@ -7,6 +7,11 @@ on:
         description: 'Version to publish (e.g., v0.1.1). Must already exist as a GitHub Release.'
         required: true
         type: string
+      publish_unscoped:
+        description: 'Also publish the unscoped coven-code mirror. Requires npm auth or trusted publishing.'
+        required: false
+        default: false
+        type: boolean
   workflow_run:
     workflows: ['Release']
     types: [completed]
@@ -251,7 +256,10 @@ jobs:
           NODE
           }
 
-          packages=("@opencoven/coven-code" "coven-code")
+          packages=("@opencoven/coven-code")
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.publish_unscoped }}" == "true" ]]; then
+            packages+=("coven-code")
+          fi
           for package_name in "${packages[@]}"; do
             if npm view "${package_name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${package_name}@${VERSION} is already published; skipping."
