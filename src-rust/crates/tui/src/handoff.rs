@@ -45,8 +45,10 @@ pub fn send_handoff(
     context: String,
     project_root: &str,
 ) -> Result<String, String> {
-    let client = DaemonClient::new()
-        .ok_or_else(|| "Coven daemon not running; install coven to use /handoff".to_string())?;
+    let client = DaemonClient::new().ok_or_else(|| {
+        let detection = claurst_core::openclaw_agent::detect_openclaw_agent_installation();
+        format_handoff_unavailable_message(&detection)
+    })?;
     let title = format!("Handoff from coven-code: {}", infer_short_topic(&context));
     client
         .create_session(CreateSessionRequest {
@@ -57,6 +59,19 @@ pub fn send_handoff(
             initial_message: context,
         })
         .map_err(|e| e.to_string())
+}
+
+fn format_handoff_unavailable_message(
+    detection: &claurst_core::openclaw_agent::OpenClawAgentDetection,
+) -> String {
+    let mut message =
+        "Coven daemon not running. Start it with `coven daemon start` to use /handoff.".to_string();
+    if detection.branch != claurst_core::openclaw_agent::OpenClawAgentDetectionBranch::NoOpenClawDir
+    {
+        message.push_str("\n\n");
+        message.push_str(&detection.guidance);
+    }
+    message
 }
 
 fn format_message(message: &Message) -> String {
@@ -121,5 +136,22 @@ mod tests {
     fn truncate_chars_does_not_split_unicode_boundaries() {
         let text = "wisp 🌿 keeps context";
         assert_eq!(truncate_chars(text, 6), "wisp 🌿...");
+    }
+
+    #[test]
+    fn unavailable_handoff_message_distinguishes_stale_openclaw_data() {
+        let detection = claurst_core::openclaw_agent::OpenClawAgentDetection {
+            branch: claurst_core::openclaw_agent::OpenClawAgentDetectionBranch::StaleOpenClawData,
+            home: std::path::PathBuf::from("/tmp/.openclaw"),
+            valid_agents: Vec::new(),
+            stale_agents: Vec::new(),
+            guidance: "OpenClaw data found, but no loadable OpenClaw agent was found. Create or import an agent; existing data will be preserved.".to_string(),
+        };
+
+        let message = format_handoff_unavailable_message(&detection);
+
+        assert!(message.contains("OpenClaw data found"));
+        assert!(message.contains("no loadable OpenClaw agent"));
+        assert!(message.contains("Create or import"));
     }
 }

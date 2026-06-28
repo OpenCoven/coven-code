@@ -50,6 +50,9 @@ pub mod claudemd;
 // Hosted review runtime isolation model.
 pub mod hosted_review;
 
+// OpenClaw installation/agent detection used by Coven integrations.
+pub mod openclaw_agent;
+
 // Message manipulation utilities (T4-2).
 pub mod message_utils;
 
