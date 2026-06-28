@@ -666,8 +666,16 @@ fn handle_exit_key(
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Fast-path: handle --version before parsing everything
     let raw_args: Vec<String> = std::env::args().collect();
+
+    // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
+    // This must run before the top-level --version handler so
+    // `coven-code upgrade --version <v>` reaches the upgrade subcommand.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("upgrade") {
+        return upgrade::run_upgrade(&raw_args[2..]).await;
+    }
+
+    // Fast-path: handle --version before parsing everything
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
         println!("coven-code {}", APP_VERSION);
         return Ok(());
@@ -688,11 +696,6 @@ async fn main() -> anyhow::Result<()> {
     if raw_args.get(1).map(|s| s.as_str()) == Some("accounts") {
         handle_accounts_command(&raw_args[2..]);
         return Ok(());
-    }
-
-    // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
-    if raw_args.get(1).map(|s| s.as_str()) == Some("upgrade") {
-        return upgrade::run_upgrade(&raw_args[2..]).await;
     }
 
     // Fast-path: `coven-code acp` — start the Agent Client Protocol stdio server.

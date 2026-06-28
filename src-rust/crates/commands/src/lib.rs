@@ -34,6 +34,8 @@ pub struct CommandContext {
     pub mcp_auth_runner: Option<Arc<dyn Fn(claurst_mcp::oauth::McpAuthSession) + Send + Sync>>,
 }
 
+const COVEN_CODE_REPO: &str = "OpenCoven/coven-code";
+
 /// Result of running a slash command.
 #[derive(Debug)]
 pub enum CommandResult {
@@ -6840,6 +6842,109 @@ impl SlashCommand for VoiceCommand {
 
 // ---- /upgrade ------------------------------------------------------------
 
+struct LatestRelease {
+    version: String,
+    url: String,
+}
+
+async fn fetch_latest_release(current: &str) -> anyhow::Result<LatestRelease> {
+    let api_url = format!("https://api.github.com/repos/{COVEN_CODE_REPO}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent(format!("coven-code/{current}"))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let mut req = client.get(&api_url);
+    if let Some(token) = github_token() {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = match req.send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            return fetch_latest_release_from_redirect(current)
+                .await
+                .map_err(|fallback_err| {
+                    anyhow::anyhow!(
+                        "GitHub API request failed for {api_url}: {err}; redirect fallback failed: {fallback_err}"
+                    )
+                });
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return fetch_latest_release_from_redirect(current)
+            .await
+            .map_err(|fallback_err| {
+                anyhow::anyhow!(
+                    "GitHub API returned {status} for {api_url}; redirect fallback failed: {fallback_err}"
+                )
+            });
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    let tag = json
+        .get("tag_name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub API response"))?;
+    let version = tag.trim_start_matches('v').to_string();
+    let url = json
+        .get("html_url")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| release_url_for_version(&version));
+    Ok(LatestRelease { version, url })
+}
+
+async fn fetch_latest_release_from_redirect(current: &str) -> anyhow::Result<LatestRelease> {
+    let latest_url = format!("https://github.com/{COVEN_CODE_REPO}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent(format!("coven-code/{current}"))
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let resp = client.get(&latest_url).send().await?;
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("GitHub latest release redirect did not include a Location header")
+        })?;
+    let version = latest_release_version_from_location(location).ok_or_else(|| {
+        anyhow::anyhow!("could not parse release version from redirect: {location}")
+    })?;
+    let url = release_url_for_version(&version);
+    Ok(LatestRelease { version, url })
+}
+
+fn latest_release_version_from_location(location: &str) -> Option<String> {
+    let without_fragment = location.split('#').next().unwrap_or(location);
+    let path = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let tag = path.split("/releases/tag/").nth(1)?.split('/').next()?;
+    let version = tag.trim_start_matches('v').trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
+fn release_url_for_version(version: &str) -> String {
+    format!("https://github.com/{COVEN_CODE_REPO}/releases/tag/v{version}")
+}
+
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
 #[async_trait]
 impl SlashCommand for UpgradeCommand {
     fn name(&self) -> &str {
@@ -6860,68 +6965,27 @@ impl SlashCommand for UpgradeCommand {
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
         let current = claurst_core::constants::APP_VERSION;
 
-        // Check GitHub releases API for latest version
-        let client = reqwest::Client::builder()
-            .user_agent(format!("coven-code/{}", current))
-            .timeout(std::time::Duration::from_secs(8))
-            .build();
-
-        let client = match client {
-            Ok(c) => c,
-            Err(e) => {
-                return CommandResult::Message(format!(
-                    "Current version: {current}\n\
-                     Could not check for updates (HTTP client error: {e})\n\
-                     Visit https://github.com/OpenCoven/coven-code/releases for updates."
-                ))
-            }
-        };
-
-        let resp = client
-            .get("https://api.github.com/repos/OpenCoven/coven-code/releases/latest")
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let json: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
-
-                let tag = json
-                    .get("tag_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .trim_start_matches('v');
-
-                let url = json
-                    .get("html_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("https://github.com/OpenCoven/coven-code/releases");
-
-                if tag == current || tag == "unknown" {
+        match fetch_latest_release(current).await {
+            Ok(latest) => {
+                if latest.version == current {
                     CommandResult::Message(format!(
                         "Coven Code v{current} - you are up to date.\n\
-                         Release page: {url}"
+                         Release page: {}",
+                        latest.url
                     ))
                 } else {
                     CommandResult::Message(format!(
                         "Update available!\n\
                          Current version:  v{current}\n\
-                         Latest version:   v{tag}\n\
-                         Release page:     {url}\n\n\
+                         Latest version:   v{}\n\
+                         Release page:     {}\n\n\
                          Upgrade in place (recommended):\n\
                            coven-code upgrade\n\n\
                          Or build from source:\n\
-                           cargo install coven-code --force"
+                           cargo install coven-code --force",
+                        latest.version, latest.url
                     ))
                 }
-            }
-            Ok(r) => {
-                let status = r.status();
-                CommandResult::Message(format!(
-                    "Current version: v{current}\n\
-                     Could not check for updates (HTTP {status}).\n\
-                     Visit https://github.com/OpenCoven/coven-code/releases for updates."
-                ))
             }
             Err(e) => CommandResult::Message(format!(
                 "Current version: v{current}\n\
@@ -10668,6 +10732,30 @@ mod tests {
         assert!(find_command("remote").is_some());
         assert!(find_command("sandbox-toggle").is_some());
         assert!(find_command("btw").is_some());
+    }
+
+    #[test]
+    fn upgrade_command_parses_latest_release_redirect_locations() {
+        assert_eq!(
+            latest_release_version_from_location(
+                "https://github.com/OpenCoven/coven-code/releases/tag/v0.2.0"
+            )
+            .as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            latest_release_version_from_location(
+                "/OpenCoven/coven-code/releases/tag/v1.2.3?expanded=true"
+            )
+            .as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            latest_release_version_from_location(
+                "https://github.com/OpenCoven/coven-code/releases"
+            ),
+            None
+        );
     }
 
     #[test]
