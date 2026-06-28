@@ -9,6 +9,8 @@
 // `flate2`/`tar`/`zip` into the cli crate just for one command.
 
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::LOCATION;
+use reqwest::redirect::Policy;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -185,9 +187,16 @@ async fn fetch_latest_version() -> Result<String> {
         .timeout(Duration::from_secs(10))
         .user_agent(format!("coven-code-upgrade/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let resp = client.get(&url).send().await?;
+    let mut req = client.get(&url);
+    if let Some(token) = github_token() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await?;
     if !resp.status().is_success() {
-        bail!("GitHub API returned {} for {}", resp.status(), url);
+        let status = resp.status();
+        return fetch_latest_version_from_redirect()
+            .await
+            .with_context(|| format!("GitHub API returned {} for {}", status, url));
     }
     let json: serde_json::Value = resp.json().await?;
     let tag = json
@@ -195,6 +204,50 @@ async fn fetch_latest_version() -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("no tag_name in GitHub API response"))?;
     Ok(tag.trim_start_matches('v').to_string())
+}
+
+async fn fetch_latest_version_from_redirect() -> Result<String> {
+    let url = format!("https://github.com/{}/releases/latest", REPO);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(format!("coven-code-upgrade/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(Policy::none())
+        .build()?;
+    let resp = client.get(&url).send().await?;
+    let location = resp
+        .headers()
+        .get(LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            anyhow!("GitHub latest release redirect did not include a Location header")
+        })?;
+    release_version_from_location(location).ok_or_else(|| {
+        anyhow!(
+            "could not parse release version from redirect: {}",
+            location
+        )
+    })
+}
+
+fn release_version_from_location(location: &str) -> Option<String> {
+    let path = url::Url::parse(location)
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|_| location.split('?').next().unwrap_or(location).to_string());
+    let tag = path.split("/releases/tag/").nth(1)?.split('/').next()?;
+    let version = tag.trim_start_matches('v').trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -354,4 +407,24 @@ fn tempdir_for_upgrade() -> Result<PathBuf> {
     let dir = base.join(format!("coven-code-upgrade-{}-{}", pid, now));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_version_from_location;
+
+    #[test]
+    fn parses_latest_release_redirect_locations() {
+        assert_eq!(
+            release_version_from_location(
+                "https://github.com/OpenCoven/coven-code/releases/tag/v0.0.37"
+            )
+            .as_deref(),
+            Some("0.0.37")
+        );
+        assert_eq!(
+            release_version_from_location("/OpenCoven/coven-code/releases/tag/v1.2.3").as_deref(),
+            Some("1.2.3")
+        );
+    }
 }
