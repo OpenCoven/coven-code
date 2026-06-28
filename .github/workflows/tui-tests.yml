@@ -1,0 +1,87 @@
+name: TUI Tests
+
+# Interactive terminal (TUI) smoke suite. Drives the real coven-code binary
+# through a tmux pseudo-terminal and asserts on the rendered output.
+# Offline / headless-first: no live model call, no network, no credentials.
+# See scripts/tui-tests/README.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src-rust/**'
+      - 'scripts/tui-tests/**'
+      - '.github/workflows/tui-tests.yml'
+  pull_request:
+    paths:
+      - 'src-rust/**'
+      - 'scripts/tui-tests/**'
+      - '.github/workflows/tui-tests.yml'
+  workflow_dispatch:
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: tui-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tui-tests:
+    name: Interactive terminal suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # tmux drives the pseudo-terminal; ALSA + pkg-config are needed to build
+      # the binary (voice feature), mirroring the release workflow.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux libasound2-dev pkg-config
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: tui-tests-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: tui-tests-cargo-
+
+      - name: Build debug binary
+        working-directory: src-rust
+        run: cargo build --locked --package claurst
+
+      # Belt-and-suspenders: mark onboarding complete so a credential-less
+      # runner lands on the main screen rather than (potentially) a blocking
+      # provider-setup dialog. The suite makes no network calls.
+      - name: Seed offline settings
+        run: |
+          mkdir -p "$HOME/.coven-code"
+          printf '{"hasCompletedOnboarding": true}' > "$HOME/.coven-code/settings.json"
+
+      - name: Run interactive terminal suite
+        env:
+          # Fail loudly if tmux is missing instead of silently skipping the
+          # interactive cases, and persist pane captures for any failure.
+          REQUIRE_TMUX: '1'
+          TUI_LOG_DIR: ${{ runner.temp }}/tui-failures
+        run: bash scripts/tui-tests/run.sh
+
+      - name: Upload failure pane captures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-failure-captures
+          path: ${{ runner.temp }}/tui-failures
+          if-no-files-found: ignore
+          retention-days: 14
