@@ -4070,9 +4070,9 @@ async fn run_interactive(
                     tokio::spawn(async move {
                         if !client_id_configured {
                             let _ = tx2.send(DeviceAuthEvent::Error(
-                                "Anthropic subscription login needs COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID.\n\
-                                 Configure a Coven Code OAuth client, choose \"Anthropic CLI\" to import an existing\n\
-                                 `claude`/`ant` login, or use an API key: console.anthropic.com/settings/keys".to_string()
+                                "Claude subscription login is not configured.\n\
+                                 Set COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, choose \"Anthropic CLI\" to import an existing\n\
+                                 `claude`/`ant` login, or use ANTHROPIC_API_KEY from console.anthropic.com/settings/keys.".to_string()
                             )).await;
                             return;
                         }

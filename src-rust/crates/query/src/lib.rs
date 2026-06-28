@@ -750,6 +750,77 @@ fn is_fallback_worthy_api_error(err: &ClaudeError) -> bool {
     }
 }
 
+fn enrich_error_notice(
+    err: ClaudeError,
+    provider: &str,
+    model: &str,
+    account: Option<&str>,
+) -> ClaudeError {
+    match err {
+        ClaudeError::RateLimit => ClaudeError::ApiStatus {
+            status: 429,
+            message: rate_limit_notice(provider, model, account, None),
+        },
+        ClaudeError::ApiStatus {
+            status: 429,
+            message,
+        } => ClaudeError::ApiStatus {
+            status: 429,
+            message: rate_limit_notice(provider, model, account, Some(&message)),
+        },
+        other => other,
+    }
+}
+
+fn rate_limit_notice(
+    provider: &str,
+    model: &str,
+    account: Option<&str>,
+    provider_message: Option<&str>,
+) -> String {
+    let account_part = account
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" on account `{}`", value.trim()))
+        .unwrap_or_default();
+    let mut message = format!(
+        "Claude rate limit for model `{model}`{account_part}.\n\n\
+         Anthropic/Claude Max limits are model-tier scoped: Sonnet/Opus can be limited while Haiku still works.\n\
+         Try switching to Haiku, switching Anthropic accounts, or waiting before retrying."
+    );
+
+    let provider_message = provider_message
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| !value.eq_ignore_ascii_case("error"));
+    if let Some(provider_message) = provider_message {
+        message.push_str(&format!("\n\nProvider message: {provider_message}"));
+    } else if provider != "anthropic" {
+        message.push_str(&format!("\n\nProvider: {provider}"));
+    }
+
+    message
+}
+
+fn active_account_notice(provider: &str) -> Option<String> {
+    let registry = claurst_core::accounts::AccountRegistry::load();
+    let profile = registry.active_profile(provider)?;
+    let display_name = profile.display_name();
+    let mut label = if display_name == profile.id {
+        profile.id.clone()
+    } else {
+        format!("{} ({})", profile.id, display_name)
+    };
+    if let Some(tier) = profile
+        .subscription_tier
+        .as_deref()
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+    {
+        label.push_str(&format!(" [{tier}]"));
+    }
+    Some(label)
+}
+
 // Spinner verbs are imported from claurst_core::spinner
 
 /// Run the agentic query loop.
@@ -1269,8 +1340,12 @@ pub async fn run_query_loop(
                         Ok(s) => s,
                         Err(e) => {
                             error!(provider = %provider_id_str, error = %e, "Provider stream failed");
-                            return QueryOutcome::Error(claurst_core::error::ClaudeError::Api(
-                                e.to_string(),
+                            let claude_error: claurst_core::error::ClaudeError = e.into();
+                            return QueryOutcome::Error(enrich_error_notice(
+                                claude_error,
+                                &provider_id_str,
+                                &model_id_str,
+                                active_account_notice(&provider_id_str).as_deref(),
                             ));
                         }
                     };
@@ -1580,7 +1655,12 @@ pub async fn run_query_loop(
                     }
                 }
                 error!(error = %e, "API request failed");
-                return QueryOutcome::Error(e);
+                return QueryOutcome::Error(enrich_error_notice(
+                    e,
+                    "anthropic",
+                    &effective_model,
+                    active_account_notice("anthropic").as_deref(),
+                ));
             }
         };
 
@@ -2636,6 +2716,48 @@ mod tests {
     fn test_typed_rate_limit_uses_fallback() {
         let err = claurst_core::error::ClaudeError::RateLimit;
         assert!(is_fallback_worthy_api_error(&err));
+    }
+
+    #[test]
+    fn test_generic_429_error_is_enriched_for_model_tier_limits() {
+        let err = claurst_core::error::ClaudeError::ApiStatus {
+            status: 429,
+            message: "Error".to_string(),
+        };
+
+        let enriched = enrich_error_notice(
+            err,
+            "anthropic",
+            "claude-sonnet-4-6",
+            Some("claude-code-10 [max]"),
+        );
+
+        let text = enriched.to_string();
+        assert!(text.contains("API error 429"));
+        assert!(text.contains("Claude rate limit"));
+        assert!(text.contains("claude-sonnet-4-6"));
+        assert!(text.contains("claude-code-10 [max]"));
+        assert!(text.contains("model-tier"));
+        assert!(text.contains("Haiku"));
+    }
+
+    #[test]
+    fn test_provider_rate_limit_error_is_enriched_for_model_tier_limits() {
+        let err: claurst_core::error::ClaudeError =
+            claurst_api::provider_error::ProviderError::RateLimited {
+                provider: claurst_core::ProviderId::new("anthropic"),
+                retry_after: Some(60),
+            }
+            .into();
+
+        let enriched = enrich_error_notice(err, "anthropic", "claude-opus-4-8", None);
+
+        let text = enriched.to_string();
+        assert!(text.contains("API error 429"));
+        assert!(text.contains("Claude rate limit"));
+        assert!(text.contains("claude-opus-4-8"));
+        assert!(text.contains("model-tier"));
+        assert!(text.contains("Haiku"));
     }
 
     #[test]

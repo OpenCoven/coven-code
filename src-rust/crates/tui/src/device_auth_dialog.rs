@@ -155,6 +155,64 @@ pub enum DeviceAuthEvent {
     Error(String),
 }
 
+fn wrap_device_auth_error_message(msg: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+
+    for paragraph in msg.lines() {
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if word.len() > max_width {
+                if !current.is_empty() {
+                    lines.push(current);
+                    current = String::new();
+                }
+                let mut chunk = String::new();
+                for ch in word.chars() {
+                    if chunk.len() + ch.len_utf8() > max_width {
+                        lines.push(chunk);
+                        chunk = String::new();
+                    }
+                    chunk.push(ch);
+                }
+                if !chunk.is_empty() {
+                    current = chunk;
+                }
+                continue;
+            }
+
+            if current.is_empty() {
+                current.push_str(word);
+                continue;
+            }
+
+            if current.len() + 1 + word.len() <= max_width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current);
+                current = word.to_string();
+            }
+        }
+
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -309,12 +367,36 @@ pub fn render_device_auth_dialog(frame: &mut Frame, state: &DeviceAuthDialogStat
         DeviceAuthStatus::Error(msg) => {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!(" Error: {}", msg),
-                Style::default().fg(Color::Red),
+                " Error",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
+            let max_w = inner.width.saturating_sub(2) as usize;
+            for line in wrap_device_auth_error_message(msg, max_w) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", line),
+                    Style::default().fg(Color::Red),
+                )));
+            }
         }
     };
 
     let para = Paragraph::new(lines).bg(dialog_bg);
     frame.render_widget(para, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_device_auth_error_message;
+
+    #[test]
+    fn wraps_long_auth_error_messages() {
+        let lines = wrap_device_auth_error_message(
+            "Claude subscription login is not configured. Set COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID.",
+            32,
+        );
+
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.len() <= 32));
+        assert_eq!(lines[0], "Claude subscription login is not");
+    }
 }

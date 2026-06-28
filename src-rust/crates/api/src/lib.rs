@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // Modules
@@ -763,7 +763,7 @@ pub mod client {
                         .map(Duration::from_secs);
 
                     let wait = retry_after.unwrap_or(delay);
-                    warn!(
+                    debug!(
                         status,
                         attempt = attempts,
                         wait_secs = wait.as_secs(),
