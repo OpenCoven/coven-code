@@ -1,5 +1,7 @@
 # Coven Code
 
+[![TUI Tests](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml/badge.svg)](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml)
+
 **Coven Code** is an open-source agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
 > **Attribution:** Coven Code is derived from Claurst v0.2.1 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
