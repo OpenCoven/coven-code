@@ -1247,6 +1247,7 @@ mod tests {
             git_branch: None,
             agent_role: None,
             managed_session_id: None,
+            hosted_review: false,
             extra: Default::default(),
         })
     }
@@ -1265,6 +1266,7 @@ mod tests {
             git_branch: None,
             agent_role: None,
             managed_session_id: None,
+            hosted_review: false,
             extra: Default::default(),
         })
     }

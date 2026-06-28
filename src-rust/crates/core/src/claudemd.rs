@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::hosted_review::RuntimeMode;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -46,6 +48,39 @@ pub struct MemoryFileInfo {
     pub content: String,
     pub frontmatter: MemoryFrontmatter,
     pub mtime: Option<SystemTime>,
+}
+
+/// Controls which memory scopes are loaded for the current runtime mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLoadOptions {
+    pub mode: RuntimeMode,
+    pub allow_user_memory: bool,
+    pub allow_managed_rules: bool,
+}
+
+impl MemoryLoadOptions {
+    pub fn local() -> Self {
+        Self {
+            mode: RuntimeMode::Local,
+            allow_user_memory: true,
+            allow_managed_rules: true,
+        }
+    }
+
+    pub fn hosted_review() -> Self {
+        Self {
+            mode: RuntimeMode::HostedReview,
+            allow_user_memory: false,
+            allow_managed_rules: false,
+        }
+    }
+
+    pub fn from_mode(mode: RuntimeMode) -> Self {
+        match mode {
+            RuntimeMode::Local => Self::local(),
+            RuntimeMode::HostedReview => Self::hosted_review(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,33 +273,45 @@ fn load_scope_files(dir: &Path, scope: MemoryScope, files: &mut Vec<MemoryFileIn
 ///
 /// Returned list is ordered: Managed (highest) → User → Project → Local.
 pub fn load_all_memory_files(project_root: &Path) -> Vec<MemoryFileInfo> {
+    load_all_memory_files_with_options(project_root, &MemoryLoadOptions::local())
+}
+
+/// Load all memory files for the given project root using explicit scope gates.
+pub fn load_all_memory_files_with_options(
+    project_root: &Path,
+    options: &MemoryLoadOptions,
+) -> Vec<MemoryFileInfo> {
     let mut files = Vec::new();
 
     // 1. Managed: ~/.coven-code/rules/*.md
     if let Some(home) = dirs::home_dir() {
-        let rules_dir = home.join(".coven-code/rules");
-        if let Ok(entries) = std::fs::read_dir(&rules_dir) {
-            let mut paths: Vec<PathBuf> = entries
-                .flatten()
-                .filter_map(|e| {
-                    let p = e.path();
-                    if p.extension().is_some_and(|x| x == "md") {
-                        Some(p)
-                    } else {
-                        None
+        if options.allow_managed_rules {
+            let rules_dir = home.join(".coven-code/rules");
+            if let Ok(entries) = std::fs::read_dir(&rules_dir) {
+                let mut paths: Vec<PathBuf> = entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        if p.extension().is_some_and(|x| x == "md") {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                paths.sort();
+                for p in paths {
+                    if let Some(f) = load_memory_file(&p, MemoryScope::Managed) {
+                        files.push(f);
                     }
-                })
-                .collect();
-            paths.sort();
-            for p in paths {
-                if let Some(f) = load_memory_file(&p, MemoryScope::Managed) {
-                    files.push(f);
                 }
             }
         }
 
         // 2. User: ~/.coven-code/AGENTS.md then ~/.coven-code/CLAUDE.md
-        load_scope_files(&home.join(".coven-code"), MemoryScope::User, &mut files);
+        if options.allow_user_memory {
+            load_scope_files(&home.join(".coven-code"), MemoryScope::User, &mut files);
+        }
     }
 
     // 3. Project: {project_root}/AGENTS.md then {project_root}/CLAUDE.md
@@ -350,6 +397,64 @@ mod tests {
             .collect();
         assert_eq!(project.len(), 1);
         assert!(project[0].path.ends_with("CLAUDE.md"));
+    }
+
+    #[test]
+    fn hosted_review_excludes_user_memory_by_default() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("AGENTS.md"), "project memory").unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let coven_code = home.path().join(".coven-code");
+        std::fs::create_dir_all(&coven_code).unwrap();
+        std::fs::write(coven_code.join("AGENTS.md"), "user memory").unwrap();
+
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let files =
+            load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
+
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(files.iter().all(|file| file.scope != MemoryScope::User));
+        assert!(files.iter().any(|file| {
+            file.scope == MemoryScope::Project && file.content.contains("project memory")
+        }));
+    }
+
+    #[test]
+    fn local_memory_load_still_includes_user_memory() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("AGENTS.md"), "project memory").unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let coven_code = home.path().join(".coven-code");
+        std::fs::create_dir_all(&coven_code).unwrap();
+        std::fs::write(coven_code.join("AGENTS.md"), "user memory").unwrap();
+
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let files = load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::local());
+
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(files
+            .iter()
+            .any(|file| file.scope == MemoryScope::User && file.content.contains("user memory")));
     }
 
     #[test]
