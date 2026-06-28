@@ -5,9 +5,9 @@
 //! same skill set as the surrounding tooling. Search priority (first match
 //! wins for a given skill name):
 //!   1. Project (walk up from `cwd`):
-//!        `.coven-code/skills/`, `.agents/skills/`, `.claude/skills/`
+//!      `.coven-code/skills/`, `.agents/skills/`, `.claude/skills/`
 //!   2. User (home dir):
-//!        `~/.coven-code/skills/`, `~/.claude/skills/`, `~/.codex/prompts/`
+//!      `~/.coven-code/skills/`, `~/.claude/skills/`, `~/.codex/prompts/`
 //!   3. Plugin: `~/.claude/plugins/*/skills/`
 //!   4. Configured extra paths from `SkillsConfig.paths`
 //!   5. Git-URL repos from `SkillsConfig.urls` (cloned once, then cached)

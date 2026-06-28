@@ -278,9 +278,12 @@ pub async fn import() -> anyhow::Result<(ImportSource, String)> {
             }
         )
     })?;
-    let label = found.source.label().to_string();
-    let profile_id = found.tokens.save_and_register(Some(&label)).await?;
-    Ok((found.source, profile_id))
+    let source = found.source;
+    let label = source.label().to_string();
+    let mut tokens = found.tokens;
+    tokens.external_cli_source = Some(label.clone());
+    let profile_id = tokens.save_and_register(Some(&label)).await?;
+    Ok((source, profile_id))
 }
 
 // ---------------------------------------------------------------------------

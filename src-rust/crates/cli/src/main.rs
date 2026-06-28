@@ -5003,10 +5003,10 @@ async fn auth_status(json_output: bool) {
         });
     let usable_oauth_tokens = oauth_tokens
         .as_ref()
-        .filter(|tokens| !tokens.uses_bearer_auth() || tokens.uses_configured_oauth_client());
+        .filter(|tokens| tokens.bearer_auth_is_usable());
     let disabled_bearer_token = oauth_tokens
         .as_ref()
-        .is_some_and(|tokens| tokens.uses_bearer_auth() && !tokens.uses_configured_oauth_client());
+        .is_some_and(|tokens| tokens.uses_bearer_auth() && !tokens.bearer_auth_is_usable());
     let token_source = usable_oauth_tokens.map(|tokens| {
         if tokens.uses_bearer_auth() {
             "claude.ai".to_string()

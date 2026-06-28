@@ -1103,16 +1103,15 @@ mod tests {
         let reg = ModelRegistry::new();
         // The bundled snapshot ships only Anthropic; Codex models are served
         // from a curated in-code list, not the snapshot.
-        for pid in ["anthropic"] {
-            assert!(
-                reg.provider(pid).is_some(),
-                "expected provider {pid} in bundled snapshot"
-            );
-            assert!(
-                !reg.list_by_provider(pid).is_empty(),
-                "expected at least one model for provider {pid}"
-            );
-        }
+        let pid = "anthropic";
+        assert!(
+            reg.provider(pid).is_some(),
+            "expected provider {pid} in bundled snapshot"
+        );
+        assert!(
+            !reg.list_by_provider(pid).is_empty(),
+            "expected at least one model for provider {pid}"
+        );
     }
 
     #[test]

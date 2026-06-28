@@ -91,7 +91,7 @@ mod tests {
         {
             assert_eq!(mode_of(&path), 0o600, "file should be owner-only");
             assert_eq!(
-                mode_of(&path.parent().unwrap()),
+                mode_of(path.parent().unwrap()),
                 0o700,
                 "parent dir should be owner-only"
             );
