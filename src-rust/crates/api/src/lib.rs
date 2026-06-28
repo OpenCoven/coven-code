@@ -781,11 +781,14 @@ pub mod client {
         }
 
         /// Parse an API error body into a typed `ClaudeError`.
-        fn parse_api_error(&self, status: u16, body: &str) -> ClaudeError {
+        pub(crate) fn parse_api_error(&self, status: u16, body: &str) -> ClaudeError {
             if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(body) {
                 match status {
                     401 => ClaudeError::Auth(err.error.message),
-                    429 => ClaudeError::RateLimit,
+                    429 => ClaudeError::ApiStatus {
+                        status,
+                        message: err.error.message,
+                    },
                     529 => ClaudeError::ApiStatus {
                         status,
                         message: format!("Overloaded: {}", err.error.message),
@@ -1278,6 +1281,23 @@ mod tests {
         let header = client.anthropic_beta_header();
         assert!(!header.contains("oauth-2025-04-20"), "header={header}");
         assert_eq!(header, "effort-2025-11-24");
+    }
+
+    #[test]
+    fn anthropic_429_preserves_provider_message() {
+        let client = AnthropicClient::new(client::ClientConfig::default()).expect("client");
+        let err = client.parse_api_error(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"model is temporarily unavailable"}}"#,
+        );
+
+        match err {
+            ClaudeError::ApiStatus { status, message } => {
+                assert_eq!(status, 429);
+                assert_eq!(message, "model is temporarily unavailable");
+            }
+            other => panic!("expected ApiStatus, got {other:?}"),
+        }
     }
 
     #[test]

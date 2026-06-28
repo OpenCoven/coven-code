@@ -734,6 +734,22 @@ fn selected_model_for_query(config: &QueryConfig) -> String {
     selected_model
 }
 
+fn is_fallback_worthy_api_error(err: &ClaudeError) -> bool {
+    match err {
+        ClaudeError::RateLimit => true,
+        ClaudeError::ApiStatus { status, message } => {
+            *status == 429 || *status == 529 || message.to_lowercase().contains("overloaded")
+        }
+        _ => {
+            let err_str = err.to_string().to_lowercase();
+            err_str.contains("overloaded")
+                || err_str.contains("529")
+                || err_str.contains("rate_limit")
+                || err_str.contains("rate limit")
+        }
+    }
+}
+
 // Spinner verbs are imported from claurst_core::spinner
 
 /// Run the agentic query loop.
@@ -1544,12 +1560,7 @@ pub async fn run_query_loop(
             Ok(rx) => rx,
             Err(e) => {
                 // On overloaded/rate-limit errors, attempt one switch to the fallback model.
-                let err_str = e.to_string().to_lowercase();
-                if !used_fallback
-                    && (err_str.contains("overloaded")
-                        || err_str.contains("529")
-                        || err_str.contains("rate_limit"))
-                {
+                if !used_fallback && is_fallback_worthy_api_error(&e) {
                     if let Some(ref fb) = config.fallback_model {
                         warn!(
                             primary = %effective_model,
@@ -2619,6 +2630,12 @@ mod tests {
         let err_outcome = QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit);
         let s2 = format!("{:?}", err_outcome);
         assert!(s2.contains("Error"));
+    }
+
+    #[test]
+    fn test_typed_rate_limit_uses_fallback() {
+        let err = claurst_core::error::ClaudeError::RateLimit;
+        assert!(is_fallback_worthy_api_error(&err));
     }
 
     #[test]
