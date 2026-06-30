@@ -320,6 +320,8 @@ pub fn save_codex_tokens_for_profile(tokens: &CodexTokens, profile_id: &str) -> 
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, serde_json::to_string_pretty(tokens)?)?;
+    // Restrict to owner-only: this file holds the Codex access + refresh tokens.
+    crate::accounts::set_user_only_perms(&path);
     Ok(())
 }
 

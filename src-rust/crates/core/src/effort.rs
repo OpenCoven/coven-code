@@ -130,7 +130,7 @@ impl EffortLevel {
             Self::Low => "Quick, straightforward implementation with minimal overhead",
             Self::Medium => "Balanced approach with standard implementation and testing",
             Self::High => "Comprehensive implementation with extensive testing and documentation",
-            Self::Max => "Maximum capability with deepest reasoning (Opus 4.6 only)",
+            Self::Max => "Maximum capability with deepest reasoning (Opus-tier and Fable models)",
         }
     }
 }

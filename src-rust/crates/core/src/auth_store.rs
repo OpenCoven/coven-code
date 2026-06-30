@@ -90,6 +90,10 @@ impl AuthStore {
         ));
 
         std::fs::write(&tmp_path, json)?;
+        // Tighten perms on the tempfile *before* the rename so the credential
+        // file is never world-readable for even a moment. auth.json holds API
+        // keys and OAuth tokens.
+        crate::accounts::set_user_only_perms(&tmp_path);
         // rename is atomic on POSIX; on Windows std::fs::rename uses
         // MoveFileExW with MOVEFILE_REPLACE_EXISTING.
         match std::fs::rename(&tmp_path, path) {
@@ -209,6 +213,29 @@ mod tests {
             1,
             "exactly one writer's entry should survive"
         );
+    }
+
+    /// The credential file must not be world/group-readable: it holds API
+    /// keys and OAuth tokens. After an atomic save the destination file should
+    /// be mode 0600 on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn save_to_restricts_permissions_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::default();
+        store.credentials.insert(
+            "anthropic".to_string(),
+            StoredCredential::ApiKey {
+                key: "sk-ant-secret".to_string(),
+            },
+        );
+        store.save_to(&path).expect("save_to should succeed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "auth.json must be owner-only, got {mode:o}");
     }
 
     #[test]

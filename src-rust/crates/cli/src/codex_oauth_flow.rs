@@ -231,11 +231,24 @@ async fn exchange_code_for_tokens(code: &str, verifier: &str) -> anyhow::Result<
     let refresh_token = body["refresh_token"].as_str().map(|s| s.to_string());
     let account_id = extract_account_id_from_jwt(&access_token);
 
+    // Record absolute expiry (epoch seconds) from the relative `expires_in`
+    // so CodexProvider::is_expired can trigger a refresh. Without this the
+    // access token silently 401s mid-session once it lapses, even though a
+    // valid refresh token is sitting on disk. Mirrors the refresh path in
+    // crates/api/src/providers/codex.rs.
+    let expires_at = body["expires_in"].as_u64().map(|secs| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + secs
+    });
+
     Ok(CodexTokens {
         access_token,
         refresh_token,
         account_id,
-        expires_at: None,
+        expires_at,
     })
 }
 

@@ -86,8 +86,10 @@ cargo build --release --package claurst   # binary outputs as coven-code; coven-
 
 | Flag | Short | Description |
 |---|---|---|
-| `--model <MODEL>` | `-m` | Model to use (e.g. `claude-sonnet-4-6`, `claude-opus-4-6`) |
+| `--model <MODEL>` | `-m` | Model to use (e.g. `claude-sonnet-4-6`, `claude-opus-4-7`) |
 | `--provider <PROVIDER>` | | LLM provider: `anthropic` or `codex` (env: `COVEN_CODE_PROVIDER`) |
+| `--effort <LEVEL>` | | Reasoning effort for extended-thinking models: `low`, `medium`, `high`, `max` |
+| `--thinking <TOKENS>` | | Extended-thinking budget in tokens (enables extended thinking) |
 | `--resume [<ID>]` | | Resume a previous session by ID; omit ID to resume the most recent |
 | `--print` | `-p` | Print mode: send prompt and exit (non-interactive / headless) |
 | `--permission-mode <MODE>` | | `default`, `accept-edits`, `bypass-permissions`, or `plan` |
@@ -133,6 +135,25 @@ coven-code --provider codex
 
 Environment variable prefix: `COVEN_CODE_*` (e.g. `COVEN_CODE_SKIP_PROMPT_HISTORY=1`).
 
+### First run & connecting in-app
+
+If you launch `coven-code` with no credentials configured, the TUI opens a
+**provider-setup** prompt. Press `1`/`2` or `Enter` to open the connect dialog
+and authenticate, or `Esc` to skip. You can connect (or switch providers) at any
+time with `/connect`.
+
+Useful in-session commands:
+
+| Command | Does |
+|---|---|
+| `/connect` | Connect or switch a provider (Claude API key, Claude.ai / Codex OAuth, or import from the Claude CLI) |
+| `/model` | Open the model picker for the active provider; `←`/`→` adjusts reasoning effort |
+| `/effort <low\|medium\|high\|max>` | Set reasoning effort for extended-thinking models (no arg opens a picker) |
+| `/help` | Full keybinding + command reference |
+
+List the model catalog from the shell with `coven-code models [<provider>]`
+(`--refresh` to re-fetch from models.dev, `--json` for machine output).
+
 ---
 
 ## Providers
@@ -144,7 +165,7 @@ Quick example:
 ```bash
 coven-code --provider anthropic "refactor this module"
 coven-code --provider codex "explain this function"
-coven-code --model claude-opus-4-6 "write tests"
+coven-code --model claude-opus-4-7 "write tests"
 ```
 
 ---

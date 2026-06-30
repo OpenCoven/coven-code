@@ -747,6 +747,13 @@ pub struct App {
     pub has_credentials: bool,
     /// Current effort level (controls extended-thinking budget_tokens).
     pub effort_level: EffortLevel,
+    /// Whether the user has explicitly chosen an effort level (via the model
+    /// picker, the `/effort` dialog, or the `/effort` command). When false the
+    /// query layer leaves effort unset so the model uses its own default; when
+    /// true `effort_level` is the single source of truth and is forwarded to
+    /// every turn. Without this flag, picker/dialog selections were silently
+    /// dropped — only the `/effort` command reached the API.
+    pub effort_is_set: bool,
     /// Whether fast mode is currently active (model locked to FAST_MODE_MODEL).
     pub fast_mode: bool,
     /// Active speech mode: None = normal, Some("caveman") / Some("rocky").
@@ -1311,6 +1318,7 @@ impl App {
             model_name,
             has_credentials: true, // overridden by caller when no key is configured
             effort_level: EffortLevel::Normal,
+            effort_is_set: false,
             fast_mode: false,
             speech_mode: None,
             speech_level: "full".to_string(),
@@ -3259,6 +3267,26 @@ impl App {
 
         // Onboarding dialog: shown on first launch, dismissed with Enter/→/Esc.
         if self.onboarding_dialog.visible {
+            // The no-credentials provider-setup page is actionable: Enter or a
+            // provider number opens the real connect dialog so a brand-new user
+            // can actually authenticate instead of paging through read-only
+            // text and landing at an empty prompt.
+            if self.onboarding_dialog.is_provider_setup() {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.onboarding_dialog.dismiss();
+                        self.status_message =
+                            Some("Run /connect when you're ready to add a provider.".to_string());
+                    }
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('1') | KeyCode::Char('2') => {
+                        self.onboarding_dialog.dismiss();
+                        let _ = Self::persist_onboarding_complete();
+                        self.connect_dialog.open();
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             match key.code {
                 KeyCode::Esc => {
                     self.onboarding_dialog.dismiss();
@@ -3303,6 +3331,7 @@ impl App {
                 KeyCode::Enter => {
                     let chosen = self.effort_picker.current();
                     self.effort_level = chosen;
+                    self.effort_is_set = true;
                     self.effort_picker.close();
                     self.status_message = Some(format!(
                         "Effort set to {} {}.",
@@ -3691,6 +3720,7 @@ impl App {
                         }
                         if let Some(e) = effort {
                             self.effort_level = e;
+                            self.effort_is_set = true;
                         }
                         // Store explicit selections in the canonical
                         // "provider/model" form for non-Anthropic providers.
