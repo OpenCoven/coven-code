@@ -386,6 +386,18 @@ fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, are
         ])
     };
 
+    // The input-editing actions are user-customizable via keybindings.json, so
+    // reflect the real binding rather than a hardcoded label that can drift.
+    // Fixed keys (Tab mode cycle, F1/F2, permission y/Y/n) live outside that
+    // system and stay static.
+    let user_kb = claurst_core::keybindings::UserKeybindings::load(
+        &claurst_core::config::Settings::config_dir(),
+    );
+    let submit_key = claurst_core::keybindings::display_binding_for(&user_kb, "submit")
+        .unwrap_or_else(|| "Enter".to_string());
+    let help_key = claurst_core::keybindings::display_binding_for(&user_kb, "openHelp")
+        .unwrap_or_else(|| "Alt+H".to_string());
+
     let (page_n, page_total) = state.page_progress();
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(vec![
@@ -409,7 +421,7 @@ fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, are
             "  Input",
             Style::default().fg(pink).add_modifier(Modifier::BOLD),
         )),
-        kb("Enter", "send message"),
+        kb(&submit_key, "send message"),
         kb("Shift+Enter", "newline"),
         kb("Ctrl+C", "interrupt / cancel"),
         kb("Tab", "cycle mode (build/plan/explore)"),
@@ -424,7 +436,7 @@ fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, are
         kb("Ctrl+Shift+A", "model picker"),
         kb("F1", "toggle help overlay"),
         kb("F2", "switch familiar"),
-        kb("Alt+H", "open help"),
+        kb(&help_key, "open help"),
         kb("Ctrl+B", "create / switch branch"),
         Line::from(""),
         Line::from(Span::styled(

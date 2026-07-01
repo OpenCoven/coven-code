@@ -29,7 +29,7 @@ use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
-use crate::error_handling::parse_error_response;
+use crate::error_handling::{parse_error_response_with_retry_after, parse_retry_after_secs};
 use crate::provider::{LlmProvider, ModelInfo};
 use crate::provider_error::ProviderError;
 use crate::provider_types::{
@@ -38,6 +38,15 @@ use crate::provider_types::{
 };
 
 use crate::providers::responses_input::to_responses_input;
+
+/// Extract a `Retry-After` delay (in seconds) from response headers, if the
+/// server sent one in the delay-seconds form.
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after_secs)
+}
 
 // ---------------------------------------------------------------------------
 // CodexProvider
@@ -333,6 +342,7 @@ impl CodexProvider {
             })?;
 
         let status = resp.status().as_u16();
+        let retry_after = retry_after_from_headers(resp.headers());
         let text = resp.text().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
             message: format!("Failed to read response body: {}", e),
@@ -341,7 +351,12 @@ impl CodexProvider {
         })?;
 
         if !(200..300).contains(&(status as usize)) {
-            return Err(parse_error_response(status, &text, &self.id));
+            return Err(parse_error_response_with_retry_after(
+                status,
+                &text,
+                &self.id,
+                retry_after,
+            ));
         }
 
         let json_val: Value = serde_json::from_str(&text).map_err(|e| ProviderError::Other {
@@ -384,13 +399,19 @@ impl CodexProvider {
 
         let status = resp.status().as_u16();
         if !(200..300).contains(&(status as usize)) {
+            let retry_after = retry_after_from_headers(resp.headers());
             let text = resp.text().await.map_err(|e| ProviderError::Other {
                 provider: self.id.clone(),
                 message: format!("Failed to read response body: {}", e),
                 status: Some(status),
                 body: None,
             })?;
-            return Err(parse_error_response(status, &text, &self.id));
+            return Err(parse_error_response_with_retry_after(
+                status,
+                &text,
+                &self.id,
+                retry_after,
+            ));
         }
 
         Ok(resp)

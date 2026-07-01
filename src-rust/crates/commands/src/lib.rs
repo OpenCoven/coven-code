@@ -8580,6 +8580,95 @@ fn infer_familiar_from_env() -> Option<String> {
     })
 }
 
+/// Refusal message when the Coven daemon owns the roster file.
+fn daemon_owned_refusal() -> CommandResult {
+    CommandResult::Error(
+        "Familiars are managed by the running Coven daemon — add, rename, or remove them \
+         through the daemon. coven-code only writes ~/.coven/familiars.toml in standalone mode."
+            .to_string(),
+    )
+}
+
+/// `/familiar new <id> [display name...]` — create a standalone familiar.
+fn familiar_new(rest: &str) -> CommandResult {
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let id = parts.next().unwrap_or("").trim();
+    if id.is_empty() {
+        return CommandResult::Error("Usage: /familiar new <id> [display name]".to_string());
+    }
+    if !claurst_core::coven_shared::can_write_familiars() {
+        return daemon_owned_refusal();
+    }
+    let display = parts.next().map(str::trim).filter(|s| !s.is_empty());
+    let fam = claurst_core::coven_shared::CovenFamiliar {
+        id: id.to_string(),
+        display_name: display.map(str::to_string),
+        emoji: None,
+        role: None,
+        description: None,
+        pronouns: None,
+        access: Some(claurst_core::coven_shared::DEFAULT_FAMILIAR_ACCESS.to_string()),
+        model: None,
+    };
+    match claurst_core::coven_shared::create_familiar(fam) {
+        Ok(()) => CommandResult::Message(format!(
+            "Created familiar '{id}' (access: {}). Edit ~/.coven/familiars.toml to customize, \
+             then switch with /familiar {id}.",
+            claurst_core::coven_shared::DEFAULT_FAMILIAR_ACCESS,
+        )),
+        Err(e) => CommandResult::Error(format!("Could not create familiar: {e}")),
+    }
+}
+
+/// `/familiar remove <id>` — delete a standalone familiar. Clears the active
+/// familiar too if it was the one removed.
+fn familiar_remove(rest: &str, ctx: &CommandContext) -> CommandResult {
+    let id = rest.trim();
+    if id.is_empty() {
+        return CommandResult::Error("Usage: /familiar remove <id>".to_string());
+    }
+    if !claurst_core::coven_shared::can_write_familiars() {
+        return daemon_owned_refusal();
+    }
+    match claurst_core::coven_shared::remove_familiar(id) {
+        Ok(removed) => {
+            let was_active = ctx
+                .config
+                .familiar
+                .as_deref()
+                .map(|a| a.eq_ignore_ascii_case(&removed.id))
+                .unwrap_or(false);
+            if was_active {
+                let _ = save_settings_mutation(|s| s.config.familiar = None);
+                let mut new_config = ctx.config.clone();
+                new_config.familiar = None;
+                return CommandResult::ConfigChangeMessage(
+                    new_config,
+                    format!("Removed familiar '{}' (was active — cleared).", removed.id),
+                );
+            }
+            CommandResult::Message(format!("Removed familiar '{}'.", removed.id))
+        }
+        Err(e) => CommandResult::Error(format!("Could not remove familiar: {e}")),
+    }
+}
+
+/// `/familiar rename <old> <new>` — rename a standalone familiar's id.
+fn familiar_rename(rest: &str) -> CommandResult {
+    let mut parts = rest.split_whitespace();
+    let (old_id, new_id) = (parts.next(), parts.next());
+    let (Some(old_id), Some(new_id)) = (old_id, new_id) else {
+        return CommandResult::Error("Usage: /familiar rename <old-id> <new-id>".to_string());
+    };
+    if !claurst_core::coven_shared::can_write_familiars() {
+        return daemon_owned_refusal();
+    }
+    match claurst_core::coven_shared::rename_familiar(old_id, new_id) {
+        Ok(()) => CommandResult::Message(format!("Renamed familiar '{old_id}' → '{new_id}'.")),
+        Err(e) => CommandResult::Error(format!("Could not rename familiar: {e}")),
+    }
+}
+
 #[async_trait]
 impl SlashCommand for FamiliarCommand {
     fn name(&self) -> &str {
@@ -8592,7 +8681,7 @@ impl SlashCommand for FamiliarCommand {
         vec!["familiars", "agent"]
     }
     fn help(&self) -> &str {
-        "Usage: /familiar [name | info <name> | list|create|edit|delete [name] | managed ... | reset | reset-roster | auto]\n\n\
+        "Usage: /familiar [name | info <name> | list|create|edit|delete [name] | managed ... | clear | wipe-roster | auto]\n\n\
          One surface for familiars and agents — both resolve through the same\n\
          runtime agent map and access-tier security under the hood.\n\n\
          /familiar                  Current familiar, roster, and agents (with access tiers)\n\
@@ -8601,9 +8690,13 @@ impl SlashCommand for FamiliarCommand {
          /familiar <agent>          Details for a built-in or workspace agent\n\
          /familiar info <name>      Details for any familiar or agent\n\
          /familiar list|create|edit|delete [name]   Manage workspace agents\n\
+         /familiar new <id> [name]  Create a familiar (standalone; writes ~/.coven/familiars.toml)\n\
+         /familiar rename <old> <new>   Rename a familiar (standalone)\n\
+         /familiar remove <id>      Delete a familiar (standalone)\n\
          /familiar managed ...      Manager-executor architecture (presets, budget)\n\
-         /familiar reset            Clear the active familiar\n\
-         /familiar reset-roster     Reset saved familiars and workspace agents\n\
+         /familiar clear            Step back to no active familiar (alias: reset)\n\
+         /familiar wipe-roster      DESTRUCTIVE — delete saved familiars + workspace\n\
+                                    agents. Requires `wipe-roster confirm` (alias: reset-roster)\n\
          /familiar auto             Infer your familiar from the system username\n\n\
          Roster lives in ~/.coven/familiars.toml (Coven daemon). In the TUI,\n\
          bare /familiar opens the visual menu and F2 is the quick switcher."
@@ -8623,10 +8716,26 @@ impl SlashCommand for FamiliarCommand {
             }
             // Manager-executor architecture (absorbed from /managed-agents).
             "managed" => return ManagedAgentsCommand.execute(rest, ctx).await,
-            // The old `/agents reset` roster wipe. `/familiar reset` clears
-            // the active familiar instead, so the destructive variant gets
-            // an explicit, unambiguous name.
-            "reset-roster" => {
+            // The old `/agents reset` roster wipe. `/familiar reset`/`clear`
+            // clears the active familiar instead, so the destructive variant
+            // gets an explicit, unambiguous name AND a confirmation gate —
+            // `reset` and `reset-roster` are one keystroke apart and the latter
+            // is irreversible.
+            "reset-roster" | "wipe-roster" => {
+                let confirmed = matches!(
+                    rest.trim().to_lowercase().as_str(),
+                    "confirm" | "yes" | "--yes" | "-y"
+                );
+                if !confirmed {
+                    return CommandResult::Message(
+                        "\u{26a0} /familiar wipe-roster is destructive. It deletes \
+                         ~/.coven/familiars.toml, removes workspace agents \
+                         (.coven-code/agents/*.md), and clears your active familiar.\n\n\
+                         Re-run `/familiar wipe-roster confirm` to proceed.\n\
+                         To simply step back to no active familiar, use `/familiar clear`."
+                            .to_string(),
+                    );
+                }
                 return execute_named_command_from_slash("agents", "reset", ctx);
             }
             "info" => {
@@ -8644,6 +8753,11 @@ impl SlashCommand for FamiliarCommand {
                     )),
                 };
             }
+            // Standalone-only roster writes. When the Coven daemon is running it
+            // owns ~/.coven/familiars.toml, so these refuse and defer to it.
+            "new" => return familiar_new(rest),
+            "remove" => return familiar_remove(rest, ctx),
+            "rename" => return familiar_rename(rest),
             _ => {}
         }
 
@@ -8654,8 +8768,9 @@ impl SlashCommand for FamiliarCommand {
             return CommandResult::Message(familiar_overview(ctx));
         }
 
-        // Resolve switch target.
-        let target = if arg == "reset" {
+        // Resolve switch target. `clear` is the preferred, unambiguous name
+        // for stepping back to no active familiar; `reset` is kept as an alias.
+        let target = if arg == "reset" || arg == "clear" {
             None
         } else if arg == "auto" {
             match infer_familiar_from_env() {
@@ -8715,7 +8830,7 @@ impl SlashCommand for FamiliarCommand {
                     name, desc, access
                 )
             }
-            None => "Familiar reset to none.".to_string(),
+            None => "Familiar cleared — no active persona.".to_string(),
         };
 
         CommandResult::ConfigChangeMessage(new_config, msg)

@@ -16,7 +16,7 @@ pub use crate::coven_daemon::{
     DaemonReachability, DaemonSession, EventPage, EventRecord, FamiliarStatus,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Locate `~/.coven/` if it exists.
@@ -123,23 +123,33 @@ pub fn is_disallowed_familiar_name(name: &str) -> bool {
 /// One entry in `~/.coven/familiars.toml`.
 ///
 /// Schema mirrors what the daemon serves at `GET /api/v1/familiars`.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` is derived with `skip_serializing_if` on every optional field so
+/// [`save_familiars`] round-trips a clean, minimal TOML file (no `field = ""`
+/// noise) when coven-code owns the roster in standalone mode.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CovenFamiliar {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pronouns: Option<String>,
     /// Tool-access tier: `"full"`, `"read-only"`, or `"search-only"`.
     /// Absent → [`DEFAULT_FAMILIAR_ACCESS`] (`"read-only"`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    /// Optional model override for this familiar (e.g. `"claude-opus-4-8"`).
+    /// Absent → the familiar inherits the session's default model. This lets a
+    /// persona be pinned to a specific model without shadowing it with a
+    /// workspace agent `.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl CovenFamiliar {
@@ -159,23 +169,355 @@ impl CovenFamiliar {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct FamiliarsFile {
     #[serde(default)]
     familiar: Vec<CovenFamiliar>,
 }
 
+/// A `~/.coven/familiars.toml` exists but could not be read or parsed.
+///
+/// Carries the offending path and a human-readable message so the TUI can
+/// surface it instead of the roster silently vanishing.
+#[derive(Debug, Clone)]
+pub struct FamiliarLoadError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl std::fmt::Display for FamiliarLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.message)
+    }
+}
+
+impl std::error::Error for FamiliarLoadError {}
+
+/// Load familiars, distinguishing "nothing to load" from "malformed file".
+///
+/// - `Ok(None)` — no `~/.coven/` dir or no `familiars.toml` (normal standalone
+///   operation; nothing to surface).
+/// - `Ok(Some(vec))` — the file parsed. The vec may be empty if the file
+///   declared no `[[familiar]]` entries, which is distinct from a missing file.
+/// - `Err(_)` — the file exists but could not be read or parsed. Callers that
+///   can show UI should surface this; a malformed roster otherwise disappears
+///   with no signal to the user.
+pub fn load_familiars_result() -> Result<Option<Vec<CovenFamiliar>>, FamiliarLoadError> {
+    let Some(home) = coven_home() else {
+        return Ok(None);
+    };
+    let path = home.join("familiars.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(FamiliarLoadError {
+                path,
+                message: e.to_string(),
+            })
+        }
+    };
+    match toml::from_str::<FamiliarsFile>(&raw) {
+        Ok(parsed) => Ok(Some(parsed.familiar)),
+        Err(e) => Err(FamiliarLoadError {
+            path,
+            message: e.to_string(),
+        }),
+    }
+}
+
 /// Load familiars from `~/.coven/familiars.toml`.
 /// Returns `None` if the daemon dir, the file, or the parse fails.
+///
+/// This is the graceful-degradation entry point used by the security-critical
+/// agent-merge paths: any failure collapses to `None` so a broken roster can
+/// never widen the runtime agent map. UI surfaces that want to *report* a
+/// malformed file should call [`load_familiars_result`] instead.
 pub fn load_familiars() -> Option<Vec<CovenFamiliar>> {
-    let path = coven_home()?.join("familiars.toml");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: FamiliarsFile = toml::from_str(&raw).ok()?;
-    if parsed.familiar.is_empty() {
-        None
-    } else {
-        Some(parsed.familiar)
+    match load_familiars_result() {
+        Ok(Some(fams)) if !fams.is_empty() => Some(fams),
+        _ => None,
     }
+}
+
+/// Non-fatal warnings about a loaded roster, for surfacing in the UI.
+///
+/// Covers the failure modes that otherwise happen silently: ids dropped for
+/// using a reserved name, duplicate ids (only the first is used), and unknown
+/// access tiers (which fail closed to [`DEFAULT_FAMILIAR_ACCESS`]). Returns an
+/// empty vec for a clean roster.
+pub fn familiar_roster_warnings(fams: &[CovenFamiliar]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for fam in fams {
+        let id = fam.id.trim().to_ascii_lowercase();
+        if is_disallowed_familiar_name(&id) {
+            warnings.push(format!(
+                "familiar {:?} uses a reserved name and was skipped",
+                fam.id
+            ));
+            continue;
+        }
+        if !seen.insert(id) {
+            warnings.push(format!(
+                "duplicate familiar id {:?} — only the first is used",
+                fam.id
+            ));
+        }
+        if let Some(raw) = fam.access.as_deref() {
+            if canonicalize_access_tier(raw).is_none() {
+                warnings.push(format!(
+                    "familiar {:?}: unknown access tier {:?} — using {:?}",
+                    fam.id, raw, DEFAULT_FAMILIAR_ACCESS
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+// ---------------------------------------------------------------------------
+// Writing the roster (standalone-only)
+// ---------------------------------------------------------------------------
+
+/// Resolve the `~/.coven/` path even when the directory does not exist yet.
+///
+/// Unlike [`coven_home`], this does not require the directory to be present —
+/// it is the target for *writing* the roster in standalone mode. Respects
+/// `COVEN_HOME`.
+pub fn coven_home_path() -> Option<PathBuf> {
+    if let Ok(override_path) = std::env::var("COVEN_HOME") {
+        if !override_path.is_empty() {
+            return Some(PathBuf::from(override_path));
+        }
+    }
+    Some(dirs::home_dir()?.join(".coven"))
+}
+
+/// Whether the Coven daemon appears to be running, detected by the presence of
+/// its IPC socket at `~/.coven/coven.sock`.
+///
+/// When the daemon is up it owns `familiars.toml`, so coven-code must treat the
+/// roster as read-only. Standalone (no socket) is the only mode in which
+/// coven-code writes the file itself.
+pub fn daemon_socket_present() -> bool {
+    coven_home_path()
+        .map(|p| p.join("coven.sock").exists())
+        .unwrap_or(false)
+}
+
+/// Whether coven-code may write `~/.coven/familiars.toml` directly.
+///
+/// True only in standalone mode (no daemon socket). When the daemon is running
+/// the file is daemon-owned and writes must go through it instead.
+pub fn can_write_familiars() -> bool {
+    !daemon_socket_present()
+}
+
+/// Failure modes for the standalone roster-write API.
+#[derive(Debug, Clone)]
+pub enum FamiliarWriteError {
+    /// The Coven daemon is running and owns `familiars.toml`.
+    DaemonOwned,
+    /// `~/.coven/` could not be resolved (no home directory).
+    NoHome,
+    /// The existing roster file is malformed and must be fixed before writing.
+    ExistingUnreadable(String),
+    /// An id was empty or a reserved/disallowed name.
+    InvalidId(String),
+    /// A familiar with the target id already exists (create-only paths).
+    Duplicate(String),
+    /// The target id was not found (edit/remove/rename paths).
+    NotFound(String),
+    /// Serialization or filesystem I/O failed.
+    Io(String),
+}
+
+impl std::fmt::Display for FamiliarWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DaemonOwned => write!(
+                f,
+                "the Coven daemon is running and owns ~/.coven/familiars.toml — \
+                 edit familiars through the daemon instead"
+            ),
+            Self::NoHome => write!(f, "could not resolve ~/.coven/ (no home directory)"),
+            Self::ExistingUnreadable(m) => {
+                write!(f, "existing familiars.toml is unreadable: {m}")
+            }
+            Self::InvalidId(id) => write!(f, "invalid familiar id {id:?}"),
+            Self::Duplicate(id) => write!(f, "a familiar with id {id:?} already exists"),
+            Self::NotFound(id) => write!(f, "no familiar with id {id:?}"),
+            Self::Io(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for FamiliarWriteError {}
+
+/// Load the current roster for mutation. Missing file → empty vec; a malformed
+/// file is a hard error so a write never silently discards existing entries.
+fn load_roster_for_write() -> Result<Vec<CovenFamiliar>, FamiliarWriteError> {
+    match load_familiars_result() {
+        Ok(Some(fams)) => Ok(fams),
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => Err(FamiliarWriteError::ExistingUnreadable(e.message)),
+    }
+}
+
+/// Overwrite `~/.coven/familiars.toml` with `familiars` (standalone only).
+///
+/// Refuses when the daemon is running ([`daemon_socket_present`]). Creates
+/// `~/.coven/` if needed. This is the single write chokepoint the higher-level
+/// upsert/remove/rename helpers funnel through.
+pub fn save_familiars(familiars: &[CovenFamiliar]) -> Result<(), FamiliarWriteError> {
+    if daemon_socket_present() {
+        return Err(FamiliarWriteError::DaemonOwned);
+    }
+    let home = coven_home_path().ok_or(FamiliarWriteError::NoHome)?;
+    std::fs::create_dir_all(&home).map_err(|e| FamiliarWriteError::Io(e.to_string()))?;
+    let file = FamiliarsFile {
+        familiar: familiars.to_vec(),
+    };
+    let toml = toml::to_string_pretty(&file)
+        .map_err(|e| FamiliarWriteError::Io(format!("serialize: {e}")))?;
+    std::fs::write(home.join("familiars.toml"), toml)
+        .map_err(|e| FamiliarWriteError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Validate an id for a writable familiar: non-empty and not reserved.
+fn validate_writable_id(id: &str) -> Result<(), FamiliarWriteError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(FamiliarWriteError::InvalidId(id.to_string()));
+    }
+    if is_disallowed_familiar_name(trimmed) {
+        return Err(FamiliarWriteError::InvalidId(trimmed.to_string()));
+    }
+    Ok(())
+}
+
+/// Insert a familiar, or replace an existing one with the same (case-insensitive)
+/// id. Standalone only. Returns whether an existing entry was replaced.
+pub fn upsert_familiar(fam: CovenFamiliar) -> Result<bool, FamiliarWriteError> {
+    validate_writable_id(&fam.id)?;
+    let mut roster = load_roster_for_write()?;
+    let key = fam.id.trim().to_ascii_lowercase();
+    let mut replaced = false;
+    if let Some(slot) = roster
+        .iter_mut()
+        .find(|f| f.id.trim().to_ascii_lowercase() == key)
+    {
+        *slot = fam;
+        replaced = true;
+    } else {
+        roster.push(fam);
+    }
+    save_familiars(&roster)?;
+    Ok(replaced)
+}
+
+/// Create a new familiar, erroring if the id already exists. Standalone only.
+pub fn create_familiar(fam: CovenFamiliar) -> Result<(), FamiliarWriteError> {
+    validate_writable_id(&fam.id)?;
+    let roster = load_roster_for_write()?;
+    let key = fam.id.trim().to_ascii_lowercase();
+    if roster
+        .iter()
+        .any(|f| f.id.trim().to_ascii_lowercase() == key)
+    {
+        return Err(FamiliarWriteError::Duplicate(fam.id));
+    }
+    let mut roster = roster;
+    roster.push(fam);
+    save_familiars(&roster)
+}
+
+/// Remove a familiar by (case-insensitive) id. Standalone only. Returns the
+/// removed entry.
+pub fn remove_familiar(id: &str) -> Result<CovenFamiliar, FamiliarWriteError> {
+    let key = id.trim().to_ascii_lowercase();
+    let mut roster = load_roster_for_write()?;
+    let Some(pos) = roster
+        .iter()
+        .position(|f| f.id.trim().to_ascii_lowercase() == key)
+    else {
+        return Err(FamiliarWriteError::NotFound(id.to_string()));
+    };
+    let removed = roster.remove(pos);
+    save_familiars(&roster)?;
+    Ok(removed)
+}
+
+/// Rename a familiar's id, preserving all other fields. Standalone only.
+pub fn rename_familiar(old_id: &str, new_id: &str) -> Result<(), FamiliarWriteError> {
+    validate_writable_id(new_id)?;
+    let old_key = old_id.trim().to_ascii_lowercase();
+    let new_key = new_id.trim().to_ascii_lowercase();
+    let mut roster = load_roster_for_write()?;
+    if old_key != new_key
+        && roster
+            .iter()
+            .any(|f| f.id.trim().to_ascii_lowercase() == new_key)
+    {
+        return Err(FamiliarWriteError::Duplicate(new_id.to_string()));
+    }
+    let Some(slot) = roster
+        .iter_mut()
+        .find(|f| f.id.trim().to_ascii_lowercase() == old_key)
+    else {
+        return Err(FamiliarWriteError::NotFound(old_id.to_string()));
+    };
+    slot.id = new_id.trim().to_string();
+    save_familiars(&roster)
+}
+
+/// A couple of example familiars written on first-run bootstrap so a brand-new
+/// standalone user has a working roster to switch between and a concrete
+/// template to edit. Access tiers are deliberately conservative.
+pub fn starter_familiars() -> Vec<CovenFamiliar> {
+    vec![
+        CovenFamiliar {
+            id: "sage".to_string(),
+            display_name: Some("Sage".to_string()),
+            emoji: Some("\u{1f989}".to_string()), // owl
+            role: Some("Guide".to_string()),
+            description: Some(
+                "A thoughtful pair-programmer who explains as they go.".to_string(),
+            ),
+            pronouns: Some("they/them".to_string()),
+            access: Some("read-only".to_string()),
+            model: None,
+        },
+        CovenFamiliar {
+            id: "forge".to_string(),
+            display_name: Some("Forge".to_string()),
+            emoji: Some("\u{1f525}".to_string()), // fire
+            role: Some("Builder".to_string()),
+            description: Some("A hands-on familiar that writes and runs code.".to_string()),
+            pronouns: None,
+            access: Some("full".to_string()),
+            model: None,
+        },
+    ]
+}
+
+/// Write [`starter_familiars`] to `~/.coven/familiars.toml` for a first-run
+/// standalone user. Refuses if the daemon owns the file or a roster already
+/// exists (so it never clobbers real entries). Returns the written roster.
+pub fn write_starter_roster() -> Result<Vec<CovenFamiliar>, FamiliarWriteError> {
+    if daemon_socket_present() {
+        return Err(FamiliarWriteError::DaemonOwned);
+    }
+    if !load_roster_for_write()?.is_empty() {
+        return Err(FamiliarWriteError::Duplicate(
+            "roster already exists".to_string(),
+        ));
+    }
+    let fams = starter_familiars();
+    save_familiars(&fams)?;
+    Ok(fams)
 }
 
 /// Build a [`crate::config::AgentDefinition`] from a familiar so it can be
@@ -208,7 +550,9 @@ pub fn familiar_to_agent_definition(
 
     let def = crate::config::AgentDefinition {
         description: Some(format!("{emoji} {role} — {desc_body}")),
-        model: None,
+        // An explicit per-familiar model pins the persona; otherwise `None`
+        // means "inherit the session default".
+        model: fam.model.clone().filter(|m| !m.trim().is_empty()),
         temperature: None,
         prompt: Some(prompt),
         access: fam.resolved_access().to_string(),
@@ -437,6 +781,175 @@ role = "General Helper"
     }
 
     #[test]
+    fn load_familiars_result_distinguishes_absent_from_malformed() {
+        // Missing file → Ok(None), not an error.
+        let _g = with_coven_home(|_| {});
+        assert!(matches!(load_familiars_result(), Ok(None)));
+
+        // Malformed file → Err carrying the path + message.
+        let _g2 = with_coven_home(|home| {
+            fs::write(home.join("familiars.toml"), "this is = not [valid toml").unwrap();
+        });
+        let err = load_familiars_result().expect_err("malformed file should error");
+        assert!(err.path.ends_with("familiars.toml"));
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn load_familiars_result_reports_empty_roster_as_some() {
+        // A file that parses but declares no familiars is distinct from a
+        // missing file: Ok(Some(empty)) vs Ok(None).
+        let _g = with_coven_home(|home| {
+            fs::write(home.join("familiars.toml"), "# no entries\n").unwrap();
+        });
+        match load_familiars_result() {
+            Ok(Some(v)) => assert!(v.is_empty()),
+            other => panic!("expected Ok(Some(empty)), got {other:?}"),
+        }
+        // The graceful wrapper still collapses empty to None.
+        assert!(load_familiars().is_none());
+    }
+
+    #[test]
+    fn familiar_roster_warnings_flags_unknown_tier_and_duplicates() {
+        let fams = vec![
+            CovenFamiliar {
+                id: "willow".to_string(),
+                display_name: None,
+                emoji: None,
+                role: None,
+                description: None,
+                pronouns: None,
+                access: Some("readonly".to_string()), // typo → unknown tier
+                model: None,
+            },
+            CovenFamiliar {
+                id: "Willow".to_string(), // duplicate id (case-insensitive)
+                display_name: None,
+                emoji: None,
+                role: None,
+                description: None,
+                pronouns: None,
+                access: Some("full".to_string()),
+                model: None,
+            },
+            CovenFamiliar {
+                id: "val".to_string(), // reserved/disallowed name
+                display_name: None,
+                emoji: None,
+                role: None,
+                description: None,
+                pronouns: None,
+                access: None,
+                model: None,
+            },
+        ];
+        let warnings = familiar_roster_warnings(&fams);
+        assert!(warnings.iter().any(|w| w.contains("unknown access tier")));
+        assert!(warnings.iter().any(|w| w.contains("duplicate familiar id")));
+        assert!(warnings.iter().any(|w| w.contains("reserved name")));
+    }
+
+    #[test]
+    fn familiar_roster_warnings_empty_for_clean_roster() {
+        let fams = vec![CovenFamiliar {
+            id: "atlas".to_string(),
+            display_name: Some("Atlas".to_string()),
+            emoji: None,
+            role: None,
+            description: None,
+            pronouns: None,
+            access: Some("full".to_string()),
+            model: None,
+        }];
+        assert!(familiar_roster_warnings(&fams).is_empty());
+    }
+
+    fn writable_familiar(id: &str) -> CovenFamiliar {
+        CovenFamiliar {
+            id: id.to_string(),
+            display_name: None,
+            emoji: None,
+            role: Some("Helper".to_string()),
+            description: None,
+            pronouns: None,
+            access: Some("read-only".to_string()),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn create_and_remove_familiar_round_trip() {
+        let _g = with_coven_home(|_| {});
+        // No daemon socket in the temp home → writes are allowed.
+        assert!(can_write_familiars());
+
+        create_familiar(writable_familiar("nova")).expect("create");
+        let roster = load_familiars().expect("roster after create");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].id, "nova");
+
+        // Duplicate create is rejected.
+        let dup = create_familiar(writable_familiar("Nova"));
+        assert!(matches!(dup, Err(FamiliarWriteError::Duplicate(_))));
+
+        let removed = remove_familiar("nova").expect("remove");
+        assert_eq!(removed.id, "nova");
+        assert!(load_familiars().is_none(), "roster empty after remove");
+    }
+
+    #[test]
+    fn upsert_replaces_existing_and_rename_moves_id() {
+        let _g = with_coven_home(|_| {});
+        create_familiar(writable_familiar("scout")).expect("create");
+
+        // Upsert with same id (different case) replaces rather than duplicates.
+        let mut updated = writable_familiar("Scout");
+        updated.access = Some("full".to_string());
+        let replaced = upsert_familiar(updated).expect("upsert");
+        assert!(replaced);
+        let roster = load_familiars().expect("roster");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].resolved_access(), "full");
+
+        rename_familiar("scout", "ranger").expect("rename");
+        let roster = load_familiars().expect("roster");
+        assert_eq!(roster[0].id, "ranger");
+    }
+
+    #[test]
+    fn write_rejects_reserved_and_missing_ids() {
+        let _g = with_coven_home(|_| {});
+        // Reserved name is refused.
+        assert!(matches!(
+            create_familiar(writable_familiar("val")),
+            Err(FamiliarWriteError::InvalidId(_))
+        ));
+        // Remove/rename of a missing id errors instead of silently succeeding.
+        assert!(matches!(
+            remove_familiar("ghost"),
+            Err(FamiliarWriteError::NotFound(_))
+        ));
+        assert!(matches!(
+            rename_familiar("ghost", "wraith"),
+            Err(FamiliarWriteError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn write_refused_when_daemon_socket_present() {
+        let _g = with_coven_home(|home| {
+            // Simulate a running daemon by creating its IPC socket path.
+            std::fs::write(home.join("coven.sock"), b"").unwrap();
+        });
+        assert!(!can_write_familiars());
+        assert!(matches!(
+            create_familiar(writable_familiar("nova")),
+            Err(FamiliarWriteError::DaemonOwned)
+        ));
+    }
+
+    #[test]
     fn familiar_access_defaults_to_read_only_when_absent() {
         let _g = with_coven_home(|home| {
             fs::write(
@@ -493,10 +1006,13 @@ access = "search-only"
             description: Some("Builds and ships.".to_string()),
             pronouns: None,
             access: Some("full".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
         };
         let (id, def) = familiar_to_agent_definition(&fam);
         assert_eq!(id, "builder", "id should be lowercased for map keys");
         assert_eq!(def.access, "full");
+        // Explicit per-familiar model is threaded into the agent definition.
+        assert_eq!(def.model.as_deref(), Some("claude-opus-4-8"));
         assert!(def.visible);
         let prompt = def.prompt.as_deref().unwrap_or("");
         assert!(prompt.contains("Builder"));
@@ -513,9 +1029,12 @@ access = "search-only"
             description: None,
             pronouns: None,
             access: None,
+            model: None,
         };
         let (_id, def) = familiar_to_agent_definition(&fam);
         assert_eq!(def.access, "read-only");
+        // No model override → inherits session default.
+        assert_eq!(def.model, None);
     }
 
     #[test]
@@ -844,6 +1363,7 @@ access = "read-only"
             description: None,
             pronouns: None,
             access: Some("READ-ONLY".into()),
+            model: None,
         };
         assert_eq!(case_variant.resolved_access(), "read-only");
 
@@ -855,6 +1375,7 @@ access = "read-only"
             description: None,
             pronouns: None,
             access: Some("readonly".into()),
+            model: None,
         };
         assert_eq!(typo.resolved_access(), DEFAULT_FAMILIAR_ACCESS);
 
@@ -866,6 +1387,7 @@ access = "read-only"
             description: None,
             pronouns: None,
             access: Some("super-admin".into()),
+            model: None,
         };
         assert_eq!(garbage.resolved_access(), DEFAULT_FAMILIAR_ACCESS);
     }
