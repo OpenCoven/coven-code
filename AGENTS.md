@@ -86,8 +86,13 @@ When closing issues via commit, include `fixes #<number>` or `closes #<number>` 
 Coven Code supports exactly two providers: **Claude** (Anthropic) and **Codex**
 (OpenAI Codex via ChatGPT OAuth). The provider layer lives in
 `crates/api/src/providers/` (`anthropic.rs`, `codex.rs`) and is registered in
-`crates/api/src/registry.rs`. Auth flows live in `crates/core/src/oauth_config.rs`,
-`codex_oauth.rs`, and `device_code.rs`. Adding other providers is out of scope.
+`crates/api/src/registry.rs`. Auth config/storage lives in
+`crates/core/src/oauth_config.rs` and `codex_oauth.rs` (Codex) plus
+`anthropic_cli_import.rs` (importing Claude Code / `ant` CLI credentials); the
+interactive OAuth handshakes are in `crates/cli/src/oauth_flow.rs` (Anthropic)
+and `codex_oauth_flow.rs` (Codex). (`crates/core/src/device_code.rs` implements
+an RFC 8628 device-code flow but is **not wired to any provider** — both
+providers use browser-redirect OAuth.) Adding other providers is out of scope.
 
 ## Releasing
 

@@ -1405,9 +1405,21 @@ pub mod config {
                 return Some((key, false));
             }
 
-            let tokens = crate::oauth::OAuthTokens::load().await?;
+            let mut tokens = crate::oauth::OAuthTokens::load().await?;
             if !tokens.bearer_auth_is_usable() {
                 return None;
+            }
+
+            // Proactively refresh an expired (or near-expiry) Claude.ai bearer
+            // token so the client is built with a valid credential instead of
+            // 401ing on the first request. Console-flow tokens present a
+            // long-lived API key and are left untouched. A refresh failure is
+            // non-fatal: fall through with the existing token.
+            if tokens.uses_bearer_auth() && tokens.is_expired() && tokens.refresh_token.is_some() {
+                match tokens.refresh().await {
+                    Ok(updated) => tokens = updated,
+                    Err(e) => tracing::warn!("Anthropic OAuth token refresh failed: {e}"),
+                }
             }
 
             tokens
@@ -4104,6 +4116,91 @@ pub mod oauth {
             }
         }
 
+        /// Exchange the stored `refresh_token` for a fresh access token via the
+        /// Anthropic OAuth refresh grant, persist it to the active profile, and
+        /// return the updated tokens.
+        ///
+        /// Errors (rather than panics) when there is no refresh token or no
+        /// usable client id. The HTTP error body is deliberately **not** echoed
+        /// into the returned error — provider responses can reflect parts of the
+        /// request, and we never want a refresh/access token landing in logs.
+        pub async fn refresh(&self) -> anyhow::Result<Self> {
+            use anyhow::{bail, Context};
+
+            let refresh_token = self
+                .refresh_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .context("No refresh token available to refresh the OAuth credential")?;
+
+            // Prefer the client id that minted this token; fall back to the
+            // configured env override. Refresh is impossible without one.
+            let client_id = self
+                .oauth_client_id
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .or_else(|| {
+                    std::env::var(CLIENT_ID_ENV)
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                })
+                .context("No OAuth client id available to refresh the token")?;
+
+            let body = serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "scope": ALL_SCOPES.join(" "),
+            });
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+
+            let resp = client
+                .post(TOKEN_URL)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .context("Token refresh HTTP request failed")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                // Drain the body without surfacing it (may contain secrets).
+                let _ = resp.text().await;
+                bail!("Anthropic OAuth token refresh failed (HTTP {status})");
+            }
+
+            let v: serde_json::Value = resp
+                .json()
+                .await
+                .context("Failed to parse token refresh response")?;
+
+            let access_token = v
+                .get("access_token")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .context("Token refresh response missing access_token")?
+                .to_string();
+
+            let mut updated = self.clone();
+            updated.access_token = access_token;
+            if let Some(rt) = v.get("refresh_token").and_then(|x| x.as_str()) {
+                updated.refresh_token = Some(rt.to_string());
+            }
+            if let Some(exp_in) = v.get("expires_in").and_then(|x| x.as_i64()) {
+                updated.expires_at_ms = Some(chrono::Utc::now().timestamp_millis() + exp_in * 1000);
+            }
+            if let Some(scope) = v.get("scope").and_then(|x| x.as_str()) {
+                updated.scopes = scope.split_whitespace().map(String::from).collect();
+            }
+
+            updated.save().await?;
+            Ok(updated)
+        }
+
         /// Legacy token file path — kept for backward-compat reads when no
         /// account registry exists yet. New writes go to per-account dirs.
         pub fn token_file_path() -> std::path::PathBuf {
@@ -4121,6 +4218,9 @@ pub mod oauth {
                 tokio::fs::create_dir_all(parent).await?;
             }
             tokio::fs::write(&path, serde_json::to_string_pretty(self)?).await?;
+            // Restrict to owner-only: this file holds the Anthropic OAuth
+            // access + refresh tokens (and any minted API key).
+            crate::accounts::set_user_only_perms(&path);
             Ok(())
         }
 
@@ -4783,6 +4883,28 @@ mod tests {
             ..Default::default()
         };
         assert!(tokens.uses_bearer_auth());
+    }
+
+    #[test]
+    fn test_oauth_refresh_without_refresh_token_errors_offline() {
+        // A token with no refresh_token must fail fast with a clear error and
+        // never touch the network (the refresh-token check precedes any HTTP).
+        let tokens = crate::oauth::OAuthTokens {
+            access_token: "at".to_string(),
+            refresh_token: None,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(tokens.refresh())
+            .expect_err("refresh without a refresh_token must error");
+        assert!(
+            err.to_string().contains("No refresh token"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -760,15 +760,16 @@ impl SlashCommand for ModelCommand {
     }
     fn help(&self) -> &str {
         "Usage: /model [<model-id>]\n\n\
-         Without arguments, shows the current model.\n\n\
-         With a model ID, switches to that model.  Accepts both bare model\n\
-         names (e.g. claude-sonnet-4-6) and provider-prefixed format\n\
-         (e.g. openai/gpt-4o, google/gemini-2.0-flash).\n\n\
+         Without arguments, opens the model picker for the active provider.\n\n\
+         With a model ID, switches to that model. Accepts a bare Claude model\n\
+         name (e.g. claude-sonnet-4-6) or, for Codex, the provider-prefixed\n\
+         form codex/<model>. Coven Code dispatches to two providers: Anthropic\n\
+         (Claude) and Codex.\n\n\
          Examples:\n\
-           /model                        — show current model\n\
-           /model claude-opus-4-6        — switch to Claude Opus 4.6\n\
-           /model openai/gpt-4o          — switch to GPT-4o via OpenAI\n\
-           /model google/gemini-2.0-flash — switch to Gemini 2.0 Flash"
+           /model                       — open the model picker\n\
+           /model claude-sonnet-4-6     — switch to Claude Sonnet 4.6\n\
+           /model claude-haiku-4-5      — switch to Claude Haiku 4.5\n\
+           /model codex/gpt-5.2-codex   — switch to Codex (requires codex login)"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {

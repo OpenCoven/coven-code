@@ -52,7 +52,11 @@ These are **not** user-visible and are kept for merge-friendliness:
 Every provider implements `LlmProvider`. To add an OpenCoven-specific or private provider:
 1. Create `my_provider.rs` implementing `LlmProvider`.
 2. Register it in `providers/mod.rs`.
-3. Add routing in `src-rust/crates/core/src/settings.rs` (provider enum).
+3. Add routing in `src-rust/crates/api/src/registry.rs` (`provider_from_key` /
+   `provider_from_config` / `runtime_provider_for`) and, if it needs a stable
+   id, a constant in `src-rust/crates/core/src/provider_id.rs`. (There is no
+   provider enum in `core/settings`; the only `Provider` enum is the
+   two-variant client selector in `crates/api/src/lib.rs`.)
 
 ### 2. Plugin system — `src-rust/crates/plugins/`
 

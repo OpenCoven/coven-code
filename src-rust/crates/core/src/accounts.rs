@@ -287,9 +287,14 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Tighten permissions on credential files (best-effort, Unix-only).
+/// Tighten permissions on credential files to `0600` (owner read/write only).
+///
+/// Best-effort and Unix-only: on Windows this is a no-op and access control is
+/// left to the filesystem ACLs of the user's home directory. Every file that
+/// stores a secret (API keys, OAuth access/refresh tokens) routes through this
+/// before it can be read by another local user under a permissive umask.
 #[allow(unused_variables)]
-fn set_user_only_perms(path: &std::path::Path) {
+pub(crate) fn set_user_only_perms(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -60,6 +60,22 @@ impl EffortLevel {
         }
     }
 
+    /// Map this picker effort level onto the core `EffortLevel` consumed by the
+    /// query layer (which actually builds the API request).
+    ///
+    /// `Normal` maps to `Medium` — the same mapping the `/effort` command path
+    /// uses — so the picker, the `/effort` dialog, and the `/effort` command
+    /// all resolve to identical request parameters.
+    pub fn to_core(self) -> claurst_core::effort::EffortLevel {
+        use claurst_core::effort::EffortLevel as Core;
+        match self {
+            Self::Low => Core::Low,
+            Self::Normal => Core::Medium,
+            Self::High => Core::High,
+            Self::Max => Core::Max,
+        }
+    }
+
     /// Cycle to next level; skips `Max` when the selected model does not
     /// support it.
     pub fn next(self, supports_max: bool) -> Self {
@@ -1009,6 +1025,18 @@ mod tests {
                 .unwrap()
                 .is_current
         );
+    }
+
+    // Effort selected in the picker / dialog must map onto the core effort
+    // level the query layer consumes, matching the /effort command path
+    // (Normal → Medium). A regression here silently drops effort from the API.
+    #[test]
+    fn effort_to_core_maps_to_query_levels() {
+        use claurst_core::effort::EffortLevel as Core;
+        assert_eq!(EffortLevel::Low.to_core(), Core::Low);
+        assert_eq!(EffortLevel::Normal.to_core(), Core::Medium);
+        assert_eq!(EffortLevel::High.to_core(), Core::High);
+        assert_eq!(EffortLevel::Max.to_core(), Core::Max);
     }
 
     #[test]

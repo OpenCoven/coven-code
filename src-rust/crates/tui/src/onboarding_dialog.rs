@@ -113,6 +113,13 @@ impl OnboardingDialogState {
     pub fn is_done(&self) -> bool {
         self.page == OnboardingPage::Done
     }
+
+    /// True while the no-credentials provider-setup page is showing. The app
+    /// uses this so Enter / a provider number opens the real connect dialog
+    /// instead of advancing into the (purely informational) welcome pages.
+    pub fn is_provider_setup(&self) -> bool {
+        self.page == OnboardingPage::ProviderSetup
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +257,14 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
     lines.extend([
         Line::from(""),
         Line::from(vec![
-            Span::styled("  enter", Style::default().fg(pink)),
-            Span::styled(" next · ", Style::default().fg(dim)),
+            Span::styled("  1·2", Style::default().fg(pink)),
+            Span::styled(" or ", Style::default().fg(dim)),
+            Span::styled("enter", Style::default().fg(pink)),
+            Span::styled(" connect now · ", Style::default().fg(dim)),
             Span::styled("esc", Style::default().fg(pink)),
-            Span::styled(" dismiss · configure later with ", Style::default().fg(dim)),
-            Span::styled("/providers", Style::default().fg(Color::Rgb(150, 150, 150))),
+            Span::styled(" skip · run ", Style::default().fg(dim)),
+            Span::styled("/connect", Style::default().fg(Color::Rgb(150, 150, 150))),
+            Span::styled(" anytime", Style::default().fg(dim)),
         ]),
     ]);
 

@@ -2207,6 +2207,9 @@ async fn run_interactive(
             claurst_core::effort::EffortLevel::High => TuiEL::High,
             claurst_core::effort::EffortLevel::Max => TuiEL::Max,
         };
+        // An effort supplied at launch (`--effort`) is an explicit choice, so
+        // make `app.effort_level` authoritative for every turn from the start.
+        app.effort_is_set = true;
     }
     app.provider_registry = base_query_config.provider_registry.clone();
     app.refresh_context_window_size();
@@ -2661,6 +2664,7 @@ async fn run_interactive(
                             // Sync effort level when TUI cycled the visual indicator
                             // (no-args /effort → cycle Low→Med→High→Max→Low).
                             if handled_by_tui && cmd_name == "effort" && cmd_args.is_empty() {
+                                app.effort_is_set = true;
                                 current_effort = Some(match app.effort_level {
                                     claurst_tui::EffortLevel::Low => {
                                         claurst_core::effort::EffortLevel::Low
@@ -3015,6 +3019,7 @@ async fn run_interactive(
                                     claurst_core::effort::EffortLevel::parse(&cmd_args)
                                 {
                                     current_effort = Some(level);
+                                    app.effort_is_set = true;
                                     app.effort_level = match level {
                                         claurst_core::effort::EffortLevel::Low => {
                                             claurst_tui::EffortLevel::Low
@@ -3271,8 +3276,17 @@ async fn run_interactive(
                                 None => addendum,
                             });
                         }
-                        // Apply active effort level (set via /effort command).
-                        if let Some(level) = current_effort {
+                        // Apply active effort level. Once the user has chosen a
+                        // level through any UI (model picker ←/→, the /effort
+                        // dialog, or the /effort command) `app.effort_level` is
+                        // authoritative and resolved at turn-dispatch time;
+                        // otherwise fall back to the command-set carrier.
+                        let turn_effort = if app.effort_is_set {
+                            Some(app.effort_level.to_core())
+                        } else {
+                            current_effort
+                        };
+                        if let Some(level) = turn_effort {
                             qcfg.effort_level = Some(level);
                         }
                         // Wire completion_notifier if a command queue is available.
@@ -4445,7 +4459,12 @@ async fn run_interactive(
                                     None => addendum,
                                 });
                             }
-                            if let Some(level) = current_effort {
+                            let turn_effort = if app.effort_is_set {
+                                Some(app.effort_level.to_core())
+                            } else {
+                                current_effort
+                            };
+                            if let Some(level) = turn_effort {
                                 qcfg.effort_level = Some(level);
                             }
                             if let Some(ref cq) = qcfg.command_queue {
