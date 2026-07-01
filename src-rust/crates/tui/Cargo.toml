@@ -7,6 +7,10 @@ edition.workspace = true
 # Enable real microphone capture for voice PTT mode.
 voice = ["claurst-core/voice", "dep:cpal", "dep:hound"]
 
+# Opt-in `/steer` command: explicitly queue a steering message for the running
+# turn (auto-runs after it), or submit immediately when idle. Off by default.
+steer = []
+
 # UI & Interaction features (pass-through from cc-core)
 token_budget = ["claurst-core/token_budget"]
 ultraplan = ["claurst-core/ultraplan"]
