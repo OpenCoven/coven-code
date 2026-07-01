@@ -161,6 +161,30 @@ access = "read-only"
 | `description` | | Full description used to build the persona system prompt. |
 | `pronouns` | | Appended to the persona prompt if present. |
 | `access` | | Tool-access tier: `"full"`, `"read-only"`, or `"search-only"`. Defaults to `"read-only"` when omitted. See [Tool access tiers](#tool-access-tiers) below. |
+| `model` | | Optional model override for this familiar, e.g. `"claude-opus-4-8"`. When omitted the familiar inherits the session's default model. Lets you pin a persona to a model without shadowing it with a workspace agent. |
+
+---
+
+## Managing the roster
+
+`~/.coven/familiars.toml` is **owned by the Coven daemon** when it is running. In that mode coven-code treats the roster as read-only and directs all edits to the daemon.
+
+**Standalone mode** (no daemon socket at `~/.coven/coven.sock`) is different: coven-code owns the file and can write it directly.
+
+- **First-run bootstrap.** Press **F2** with no familiars configured and coven-code writes a starter `~/.coven/familiars.toml` (a `read-only` guide and a `full`-access builder) and opens the switcher so you have something to pick and a template to edit.
+- **Create / rename / remove** from the prompt:
+
+  ```text
+  /familiar new <id> [display name]   # create a read-only familiar
+  /familiar rename <old-id> <new-id>  # rename, preserving all fields
+  /familiar remove <id>               # delete (clears it if it was active)
+  ```
+
+  You can also remove a familiar from the visual `/familiar` menu. All of these refuse with a clear message when the daemon owns the file.
+- **Switching:** `/familiar <id>`, the **F2** quick switcher (type to filter, `— none —` clears the active familiar), or the `/familiar` menu.
+- **Clearing vs wiping:** `/familiar clear` (alias `reset`) steps back to no active familiar. `/familiar wipe-roster` (alias `reset-roster`) is **destructive** — it deletes the roster and workspace agents — and requires `/familiar wipe-roster confirm`.
+
+If the roster file is malformed, coven-code surfaces the parse error at startup instead of silently dropping every familiar; unknown access tiers and duplicate/reserved ids are reported as warnings.
 
 ---
 

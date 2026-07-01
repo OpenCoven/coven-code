@@ -1112,6 +1112,19 @@ pub struct App {
     pub familiar_switcher_open: bool,
     pub familiar_switcher_list: Vec<String>,
     pub familiar_switcher_idx: usize,
+    /// Incremental filter typed while the switcher is open. Empty = show all.
+    pub familiar_switcher_filter: String,
+}
+
+/// One selectable row in the F2 familiar switcher.
+///
+/// The synthetic [`FamiliarSwitcherEntry::Clear`] row always leads the list so
+/// the user can step back to no active familiar without reaching for
+/// `/familiar reset`; the rest map to roster ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FamiliarSwitcherEntry {
+    Clear,
+    Familiar(String),
 }
 
 // Spinner verbs are now imported from claurst_core::spinner
@@ -1285,6 +1298,7 @@ impl App {
     pub fn new(config: Config, cost_tracker: Arc<CostTracker>) -> Self {
         // Auto-detect familiar from system username when none is configured.
         let mut config = config;
+        let familiar_explicit = config.familiar.is_some();
         if config.familiar.is_none() {
             if let Some(inferred) = Self::infer_familiar_from_env() {
                 config.familiar = Some(inferred);
@@ -1292,7 +1306,7 @@ impl App {
         }
         let model_name = config.effective_model().to_string();
         let user_keybindings = UserKeybindings::load(&Settings::config_dir());
-        Self {
+        let mut app = Self {
             config,
             cost_tracker,
             messages: Vec::new(),
@@ -1505,6 +1519,66 @@ impl App {
             familiar_switcher_open: false,
             familiar_switcher_list: Self::default_familiar_switcher_list(),
             familiar_switcher_idx: 0,
+            familiar_switcher_filter: String::new(),
+        };
+        app.surface_familiar_roster_warnings(familiar_explicit);
+        app
+    }
+
+    /// Surface a one-time status message when `~/.coven/familiars.toml` exists
+    /// but is malformed, or when the loaded roster has non-fatal problems
+    /// (unknown access tiers, or duplicate and reserved ids). Without this, a
+    /// broken roster silently vanishes with no signal to the user.
+    ///
+    /// `familiar_explicit` is true only when the active familiar came from
+    /// settings rather than username inference — stale-selection warnings fire
+    /// only in that case so an inferred default never nags a standalone user.
+    fn surface_familiar_roster_warnings(&mut self, familiar_explicit: bool) {
+        match claurst_core::coven_shared::load_familiars_result() {
+            Err(err) => {
+                self.status_message = Some(format!(
+                    "familiars.toml could not be parsed ({}) — roster unavailable.",
+                    err.message
+                ));
+            }
+            Ok(Some(fams)) if !fams.is_empty() => {
+                let warnings = claurst_core::coven_shared::familiar_roster_warnings(&fams);
+                if let Some(first) = warnings.first() {
+                    let extra = warnings.len().saturating_sub(1);
+                    self.status_message = Some(if extra > 0 {
+                        format!("Familiar roster: {first} (+{extra} more)")
+                    } else {
+                        format!("Familiar roster: {first}")
+                    });
+                    return;
+                }
+                // Roster is clean — warn only if an explicitly-selected familiar
+                // is missing from it.
+                if familiar_explicit {
+                    if let Some(active) = self.config.familiar.as_deref() {
+                        let active_lc = active.trim().to_ascii_lowercase();
+                        let present = fams
+                            .iter()
+                            .any(|f| f.id.trim().to_ascii_lowercase() == active_lc);
+                        if !present {
+                            self.status_message = Some(format!(
+                                "Selected familiar '{active}' is not in the roster — using none.",
+                            ));
+                        }
+                    }
+                }
+            }
+            // No roster file, or an empty one, while a familiar was explicitly
+            // configured: flag the stale selection so it isn't silently ignored.
+            _ => {
+                if familiar_explicit {
+                    if let Some(active) = self.config.familiar.as_deref() {
+                        self.status_message = Some(format!(
+                            "Selected familiar '{active}' has no roster (~/.coven/familiars.toml) — using none.",
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -1518,6 +1592,66 @@ impl App {
             }
         }
         ids
+    }
+
+    /// The switcher rows after applying the current filter. Leads with the
+    /// synthetic [`FamiliarSwitcherEntry::Clear`] row (unless the filter
+    /// excludes it) so the user can return to no active familiar, followed by
+    /// roster ids whose id contains the (case-insensitive) filter.
+    pub fn familiar_switcher_entries(&self) -> Vec<FamiliarSwitcherEntry> {
+        let filter = self.familiar_switcher_filter.trim().to_ascii_lowercase();
+        let mut entries = Vec::new();
+        // The clear row shows for an empty filter or when the user is plainly
+        // typing toward "none" / "clear".
+        if filter.is_empty() || "none".contains(&filter) || "clear".contains(&filter) {
+            entries.push(FamiliarSwitcherEntry::Clear);
+        }
+        for id in &self.familiar_switcher_list {
+            if filter.is_empty() || id.to_ascii_lowercase().contains(&filter) {
+                entries.push(FamiliarSwitcherEntry::Familiar(id.clone()));
+            }
+        }
+        entries
+    }
+
+    /// Close the F2 switcher and reset its transient filter/selection state.
+    fn close_familiar_switcher(&mut self) {
+        self.familiar_switcher_open = false;
+        self.familiar_switcher_filter.clear();
+        self.familiar_switcher_idx = 0;
+    }
+
+    /// First-run action when F2 is pressed with no familiars: in standalone
+    /// mode, write a starter `~/.coven/familiars.toml` and open the switcher so
+    /// the user has something to pick and a template to edit. When the Coven
+    /// daemon owns the roster, point the user at it instead of writing.
+    fn bootstrap_or_prompt_familiar_roster(&mut self) {
+        use claurst_core::coven_shared;
+        if !coven_shared::can_write_familiars() {
+            self.status_message = Some(
+                "Familiars are managed by the Coven daemon — add them there, then press F2."
+                    .to_string(),
+            );
+            return;
+        }
+        match coven_shared::write_starter_roster() {
+            Ok(fams) => {
+                self.familiar_switcher_list = fams.iter().map(|f| f.id.clone()).collect();
+                self.familiar_switcher_open = true;
+                self.familiar_switcher_filter.clear();
+                self.familiar_switcher_idx = 0;
+                self.push_notification(
+                    crate::notifications::NotificationKind::Info,
+                    "Created a starter roster at ~/.coven/familiars.toml — pick one or edit the file."
+                        .to_string(),
+                    Some(6),
+                );
+            }
+            Err(err) => {
+                self.status_message =
+                    Some(format!("Could not create a starter roster: {err}"));
+            }
+        }
     }
 
     /// Load token budget from environment or model defaults.
@@ -3147,40 +3281,74 @@ impl App {
 
         // ---- Familiar switcher (F2) ----------------------------------------
         if self.familiar_switcher_open {
+            // Navigation runs over the filtered entry list (which leads with a
+            // synthetic "clear" row); typing narrows the roster incrementally.
+            let entries = self.familiar_switcher_entries();
+            let len = entries.len();
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
             match key.code {
                 KeyCode::Esc | KeyCode::F(2) => {
-                    self.familiar_switcher_open = false;
+                    self.close_familiar_switcher();
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    let len = self.familiar_switcher_list.len();
+                KeyCode::Down => {
                     if len > 0 {
                         self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    let len = self.familiar_switcher_list.len();
+                KeyCode::Up => {
                     if len > 0 {
                         self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
                     }
                 }
-                KeyCode::Enter => {
-                    if let Some(id) = self
-                        .familiar_switcher_list
-                        .get(self.familiar_switcher_idx)
-                        .cloned()
-                    {
-                        // Full activation, same as the menu and /familiar:
-                        // mascot + persisted setting + agent mode/tool tier.
-                        self.config.familiar = Some(id.clone());
-                        self.persist_familiar_setting(Some(id.clone()));
-                        self.apply_familiar_agent_mode(Some(id.clone()), None);
-                        self.push_notification(
-                            crate::notifications::NotificationKind::Info,
-                            format!("\u{2728} Familiar: {}", id),
-                            None,
-                        );
+                KeyCode::Char('n') if ctrl => {
+                    if len > 0 {
+                        self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
                     }
-                    self.familiar_switcher_open = false;
+                }
+                KeyCode::Char('p') if ctrl => {
+                    if len > 0 {
+                        self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.familiar_switcher_filter.pop();
+                    self.familiar_switcher_idx = 0;
+                }
+                KeyCode::Enter => {
+                    match entries.get(self.familiar_switcher_idx) {
+                        Some(FamiliarSwitcherEntry::Clear) => {
+                            // Step back to no active familiar (same effect as
+                            // `/familiar reset`) without leaving the switcher.
+                            self.config.familiar = None;
+                            self.persist_familiar_setting(None);
+                            self.apply_familiar_agent_mode(None, None);
+                            self.push_notification(
+                                crate::notifications::NotificationKind::Info,
+                                "Familiar cleared.".to_string(),
+                                None,
+                            );
+                        }
+                        Some(FamiliarSwitcherEntry::Familiar(id)) => {
+                            // Full activation, same as the menu and /familiar:
+                            // mascot + persisted setting + agent mode/tool tier.
+                            let id = id.clone();
+                            self.config.familiar = Some(id.clone());
+                            self.persist_familiar_setting(Some(id.clone()));
+                            self.apply_familiar_agent_mode(Some(id.clone()), None);
+                            self.push_notification(
+                                crate::notifications::NotificationKind::Info,
+                                format!("\u{2728} Familiar: {}", id),
+                                None,
+                            );
+                        }
+                        None => {}
+                    }
+                    self.close_familiar_switcher();
+                }
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    self.familiar_switcher_filter.push(c);
+                    self.familiar_switcher_idx = 0;
                 }
                 _ => {}
             }
@@ -3274,7 +3442,12 @@ impl App {
             if self.onboarding_dialog.is_provider_setup() {
                 match key.code {
                     KeyCode::Esc => {
+                        // Esc = "skip for now". Persist completion so a brand-new
+                        // user who dismisses isn't re-nagged with the same dialog
+                        // every launch; the /connect hint in the welcome box keeps
+                        // the affordance visible.
                         self.onboarding_dialog.dismiss();
+                        let _ = Self::persist_onboarding_complete();
                         self.status_message =
                             Some("Run /connect when you're ready to add a provider.".to_string());
                     }
@@ -3289,7 +3462,10 @@ impl App {
             }
             match key.code {
                 KeyCode::Esc => {
+                    // Esc dismisses from any page and counts as completing
+                    // onboarding, so the dialog doesn't reappear next launch.
                     self.onboarding_dialog.dismiss();
+                    let _ = Self::persist_onboarding_complete();
                 }
                 KeyCode::Enter | KeyCode::Right if self.onboarding_dialog.next_page() => {
                     self.onboarding_dialog.dismiss();
@@ -4340,22 +4516,24 @@ impl App {
             }
             KeyCode::F(2) => {
                 if self.familiar_switcher_open {
-                    self.familiar_switcher_open = false;
+                    self.close_familiar_switcher();
                 } else if self.familiar_switcher_list.is_empty() {
-                    self.status_message =
-                        Some("No saved familiars. Add ~/.coven/familiars.toml first.".to_string());
+                    self.bootstrap_or_prompt_familiar_roster();
                 } else {
                     self.familiar_switcher_open = true;
+                    self.familiar_switcher_filter.clear();
                     // Highlight the active familiar if one is set; otherwise
-                    // start at the top. No built-in default is assumed.
+                    // start at the top. Entries lead with the "clear" row, so
+                    // account for that offset when locating the active id.
+                    let entries = self.familiar_switcher_entries();
                     self.familiar_switcher_idx = self
                         .config
                         .familiar
                         .as_deref()
                         .and_then(|current| {
-                            self.familiar_switcher_list
-                                .iter()
-                                .position(|id| id == current)
+                            entries.iter().position(|e| {
+                                matches!(e, FamiliarSwitcherEntry::Familiar(id) if id == current)
+                            })
                         })
                         .unwrap_or(0);
                 }
@@ -4790,9 +4968,8 @@ impl App {
                     self.config.permission_mode = claurst_core::config::PermissionMode::Default;
                 }
                 self.managed_agents_active = false;
-                self.familiar_switcher_open = false;
+                self.close_familiar_switcher();
                 self.familiar_switcher_list.clear();
-                self.familiar_switcher_idx = 0;
                 self.status_message = Some(summary.message());
             }
             Err(err) => {
@@ -7007,6 +7184,36 @@ mod tests {
     }
 
     #[test]
+    fn familiar_switcher_entries_lead_with_clear_and_filter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.familiar_switcher_list = vec!["ember".to_string(), "onyx".to_string()];
+
+        // No filter → Clear leads, then all familiars in order.
+        app.familiar_switcher_filter.clear();
+        let entries = app.familiar_switcher_entries();
+        assert_eq!(entries[0], FamiliarSwitcherEntry::Clear);
+        assert_eq!(entries[1], FamiliarSwitcherEntry::Familiar("ember".to_string()));
+        assert_eq!(entries[2], FamiliarSwitcherEntry::Familiar("onyx".to_string()));
+
+        // Filter narrows to matching ids and drops the Clear row.
+        app.familiar_switcher_filter = "ony".to_string();
+        let entries = app.familiar_switcher_entries();
+        assert_eq!(entries, vec![FamiliarSwitcherEntry::Familiar("onyx".to_string())]);
+
+        // Typing toward "none" keeps the Clear row available.
+        app.familiar_switcher_filter = "non".to_string();
+        let entries = app.familiar_switcher_entries();
+        assert_eq!(entries, vec![FamiliarSwitcherEntry::Clear]);
+    }
+
+    #[test]
     fn startup_familiar_switcher_uses_saved_roster_only() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
@@ -7060,7 +7267,7 @@ role = "Research"
     }
 
     #[test]
-    fn f2_does_not_open_familiar_switcher_without_saved_roster() {
+    fn f2_bootstraps_starter_roster_when_standalone_and_empty() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -7069,13 +7276,38 @@ role = "Research"
         let _guard = EnvGuard::set(&home, &coven_home);
 
         let mut app = make_app();
+        // No daemon socket → standalone → F2 writes a starter roster and opens.
+        app.handle_key_event(press_key(KeyCode::F(2), KeyModifiers::NONE));
+
+        assert!(app.familiar_switcher_open);
+        assert_eq!(
+            app.familiar_switcher_list,
+            vec!["sage".to_string(), "forge".to_string()]
+        );
+        assert!(coven_home.join("familiars.toml").exists());
+    }
+
+    #[test]
+    fn f2_does_not_write_roster_when_daemon_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        // Simulate a running daemon by creating its IPC socket.
+        std::fs::write(coven_home.join("coven.sock"), b"").expect("socket");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
         app.handle_key_event(press_key(KeyCode::F(2), KeyModifiers::NONE));
 
         assert!(!app.familiar_switcher_open);
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("No saved familiars. Add ~/.coven/familiars.toml first.")
-        );
+        assert!(!coven_home.join("familiars.toml").exists());
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Coven daemon"));
     }
 
     #[test]

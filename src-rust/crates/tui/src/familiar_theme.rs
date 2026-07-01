@@ -134,6 +134,7 @@ pub fn resolve(id: &str, daemon_familiars: &[CovenFamiliar]) -> FamiliarTheme {
         description: None,
         pronouns: None,
         access: None,
+        model: None,
     })
 }
 
@@ -177,6 +178,7 @@ mod tests {
             description: None,
             pronouns: None,
             access: None,
+            model: None,
         }
     }
 
