@@ -2631,6 +2631,39 @@ async fn run_interactive(
                             let cmd_name = cmd_name.to_string();
                             let cmd_args = cmd_args.to_string();
 
+                            // ── /steer <message> (opt-in feature) ─────────────────────
+                            // Explicit steering: queue the message when a turn is in
+                            // flight (it auto-runs after the current turn, mirroring
+                            // Enter-while-busy), or submit it immediately when idle.
+                            #[cfg(feature = "steer")]
+                            if cmd_name == "steer" {
+                                let msg = cmd_args.trim().to_string();
+                                if msg.is_empty() {
+                                    app.notifications.push(
+                                        claurst_tui::NotificationKind::Info,
+                                        "Usage: /steer <message> — steer the running turn"
+                                            .to_string(),
+                                        Some(4),
+                                    );
+                                    continue;
+                                }
+                                if app.is_streaming || current_query.is_some() {
+                                    let preview: String = msg.chars().take(40).collect();
+                                    app.queued_messages.push_back(msg);
+                                    let total = app.queued_messages.len();
+                                    app.notifications.push(
+                                        claurst_tui::NotificationKind::Info,
+                                        format!("Steer queued ({total}): {preview}"),
+                                        Some(3),
+                                    );
+                                } else {
+                                    // Idle: submit now via the auto-submit path.
+                                    app.set_prompt_text(msg);
+                                    app.pending_auto_submit = true;
+                                }
+                                continue;
+                            }
+
                             // ── Step 1: TUI-layer intercept (overlays, toggles) ────────
                             // Run first so we know whether a UI overlay opened, which
                             // lets us suppress redundant CLI text output below.

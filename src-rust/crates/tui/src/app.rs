@@ -133,6 +133,11 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "status",
         "Show session status or run diagnostics (/status doctor)",
     ),
+    #[cfg(feature = "steer")]
+    (
+        "steer",
+        "Queue a steering message for the running turn (or send it now if idle)",
+    ),
     ("survey", "Open session feedback survey"),
     ("tasks", "Manage tracked background tasks"),
     (

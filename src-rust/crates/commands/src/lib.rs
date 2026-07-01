@@ -11314,7 +11314,10 @@ mod tests {
         //  - stats: intercepted directly by the TUI to open the live stats
         //    dialog; the named CLI `stats` command handles aggregate saved
         //    session reports outside the TUI.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff"];
+        //  - steer: opt-in feature, intercepted directly in the CLI main loop
+        //    (queues/sends a steering message); only present when built with
+        //    `--features steer`.
+        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "steer"];
 
         let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
             .iter()
