@@ -75,6 +75,26 @@ pub fn is_context_overflow(message: &str) -> bool {
 /// is classified as [`ProviderError::ContextOverflow`] rather than
 /// [`ProviderError::InvalidRequest`].
 pub fn parse_error_response(status: u16, body: &str, provider: &ProviderId) -> ProviderError {
+    parse_error_response_with_retry_after(status, body, provider, None)
+}
+
+/// Parse a `Retry-After` header value into whole seconds.
+///
+/// Supports the delay-seconds form (`Retry-After: 30`). The HTTP-date form is
+/// not parsed and yields `None` (callers fall back to their own back-off).
+pub fn parse_retry_after_secs(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+/// Like [`parse_error_response`], but threads a caller-extracted `Retry-After`
+/// value (in seconds) into the [`ProviderError::RateLimited`] variant so the
+/// server-provided back-off delay is preserved and surfaced to the user.
+pub fn parse_error_response_with_retry_after(
+    status: u16,
+    body: &str,
+    provider: &ProviderId,
+    retry_after: Option<u64>,
+) -> ProviderError {
     let json: Option<serde_json::Value> = serde_json::from_str(body).ok();
 
     let message = if let Some(ref j) = json {
@@ -142,7 +162,7 @@ pub fn parse_error_response(status: u16, body: &str, provider: &ProviderId) -> P
         },
         429 => ProviderError::RateLimited {
             provider: provider.clone(),
-            retry_after: None,
+            retry_after,
         },
         413 => ProviderError::ContextOverflow {
             provider: provider.clone(),
@@ -312,7 +332,38 @@ mod tests {
     fn test_parse_error_response_rate_limit() {
         let pid = ProviderId::new("openai");
         let err = parse_error_response(429, "rate limited", &pid);
-        assert!(matches!(err, ProviderError::RateLimited { .. }));
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited {
+                retry_after: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_error_response_threads_retry_after() {
+        let pid = ProviderId::new("openai");
+        let err = parse_error_response_with_retry_after(429, "rate limited", &pid, Some(42));
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited {
+                retry_after: Some(42),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_retry_after_secs() {
+        assert_eq!(parse_retry_after_secs("30"), Some(30));
+        assert_eq!(parse_retry_after_secs("  15 "), Some(15));
+        // HTTP-date form is unsupported → None (caller falls back to back-off).
+        assert_eq!(
+            parse_retry_after_secs("Wed, 21 Oct 2015 07:28:00 GMT"),
+            None
+        );
+        assert_eq!(parse_retry_after_secs(""), None);
     }
 
     #[test]

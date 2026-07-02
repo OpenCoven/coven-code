@@ -107,6 +107,69 @@ fn format_chord_string(chord: &Chord) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// A pretty single-keystroke label for UI hints, e.g. `Ctrl+C`, `Enter`,
+/// `Alt+H`, `↑`.
+fn prettify_keystroke(ks: &ParsedKeystroke) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if ks.ctrl {
+        parts.push("Ctrl".to_string());
+    }
+    if ks.alt {
+        parts.push("Alt".to_string());
+    }
+    if ks.shift {
+        parts.push("Shift".to_string());
+    }
+    if ks.meta {
+        parts.push("Meta".to_string());
+    }
+    let key = match ks.key.as_str() {
+        "enter" => "Enter".to_string(),
+        "escape" => "Esc".to_string(),
+        "up" => "\u{2191}".to_string(),
+        "down" => "\u{2193}".to_string(),
+        "left" => "\u{2190}".to_string(),
+        "right" => "\u{2192}".to_string(),
+        "space" => "Space".to_string(),
+        "pageup" => "PgUp".to_string(),
+        "pagedown" => "PgDn".to_string(),
+        "tab" => "Tab".to_string(),
+        k if k.chars().count() == 1 => k.to_uppercase(),
+        k => {
+            let mut c = k.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        }
+    };
+    parts.push(key);
+    parts.join("+")
+}
+
+/// The keystroke currently bound to `action`, as a display string — a user
+/// override wins, otherwise the built-in default. `None` if nothing is bound.
+///
+/// Matches on action name across contexts (action names like `submit` /
+/// `openHelp` are unique enough for hint display), so first-run keybinding
+/// hints stay in sync with a user's customized `keybindings.json`.
+pub fn display_binding_for(user: &UserKeybindings, action: &str) -> Option<String> {
+    // User override wins.
+    for b in &user.bindings {
+        if b.action.as_deref() == Some(action) {
+            let first = b.chord.split_whitespace().next().unwrap_or(&b.chord);
+            if let Some(ks) = parse_keystroke(first) {
+                return Some(prettify_keystroke(&ks));
+            }
+        }
+    }
+    // Fall back to the built-in default.
+    default_bindings()
+        .iter()
+        .find(|pb| pb.action.as_deref() == Some(action))
+        .and_then(|pb| pb.chord.first().map(prettify_keystroke))
+}
+
 fn normalize_key(k: &str) -> String {
     match k {
         "esc" | "escape" => "escape".to_string(),

@@ -1873,16 +1873,39 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string());
 
     let mut right_lines: Vec<Line> = Vec::new();
-    right_lines.push(Line::from(Span::styled(
-        "Tips for getting started",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    )));
-    // Word-wrap the tip on word boundaries so it stays readable when narrow.
-    for line in crate::dialogs::word_wrap(&tip_text, right_w_usize) {
+    if !app.has_credentials {
+        // Brand-new user with no provider: lead the empty state with a clear,
+        // actionable call-to-action instead of a generic tip they can't use yet.
+        let pink = Color::Rgb(139, 92, 246);
         right_lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(Color::Gray),
+            "No provider connected",
+            Style::default().fg(pink).add_modifier(Modifier::BOLD),
         )));
+        right_lines.push(Line::from(vec![
+            Span::styled(
+                " /connect ",
+                Style::default()
+                    .fg(readable_fg_on(pink))
+                    .bg(pink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " sign in with Claude or add a key",
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    } else {
+        right_lines.push(Line::from(Span::styled(
+            "Tips for getting started",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+        // Word-wrap the tip on word boundaries so it stays readable when narrow.
+        for line in crate::dialogs::word_wrap(&tip_text, right_w_usize) {
+            right_lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Gray),
+            )));
+        }
     }
     // Divider rule between the two sections (matches the reference image).
     right_lines.push(Line::from(Span::styled(
@@ -3331,13 +3354,17 @@ pub fn render_teammate_header(teammate_id: &str, session_info: Option<&str>) -> 
 // ---------------------------------------------------------------------------
 
 fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::app::FamiliarSwitcherEntry;
     use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
-    let list_len = app.familiar_switcher_list.len() as u16;
+    let entries = app.familiar_switcher_entries();
+    // +2 for borders, +1 for the filter/hint footer line inside the block.
+    let list_len = entries.len() as u16;
     let popup_h = list_len
-        .saturating_add(2)
-        .min(area.height.saturating_sub(4));
-    let popup_w = 40u16.min(area.width.saturating_sub(4));
+        .saturating_add(3)
+        .min(area.height.saturating_sub(4))
+        .max(4);
+    let popup_w = 44u16.min(area.width.saturating_sub(4));
     let popup_x = area.x + area.width.saturating_sub(popup_w) / 2;
     let popup_y = area.y + area.height.saturating_sub(popup_h) / 2;
     let popup_area = Rect {
@@ -3349,34 +3376,74 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(Clear, popup_area);
 
+    let pink = Color::Rgb(139, 92, 246);
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
     let interior_w = popup_w.saturating_sub(2);
 
-    let items: Vec<ListItem> = app
-        .familiar_switcher_list
+    // Footer shows the active filter (or a hint when empty) so incremental
+    // typing is discoverable.
+    let footer = if app.familiar_switcher_filter.is_empty() {
+        Line::from(Span::styled(
+            " type to filter · ↑↓ move · ⏎ select ",
+            Style::default().fg(Color::Rgb(120, 120, 130)),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" filter: ", Style::default().fg(Color::Rgb(120, 120, 130))),
+            Span::styled(
+                app.familiar_switcher_filter.clone(),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+
+    let items: Vec<ListItem> = entries
         .iter()
         .enumerate()
-        .map(|(i, id)| {
-            let theme = familiar_theme::resolve(id, &daemon_familiars);
-            let row = familiar_card::render_mini_row(&theme, interior_w);
-            let item = ListItem::new(row);
-            if i == app.familiar_switcher_idx {
-                item.style(
-                    Style::default()
-                        .bg(theme.palette.primary)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                item
+        .map(|(i, entry)| {
+            let selected = i == app.familiar_switcher_idx;
+            match entry {
+                FamiliarSwitcherEntry::Clear => {
+                    let line = Line::from(Span::styled(
+                        "  ✕  none (clear active familiar)",
+                        Style::default().fg(Color::Rgb(170, 170, 180)),
+                    ));
+                    let item = ListItem::new(line);
+                    if selected {
+                        item.style(
+                            Style::default()
+                                .bg(Color::Rgb(70, 70, 80))
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        item
+                    }
+                }
+                FamiliarSwitcherEntry::Familiar(id) => {
+                    let theme = familiar_theme::resolve(id, &daemon_familiars);
+                    let row = familiar_card::render_mini_row(&theme, interior_w);
+                    let item = ListItem::new(row);
+                    if selected {
+                        item.style(
+                            Style::default()
+                                .bg(theme.palette.primary)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        item
+                    }
+                }
             }
         })
         .collect();
 
     let block = Block::default()
         .title(" \u{2728} Familiar (F2) ")
+        .title_bottom(footer)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(139, 92, 246)));
+        .border_style(Style::default().fg(pink));
 
     let list = List::new(items).block(block);
     let mut state = ListState::default();
