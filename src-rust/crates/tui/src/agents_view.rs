@@ -440,10 +440,37 @@ impl AgentsMenuState {
             .ok_or_else(|| "Selected agent is no longer available.".to_string())?
             .clone();
         if def.source.starts_with("coven:familiar") {
-            return Err(
-                "Coven familiars are read-only in this menu. Remove them from ~/.coven/familiars.toml."
-                    .to_string(),
-            );
+            // In standalone mode coven-code owns the roster, so allow removal;
+            // when the daemon is running the file is daemon-owned and read-only.
+            if !claurst_core::coven_shared::can_write_familiars() {
+                return Err(
+                    "Coven familiars are daemon-managed. Remove them via the daemon or from ~/.coven/familiars.toml."
+                        .to_string(),
+                );
+            }
+            let fam_id = def
+                .source
+                .strip_prefix("coven:familiar:")
+                .unwrap_or(&def.name)
+                .to_string();
+            match claurst_core::coven_shared::remove_familiar(&fam_id) {
+                Ok(removed) => {
+                    if let Some(root) = self.project_root.clone() {
+                        self.definitions = load_agent_definitions(&root);
+                    } else {
+                        self.definitions.remove(idx);
+                    }
+                    self.route = AgentsRoute::List;
+                    self.selected_row = if self.definitions.is_empty() {
+                        0
+                    } else {
+                        (idx + 2).min(self.definitions.len() + 1)
+                    };
+                    self.editor = AgentEditorState::new();
+                    return Ok(format!("Removed familiar {}.", removed.id));
+                }
+                Err(e) => return Err(format!("Could not remove familiar: {e}")),
+            }
         }
         if def.source != "user" {
             return Err(format!(
@@ -825,6 +852,7 @@ mod tests {
             description: Some("Builds and ships.".to_string()),
             pronouns: None,
             access: Some("full".to_string()),
+            model: None,
         };
         let def = familiar_as_agent_def(&fam);
         let (id, core_def) = coven_shared::familiar_to_agent_definition(&fam);
@@ -845,6 +873,7 @@ mod tests {
             description: None,
             pronouns: None,
             access: None,
+            model: None,
         };
         let def = familiar_as_agent_def(&fam);
         assert_eq!(def.access.as_deref(), Some("read-only"));
@@ -923,7 +952,43 @@ mod tests {
     }
 
     #[test]
-    fn delete_selected_definition_rejects_coven_familiar() {
+    fn delete_selected_definition_removes_familiar_in_standalone() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"onyx\"\n",
+        )
+        .expect("roster");
+        let _guard = crate::app::test_env::EnvGuard::set(&home, &coven_home);
+
+        let mut state = AgentsMenuState::new();
+        state.definitions = vec![familiar_def("onyx", "Onyx")];
+        state.route = AgentsRoute::List;
+        state.selected_row = 2;
+
+        // Standalone (no daemon socket) → coven-code owns the roster and removes.
+        let msg = state
+            .delete_selected_definition()
+            .expect("standalone familiar removal");
+        assert_eq!(msg, "Removed familiar onyx.");
+        assert!(claurst_core::coven_shared::load_familiars().is_none());
+    }
+
+    #[test]
+    fn delete_selected_definition_rejects_familiar_when_daemon_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        // Simulate a running daemon: the roster is daemon-owned and read-only.
+        std::fs::write(coven_home.join("coven.sock"), b"").expect("socket");
+        let _guard = crate::app::test_env::EnvGuard::set(&home, &coven_home);
+
         let mut state = AgentsMenuState::new();
         state.definitions = vec![familiar_def("onyx", "Onyx")];
         state.route = AgentsRoute::List;
@@ -931,12 +996,8 @@ mod tests {
 
         let err = state
             .delete_selected_definition()
-            .expect_err("daemon familiar should not be removed from this menu");
-
-        assert_eq!(
-            err,
-            "Coven familiars are read-only in this menu. Remove them from ~/.coven/familiars.toml."
-        );
+            .expect_err("daemon-owned familiar should not be removed from this menu");
+        assert!(err.contains("daemon-managed"), "unexpected message: {err}");
     }
 }
 
