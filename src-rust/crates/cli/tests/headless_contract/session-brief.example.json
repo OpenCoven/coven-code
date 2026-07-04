@@ -1,0 +1,25 @@
+{
+  "contract_version": "1",
+  "trigger": "issue_assigned",
+  "repo": {
+    "owner": "OpenCoven",
+    "name": "coven-code",
+    "clone_url": "https://github.com/OpenCoven/coven-code.git",
+    "default_branch": "main"
+  },
+  "task": {
+    "kind": "fix_issue",
+    "issue_number": 42,
+    "issue_title": "Fix OAuth token refresh",
+    "issue_body": "The refresh path ignores clock skew between client and auth server."
+  },
+  "familiar": {
+    "id": "cody",
+    "display_name": "Cody",
+    "model": "anthropic/claude-sonnet-4-6",
+    "skills": ["systematic-debugging"]
+  },
+  "workspace": {
+    "root": "/tmp/task-abc123"
+  }
+}
