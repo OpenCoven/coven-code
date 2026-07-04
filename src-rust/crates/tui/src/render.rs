@@ -1,4 +1,4 @@
-// render.rs â€” All ratatui rendering logic.
+// render.rs — All ratatui rendering logic.
 
 use std::cell::RefCell;
 
@@ -1569,7 +1569,7 @@ fn render_message_items(app: &App, width: u16) -> Vec<RenderedLineItem> {
     completed_lines
 }
 
-// â”€â”€ Welcome / startup screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Welcome / startup screen ─────────────────────────────────────────────────
 
 /// Render the two-column orange round-bordered welcome box (matches TS LogoV2).
 /// Short, user-facing label for the active model. Falls back to the
@@ -1877,7 +1877,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // call-to-action so a brand-new user has an obvious next step. The tips and
     // what's-new sections still render below (kept for the startup chrome).
     if !app.has_credentials {
-        let pink = Color::Rgb(139, 92, 246);
+        let pink = crate::overlays::COVEN_CODE_ACCENT;
         right_lines.push(Line::from(vec![
             Span::styled(
                 " /connect ",
@@ -1944,7 +1944,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// â”€â”€ Per-message rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Per-message rendering ─────────────────────────────────────────────────────
 
 /// Build a tool_use_id → tool_name lookup from all messages in the transcript.
 /// This allows ToolResult blocks to dispatch to tool-specific renderers.
@@ -1962,14 +1962,14 @@ fn build_tool_names(
     map
 }
 
-// â”€â”€ System annotation (compact boundary, info notices) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── System annotation (compact boundary, info notices) ───────────────────────
 
 fn render_system_annotation_lines(
     lines: &mut Vec<Line<'static>>,
     ann: &SystemAnnotation,
     width: usize,
 ) {
-    // Compact boundary: show âœ» prefix with dimmed text
+    // Compact boundary: show ✻ prefix with dimmed text
     if ann.style == SystemMessageStyle::Compact {
         lines.push(Line::from(vec![
             Span::styled(
@@ -1993,7 +1993,7 @@ fn render_system_annotation_lines(
         SystemMessageStyle::Compact => unreachable!(),
     };
 
-    // Centred, padded rule: "â”€â”€â”€ text â”€â”€â”€"
+    // Centred, padded rule: "─── text ───"
     let text = ann.text.as_str();
     let inner_width = width.saturating_sub(4);
     let text_len = text.len();
@@ -2015,7 +2015,7 @@ fn render_system_annotation_lines(
     lines.push(Line::from(""));
 }
 
-// â”€â”€ Tool use block â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Tool use block ────────────────────────────────────────────────────────────
 
 fn render_tool_block_lines(
     lines: &mut Vec<Line<'static>>,
@@ -2488,7 +2488,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         // Daemon online/offline indicator
         {
             let (label, color) = if app.daemon_online {
-                ("\u{2726} coven", Color::Rgb(139, 92, 246))
+                ("\u{2726} coven", crate::overlays::COVEN_CODE_ACCENT)
             } else {
                 ("\u{25cb} coven", Color::DarkGray)
             };
@@ -3102,26 +3102,34 @@ pub fn render_full_status_line(
             format!(" {} ", data.model),
             Style::default().fg(Color::Cyan),
         ));
-        spans.push(Span::styled(" â”‚ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     }
 
     // Context window
     if data.tokens_total > 0 {
         let pct = data.tokens_used as f64 / data.tokens_total as f64;
-        let ctx_color = if pct >= 0.95 {
-            Color::Red
+        // Convey the fill level by shape as well as color so colorblind and
+        // monochrome users can read the danger level, not just the number.
+        let (ctx_color, ctx_glyph) = if pct >= 0.95 {
+            (Color::Red, "\u{25cf}") // ● critical
         } else if pct >= 0.80 {
-            Color::Yellow
+            (Color::Yellow, "\u{25d0}") // ◐ warning
         } else {
-            Color::Green
+            (Color::Green, "\u{25cb}") // ○ ok
         };
         let used_k = data.tokens_used / 1000;
         let total_k = data.tokens_total / 1000;
         spans.push(Span::styled(
-            format!("{}k/{}k ({:.0}%)", used_k, total_k, pct * 100.0),
+            format!(
+                "{} {}k/{}k ({:.0}%)",
+                ctx_glyph,
+                used_k,
+                total_k,
+                pct * 100.0
+            ),
             Style::default().fg(ctx_color),
         ));
-        spans.push(Span::styled(" â”‚ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     }
 
     // Cost
@@ -3130,7 +3138,7 @@ pub fn render_full_status_line(
             format!("${:.2}", data.cost_cents / 100.0),
             Style::default().fg(Color::White),
         ));
-        spans.push(Span::styled(" â”‚ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     }
 
     // Compact warning
@@ -3142,7 +3150,7 @@ pub fn render_full_status_line(
                 Color::Yellow
             };
             spans.push(Span::styled(
-                format!("âš  ctx {:.0}% ", pct * 100.0),
+                format!("⚠ ctx {:.0}% ", pct * 100.0),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
@@ -3185,7 +3193,7 @@ pub fn render_full_status_line(
 
     // Bridge connected
     if data.bridge_connected {
-        spans.push(Span::styled("ðŸ”— ", Style::default().fg(Color::Green)));
+        spans.push(Span::styled("🔗 ", Style::default().fg(Color::Green)));
     }
 
     // Session ID
@@ -3385,7 +3393,7 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(Clear, popup_area);
 
-    let pink = Color::Rgb(139, 92, 246);
+    let pink = crate::overlays::COVEN_CODE_ACCENT;
     let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
     let interior_w = popup_w.saturating_sub(2);
 

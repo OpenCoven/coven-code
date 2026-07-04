@@ -195,9 +195,9 @@ pub fn render_dialog_select(frame: &mut Frame, state: &DialogSelectState, area: 
 
     let dim = Color::Rgb(90, 90, 90);
     let dialog_bg = COVEN_CODE_PANEL_BG;
-    let highlight_bg = Color::Rgb(139, 92, 246); // pink highlight bar
+    let highlight_bg = crate::overlays::COVEN_CODE_ACCENT; // pink highlight bar
     let highlight_fg = Color::White;
-    let category_fg = Color::Rgb(139, 92, 246); // pink category names
+    let category_fg = crate::overlays::COVEN_CODE_ACCENT; // pink category names
 
     // ── Darken the entire background ──
     render_dark_overlay(frame, area);
@@ -315,9 +315,17 @@ pub fn render_dialog_select(frame: &mut Frame, state: &DialogSelectState, area: 
             (Color::White, dialog_bg)
         };
 
+        // A leading marker + bold keeps the selected row distinguishable even
+        // when the highlight background can't render (NO_COLOR, monochrome, or
+        // a low-contrast terminal theme).
+        let marker = if is_selected { "> " } else { "  " };
+        let mut title_style = Style::default().fg(item_fg).bg(item_bg);
+        if is_selected {
+            title_style = title_style.add_modifier(Modifier::BOLD);
+        }
         let mut spans = vec![Span::styled(
-            format!(" {}", item.title),
-            Style::default().fg(item_fg).bg(item_bg),
+            format!("{}{}", marker, item.title),
+            title_style,
         )];
 
         // Auth hint in parens, dimmed

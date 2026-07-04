@@ -97,7 +97,7 @@ pub fn render_key_input_dialog(frame: &mut Frame, state: &KeyInputDialogState, a
         return;
     }
 
-    let pink = Color::Rgb(139, 92, 246);
+    let pink = crate::overlays::COVEN_CODE_ACCENT;
     let dim = Color::Rgb(90, 90, 90);
     let dialog_bg = COVEN_CODE_PANEL_BG;
 

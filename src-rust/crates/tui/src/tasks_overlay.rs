@@ -345,7 +345,7 @@ pub fn render_tasks_overlay(frame: &mut Frame, overlay: &TasksOverlay, area: Rec
     // Hint footer
     let hint_area = Rect {
         x: dialog_area.x + 1,
-        y: dialog_area.y + dialog_area.height - 2,
+        y: dialog_area.y + dialog_area.height.saturating_sub(2),
         width: dialog_area.width.saturating_sub(2),
         height: 1,
     };

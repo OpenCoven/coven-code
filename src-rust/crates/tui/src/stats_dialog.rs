@@ -624,7 +624,7 @@ fn render_daily_tokens(data: &AggregatedStats, range_days: u32, area: Rect, buf:
             }
         }
         // Label
-        let y = chart_area.y + chart_area.height - 1;
+        let y = chart_area.y + chart_area.height.saturating_sub(1);
         let label_short: String = label.chars().take(4).collect();
         for (j, ch) in label_short.chars().enumerate() {
             let cell = buf.cell_mut((x + j as u16, y));

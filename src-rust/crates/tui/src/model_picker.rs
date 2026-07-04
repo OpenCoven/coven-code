@@ -744,10 +744,10 @@ pub fn render_model_picker(state: &ModelPickerState, area: Rect, buf: &mut Buffe
     use ratatui::prelude::Stylize;
     use ratatui::widgets::Widget;
 
-    let _pink = Color::Rgb(139, 92, 246);
+    let _pink = crate::overlays::COVEN_CODE_ACCENT;
     let dim = Color::Rgb(90, 90, 90);
     let dialog_bg = COVEN_CODE_PANEL_BG;
-    let highlight_bg = Color::Rgb(139, 92, 246);
+    let highlight_bg = crate::overlays::COVEN_CODE_ACCENT;
     let highlight_fg = Color::White;
 
     // ── Dark overlay ──
@@ -893,20 +893,28 @@ pub fn render_model_picker(state: &ModelPickerState, area: Rect, buf: &mut Buffe
 
             let mut spans: Vec<Span<'static>> = Vec::new();
 
-            // Current model indicator
+            // Leading column: the current-model dot takes priority; otherwise a
+            // selection caret so focus is visible without relying on the
+            // highlight background (NO_COLOR / monochrome / low-contrast themes).
             if model.is_current {
                 spans.push(Span::styled(
                     " \u{25cf} ",
                     Style::default().fg(Color::Green).bg(bg),
                 ));
+            } else if is_selected {
+                spans.push(Span::styled(
+                    " > ",
+                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                ));
             } else {
                 spans.push(Span::styled("   ", Style::default().bg(bg)));
             }
 
-            spans.push(Span::styled(
-                model.display_name.clone(),
-                Style::default().fg(fg).bg(bg),
-            ));
+            let mut name_style = Style::default().fg(fg).bg(bg);
+            if is_selected {
+                name_style = name_style.add_modifier(Modifier::BOLD);
+            }
+            spans.push(Span::styled(model.display_name.clone(), name_style));
 
             // Effort indicator
             if supports_effort && is_selected {
@@ -978,7 +986,7 @@ pub fn render_model_picker(state: &ModelPickerState, area: Rect, buf: &mut Buffe
     footer_spans.push(Span::raw("  "));
     footer_spans.push(Span::styled(
         " /connect",
-        Style::default().fg(Color::Rgb(139, 92, 246)),
+        Style::default().fg(crate::overlays::COVEN_CODE_ACCENT),
     ));
     footer_spans.push(Span::styled(" providers", Style::default().fg(dim)));
     Paragraph::new(Line::from(footer_spans))
