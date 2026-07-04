@@ -4258,7 +4258,36 @@ pub mod oauth {
             let id = if let Some(id) = existing_id {
                 id
             } else if let Some(label) = label {
-                ensure_unique_profile_id(&registry, PROVIDER_ANTHROPIC, label)
+                let label_id = slugify_profile_id(label);
+                let imported_cli = self
+                    .external_cli_source
+                    .as_deref()
+                    .is_some_and(|source| !source.trim().is_empty());
+                let active_cli_profile = imported_cli
+                    .then(|| registry.active_profile(PROVIDER_ANTHROPIC).cloned())
+                    .flatten()
+                    .filter(|profile| {
+                        profile.label.as_deref() == Some(label_id.as_str())
+                            || profile.id == label_id
+                    })
+                    .map(|profile| profile.id);
+                let existing_cli_profile = imported_cli
+                    .then(|| {
+                        registry
+                            .list(PROVIDER_ANTHROPIC)
+                            .into_iter()
+                            .find(|profile| {
+                                profile.label.as_deref() == Some(label_id.as_str())
+                                    || profile.id == label_id
+                            })
+                            .map(|profile| profile.id)
+                    })
+                    .flatten();
+                active_cli_profile
+                    .or(existing_cli_profile)
+                    .unwrap_or_else(|| {
+                        ensure_unique_profile_id(&registry, PROVIDER_ANTHROPIC, label)
+                    })
             } else {
                 let base = self
                     .email
@@ -4932,10 +4961,10 @@ mod tests {
             }
         }
 
-        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
+        let _home_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _home_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4970,6 +4999,14 @@ mod tests {
                 .await
                 .expect("import cli credentials");
             assert_eq!(import_result.1, "claude-code");
+
+            let repeated_import = crate::anthropic_cli_import::import()
+                .await
+                .expect("repeat cli credentials import");
+            assert_eq!(repeated_import.1, "claude-code");
+            let profiles =
+                crate::accounts::AccountRegistry::load().list(crate::accounts::PROVIDER_ANTHROPIC);
+            assert_eq!(profiles.len(), 1);
 
             let config = crate::config::Config {
                 provider: Some("anthropic".to_string()),

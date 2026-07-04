@@ -781,8 +781,10 @@ role = "General Helper"
     #[test]
     fn load_familiars_result_distinguishes_absent_from_malformed() {
         // Missing file → Ok(None), not an error.
-        let _g = with_coven_home(|_| {});
-        assert!(matches!(load_familiars_result(), Ok(None)));
+        {
+            let _g = with_coven_home(|_| {});
+            assert!(matches!(load_familiars_result(), Ok(None)));
+        }
 
         // Malformed file → Err carrying the path + message.
         let _g2 = with_coven_home(|home| {

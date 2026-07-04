@@ -389,8 +389,8 @@ fn provider_picker_items() -> Vec<SelectItem> {
     vec![
         SelectItem {
             id: "anthropic-cli".into(),
-            title: "Claude CLI".into(),
-            description: "Import login from Claude Code or ant CLI".into(),
+            title: "Claude CLI import".into(),
+            description: "Import Claude Code/ant credentials; Coven Code sends requests".into(),
             category: "Claude".into(),
             badge: has_cli_login.then(|| "LOCAL".into()),
         },

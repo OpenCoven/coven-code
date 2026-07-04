@@ -787,6 +787,14 @@ fn rate_limit_notice(
          Anthropic/Claude Max limits are model-tier scoped: Sonnet/Opus can be limited while Haiku still works.\n\
          Try switching to Haiku, switching Anthropic accounts, or waiting before retrying."
     );
+    if account
+        .map(|value| value.to_lowercase().contains("claude-code"))
+        .unwrap_or(false)
+    {
+        message.push_str(
+            "\n\nThis is an imported Claude Code credential. Coven Code is using the imported token for direct Anthropic requests; it is not running the `claude` CLI for this turn.",
+        );
+    }
 
     let provider_message = provider_message
         .map(str::trim)
@@ -2737,6 +2745,8 @@ mod tests {
         assert!(text.contains("Claude rate limit"));
         assert!(text.contains("claude-sonnet-4-6"));
         assert!(text.contains("claude-code-10 [max]"));
+        assert!(text.contains("imported Claude Code credential"));
+        assert!(text.contains("not running the `claude` CLI"));
         assert!(text.contains("model-tier"));
         assert!(text.contains("Haiku"));
     }
