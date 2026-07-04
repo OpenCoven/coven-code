@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenCoven/coven-github/docs/contracts/result.schema.json",
+  "title": "coven-code headless result envelope",
+  "description": "Terminal task state coven-code --headless writes to --output. Contract version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "commits", "files_changed", "summary", "pr_body"],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure", "partial", "needs_input"]
+    },
+    "branch": {
+      "type": ["string", "null"]
+    },
+    "commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sha", "message"],
+        "properties": {
+          "sha": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "summary": { "type": "string" },
+    "pr_body": { "type": "string" },
+    "exit_reason": {
+      "type": ["string", "null"],
+      "enum": ["test_failure", "ambiguous_spec", "git_conflict", "infra_error", null]
+    }
+  }
+}

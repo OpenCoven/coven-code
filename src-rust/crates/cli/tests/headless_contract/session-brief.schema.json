@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenCoven/coven-github/docs/contracts/session-brief.schema.json",
+  "title": "coven-code headless session brief",
+  "description": "Tokenless read-context payload the adapter writes for coven-code --headless --context. Contract version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["trigger", "repo", "task", "familiar", "workspace"],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "trigger": {
+      "type": "string",
+      "enum": ["issue_assigned", "pr_review_comment", "issue_mention"]
+    },
+    "repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "name", "clone_url", "default_branch"],
+      "properties": {
+        "owner": { "type": "string" },
+        "name": { "type": "string" },
+        "clone_url": {
+          "type": "string",
+          "description": "HTTPS clone URL without embedded credentials.",
+          "not": { "pattern": "@" }
+        },
+        "default_branch": { "type": "string" }
+      }
+    },
+    "task": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "issue_number", "issue_title", "issue_body"],
+          "properties": {
+            "kind": { "const": "fix_issue" },
+            "issue_number": { "type": "integer", "minimum": 0 },
+            "issue_title": { "type": "string" },
+            "issue_body": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pr_number", "comment_body"],
+          "properties": {
+            "kind": { "const": "address_review_comment" },
+            "pr_number": { "type": "integer", "minimum": 0 },
+            "comment_body": { "type": "string" },
+            "diff_hunk": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "issue_number", "comment_body"],
+          "properties": {
+            "kind": { "const": "respond_to_mention" },
+            "issue_number": { "type": "integer", "minimum": 0 },
+            "comment_body": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "familiar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "skills"],
+      "properties": {
+        "id": { "type": "string" },
+        "display_name": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "skills": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": { "type": "string" }
+      }
+    }
+  }
+}

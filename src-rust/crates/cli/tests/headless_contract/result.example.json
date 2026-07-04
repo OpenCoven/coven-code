@@ -1,0 +1,12 @@
+{
+  "contract_version": "1",
+  "status": "success",
+  "branch": "cody/fix-issue-42",
+  "commits": [
+    { "sha": "a1b2c3d4e5f6", "message": "Add 60s clock-skew buffer to OAuth refresh" }
+  ],
+  "files_changed": ["src/auth/refresh.rs"],
+  "summary": "Fixed OAuth token refresh by adding a 60-second clock skew buffer.",
+  "pr_body": "## Hey, I'm Cody 🦄\n\nIssue #42 traced to the OAuth refresh path not accounting for clock skew. I added a 60-second buffer to the expiry check.\n\n**Changed:** `src/auth/refresh.rs` (+12 / -3)\n**Tests:** 8/8 passing (added 2 regression cases)\n",
+  "exit_reason": null
+}
