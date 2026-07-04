@@ -1288,7 +1288,7 @@ Move immutable borrow out of scope first, then take mutable. Good good good afte
 }
 
 /// Accent color for build mode (default pink).
-pub const ACCENT_BUILD: Color = Color::Rgb(139, 92, 246);
+pub const ACCENT_BUILD: Color = crate::overlays::COVEN_CODE_ACCENT;
 /// Accent color for plan mode (blue).
 pub const ACCENT_PLAN: Color = Color::Rgb(66, 135, 245);
 /// Accent color for explore mode (amber).
@@ -3418,25 +3418,17 @@ impl App {
                 KeyCode::Esc | KeyCode::F(2) => {
                     self.close_familiar_switcher();
                 }
-                KeyCode::Down => {
-                    if len > 0 {
-                        self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
-                    }
+                KeyCode::Down if len > 0 => {
+                    self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
                 }
-                KeyCode::Up => {
-                    if len > 0 {
-                        self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
-                    }
+                KeyCode::Up if len > 0 => {
+                    self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
                 }
-                KeyCode::Char('n') if ctrl => {
-                    if len > 0 {
-                        self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
-                    }
+                KeyCode::Char('n') if ctrl && len > 0 => {
+                    self.familiar_switcher_idx = (self.familiar_switcher_idx + 1) % len;
                 }
-                KeyCode::Char('p') if ctrl => {
-                    if len > 0 {
-                        self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
-                    }
+                KeyCode::Char('p') if ctrl && len > 0 => {
+                    self.familiar_switcher_idx = (self.familiar_switcher_idx + len - 1) % len;
                 }
                 KeyCode::Backspace => {
                     self.familiar_switcher_filter.pop();

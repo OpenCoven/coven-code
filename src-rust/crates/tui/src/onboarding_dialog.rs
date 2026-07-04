@@ -173,7 +173,7 @@ const PROVIDER_ENTRIES: &[ProviderEntry] = &[
 
 fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
     // Theme pink — matches the header and mascot
-    let pink = Color::Rgb(139, 92, 246);
+    let pink = crate::overlays::COVEN_CODE_ACCENT;
     let dim = Color::Rgb(100, 100, 100);
     let esc_red = Color::Red;
 
@@ -276,7 +276,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
 fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: Rect) {
     use crate::overlays::{render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
-    let pink = Color::Rgb(139, 92, 246);
+    let pink = crate::overlays::COVEN_CODE_ACCENT;
     let dim = Color::Rgb(90, 90, 90);
     let text = Color::Rgb(210, 210, 215);
 
@@ -365,7 +365,7 @@ fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: R
 fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, area: Rect) {
     use crate::overlays::{render_dark_overlay, render_dialog_bg, COVEN_CODE_PANEL_BG};
 
-    let pink = Color::Rgb(139, 92, 246);
+    let pink = crate::overlays::COVEN_CODE_ACCENT;
     let dim = Color::Rgb(90, 90, 90);
     let text = Color::Rgb(210, 210, 215);
 

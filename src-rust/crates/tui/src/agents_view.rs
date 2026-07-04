@@ -1236,7 +1236,7 @@ fn render_agents_list(state: &AgentsMenuState, area: Rect, buf: &mut Buffer) {
         lines.push(Line::from(vec![Span::styled(
             " Coven Familiars",
             Style::default()
-                .fg(Color::Rgb(139, 92, 246)) // violet-500
+                .fg(crate::overlays::COVEN_CODE_ACCENT) // violet-500
                 .add_modifier(Modifier::BOLD),
         )]));
     }
@@ -1326,7 +1326,7 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
     // Source badge — colour-coded for familiar vs user.
     let source_style = if is_familiar {
         Style::default()
-            .fg(Color::Rgb(139, 92, 246))
+            .fg(crate::overlays::COVEN_CODE_ACCENT)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(COVEN_CODE_MUTED)
@@ -1428,7 +1428,7 @@ fn render_agent_detail(def: &AgentDefinition, area: Rect, buf: &mut Buffer) {
         lines.push(Line::default());
         lines.push(Line::from(vec![Span::styled(
             " ✨ Coven Familiar — read-only. Create a workspace override to customise this familiar.",
-            Style::default().fg(Color::Rgb(139, 92, 246)),
+            Style::default().fg(crate::overlays::COVEN_CODE_ACCENT),
         )]));
     }
 

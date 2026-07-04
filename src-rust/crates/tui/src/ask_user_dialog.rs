@@ -303,7 +303,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
     // Option rows
     if let Some(ref opts) = state.options {
         for (i, opt) in opts.iter().enumerate() {
-            if row >= inner.y + inner.height - 2 {
+            if row >= inner.y + inner.height.saturating_sub(2) {
                 break;
             }
             let is_sel = !state.in_custom_input && state.selected_idx == i;
@@ -344,7 +344,7 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
     }
 
     // Custom input row
-    if row < inner.y + inner.height - 1 {
+    if row < inner.y + inner.height.saturating_sub(1) {
         let is_sel = state.in_custom_input || state.options.is_none();
         let prefix = if is_sel { "❯ " } else { "  " };
         let cursor = if is_sel { "█" } else { "" };

@@ -18,7 +18,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const CLAUDE_ORANGE: Color = Color::Rgb(139, 92, 246);
+const CLAUDE_ORANGE: Color = crate::overlays::COVEN_CODE_ACCENT;
 const PROMPT_POINTER: &str = "\u{276f}";
 
 // ---------------------------------------------------------------------------
@@ -3550,7 +3550,7 @@ pub fn render_prompt_input(
             x: area.x,
             y: area.y + 1,
             width: area.width,
-            height: area.height - 1,
+            height: area.height.saturating_sub(1),
         };
         (rest, Some(pill_y))
     } else {
