@@ -21,7 +21,7 @@ use crate::overlays::centered_rect;
 /// Which page of the onboarding flow we're on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnboardingPage {
-    /// Shown when no API credentials are configured — provider picker.
+    /// Shown when no provider login is configured.
     ProviderSetup,
     /// Main entry page for users who already have credentials configured.
     /// Default so a freshly-constructed `OnboardingDialogState` lands here
@@ -160,13 +160,13 @@ const PROVIDER_ENTRIES: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Claude",
         tagline: "  Opus · Sonnet · Haiku",
-        setup: "best available Claude setup",
-        setup_suffix: "  API key · CLI import · OAuth",
+        setup: "Claude CLI",
+        setup_suffix: "  import existing login",
     },
     ProviderEntry {
         name: "Codex",
-        tagline: "  gpt-5.2-codex via ChatGPT login",
-        setup: "coven-code codex login",
+        tagline: "  gpt-5.2-codex via Codex CLI login",
+        setup: "Codex CLI",
         setup_suffix: "",
     },
 ];
@@ -584,6 +584,22 @@ mod tests {
         let claude = content.find("Claude").expect("Claude entry missing");
         let codex = content.find("Codex").expect("Codex entry missing");
         assert!(claude < codex, "Claude should precede Codex");
+        assert!(
+            content.contains("Claude CLI"),
+            "provider setup should point users at Claude CLI login/import"
+        );
+        assert!(
+            content.contains("Codex CLI"),
+            "provider setup should point users at Codex CLI login"
+        );
+        assert!(
+            !content.to_ascii_lowercase().contains("api key"),
+            "provider setup should not advertise API keys"
+        );
+        assert!(
+            !content.to_ascii_lowercase().contains("oauth"),
+            "provider setup should not advertise OAuth setup"
+        );
     }
 
     #[test]

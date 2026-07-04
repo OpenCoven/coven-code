@@ -264,6 +264,8 @@ pub(crate) mod test_env {
         old_home: Option<String>,
         old_coven_home: Option<String>,
         old_anthropic_config_dir: Option<String>,
+        old_anthropic_api_key: Option<String>,
+        old_oauth_client_id: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
         _lock: MutexGuard<'static, ()>,
@@ -280,6 +282,8 @@ pub(crate) mod test_env {
                 old_home: std::env::var("HOME").ok(),
                 old_coven_home: std::env::var("COVEN_HOME").ok(),
                 old_anthropic_config_dir: std::env::var("ANTHROPIC_CONFIG_DIR").ok(),
+                old_anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                old_oauth_client_id: std::env::var(claurst_core::oauth::CLIENT_ID_ENV).ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
                 _lock: lock,
@@ -287,6 +291,8 @@ pub(crate) mod test_env {
             std::env::set_var("HOME", PathBuf::from(home));
             std::env::set_var("COVEN_HOME", PathBuf::from(coven_home));
             std::env::remove_var("ANTHROPIC_CONFIG_DIR");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV);
             match user {
                 Some(value) => std::env::set_var("USER", value),
                 None => std::env::remove_var("USER"),
@@ -309,6 +315,14 @@ pub(crate) mod test_env {
             match &self.old_anthropic_config_dir {
                 Some(value) => std::env::set_var("ANTHROPIC_CONFIG_DIR", value),
                 None => std::env::remove_var("ANTHROPIC_CONFIG_DIR"),
+            }
+            match &self.old_anthropic_api_key {
+                Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
+                None => std::env::remove_var("ANTHROPIC_API_KEY"),
+            }
+            match &self.old_oauth_client_id {
+                Some(value) => std::env::set_var(claurst_core::oauth::CLIENT_ID_ENV, value),
+                None => std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV),
             }
             match &self.old_user {
                 Some(value) => std::env::set_var("USER", value),
@@ -371,67 +385,23 @@ fn import_config_picker_items() -> Vec<SelectItem> {
 }
 
 fn provider_picker_items() -> Vec<SelectItem> {
-    let mut claude_items = Vec::new();
     let has_cli_login = local_anthropic_cli_login_available();
-    let has_api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let has_oauth_client = std::env::var(claurst_core::oauth::CLIENT_ID_ENV)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-
-    let api_key_item = SelectItem {
-        id: "anthropic".into(),
-        title: "Claude (API key)".into(),
-        description: if has_api_key {
-            "Use ANTHROPIC_API_KEY from this shell".into()
-        } else {
-            "Paste an Anthropic API key".into()
+    vec![
+        SelectItem {
+            id: "anthropic-cli".into(),
+            title: "Claude CLI".into(),
+            description: "Import login from Claude Code or ant CLI".into(),
+            category: "Claude".into(),
+            badge: has_cli_login.then(|| "LOCAL".into()),
         },
-        category: "Claude".into(),
-        badge: has_api_key.then(|| "READY".into()),
-    };
-    let oauth_item = SelectItem {
-        id: "anthropic-oauth".into(),
-        title: "Claude (subscription)".into(),
-        description: if has_oauth_client {
-            "Sign in with Claude.ai — browser login".into()
-        } else {
-            "Browser login; requires first-party OAuth client".into()
+        SelectItem {
+            id: "openai-codex".into(),
+            title: "Codex CLI".into(),
+            description: "Sign in with Codex CLI login".into(),
+            category: "Codex".into(),
+            badge: None,
         },
-        category: "Claude".into(),
-        badge: has_oauth_client.then(|| "OAUTH".into()),
-    };
-    let import_item = SelectItem {
-        id: "anthropic-cli".into(),
-        title: "Claude CLI".into(),
-        description: "Import login from the Claude Code CLI".into(),
-        category: "Claude".into(),
-        badge: has_cli_login.then(|| "LOCAL".into()),
-    };
-
-    if has_cli_login {
-        claude_items.push(import_item);
-        claude_items.push(api_key_item);
-        claude_items.push(oauth_item);
-    } else if has_api_key {
-        claude_items.push(api_key_item);
-        claude_items.push(import_item);
-        claude_items.push(oauth_item);
-    } else {
-        claude_items.push(api_key_item);
-        claude_items.push(oauth_item);
-        claude_items.push(import_item);
-    }
-
-    claude_items.push(SelectItem {
-        id: "openai-codex".into(),
-        title: "Codex".into(),
-        description: "Sign in with ChatGPT — browser login".into(),
-        category: "Codex".into(),
-        badge: None,
-    });
-    claude_items
+    ]
 }
 
 fn local_anthropic_cli_login_available() -> bool {
@@ -2012,7 +1982,7 @@ impl App {
             }
             "codex" | "openai-codex" => {
                 self.device_auth_dialog
-                    .open("openai-codex".into(), "Codex".into());
+                    .open("openai-codex".into(), selected.title.clone());
                 self.device_auth_pending = Some("openai-codex".to_string());
             }
             _ => {
@@ -2034,8 +2004,8 @@ impl App {
     fn start_codex_connection(&mut self) {
         self.start_connect_selection(SelectItem {
             id: "openai-codex".into(),
-            title: "Codex".into(),
-            description: "Sign in with ChatGPT — browser login".into(),
+            title: "Codex CLI".into(),
+            description: "Sign in with Codex CLI login".into(),
             category: "Codex".into(),
             badge: None,
         });
@@ -7914,7 +7884,28 @@ role = "Research"
     }
 
     #[test]
-    fn provider_setup_one_starts_claude_api_key_setup() {
+    fn provider_picker_only_exposes_cli_login_choices() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        std::env::set_var(claurst_core::oauth::CLIENT_ID_ENV, "oauth-client-test");
+
+        let items = provider_picker_items();
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["anthropic-cli", "openai-codex"]);
+        assert!(items.iter().all(|item| {
+            let text = format!("{} {}", item.title, item.description).to_ascii_lowercase();
+            !text.contains("api key") && !text.contains("oauth")
+        }));
+    }
+
+    #[test]
+    fn provider_setup_one_starts_claude_cli_import() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -7930,8 +7921,8 @@ role = "Research"
 
         assert!(!app.onboarding_dialog.visible);
         assert!(!app.connect_dialog.visible);
-        assert!(app.key_input_dialog.visible);
-        assert_eq!(app.key_input_dialog.provider_id, "anthropic");
+        assert!(!app.key_input_dialog.visible);
+        assert!(app.pending_anthropic_cli_import);
     }
 
     #[test]
@@ -7952,6 +7943,7 @@ role = "Research"
         assert!(!app.onboarding_dialog.visible);
         assert!(!app.connect_dialog.visible);
         assert!(app.device_auth_dialog.visible);
+        assert_eq!(app.device_auth_dialog.provider_name, "Codex CLI");
         assert_eq!(app.device_auth_pending.as_deref(), Some("openai-codex"));
     }
 

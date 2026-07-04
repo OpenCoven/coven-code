@@ -181,9 +181,8 @@ List all configured AI providers and their connection status. Shows provider nam
 
 ### /connect
 
-Open the interactive provider picker. The picker supports Claude API keys,
-local Claude Code/ant credential import, Claude.ai OAuth when a first-party
-OAuth client is configured, and Codex browser login.
+Open the interactive provider picker. The picker offers local Claude Code/ant
+CLI credential import and Codex CLI login.
 
 ```
 /connect
