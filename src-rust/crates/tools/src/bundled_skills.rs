@@ -225,6 +225,9 @@ Enter plan mode, then:
 
 1. **Understand the scope.** Launch subagents to deeply research what this instruction
    touches. Find all files, patterns, and call sites that need to change.
+   When research touches OpenClaw CLI flows, verify the live command shape with
+   `openclaw agent --help`; avoid obsolete `agent main` subcommands and
+   unsupported OpenClaw persistence flags.
 
 2. **Decompose into independent units.** Break the work into 5–30 self-contained units.
    Each unit must be independently implementable in an isolated git worktree and
@@ -549,6 +552,16 @@ mod tests {
         assert!(skill.user_invocable);
         assert!(skill.prompt_template.contains("AskUserQuestion"));
         assert!(skill.prompt_template.contains("options"));
+    }
+
+    #[test]
+    fn batch_skill_guards_stale_openclaw_research_patterns() {
+        let skill = find_bundled_skill("batch").unwrap();
+        assert!(skill.prompt_template.contains("openclaw agent --help"));
+        assert!(skill.prompt_template.contains("obsolete `agent main`"));
+        assert!(skill
+            .prompt_template
+            .contains("unsupported OpenClaw persistence flags"));
     }
 
     #[test]
