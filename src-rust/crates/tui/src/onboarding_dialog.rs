@@ -166,7 +166,7 @@ const PROVIDER_ENTRIES: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Codex",
         tagline: "  gpt-5.2-codex via ChatGPT login",
-        setup: "coven-code auth login --provider codex",
+        setup: "coven-code codex login",
         setup_suffix: "",
     },
 ];
