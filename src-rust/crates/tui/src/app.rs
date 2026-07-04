@@ -263,6 +263,7 @@ pub(crate) mod test_env {
     pub(crate) struct EnvGuard {
         old_home: Option<String>,
         old_coven_home: Option<String>,
+        old_anthropic_config_dir: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
         _lock: MutexGuard<'static, ()>,
@@ -278,12 +279,14 @@ pub(crate) mod test_env {
             let guard = Self {
                 old_home: std::env::var("HOME").ok(),
                 old_coven_home: std::env::var("COVEN_HOME").ok(),
+                old_anthropic_config_dir: std::env::var("ANTHROPIC_CONFIG_DIR").ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
                 _lock: lock,
             };
             std::env::set_var("HOME", PathBuf::from(home));
             std::env::set_var("COVEN_HOME", PathBuf::from(coven_home));
+            std::env::remove_var("ANTHROPIC_CONFIG_DIR");
             match user {
                 Some(value) => std::env::set_var("USER", value),
                 None => std::env::remove_var("USER"),
@@ -302,6 +305,10 @@ pub(crate) mod test_env {
             match &self.old_coven_home {
                 Some(value) => std::env::set_var("COVEN_HOME", value),
                 None => std::env::remove_var("COVEN_HOME"),
+            }
+            match &self.old_anthropic_config_dir {
+                Some(value) => std::env::set_var("ANTHROPIC_CONFIG_DIR", value),
+                None => std::env::remove_var("ANTHROPIC_CONFIG_DIR"),
             }
             match &self.old_user {
                 Some(value) => std::env::set_var("USER", value),
@@ -364,36 +371,103 @@ fn import_config_picker_items() -> Vec<SelectItem> {
 }
 
 fn provider_picker_items() -> Vec<SelectItem> {
-    vec![
-        SelectItem {
-            id: "anthropic-oauth".into(),
-            title: "Claude (subscription)".into(),
-            description: "Sign in with Claude.ai — browser login".into(),
-            category: "Claude".into(),
-            badge: None,
+    let mut claude_items = Vec::new();
+    let has_cli_login = local_anthropic_cli_login_available();
+    let has_api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let has_oauth_client = std::env::var(claurst_core::oauth::CLIENT_ID_ENV)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    let api_key_item = SelectItem {
+        id: "anthropic".into(),
+        title: "Claude (API key)".into(),
+        description: if has_api_key {
+            "Use ANTHROPIC_API_KEY from this shell".into()
+        } else {
+            "Paste an Anthropic API key".into()
         },
-        SelectItem {
-            id: "anthropic".into(),
-            title: "Claude (API key)".into(),
-            description: "Anthropic API key".into(),
-            category: "Claude".into(),
-            badge: None,
+        category: "Claude".into(),
+        badge: has_api_key.then(|| "READY".into()),
+    };
+    let oauth_item = SelectItem {
+        id: "anthropic-oauth".into(),
+        title: "Claude (subscription)".into(),
+        description: if has_oauth_client {
+            "Sign in with Claude.ai — browser login".into()
+        } else {
+            "Browser login; requires first-party OAuth client".into()
         },
-        SelectItem {
-            id: "anthropic-cli".into(),
-            title: "Claude CLI".into(),
-            description: "Import login from the Claude Code CLI".into(),
-            category: "Claude".into(),
-            badge: None,
-        },
-        SelectItem {
-            id: "openai-codex".into(),
-            title: "Codex".into(),
-            description: "Sign in with ChatGPT — browser login".into(),
-            category: "Codex".into(),
-            badge: None,
-        },
-    ]
+        category: "Claude".into(),
+        badge: has_oauth_client.then(|| "OAUTH".into()),
+    };
+    let import_item = SelectItem {
+        id: "anthropic-cli".into(),
+        title: "Claude CLI".into(),
+        description: "Import login from the Claude Code CLI".into(),
+        category: "Claude".into(),
+        badge: has_cli_login.then(|| "LOCAL".into()),
+    };
+
+    if has_cli_login {
+        claude_items.push(import_item);
+        claude_items.push(api_key_item);
+        claude_items.push(oauth_item);
+    } else if has_api_key {
+        claude_items.push(api_key_item);
+        claude_items.push(import_item);
+        claude_items.push(oauth_item);
+    } else {
+        claude_items.push(api_key_item);
+        claude_items.push(oauth_item);
+        claude_items.push(import_item);
+    }
+
+    claude_items.push(SelectItem {
+        id: "openai-codex".into(),
+        title: "Codex".into(),
+        description: "Sign in with ChatGPT — browser login".into(),
+        category: "Codex".into(),
+        badge: None,
+    });
+    claude_items
+}
+
+fn local_anthropic_cli_login_available() -> bool {
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".claude").join(".credentials.json");
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if claurst_core::anthropic_cli_import::parse_claude_code(&text)
+                .is_some_and(|tokens| !tokens.access_token.is_empty())
+            {
+                return true;
+            }
+        }
+    }
+
+    let ant_credentials_dir = std::env::var("ANTHROPIC_CONFIG_DIR")
+        .ok()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| std::path::PathBuf::from(dir).join("credentials"))
+        .or_else(|| dirs::config_dir().map(|dir| dir.join("anthropic").join("credentials")));
+
+    let Some(dir) = ant_credentials_dir else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            return false;
+        }
+        std::fs::read_to_string(path).ok().is_some_and(|text| {
+            claurst_core::anthropic_cli_import::parse_ant(&text)
+                .is_some_and(|tokens| !tokens.access_token.is_empty())
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,8 +1727,7 @@ impl App {
                 );
             }
             Err(err) => {
-                self.status_message =
-                    Some(format!("Could not create a starter roster: {err}"));
+                self.status_message = Some(format!("Could not create a starter roster: {err}"));
             }
         }
     }
@@ -1915,8 +1988,57 @@ impl App {
         self.set_provider_default(provider_id.clone());
         self.persist_provider_and_model();
         self.has_credentials = true;
-        self.status_message = Some(format!("{} {}.", status_prefix, provider_name));
+        self.status_message = Some(format!(
+            "{} {}. Choose a model to start.",
+            status_prefix, provider_name
+        ));
         self.open_model_picker_for_provider(&provider_id, Some(picker_title));
+    }
+
+    fn start_connect_selection(&mut self, selected: SelectItem) {
+        match selected.id.as_str() {
+            "anthropic" => {
+                self.key_input_dialog
+                    .open(selected.id.clone(), selected.title.clone());
+            }
+            "anthropic-oauth" => {
+                self.device_auth_dialog
+                    .open("anthropic-oauth".into(), selected.title.clone());
+                self.device_auth_pending = Some("anthropic-oauth".to_string());
+            }
+            "anthropic-cli" => {
+                self.pending_anthropic_cli_import = true;
+                self.status_message = Some("Importing Claude credentials from local CLI...".into());
+            }
+            "codex" | "openai-codex" => {
+                self.device_auth_dialog
+                    .open("openai-codex".into(), "Codex".into());
+                self.device_auth_pending = Some("openai-codex".to_string());
+            }
+            _ => {
+                self.key_input_dialog
+                    .open(selected.id.clone(), selected.title.clone());
+            }
+        }
+    }
+
+    fn start_preferred_claude_connection(&mut self) {
+        if let Some(item) = provider_picker_items()
+            .into_iter()
+            .find(|item| item.category == "Claude")
+        {
+            self.start_connect_selection(item);
+        }
+    }
+
+    fn start_codex_connection(&mut self) {
+        self.start_connect_selection(SelectItem {
+            id: "openai-codex".into(),
+            title: "Codex".into(),
+            description: "Sign in with ChatGPT — browser login".into(),
+            category: "Codex".into(),
+            badge: None,
+        });
     }
 
     fn persist_provider_and_model(&self) {
@@ -3456,10 +3578,20 @@ impl App {
                         self.status_message =
                             Some("Run /connect when you're ready to add a provider.".to_string());
                     }
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('1') | KeyCode::Char('2') => {
+                    KeyCode::Enter | KeyCode::Right => {
                         self.onboarding_dialog.dismiss();
                         let _ = Self::persist_onboarding_complete();
                         self.connect_dialog.open();
+                    }
+                    KeyCode::Char('1') => {
+                        self.onboarding_dialog.dismiss();
+                        let _ = Self::persist_onboarding_complete();
+                        self.start_preferred_claude_connection();
+                    }
+                    KeyCode::Char('2') => {
+                        self.onboarding_dialog.dismiss();
+                        let _ = Self::persist_onboarding_complete();
+                        self.start_codex_connection();
                     }
                     _ => {}
                 }
@@ -3708,40 +3840,7 @@ impl App {
                 KeyCode::Enter => {
                     if let Some(selected) = self.connect_dialog.selected().cloned() {
                         self.connect_dialog.close();
-
-                        match selected.id.as_str() {
-                            "anthropic" => {
-                                // Claude: API key from console.anthropic.com.
-                                self.key_input_dialog
-                                    .open(selected.id.clone(), selected.title.clone());
-                            }
-                            "anthropic-oauth" => {
-                                // Claude subscription: browser OAuth flow
-                                // (spawned by the main loop, like Codex).
-                                self.device_auth_dialog
-                                    .open("anthropic-oauth".into(), selected.title.clone());
-                                self.device_auth_pending = Some("anthropic-oauth".to_string());
-                            }
-                            "anthropic-cli" => {
-                                // Import an existing OAuth login from a local
-                                // Claude Code CLI. Handled by the main loop
-                                // (it's an async disk read).
-                                self.pending_anthropic_cli_import = true;
-                                self.status_message =
-                                    Some("Importing Claude credentials from local CLI…".into());
-                            }
-                            "codex" | "openai-codex" => {
-                                // Codex: browser OAuth flow (spawned by main loop)
-                                self.device_auth_dialog
-                                    .open("openai-codex".into(), "Codex".into());
-                                self.device_auth_pending = Some("openai-codex".to_string());
-                            }
-                            // Any other id — open API key input dialog
-                            _ => {
-                                self.key_input_dialog
-                                    .open(selected.id.clone(), selected.title.clone());
-                            }
-                        }
+                        self.start_connect_selection(selected);
                     }
                 }
                 KeyCode::Backspace => {
@@ -7204,13 +7303,22 @@ mod tests {
         app.familiar_switcher_filter.clear();
         let entries = app.familiar_switcher_entries();
         assert_eq!(entries[0], FamiliarSwitcherEntry::Clear);
-        assert_eq!(entries[1], FamiliarSwitcherEntry::Familiar("ember".to_string()));
-        assert_eq!(entries[2], FamiliarSwitcherEntry::Familiar("onyx".to_string()));
+        assert_eq!(
+            entries[1],
+            FamiliarSwitcherEntry::Familiar("ember".to_string())
+        );
+        assert_eq!(
+            entries[2],
+            FamiliarSwitcherEntry::Familiar("onyx".to_string())
+        );
 
         // Filter narrows to matching ids and drops the Clear row.
         app.familiar_switcher_filter = "ony".to_string();
         let entries = app.familiar_switcher_entries();
-        assert_eq!(entries, vec![FamiliarSwitcherEntry::Familiar("onyx".to_string())]);
+        assert_eq!(
+            entries,
+            vec![FamiliarSwitcherEntry::Familiar("onyx".to_string())]
+        );
 
         // Typing toward "none" keeps the Clear row available.
         app.familiar_switcher_filter = "non".to_string();
@@ -7785,6 +7893,95 @@ role = "Research"
         ));
 
         assert!(app.model_picker.visible);
+    }
+
+    #[test]
+    fn provider_picker_prioritizes_import_when_claude_credentials_exist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        std::fs::write(
+            home.join(".claude").join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-test"}}"#,
+        )
+        .expect("credentials");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let items = provider_picker_items();
+
+        assert_eq!(
+            items.first().map(|item| item.id.as_str()),
+            Some("anthropic-cli")
+        );
+        assert_eq!(
+            items.first().and_then(|item| item.badge.as_deref()),
+            Some("LOCAL")
+        );
+    }
+
+    #[test]
+    fn provider_setup_one_starts_claude_api_key_setup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.has_credentials = false;
+        app.onboarding_dialog.show_provider_setup();
+
+        app.handle_key_event(press_key(KeyCode::Char('1'), KeyModifiers::empty()));
+
+        assert!(!app.onboarding_dialog.visible);
+        assert!(!app.connect_dialog.visible);
+        assert!(app.key_input_dialog.visible);
+        assert_eq!(app.key_input_dialog.provider_id, "anthropic");
+    }
+
+    #[test]
+    fn provider_setup_two_starts_codex_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.has_credentials = false;
+        app.onboarding_dialog.show_provider_setup();
+
+        app.handle_key_event(press_key(KeyCode::Char('2'), KeyModifiers::empty()));
+
+        assert!(!app.onboarding_dialog.visible);
+        assert!(!app.connect_dialog.visible);
+        assert!(app.device_auth_dialog.visible);
+        assert_eq!(app.device_auth_pending.as_deref(), Some("openai-codex"));
+    }
+
+    #[test]
+    fn provider_setup_enter_opens_full_connect_picker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.has_credentials = false;
+        app.onboarding_dialog.show_provider_setup();
+
+        app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(!app.onboarding_dialog.visible);
+        assert!(app.connect_dialog.visible);
+        assert!(!app.key_input_dialog.visible);
+        assert!(app.device_auth_pending.is_none());
     }
 
     #[test]

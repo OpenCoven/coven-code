@@ -138,9 +138,10 @@ Environment variable prefix: `COVEN_CODE_*` (e.g. `COVEN_CODE_SKIP_PROMPT_HISTOR
 ### First run & connecting in-app
 
 If you launch `coven-code` with no credentials configured, the TUI opens a
-**provider-setup** prompt. Press `1`/`2` or `Enter` to open the connect dialog
-and authenticate, or `Esc` to skip. You can connect (or switch providers) at any
-time with `/connect`.
+**provider-setup** prompt. Press `1` to start the best available Claude path
+(local Claude CLI import when present, otherwise API key), `2` to start Codex
+browser login, or `Enter` to open the full connect picker. `Esc` skips setup;
+you can connect or switch providers later with `/connect`.
 
 Useful in-session commands:
 

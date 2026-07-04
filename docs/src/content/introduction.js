@@ -85,7 +85,7 @@ export function render() {
     <p>A ratatui-based TUI with real-time streaming, syntax-highlighted code blocks, diff viewer, permission dialogs, slash command autocomplete, session browser, and a full keybinding system.</p>
 
     <h3>Multi-Account Credentials</h3>
-    <p>Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with <code>/switch</code> or <code>coven-code auth switch &lt;id&gt;</code>. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent.</p>
+    <p>Store multiple named Anthropic (Claude.ai / Console) and Codex (ChatGPT) accounts in one install and switch between them instantly with <code>/login switch</code>, <code>coven-code auth switch &lt;id&gt;</code>, or <code>coven-code codex switch &lt;id&gt;</code>. Identity is detected from the OAuth JWT, so re-logging-in the same account is idempotent.</p>
 
     <h3>@file Injection</h3>
     <p>Type <code>@path/to/file</code> anywhere in a prompt to inject the file's contents inline. Typeahead autocomplete suggests paths as you type, with size/binary safety checks before submit.</p>

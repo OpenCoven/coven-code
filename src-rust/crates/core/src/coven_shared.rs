@@ -483,9 +483,7 @@ pub fn starter_familiars() -> Vec<CovenFamiliar> {
             display_name: Some("Sage".to_string()),
             emoji: Some("\u{1f989}".to_string()), // owl
             role: Some("Guide".to_string()),
-            description: Some(
-                "A thoughtful pair-programmer who explains as they go.".to_string(),
-            ),
+            description: Some("A thoughtful pair-programmer who explains as they go.".to_string()),
             pronouns: Some("they/them".to_string()),
             access: Some("read-only".to_string()),
             model: None,

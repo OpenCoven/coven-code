@@ -250,8 +250,8 @@ commands — Anthropic is the default, pass `--codex` to target Codex:
 /logout --codex                 # clear active Codex credentials
 /logout --all                   # purge every stored Anthropic profile
 /accounts                       # list every stored account
-/switch personal                # set active Anthropic to "personal"
-/switch --codex work            # set active Codex to "work"
+/login switch personal          # set active Anthropic to "personal"
+/login switch --codex work      # set active Codex to "work"
 ```
 
 `/accounts` lists every profile with a `*` next to the active one and shows
@@ -450,6 +450,11 @@ If the refresh fails (network error, expired refresh token, revoked grant),
 Coven Code falls back to any configured API key. If no API key is available,
 authentication fails and you must run `coven-code auth login` (optionally with
 `--label <name>` to reuse a profile id) again.
+
+For first-run setup in the TUI, `/connect` is usually the fastest path: it can
+collect a Claude API key, import a local Claude Code/ant login, start Claude.ai
+OAuth when `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID` is configured, or start Codex
+browser login.
 
 ---
 

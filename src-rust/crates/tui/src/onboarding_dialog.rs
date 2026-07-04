@@ -160,8 +160,8 @@ const PROVIDER_ENTRIES: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Claude",
         tagline: "  Opus · Sonnet · Haiku",
-        setup: "ANTHROPIC_API_KEY",
-        setup_suffix: "  or sign in with Claude.ai",
+        setup: "best available Claude setup",
+        setup_suffix: "  API key · CLI import · OAuth",
     },
     ProviderEntry {
         name: "Codex",
@@ -260,7 +260,7 @@ fn render_provider_setup_page(frame: &mut Frame, area: Rect) {
             Span::styled("  1·2", Style::default().fg(pink)),
             Span::styled(" or ", Style::default().fg(dim)),
             Span::styled("enter", Style::default().fg(pink)),
-            Span::styled(" connect now · ", Style::default().fg(dim)),
+            Span::styled(" choose setup · ", Style::default().fg(dim)),
             Span::styled("esc", Style::default().fg(pink)),
             Span::styled(" skip · run ", Style::default().fg(dim)),
             Span::styled("/connect", Style::default().fg(Color::Rgb(150, 150, 150))),

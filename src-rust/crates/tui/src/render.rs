@@ -1899,7 +1899,11 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // Word-wrap the tip on word boundaries; when the CTA is also shown, keep it
     // to a single line so the fixed-height box doesn't clip What's new.
     let tip_lines = crate::dialogs::word_wrap(&tip_text, right_w_usize);
-    let tip_take = if app.has_credentials { tip_lines.len() } else { 1 };
+    let tip_take = if app.has_credentials {
+        tip_lines.len()
+    } else {
+        1
+    };
     for line in tip_lines.into_iter().take(tip_take) {
         right_lines.push(Line::from(Span::styled(
             line,
@@ -1918,7 +1922,10 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // Trim the changelog by one when the CTA line is present so the section
     // stays inside the fixed box height.
     let whats_new_take = if app.has_credentials { 3 } else { 2 };
-    for item in claurst_core::constants::WHATS_NEW.iter().take(whats_new_take) {
+    for item in claurst_core::constants::WHATS_NEW
+        .iter()
+        .take(whats_new_take)
+    {
         right_lines.push(Line::from(Span::styled(
             truncate_meta(item, right_w_usize),
             Style::default().fg(Color::Gray),
@@ -3394,7 +3401,9 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" filter: ", Style::default().fg(Color::Rgb(120, 120, 130))),
             Span::styled(
                 app.familiar_switcher_filter.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ])
     };

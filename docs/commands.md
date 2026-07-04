@@ -181,12 +181,12 @@ List all configured AI providers and their connection status. Shows provider nam
 
 ### /connect
 
-Select or reconnect the active provider. Supports Anthropic (Claude) and Codex.
+Open the interactive provider picker. The picker supports Claude API keys,
+local Claude Code/ant credential import, Claude.ai OAuth when a first-party
+OAuth client is configured, and Codex browser login.
 
 ```
 /connect
-/connect <provider-name>
-/connect anthropic
 ```
 
 ---

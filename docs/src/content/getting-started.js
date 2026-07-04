@@ -17,11 +17,15 @@ export function render() {
 cd coven-code/src-rust
 cargo install --path crates/cli</code></pre>
 
-    <h2>2. Set Your API Key</h2>
+    <h2>2. Connect a Provider</h2>
 
     <pre><code data-lang="bash">export ANTHROPIC_API_KEY=sk-ant-...</code></pre>
 
-    <p>Or launch <code>coven</code> and run <code>/login</code> to authenticate via OAuth (Claude.ai or ChatGPT). Multiple named accounts can coexist; switch with <code>/switch &lt;id&gt;</code>.</p>
+    <p>Or launch <code>coven</code> with no credentials. The first-run prompt lets you press <kbd>1</kbd> for Claude setup, <kbd>2</kbd> for Codex browser login, or <kbd>Enter</kbd> for the full <code>/connect</code> picker. If you already use Claude Code or <code>ant</code>, the picker prioritizes local credential import.</p>
+
+    <pre><code data-lang="bash">coven-code codex login</code></pre>
+
+    <p>Claude.ai OAuth requires <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>; without that first-party client, use an API key or Claude CLI import. Multiple named accounts can coexist; switch in the TUI with <code>/login switch &lt;id&gt;</code>.</p>
 
     <h2>3. Run Interactively</h2>
 

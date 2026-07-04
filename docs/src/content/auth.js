@@ -44,41 +44,51 @@ export function render() {
     <pre><code data-lang="bash">export COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID=&lt;registered-client-id&gt;
 coven-code auth login</code></pre>
 
-    <p>A localhost callback server starts, your browser opens the authorization URL, and the tokens are saved under <code>~/.coven-code/accounts/anthropic/&lt;profile-id&gt;/</code>. Use <code>--codex</code> to authenticate against ChatGPT subscription credentials instead.</p>
+    <p>A localhost callback server starts, your browser opens the authorization URL, and the tokens are saved under <code>~/.coven-code/accounts/anthropic/&lt;profile-id&gt;/</code>. If you already use Claude Code or <code>ant</code>, open <code>/connect</code> and choose Claude CLI to import that local login instead.</p>
+
+    <h2>Method 3: Codex Login</h2>
+
+    <p>Codex uses ChatGPT/Codex browser OAuth and stores profiles under <code>~/.coven-code/accounts/codex/&lt;id&gt;/</code>:</p>
+
+    <pre><code data-lang="bash">coven-code codex login
+coven-code --provider codex</code></pre>
 
     <h2>Multi-Account Profiles</h2>
 
     <pre><code data-lang="bash"># Add accounts (each login becomes its own profile)
 coven-code auth login --label work
-coven-code auth login --codex --label personal
+coven-code codex login --label personal
 
 # Inspect
 coven-code auth list
+coven-code codex list
 
 # Switch the active account
 coven-code auth switch work
-coven-code auth switch --codex personal
+coven-code codex switch personal
 
 # Remove a stored profile
 coven-code auth remove old-account
+coven-code codex remove old-account
 
 # Logout (clears tokens for the active profile)
-coven-code auth logout</code></pre>
+coven-code auth logout
+coven-code codex logout</code></pre>
 
     <p>Inside the TUI, the same operations are available as slash commands:</p>
 
     <div class="fields-grid">
       <div class="field-card">
         <div class="field-card-name">/login</div>
-        <div class="field-card-desc">OAuth login. Use <code>--codex</code> for ChatGPT, <code>--label &lt;name&gt;</code> to name the profile.</div>
+        <div class="field-card-desc">OAuth login for Anthropic. Use <code>--label &lt;name&gt;</code> to name the profile.</div>
       </div>
       <div class="field-card">
         <div class="field-card-name">/accounts</div>
         <div class="field-card-desc">List stored Anthropic + Codex accounts.</div>
       </div>
       <div class="field-card">
-        <div class="field-card-name">/switch &lt;id&gt;</div>
-        <div class="field-card-desc">Switch active account. <code>--codex</code> for Codex.</div>
+        <div class="field-card-name">/login switch &lt;id&gt;</div>
+        <div class="field-card-desc">Switch active account. Use <code>--codex</code> for Codex.</div>
       </div>
       <div class="field-card">
         <div class="field-card-name">/logout</div>
