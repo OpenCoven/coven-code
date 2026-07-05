@@ -81,6 +81,24 @@ When creating issues, add labels that map to the relevant crate(s) — for examp
 
 When closing issues via commit, include `fixes #<number>` or `closes #<number>` in the commit message — GitHub closes the issue automatically on merge to main.
 
+## PR Readiness
+
+Before opening or updating a PR:
+
+- Re-check the live branch state with `git status --short --branch` and preserve unrelated dirty files.
+- Inspect the actual diff with `git diff --stat` and `git diff`; ensure every changed file is intentional for the requested scope.
+- Read `.github/PULL_REQUEST_TEMPLATE.md` if present and use it as the PR body structure.
+- Choose verification from the touched surface, not a generic checklist. For Rust changes, run the required commands from the Commands section unless the user explicitly narrowed the scope and you can justify a focused subset. For docs/templates-only changes, at minimum run `git diff --check`.
+- Include exact commands and outcomes in the PR body. If a check was not run, say why.
+- Document context that helps reviewers: related issue/user request, affected crates or docs, user-facing behavior, migration/backcompat notes, and remaining risks.
+- Use `gh pr create --body-file <file>` after previewing the exact body text. Never pass multi-line Markdown directly via `--body`.
+
+For parallel-agent or batch work:
+
+- One independently mergeable work unit per branch/PR. Avoid PRs that require another agent's PR to land first.
+- Each worker prompt must include the base branch/commit, assigned files or ownership boundary, non-goals, verification recipe, and PR body requirements.
+- Each worker final response must include the branch, PR URL, summary, verification evidence, and known gaps. Use a bare `PR: <url>` line when an orchestrator needs to parse results.
+
 ## Providers
 
 Coven Code supports exactly two providers: **Claude** (Anthropic) and **Codex**

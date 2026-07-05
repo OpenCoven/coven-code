@@ -203,11 +203,96 @@ Be direct and actionable. Focus on unblocking, not on explaining concepts."#,
     },
 
     // -----------------------------------------------------------------------
+    // pr-ready
+    // -----------------------------------------------------------------------
+    BundledSkill {
+        name: "pr-ready",
+        description: "Prepare or create a review-ready pull request with repo template, context, and verification evidence.",
+        aliases: &["pr", "pull-request", "ready-pr"],
+        when_to_use: Some("When the user asks to create or open a PR, make changes PR-ready, or verify a branch before review."),
+        argument_hint: Some("[scope, issue, or branch]"),
+        prompt_template: r#"# PR Ready
+
+Prepare a review-ready pull request. Do not commit, push, or open a PR unless
+the user has already asked for that action. If the user only asked whether the
+branch is ready, report readiness status instead.
+
+## Input
+
+$ARGUMENTS
+
+## Phase 1: Establish Context
+
+1. Read repo instructions (`AGENTS.md` plus nested instruction files that apply)
+   and `.github/PULL_REQUEST_TEMPLATE.md` if present.
+2. Inspect git state with `git status --short --branch`; preserve unrelated
+   dirty files and never stage files outside this task.
+3. Identify the base branch, current branch, related issue or PR, requested
+   scope, affected crates/docs, and non-goals.
+4. Review `git diff --stat` and `git diff` so the PR body reflects the real
+   changed files.
+
+## Phase 2: Verify
+
+Choose checks from the touched surface and repository instructions:
+
+- Rust: run formatter/checks/tests required by the repo, or explain any focused
+  subset.
+- Docs/templates only: run `git diff --check` and any documented docs build or
+  link check that covers the changed surface.
+- UI/TUI: run focused automated tests and a manual or headless smoke path when
+  available.
+
+Record each command exactly with pass/fail/blocked status. Do not hide missing
+verification; explain the blocker or why the check is out of scope.
+
+## Phase 3: Compose the PR
+
+Use the repository PR template when present. If no template exists, use this
+minimum body:
+
+```
+## Summary
+- ...
+
+## Context
+- Related issue/user request:
+- Scope:
+- Non-goals:
+
+## Changes
+- ...
+
+## Validation
+- `command` - PASS/FAIL/BLOCKED, key output
+- Not run: ...
+
+## PR Readiness
+- Diff limited to intended files:
+- Generated files handled correctly:
+- Docs/help updated:
+- Remaining risks:
+```
+
+Before creating or updating the PR, write the body to a temp file, preview the
+exact file contents, then use `gh pr create --body-file <file>` or
+`gh pr edit --body-file <file>`. Never pass multi-line Markdown through
+`--body`.
+
+## Final Response
+
+Report the PR URL, branch, summary, verification evidence, and known gaps. If a
+PR was opened, include a bare `PR: <url>` line so orchestrators can parse it."#,
+        allowed_tools: None,
+        user_invocable: true,
+    },
+
+    // -----------------------------------------------------------------------
     // batch
     // -----------------------------------------------------------------------
     BundledSkill {
         name: "batch",
-        description: "Research and plan a large-scale change, then execute it in parallel across isolated worktree agents that each open a PR.",
+        description: "Research and plan a large-scale change, then execute it in parallel across isolated worktree agents that each open a review-ready PR.",
         aliases: &[],
         when_to_use: Some("When the user wants to make a sweeping, mechanical change across many files that can be decomposed into independent parallel units."),
         argument_hint: Some("<instruction>"),
@@ -225,6 +310,9 @@ Enter plan mode, then:
 
 1. **Understand the scope.** Launch subagents to deeply research what this instruction
    touches. Find all files, patterns, and call sites that need to change.
+   Read the repo instruction files and existing PR template (`AGENTS.md`,
+   nested instruction files, `.github/PULL_REQUEST_TEMPLATE.md`) plus relevant
+   CI workflows so the plan reflects the real review gates.
    When research touches OpenClaw CLI flows, verify the live command shape with
    `openclaw agent --help`; avoid obsolete `agent main` subcommands and
    unsupported OpenClaw persistence flags.
@@ -233,11 +321,13 @@ Enter plan mode, then:
    Each unit must be independently implementable in an isolated git worktree and
    mergeable on its own without depending on another unit's PR landing first.
 
-3. **Determine the e2e test recipe.** Figure out how a worker can verify its change
-   actually works end-to-end. If you cannot find a concrete path, ask the user.
+3. **Determine the PR readiness contract.** Figure out how each worker can verify
+   its change end-to-end, which template sections it must fill, which labels or
+   issue links are relevant, and what evidence reviewers need. If you cannot
+   find a concrete verification path, ask the user.
 
 4. **Write the plan.** Include: research summary, numbered work units, e2e recipe,
-   and the exact worker instructions.
+   PR body requirements, and the exact worker instructions.
 
 ## Phase 2: Spawn Workers (After Plan Approval)
 
@@ -245,8 +335,23 @@ Spawn one background agent per work unit using the Agent tool with
 `isolation: "worktree"` and `run_in_background: true`. Launch them all in a single
 message block so they run in parallel. Each agent prompt must be fully self-contained.
 
+Each worker prompt must include:
+
+- Base branch and base commit/sha.
+- The exact assigned objective, owned files or boundaries, and non-goals.
+- Required context: instruction files, related issues/PRs, template sections, and
+  code paths the worker must read before editing.
+- Verification commands and expected evidence.
+- PR creation rules: stage only files changed for the unit, preserve unrelated
+  dirty work, write the PR body to a temp file, preview it, then use
+  `gh pr create --body-file <file>`.
+- Final response contract: branch, PR URL, summary, verification, risks, and a
+  bare `PR: <url>` line.
+
 After each agent finishes, parse the `PR: <url>` line from its result and render
-a status table. When all agents have reported, print a final summary."#,
+a status table with unit, branch, PR, verification, and risk/gap columns. When
+all agents have reported, print a final summary that identifies ready PRs,
+blocked PRs, duplicate work, and any remaining integration order."#,
         allowed_tools: None,
         user_invocable: true,
     },
@@ -555,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn pr_ready_skill_enforces_template_and_body_file_contract() {
+        let skill = find_bundled_skill("pr-ready").unwrap();
+        assert!(skill.user_invocable);
+        assert_eq!(find_bundled_skill("pull-request").unwrap().name, "pr-ready");
+        assert!(skill
+            .prompt_template
+            .contains(".github/PULL_REQUEST_TEMPLATE.md"));
+        assert!(skill
+            .prompt_template
+            .contains("git status --short --branch"));
+        assert!(skill.prompt_template.contains("preserve unrelated"));
+        assert!(skill.prompt_template.contains("gh pr create --body-file"));
+        assert!(skill.prompt_template.contains("PR: <url>"));
+    }
+
+    #[test]
     fn batch_skill_guards_stale_openclaw_research_patterns() {
         let skill = find_bundled_skill("batch").unwrap();
         assert!(skill.prompt_template.contains("openclaw agent --help"));
@@ -562,6 +683,20 @@ mod tests {
         assert!(skill
             .prompt_template
             .contains("unsupported OpenClaw persistence flags"));
+    }
+
+    #[test]
+    fn batch_skill_requires_pr_readiness_contract_for_workers() {
+        let skill = find_bundled_skill("batch").unwrap();
+        assert!(skill
+            .prompt_template
+            .contains(".github/PULL_REQUEST_TEMPLATE.md"));
+        assert!(skill.prompt_template.contains("PR readiness contract"));
+        assert!(skill
+            .prompt_template
+            .contains("Base branch and base commit/sha"));
+        assert!(skill.prompt_template.contains("gh pr create --body-file"));
+        assert!(skill.prompt_template.contains("risk/gap columns"));
     }
 
     #[test]
