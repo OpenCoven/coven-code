@@ -21,11 +21,26 @@ impl RuntimeMode {
 pub struct HostedReviewConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_user_memory: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_managed_rules: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_write_tools: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_mcp_servers: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_plugins: bool,
 }
 
 impl HostedReviewConfig {
     pub fn is_default(&self) -> bool {
         !self.enabled
+            && !self.allow_user_memory
+            && !self.allow_managed_rules
+            && !self.allow_write_tools
+            && !self.allow_mcp_servers
+            && !self.allow_plugins
     }
 }
 

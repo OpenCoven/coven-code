@@ -132,6 +132,28 @@ new session artifacts as hosted review artifacts, and requires a tenant plus
 canonical repository identity before resolving hosted durable memory paths.
 Local-personal mode remains the default and continues to load user memory.
 
+Hosted review also disables write/execute-capable tools, configured MCP
+servers, and plugins by default. A trusted hosted policy can opt individual
+shared surfaces back in:
+
+```json
+{
+  "config": {
+    "hostedReview": {
+      "enabled": true,
+      "allowManagedRules": true,
+      "allowWriteTools": true,
+      "allowMcpServers": true,
+      "allowPlugins": true
+    }
+  }
+}
+```
+
+`allowUserMemory` also exists for explicitly trusted deployments, but hosted
+review jobs should prefer tenant-approved managed rules over operator-global
+user memory.
+
 ### Tool access
 
 | Key | Type | Default | Description |

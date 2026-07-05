@@ -594,9 +594,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.dump_system_prompt {
         let ctx = ContextBuilder::new(cwd.clone())
             .disable_claude_mds(config.disable_claude_mds)
-            .memory_load_options(claurst_core::claudemd::MemoryLoadOptions::from_mode(
-                config.runtime_mode(),
-            ));
+            .memory_load_options(config.memory_load_options());
         let sys = ctx.build_system_context().await;
         let user = ctx.build_user_context().await;
         println!("{}\n\n{}", sys, user);
@@ -606,9 +604,7 @@ async fn main() -> anyhow::Result<()> {
     // Build context
     let ctx_builder = ContextBuilder::new(cwd.clone())
         .disable_claude_mds(config.disable_claude_mds)
-        .memory_load_options(claurst_core::claudemd::MemoryLoadOptions::from_mode(
-            config.runtime_mode(),
-        ));
+        .memory_load_options(config.memory_load_options());
     let system_ctx = ctx_builder.build_system_context().await;
     let user_ctx = ctx_builder.build_user_context().await;
 
@@ -777,28 +773,32 @@ async fn main() -> anyhow::Result<()> {
 
     // Load plugins and register any plugin-provided MCP servers into the
     // in-memory config (does not modify the settings file on disk).
-    let plugin_registry = claurst_plugins::load_plugins(&cwd, &[]).await;
-    {
-        let plugin_cmd_count = plugin_registry.all_command_defs().len();
-        let plugin_hook_count = plugin_registry
-            .build_hook_registry()
-            .values()
-            .map(|v| v.len())
-            .sum::<usize>();
-        info!(
-            plugins = plugin_registry.enabled_count(),
-            commands = plugin_cmd_count,
-            hooks = plugin_hook_count,
-            "Plugins loaded"
-        );
+    if config.hosted_review_enabled() && !config.hosted_review.allow_plugins {
+        info!("Plugins skipped because hosted review mode does not allow plugins");
+    } else {
+        let plugin_registry = claurst_plugins::load_plugins(&cwd, &[]).await;
+        {
+            let plugin_cmd_count = plugin_registry.all_command_defs().len();
+            let plugin_hook_count = plugin_registry
+                .build_hook_registry()
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>();
+            info!(
+                plugins = plugin_registry.enabled_count(),
+                commands = plugin_cmd_count,
+                hooks = plugin_hook_count,
+                "Plugins loaded"
+            );
 
-        // Register plugin MCP servers into the in-memory config so they are
-        // picked up by any subsequent MCP manager construction.
-        let existing_names: std::collections::HashSet<String> =
-            config.mcp_servers.iter().map(|s| s.name.clone()).collect();
-        for mcp_server in plugin_registry.all_mcp_servers() {
-            if !existing_names.contains(&mcp_server.name) {
-                config.mcp_servers.push(mcp_server);
+            // Register plugin MCP servers into the in-memory config so they are
+            // picked up by any subsequent MCP manager construction.
+            let existing_names: std::collections::HashSet<String> =
+                config.mcp_servers.iter().map(|s| s.name.clone()).collect();
+            for mcp_server in plugin_registry.all_mcp_servers() {
+                if !existing_names.contains(&mcp_server.name) {
+                    config.mcp_servers.push(mcp_server);
+                }
             }
         }
     }
@@ -865,6 +865,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tools
     };
+    let tools = filter_tools_for_hosted_review(tools, &config);
 
     // Spawn the background cron scheduler (fires cron tasks at scheduled times).
     // Cancelled automatically when the process exits since we use a shared token.
@@ -983,6 +984,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::McpManager>> {
     if config.mcp_servers.is_empty() {
+        return None;
+    }
+    if config.hosted_review_enabled() && !config.hosted_review.allow_mcp_servers {
+        info!("MCP servers skipped because hosted review mode does not allow MCP servers");
         return None;
     }
 
@@ -1516,6 +1521,17 @@ fn filter_tools_for_agent(
              coven_shared::ACCESS_TIERS contract violated"
         ),
     }
+}
+
+fn filter_tools_for_hosted_review(
+    tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
+    config: &Config,
+) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    if !config.hosted_review_enabled() || config.hosted_review.allow_write_tools {
+        return tools;
+    }
+
+    filter_read_only_tools(&tools)
 }
 
 fn filter_read_only_tools(
@@ -3285,12 +3301,16 @@ async fn run_interactive(
                             if let Some(turns) = def.max_turns {
                                 base_query_config.max_turns = turns;
                             }
-                            tools_arc = filter_tools_for_agent(all_tools_arc.clone(), &def.access);
+                            tools_arc = filter_tools_for_hosted_review(
+                                filter_tools_for_agent(all_tools_arc.clone(), &def.access),
+                                &cmd_ctx.config,
+                            );
                         } else {
                             // "build" with no explicit definition = full access, no agent
                             base_query_config.agent_name = None;
                             base_query_config.agent_definition = None;
-                            tools_arc = all_tools_arc.clone();
+                            tools_arc =
+                                filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
                     if !app.is_streaming && app.messages.len() < messages.len() {
@@ -4406,7 +4426,10 @@ async fn run_interactive(
             let new_mcp_manager = connect_mcp_manager_arc(&cmd_ctx.config).await;
             tool_ctx.mcp_manager = new_mcp_manager.clone();
             app.mcp_manager = new_mcp_manager.clone();
-            tools_arc = build_tools_with_mcp(new_mcp_manager.clone());
+            tools_arc = filter_tools_for_hosted_review(
+                build_tools_with_mcp(new_mcp_manager.clone()),
+                &cmd_ctx.config,
+            );
             if app.mcp_view.visible {
                 app.refresh_mcp_view();
             }
@@ -4415,15 +4438,21 @@ async fn run_interactive(
                 .as_ref()
                 .map(|manager| manager.server_count())
                 .unwrap_or(0);
-            app.status_message = Some(if cmd_ctx.config.mcp_servers.is_empty() {
-                "No MCP servers configured.".to_string()
-            } else {
-                format!(
-                    "Reconnected MCP runtime ({} connected server{}).",
-                    connected,
-                    if connected == 1 { "" } else { "s" }
-                )
-            });
+            app.status_message = Some(
+                if cmd_ctx.config.hosted_review_enabled()
+                    && !cmd_ctx.config.hosted_review.allow_mcp_servers
+                {
+                    "MCP servers are disabled in hosted review mode.".to_string()
+                } else if cmd_ctx.config.mcp_servers.is_empty() {
+                    "No MCP servers configured.".to_string()
+                } else {
+                    format!(
+                        "Reconnected MCP runtime ({} connected server{}).",
+                        connected,
+                        if connected == 1 { "" } else { "s" }
+                    )
+                },
+            );
         }
 
         if app.should_exit {
@@ -5206,6 +5235,47 @@ mod tests {
                 "search-only emitted disallowed tool {name}, expected subset of {ALLOWED:?}"
             );
         }
+    }
+
+    #[test]
+    fn hosted_review_filters_write_and_execute_tools_by_default() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let config = Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let names = tool_names(&filter_tools_for_hosted_review(all, &config));
+
+        assert!(names.contains(&"Read".to_string()));
+        for forbidden in ["Bash", "Edit", "Write", "NotebookEdit", "ApplyPatch"] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "hosted review default tools must not include {forbidden}, got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_review_trusted_policy_can_keep_write_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let before = tool_names(&all);
+        let config = Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                enabled: true,
+                allow_write_tools: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            tool_names(&filter_tools_for_hosted_review(all, &config)),
+            before
+        );
     }
 
     // NOTE: the coven-github headless-contract types + behavior moved to the

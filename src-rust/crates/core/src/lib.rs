@@ -1291,6 +1291,18 @@ pub mod config {
             self.hosted_review.enabled || crate::hosted_review::env_enables_hosted_review()
         }
 
+        pub fn memory_load_options(&self) -> crate::claudemd::MemoryLoadOptions {
+            if !self.hosted_review_enabled() {
+                return crate::claudemd::MemoryLoadOptions::local();
+            }
+
+            crate::claudemd::MemoryLoadOptions {
+                mode: crate::hosted_review::RuntimeMode::HostedReview,
+                allow_user_memory: self.hosted_review.allow_user_memory,
+                allow_managed_rules: self.hosted_review.allow_managed_rules,
+            }
+        }
+
         /// Resolve the effective model, falling back to a provider-appropriate default.
         ///
         /// When a non-Anthropic provider is active and no model is explicitly set,
@@ -2060,6 +2072,23 @@ pub mod config {
                 serde_json::from_str(r#"{"config":{"hostedReview":{"enabled":true}}}"#).unwrap();
 
             assert!(settings.effective_config().hosted_review_enabled());
+        }
+
+        #[test]
+        fn hosted_review_trusted_policy_controls_memory_options() {
+            let settings: Settings = serde_json::from_str(
+                r#"{"config":{"hostedReview":{"enabled":true,"allowManagedRules":true}}}"#,
+            )
+            .unwrap();
+
+            let options = settings.effective_config().memory_load_options();
+
+            assert_eq!(
+                options.mode,
+                crate::hosted_review::RuntimeMode::HostedReview
+            );
+            assert!(!options.allow_user_memory);
+            assert!(options.allow_managed_rules);
         }
 
         #[test]

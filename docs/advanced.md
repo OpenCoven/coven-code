@@ -534,6 +534,13 @@ Durable hosted memory and transcript namespaces are separated under a hosted
 review path and require tenant scope plus a canonical repository identity before
 they can be resolved for persistence.
 
+Hosted review mode also disables write/execute-capable tools, configured MCP
+servers, plugins, user memory, and managed rules by default. Trusted hosted
+policy settings such as `hostedReview.allowManagedRules`,
+`hostedReview.allowWriteTools`, `hostedReview.allowMcpServers`, and
+`hostedReview.allowPlugins` can opt specific surfaces back in for controlled
+deployments. Prefer tenant-approved managed rules over `allowUserMemory`.
+
 ---
 
 ## Security and permissions
