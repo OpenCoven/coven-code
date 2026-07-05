@@ -15,6 +15,7 @@ Fixes #110.
 - Adds hosted-derived settings sync project keys and hosted team-memory repo keys so hosted callers do not pass arbitrary project ids.
 - Splits hosted memory domains for default branch, branch, release, pull request, and security-private review contexts.
 - Hardens Windows test isolation for home-derived paths and gates Unix-socket daemon tests to Unix.
+- Corrects Windows TUI system-root test fixtures to use drive-qualified absolute paths.
 
 ## Test evidence
 
@@ -29,12 +30,12 @@ Fixes #110.
 - `cargo test -p claurst-core --lib roster_reset -- --nocapture`
 - `cargo test -p claurst-core --lib build_import_preview_maps_settings_and_doc -- --nocapture`
 - `cargo test -p claurst-core --lib test_imported_anthropic_cli_token_resolves_without_coven_oauth_client -- --nocapture`
+- `cargo test -p claurst-tui --lib windows_system_root --quiet`
+- `cargo test --workspace --quiet`
 
 ## Full-suite status
 
-- `cargo test --workspace` progressed through CLI, ACP, API, bridge, buddy, commands, and core tests, then Smart App Control blocked an unsigned freshly built test binary.
-- Latest block: `C:\dev-cargo-target\coven-code\debug\deps\claurst_tools-f5b8d284b5de1d1b.exe`, OS error 4551.
-- Code Integrity event: Smart App Control reported the binary did not meet Enterprise signing level requirements under policy `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`.
+- `cargo test --workspace --quiet` passes on Windows with `CARGO_TARGET_DIR=C:\dev-cargo-target\coven-code` after Smart App Control was disabled locally.
 
 ## Risk notes
 
