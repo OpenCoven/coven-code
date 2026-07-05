@@ -1300,6 +1300,8 @@ pub mod config {
                 mode: crate::hosted_review::RuntimeMode::HostedReview,
                 allow_user_memory: self.hosted_review.allow_user_memory,
                 allow_managed_rules: self.hosted_review.allow_managed_rules,
+                min_trust: self.hosted_review.memory_trust_threshold(),
+                allow_security_private: false,
             }
         }
 
@@ -2323,12 +2325,24 @@ pub mod context {
                         .join(".coven-code")
                         .join(crate::constants::CLAUDE_MD_FILENAME);
                     if global_claude_md.exists() {
-                        if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
+                        if let Some(file) = crate::claudemd::load_memory_file(
+                            &global_claude_md,
+                            crate::claudemd::MemoryScope::User,
+                        )
+                        .filter(|file| {
+                            crate::claudemd::memory_file_allowed_for_options(
+                                file,
+                                &self.memory_load_options,
+                            )
+                        }) {
                             loaded_scopes.push("user");
                             claude_mds.push(format!(
                                 "# Memory (from {})\n{}",
                                 global_claude_md.display(),
-                                content
+                                crate::claudemd::format_memory_file_for_prompt(
+                                    &file,
+                                    self.memory_load_options.mode.is_hosted_review(),
+                                )
                             ));
                         }
                     }
@@ -2341,12 +2355,24 @@ pub mod context {
             while let Some(d) = dir {
                 let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
                 if candidate.exists() {
-                    if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
+                    if let Some(file) = crate::claudemd::load_memory_file(
+                        &candidate,
+                        crate::claudemd::MemoryScope::Project,
+                    )
+                    .filter(|file| {
+                        crate::claudemd::memory_file_allowed_for_options(
+                            file,
+                            &self.memory_load_options,
+                        )
+                    }) {
                         loaded_scopes.push("project");
                         project_mds.push(format!(
                             "# Project Memory (from {})\n{}",
                             candidate.display(),
-                            content
+                            crate::claudemd::format_memory_file_for_prompt(
+                                &file,
+                                self.memory_load_options.mode.is_hosted_review(),
+                            )
                         ));
                     }
                 }
@@ -2387,7 +2413,11 @@ pub mod context {
         #[test]
         fn hosted_review_context_skips_global_user_memory() {
             let project = tempfile::tempdir().unwrap();
-            std::fs::write(project.path().join("AGENTS.md"), "project instructions").unwrap();
+            std::fs::write(
+                project.path().join("AGENTS.md"),
+                "---\ntrust: maintainer_approved\nvisibility: public_review\n---\nproject instructions",
+            )
+            .unwrap();
 
             let home = tempfile::tempdir().unwrap();
             let coven_code = home.path().join(".coven-code");

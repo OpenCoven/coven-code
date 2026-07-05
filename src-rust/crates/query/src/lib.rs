@@ -1959,6 +1959,10 @@ pub async fn run_query_loop(
                     let working_dir_clone = tool_ctx.working_dir.clone();
                     let runtime_mode = tool_ctx.config.runtime_mode();
                     let hosted_review_config = tool_ctx.config.hosted_review.clone();
+                    let memory_provenance = format!(
+                        "session:{};source:session-memory-extraction",
+                        tool_ctx.session_id
+                    );
 
                     // Build a fresh client using the same API key.  This avoids
                     // requiring an Arc in the existing run_query_loop signature.
@@ -1992,6 +1996,7 @@ pub async fn run_query_loop(
                                                 &candidate_store,
                                                 runtime_mode,
                                                 &hosted_review_config,
+                                                &memory_provenance,
                                             )
                                             .await
                                             {

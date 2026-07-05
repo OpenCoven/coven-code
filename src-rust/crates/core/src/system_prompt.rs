@@ -306,7 +306,15 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 
     // 12. Memory injection (from memdir)
     if !opts.memory_content.is_empty() {
-        parts.push(format!("\n<memory>\n{}\n</memory>", opts.memory_content));
+        if opts.memory_content.contains("<memory id=") {
+            parts.push(format!(
+                "\n<memory_context>\n{}\n</memory_context>\n\
+                 If a finding, recommendation, or decision depends on a memory entry, cite its memory id in `memory_refs`.",
+                opts.memory_content
+            ));
+        } else {
+            parts.push(format!("\n<memory>\n{}\n</memory>", opts.memory_content));
+        }
     }
 
     // 13. Active goal addendum (dynamic — changes each session)
@@ -613,6 +621,22 @@ mod tests {
             mem_pos > boundary_pos,
             "Memory content must appear after the dynamic boundary"
         );
+    }
+
+    #[test]
+    fn hosted_tagged_memory_uses_context_wrapper_and_citation_instruction() {
+        let opts = SystemPromptOptions {
+            memory_content:
+                "<memory id=\"mem_123\" trust=\"maintainer-approved\">\nUse repo auth policy.\n</memory>"
+                    .to_string(),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&opts);
+
+        assert!(prompt.contains("<memory_context>"));
+        assert!(prompt.contains("id=\"mem_123\""));
+        assert!(prompt.contains("memory_refs"));
+        assert!(!prompt.contains("<memory>\n<memory id=\"mem_123\""));
     }
 
     #[test]

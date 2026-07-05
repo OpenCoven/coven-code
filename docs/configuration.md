@@ -350,7 +350,12 @@ AGENTS.md files may begin with optional YAML frontmatter to control loading:
 ---
 memory_type: project
 priority: 10
-scope: project
+scope: repo
+trust: maintainer_approved
+visibility: public_review
+source: github_pr
+source_ref: OpenCoven/coven-code#123
+expires_at: 2099-12-31
 ---
 
 # My Project Notes
@@ -362,9 +367,22 @@ Frontmatter fields:
 
 | Field | Description |
 |-------|-------------|
-| `memory_type` | Informal label (currently informational only). |
+| `id` | Stable memory id used for hosted review citation, for example `mem_auth_policy`. If omitted, Coven Code derives a stable id from path and content. |
+| `memory_type` | Memory category label such as `project`, `user`, `reference`, or `feedback`. |
 | `priority` | Integer sort priority (lower numbers are prepended first within the same scope). |
-| `scope` | Informational label for documentation purposes. |
+| `scope` | Intended scope, such as `user`, `tenant`, `installation`, `repo`, `branch`, or `pr`. |
+| `trust` | Source trust. Hosted review enforces this against `hostedReview.memoryTrustThreshold`. Supported values include `system_policy`, `maintainer_approved`, `default_branch_code`, `model_inferred`, `contributor_input`, `fork_input`, and `unknown`. |
+| `visibility` | Intended review visibility: `public_review`, `private_review`, or `security_private`. Hosted public reviews exclude `security_private` memory by default. |
+| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session_memory_extraction`. |
+| `source_ref` | Source reference such as `owner/repo#123`, a commit SHA, or another non-secret audit handle. |
+| `expires_at` | Optional expiry date in `YYYY-MM-DD` format. Expired hosted memory is ignored. |
+| `created_at`, `created_by`, `session_id`, `transcript_ref`, `confidence` | Optional provenance fields for audit and review artifacts. |
+
+Local mode tolerates missing metadata for backward compatibility. Hosted review
+mode treats missing trust as `unknown`, ignores expired memory, and excludes
+memory below the configured trust threshold. Tagged hosted memory is injected
+with memory ids and provenance metadata; findings that rely on memory should
+include those ids in `memory_refs`.
 
 ### @include directives
 

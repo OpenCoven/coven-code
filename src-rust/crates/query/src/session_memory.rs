@@ -525,6 +525,7 @@ impl SessionMemoryExtractor {
         candidate_store: &MemoryCandidateStore,
         mode: RuntimeMode,
         hosted_config: &HostedReviewConfig,
+        provenance: &str,
     ) -> anyhow::Result<MemoryPersistenceOutcome> {
         if memories.is_empty() {
             return Ok(MemoryPersistenceOutcome::Skipped);
@@ -555,7 +556,7 @@ impl SessionMemoryExtractor {
         let candidates = candidate_store
             .write_pending(
                 &trusted_memories,
-                "session-memory-extraction",
+                provenance,
                 "hosted-review",
                 "durable-memory",
                 Some(&reason),
@@ -928,6 +929,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             &candidate_store,
             RuntimeMode::HostedReview,
             &config,
+            "session:test-session;source:session-memory-extraction",
         )
         .await
         .unwrap();
@@ -948,6 +950,10 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             serde_json::from_str(&fs::read_to_string(entry.path()).await.unwrap()).unwrap();
         assert_eq!(candidate.status, MemoryCandidateStatus::Pending);
         assert_eq!(candidate.source_trust, MemorySourceTrust::ForkInput);
+        assert_eq!(
+            candidate.provenance,
+            "session:test-session;source:session-memory-extraction"
+        );
         assert_eq!(
             candidate.rejection_reason.as_deref(),
             Some("hosted-approval-required")
@@ -978,6 +984,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             &candidate_store,
             RuntimeMode::HostedReview,
             &config,
+            "session:test-session;source:session-memory-extraction",
         )
         .await
         .unwrap();

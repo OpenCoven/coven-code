@@ -5,11 +5,12 @@
 //! Supports @include directives, YAML frontmatter, and mtime-based caching.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::hosted_review::RuntimeMode;
+use crate::hosted_review::{MemorySourceTrust, RuntimeMode};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,11 +34,41 @@ pub enum MemoryScope {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryFrontmatter {
     #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
     pub memory_type: Option<String>,
     #[serde(default)]
     pub priority: Option<u32>,
     #[serde(default)]
     pub scope: Option<String>,
+    #[serde(default)]
+    pub trust: Option<MemorySourceTrust>,
+    #[serde(default)]
+    pub visibility: Option<MemoryVisibility>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub transcript_ref: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryVisibility {
+    PublicReview,
+    PrivateReview,
+    SecurityPrivate,
 }
 
 /// Loaded memory file with metadata.
@@ -56,6 +87,8 @@ pub struct MemoryLoadOptions {
     pub mode: RuntimeMode,
     pub allow_user_memory: bool,
     pub allow_managed_rules: bool,
+    pub min_trust: MemorySourceTrust,
+    pub allow_security_private: bool,
 }
 
 impl MemoryLoadOptions {
@@ -64,6 +97,8 @@ impl MemoryLoadOptions {
             mode: RuntimeMode::Local,
             allow_user_memory: true,
             allow_managed_rules: true,
+            min_trust: MemorySourceTrust::Unknown,
+            allow_security_private: true,
         }
     }
 
@@ -72,6 +107,8 @@ impl MemoryLoadOptions {
             mode: RuntimeMode::HostedReview,
             allow_user_memory: false,
             allow_managed_rules: false,
+            min_trust: MemorySourceTrust::MaintainerApproved,
+            allow_security_private: false,
         }
     }
 
@@ -145,9 +182,22 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
             if let Some((key, val)) = line.split_once(':') {
                 let val = val.trim().to_string();
                 match key.trim() {
+                    "id" => fm.id = Some(strip_frontmatter_value(&val).to_string()),
                     "memory_type" => fm.memory_type = Some(val),
                     "priority" => fm.priority = val.parse().ok(),
-                    "scope" => fm.scope = Some(val),
+                    "scope" => fm.scope = Some(strip_frontmatter_value(&val).to_string()),
+                    "trust" => fm.trust = parse_memory_trust(&val),
+                    "visibility" => fm.visibility = parse_memory_visibility(&val),
+                    "source" => fm.source = Some(strip_frontmatter_value(&val).to_string()),
+                    "source_ref" => fm.source_ref = Some(strip_frontmatter_value(&val).to_string()),
+                    "expires_at" => fm.expires_at = Some(strip_frontmatter_value(&val).to_string()),
+                    "created_at" => fm.created_at = Some(strip_frontmatter_value(&val).to_string()),
+                    "created_by" => fm.created_by = Some(strip_frontmatter_value(&val).to_string()),
+                    "session_id" => fm.session_id = Some(strip_frontmatter_value(&val).to_string()),
+                    "transcript_ref" => {
+                        fm.transcript_ref = Some(strip_frontmatter_value(&val).to_string())
+                    }
+                    "confidence" => fm.confidence = val.parse().ok(),
                     _ => {}
                 }
             }
@@ -155,6 +205,41 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
         return (fm, body.trim_start_matches('\n'));
     }
     (MemoryFrontmatter::default(), content)
+}
+
+fn strip_frontmatter_value(value: &str) -> &str {
+    value.trim().trim_matches('"').trim_matches('\'')
+}
+
+fn normalized_frontmatter_value(value: &str) -> String {
+    strip_frontmatter_value(value)
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn parse_memory_trust(value: &str) -> Option<MemorySourceTrust> {
+    match normalized_frontmatter_value(value).as_str() {
+        "system_policy" => Some(MemorySourceTrust::SystemPolicy),
+        "maintainer_approved" | "maintainer" => Some(MemorySourceTrust::MaintainerApproved),
+        "default_branch_code" | "default_branch" => Some(MemorySourceTrust::DefaultBranchCode),
+        "contributor_input" | "contributor" | "untrusted" => {
+            Some(MemorySourceTrust::ContributorInput)
+        }
+        "fork_input" | "fork" => Some(MemorySourceTrust::ForkInput),
+        "model_inferred" => Some(MemorySourceTrust::ModelInferred),
+        "unknown" => Some(MemorySourceTrust::Unknown),
+        _ => None,
+    }
+}
+
+fn parse_memory_visibility(value: &str) -> Option<MemoryVisibility> {
+    match normalized_frontmatter_value(value).as_str() {
+        "public_review" | "public" => Some(MemoryVisibility::PublicReview),
+        "private_review" | "private" => Some(MemoryVisibility::PrivateReview),
+        "security_private" | "security" => Some(MemoryVisibility::SecurityPrivate),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +347,115 @@ pub fn load_memory_file(path: &Path, scope: MemoryScope) -> Option<MemoryFileInf
     })
 }
 
+pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLoadOptions) -> bool {
+    if !options.mode.is_hosted_review() {
+        return true;
+    }
+
+    if memory_is_expired(file.frontmatter.expires_at.as_deref()) {
+        return false;
+    }
+
+    if matches!(
+        file.frontmatter.visibility,
+        Some(MemoryVisibility::SecurityPrivate)
+    ) && !options.allow_security_private
+    {
+        return false;
+    }
+
+    file.frontmatter
+        .trust
+        .unwrap_or(MemorySourceTrust::Unknown)
+        .meets_threshold(options.min_trust)
+}
+
+fn memory_is_expired(expires_at: Option<&str>) -> bool {
+    let Some(expires_at) = expires_at else {
+        return false;
+    };
+    let Ok(expires) = chrono::NaiveDate::parse_from_str(expires_at.trim(), "%Y-%m-%d") else {
+        return false;
+    };
+    expires < chrono::Local::now().date_naive()
+}
+
+pub fn memory_id(file: &MemoryFileInfo) -> String {
+    if let Some(id) = file.frontmatter.id.as_deref().filter(|id| !id.is_empty()) {
+        return id.to_string();
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(file.path.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(file.content.as_bytes());
+    let digest = hasher.finalize();
+    format!("mem_{}", hex::encode(&digest[..8]))
+}
+
+pub fn format_memory_file_for_prompt(file: &MemoryFileInfo, hosted: bool) -> String {
+    let body = file.content.trim();
+    if !hosted {
+        return body.to_string();
+    }
+
+    let trust = file
+        .frontmatter
+        .trust
+        .map(memory_trust_label)
+        .unwrap_or("unknown");
+    let visibility = file
+        .frontmatter
+        .visibility
+        .map(memory_visibility_label)
+        .unwrap_or("unspecified");
+    let source = file.frontmatter.source.as_deref().unwrap_or("manual");
+    let source_ref = file.frontmatter.source_ref.as_deref().unwrap_or("");
+    let mut attrs = format!(
+        "id=\"{}\" trust=\"{}\" visibility=\"{}\" source=\"{}\"",
+        xml_escape_attr(&memory_id(file)),
+        trust,
+        visibility,
+        xml_escape_attr(source)
+    );
+    if !source_ref.is_empty() {
+        attrs.push_str(&format!(" source_ref=\"{}\"", xml_escape_attr(source_ref)));
+    }
+    if let Some(session_id) = file.frontmatter.session_id.as_deref() {
+        attrs.push_str(&format!(" session_id=\"{}\"", xml_escape_attr(session_id)));
+    }
+
+    format!("<memory {}>\n{}\n</memory>", attrs, body)
+}
+
+fn memory_trust_label(trust: MemorySourceTrust) -> &'static str {
+    match trust {
+        MemorySourceTrust::SystemPolicy => "system-policy",
+        MemorySourceTrust::MaintainerApproved => "maintainer-approved",
+        MemorySourceTrust::DefaultBranchCode => "default-branch-code",
+        MemorySourceTrust::ContributorInput => "contributor-input",
+        MemorySourceTrust::ForkInput => "fork-input",
+        MemorySourceTrust::ModelInferred => "model-inferred",
+        MemorySourceTrust::Unknown => "unknown",
+    }
+}
+
+fn memory_visibility_label(visibility: MemoryVisibility) -> &'static str {
+    match visibility {
+        MemoryVisibility::PublicReview => "public-review",
+        MemoryVisibility::PrivateReview => "private-review",
+        MemoryVisibility::SecurityPrivate => "security-private",
+    }
+}
+
+fn xml_escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Load memory files from a directory for a given scope.
 ///
 /// Loads `AGENTS.md` first (primary/universal standard), then `CLAUDE.md` if
@@ -336,6 +530,9 @@ pub fn load_all_memory_files_with_options(
     );
 
     files
+        .into_iter()
+        .filter(|file| memory_file_allowed_for_options(file, options))
+        .collect()
 }
 
 /// Concatenate all memory file contents into a single system-prompt fragment.
@@ -343,7 +540,19 @@ pub fn build_memory_prompt(files: &[MemoryFileInfo]) -> String {
     files
         .iter()
         .filter(|f| !f.content.trim().is_empty())
-        .map(|f| f.content.trim().to_string())
+        .map(|f| format_memory_file_for_prompt(f, false))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+pub fn build_memory_prompt_with_options(
+    files: &[MemoryFileInfo],
+    options: &MemoryLoadOptions,
+) -> String {
+    files
+        .iter()
+        .filter(|f| !f.content.trim().is_empty())
+        .map(|f| format_memory_file_for_prompt(f, options.mode.is_hosted_review()))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -359,6 +568,23 @@ mod tests {
         assert_eq!(fm.memory_type.as_deref(), Some("project"));
         assert_eq!(fm.priority, Some(10));
         assert_eq!(body.trim(), "Hello world");
+    }
+
+    #[test]
+    fn parse_frontmatter_hosted_metadata() {
+        let content = "---\nid: mem_auth\nmemory_type: project\nscope: repo\ntrust: maintainer_approved\nvisibility: public_review\nsource: github_pr\nsource_ref: OpenCoven/coven-code#123\nexpires_at: 2099-12-31\nsession_id: sess-1\nconfidence: 0.9\n---\nUse explicit auth checks.";
+        let (fm, body) = parse_frontmatter(content);
+
+        assert_eq!(fm.id.as_deref(), Some("mem_auth"));
+        assert_eq!(fm.scope.as_deref(), Some("repo"));
+        assert_eq!(fm.trust, Some(MemorySourceTrust::MaintainerApproved));
+        assert_eq!(fm.visibility, Some(MemoryVisibility::PublicReview));
+        assert_eq!(fm.source.as_deref(), Some("github_pr"));
+        assert_eq!(fm.source_ref.as_deref(), Some("OpenCoven/coven-code#123"));
+        assert_eq!(fm.expires_at.as_deref(), Some("2099-12-31"));
+        assert_eq!(fm.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(fm.confidence, Some(0.9));
+        assert_eq!(body.trim(), "Use explicit auth checks.");
     }
 
     #[test]
@@ -413,7 +639,11 @@ mod tests {
     #[test]
     fn hosted_review_excludes_user_memory_by_default() {
         let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("AGENTS.md"), "project memory").unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\ntrust: maintainer_approved\nvisibility: public_review\n---\nproject memory",
+        )
+        .unwrap();
 
         let home = tempfile::tempdir().unwrap();
         let coven_code = home.path().join(".coven-code");
@@ -452,7 +682,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let rules = home.path().join(".coven-code").join("rules");
         std::fs::create_dir_all(&rules).unwrap();
-        std::fs::write(rules.join("managed.md"), "managed hosted policy").unwrap();
+        std::fs::write(
+            rules.join("managed.md"),
+            "---\ntrust: system_policy\nvisibility: public_review\n---\nmanaged hosted policy",
+        )
+        .unwrap();
 
         let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
             .lock()
@@ -489,6 +723,73 @@ mod tests {
         assert!(trusted_hosted.iter().any(|file| {
             file.scope == MemoryScope::Managed && file.content.contains("managed hosted policy")
         }));
+    }
+
+    #[test]
+    fn hosted_review_excludes_missing_or_untrusted_memory_metadata() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("AGENTS.md"), "legacy project memory").unwrap();
+        std::fs::create_dir_all(project.path().join(".coven-code")).unwrap();
+        std::fs::write(
+            project.path().join(".coven-code").join("AGENTS.md"),
+            "---\ntrust: contributor_input\nvisibility: public_review\n---\nuntrusted memory",
+        )
+        .unwrap();
+
+        let files =
+            load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_excludes_expired_memory() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\ntrust: maintainer_approved\nvisibility: public_review\nexpires_at: 2000-01-01\n---\nexpired memory",
+        )
+        .unwrap();
+
+        let files =
+            load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_excludes_security_private_memory_by_default() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\ntrust: maintainer_approved\nvisibility: security_private\n---\nprivate memory",
+        )
+        .unwrap();
+
+        let files =
+            load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_renders_memory_ids_and_provenance() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\nid: mem_review_policy\ntrust: maintainer_approved\nvisibility: public_review\nsource: github_pr\nsource_ref: OpenCoven/coven-code#123\nsession_id: sess-1\n---\nAlways cite auth policy.",
+        )
+        .unwrap();
+
+        let options = MemoryLoadOptions::hosted_review();
+        let files = load_all_memory_files_with_options(project.path(), &options);
+        let prompt = build_memory_prompt_with_options(&files, &options);
+
+        assert!(prompt.contains("<memory id=\"mem_review_policy\""));
+        assert!(prompt.contains("trust=\"maintainer-approved\""));
+        assert!(prompt.contains("source_ref=\"OpenCoven/coven-code#123\""));
+        assert!(prompt.contains("session_id=\"sess-1\""));
+        assert!(prompt.contains("Always cite auth policy."));
     }
 
     #[test]

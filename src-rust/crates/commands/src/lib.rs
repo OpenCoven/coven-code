@@ -3382,6 +3382,39 @@ impl SlashCommand for LearnCommand {
 
 // ---- /review -------------------------------------------------------------
 
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct StructuredReviewOutput {
+    #[serde(default)]
+    pub findings: Vec<StructuredReviewFinding>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct StructuredReviewFinding {
+    pub title: String,
+    #[serde(default)]
+    pub memory_refs: Vec<String>,
+    #[serde(default)]
+    pub memory_dependent: bool,
+}
+
+pub fn parse_structured_review_output(text: &str) -> Option<StructuredReviewOutput> {
+    serde_json::from_str::<StructuredReviewOutput>(text).ok()
+}
+
+pub fn validate_structured_review_memory_refs(review: &StructuredReviewOutput) -> Vec<String> {
+    review
+        .findings
+        .iter()
+        .filter(|finding| finding.memory_dependent && finding.memory_refs.is_empty())
+        .map(|finding| {
+            format!(
+                "finding '{}' is marked memory-dependent but has no memory_refs",
+                finding.title
+            )
+        })
+        .collect()
+}
+
 #[async_trait]
 impl SlashCommand for ReviewCommand {
     fn name(&self) -> &str {
@@ -3527,7 +3560,8 @@ impl SlashCommand for ReviewCommand {
              (1-3 sentences describing what changed)\n\n\
              ## Issues\n\
              (bulleted list: [CRITICAL|MAJOR|MINOR] file:line — description; \
-             omit section if none)\n\n\
+             omit section if none; if the issue depends on a loaded memory entry, \
+             include memory_refs: [\"mem_...\"] on that bullet)\n\n\
              ## Suggestions\n\
              (bulleted list of optional improvements; omit section if none)\n\n\
              ## Verdict\n\
@@ -10486,6 +10520,30 @@ mod tests {
                 cmd.name()
             );
         }
+    }
+
+    #[test]
+    fn structured_review_output_parses_memory_refs() {
+        let review = parse_structured_review_output(
+            r#"{"findings":[{"title":"Auth check","memory_refs":["mem_auth"],"memory_dependent":true}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(review.findings[0].memory_refs, vec!["mem_auth"]);
+        assert!(validate_structured_review_memory_refs(&review).is_empty());
+    }
+
+    #[test]
+    fn structured_review_output_warns_when_memory_refs_missing() {
+        let review = parse_structured_review_output(
+            r#"{"findings":[{"title":"Auth check","memory_dependent":true}]}"#,
+        )
+        .unwrap();
+
+        let warnings = validate_structured_review_memory_refs(&review);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Auth check"));
+        assert!(warnings[0].contains("memory_refs"));
     }
 
     #[tokio::test]
