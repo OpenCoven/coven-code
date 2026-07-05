@@ -771,6 +771,7 @@ fn url_quote(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::coven_shared::COVEN_HOME_ENV_LOCK;
+    #[cfg(unix)]
     use std::fs;
 
     /// Guard that temporarily sets `COVEN_HOME` and restores it on drop.
@@ -805,6 +806,7 @@ mod tests {
         assert!(DaemonClient::new().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn new_returns_some_when_sock_present() {
         let _lock = COVEN_HOME_ENV_LOCK
@@ -873,6 +875,7 @@ mod tests {
         assert_eq!(s1.active_sessions, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn familiar_statuses_returns_offline_when_connect_fails() {
         let _lock = COVEN_HOME_ENV_LOCK

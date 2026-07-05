@@ -1,0 +1,64 @@
+name: Rust CI
+
+on:
+  pull_request:
+    paths:
+      - 'src-rust/**'
+      - '.github/workflows/rust-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: rust-ci-cargo-${{ runner.os }}-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: rust-ci-cargo-${{ runner.os }}-
+
+      - name: Check formatting
+        working-directory: src-rust
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        working-directory: src-rust
+        run: cargo check --workspace --locked
+
+      - name: Run Clippy
+        working-directory: src-rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        working-directory: src-rust
+        run: cargo test --workspace --locked --quiet
