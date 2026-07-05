@@ -52,6 +52,12 @@ pub struct MemoryFrontmatter {
     #[serde(default)]
     pub expires_at: Option<String>,
     #[serde(default)]
+    pub retention_class: Option<String>,
+    #[serde(default)]
+    pub redacted_at: Option<String>,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub created_by: Option<String>,
@@ -191,6 +197,13 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
                     "source" => fm.source = Some(strip_frontmatter_value(&val).to_string()),
                     "source_ref" => fm.source_ref = Some(strip_frontmatter_value(&val).to_string()),
                     "expires_at" => fm.expires_at = Some(strip_frontmatter_value(&val).to_string()),
+                    "retention_class" => {
+                        fm.retention_class = Some(strip_frontmatter_value(&val).to_string())
+                    }
+                    "redacted_at" => {
+                        fm.redacted_at = Some(strip_frontmatter_value(&val).to_string())
+                    }
+                    "deleted_at" => fm.deleted_at = Some(strip_frontmatter_value(&val).to_string()),
                     "created_at" => fm.created_at = Some(strip_frontmatter_value(&val).to_string()),
                     "created_by" => fm.created_by = Some(strip_frontmatter_value(&val).to_string()),
                     "session_id" => fm.session_id = Some(strip_frontmatter_value(&val).to_string()),
@@ -356,6 +369,10 @@ pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLo
         return false;
     }
 
+    if file.frontmatter.deleted_at.is_some() {
+        return false;
+    }
+
     if matches!(
         file.frontmatter.visibility,
         Some(MemoryVisibility::SecurityPrivate)
@@ -394,7 +411,11 @@ pub fn memory_id(file: &MemoryFileInfo) -> String {
 }
 
 pub fn format_memory_file_for_prompt(file: &MemoryFileInfo, hosted: bool) -> String {
-    let body = file.content.trim();
+    let body = if hosted && file.frontmatter.redacted_at.is_some() {
+        "[REDACTED: memory content removed; retain metadata for audit]"
+    } else {
+        file.content.trim()
+    };
     if !hosted {
         return body.to_string();
     }
@@ -755,6 +776,39 @@ mod tests {
             load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
 
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_excludes_deleted_memory() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\ntrust: maintainer_approved\nvisibility: public_review\ndeleted_at: 2026-01-01T00:00:00Z\n---\ndeleted memory",
+        )
+        .unwrap();
+
+        let files =
+            load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_redacts_memory_content_in_prompt() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "---\nid: mem_redacted\ntrust: maintainer_approved\nvisibility: public_review\nredacted_at: 2026-01-01T00:00:00Z\n---\noriginal sensitive detail",
+        )
+        .unwrap();
+
+        let options = MemoryLoadOptions::hosted_review();
+        let files = load_all_memory_files_with_options(project.path(), &options);
+        let prompt = build_memory_prompt_with_options(&files, &options);
+
+        assert!(prompt.contains("id=\"mem_redacted\""));
+        assert!(prompt.contains("[REDACTED: memory content removed"));
+        assert!(!prompt.contains("original sensitive detail"));
     }
 
     #[test]

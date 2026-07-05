@@ -376,6 +376,9 @@ Frontmatter fields:
 | `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session_memory_extraction`. |
 | `source_ref` | Source reference such as `owner/repo#123`, a commit SHA, or another non-secret audit handle. |
 | `expires_at` | Optional expiry date in `YYYY-MM-DD` format. Expired hosted memory is ignored. |
+| `retention_class` | Optional lifecycle class such as `standard`, `short_lived`, `security`, or `legal_hold`. |
+| `redacted_at` | Marks content as redacted. Hosted review keeps the metadata visible but replaces the body with a redaction stub. |
+| `deleted_at` | Marks memory as deleted. Hosted review excludes deleted entries from prompt loading. |
 | `created_at`, `created_by`, `session_id`, `transcript_ref`, `confidence` | Optional provenance fields for audit and review artifacts. |
 
 Local mode tolerates missing metadata for backward compatibility. Hosted review
@@ -383,6 +386,18 @@ mode treats missing trust as `unknown`, ignores expired memory, and excludes
 memory below the configured trust threshold. Tagged hosted memory is injected
 with memory ids and provenance metadata; findings that rely on memory should
 include those ids in `memory_refs`.
+
+Hosted sync and persistence boundaries run high-confidence secret scanning
+before writing or uploading memory. Entries with detected secret patterns are
+blocked by default. Logs and review candidates include only pattern labels and
+reason codes, not matched secret values. False positives should be handled by
+redacting or editing the memory entry before retrying sync.
+
+Hosted team-memory pull is conflict-aware. Local changes are preserved when
+both local and remote content changed since the last known server checksum; a
+conflict record is written for operator review instead of overwriting local
+memory. Hosted team-memory sync also sends tenant, installation, repo, and
+domain scope metadata so the server can authorize the full tuple.
 
 ### @include directives
 

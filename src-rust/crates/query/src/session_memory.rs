@@ -19,6 +19,7 @@ use claurst_api::{
     SystemPrompt,
 };
 use claurst_core::hosted_review::{HostedReviewConfig, MemorySourceTrust, RuntimeMode};
+use claurst_core::team_memory_sync::scan_for_secrets;
 use claurst_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -545,6 +546,31 @@ impl SessionMemoryExtractor {
             .map(|memory| memory.with_source_trust(source_trust))
             .collect();
 
+        let secret_labels = memory_secret_labels(&trusted_memories);
+        if !secret_labels.is_empty() {
+            let label_text = secret_labels.join(", ");
+            let redaction_required = ExtractedMemory {
+                content: format!("Redaction required before memory review. Detected secret patterns: {label_text}."),
+                category: MemoryCategory::Constraint,
+                confidence: 1.0,
+                source_trust,
+            };
+            let reason = format!("redaction-required:{}", label_text);
+            let candidates = candidate_store
+                .write_pending(
+                    &[redaction_required],
+                    provenance,
+                    "hosted-review",
+                    "durable-memory",
+                    Some(&reason),
+                )
+                .await?;
+            return Ok(MemoryPersistenceOutcome::CandidatesWritten {
+                count: candidates.len(),
+                reason,
+            });
+        }
+
         if hosted_config.allows_auto_memory_persistence() {
             Self::persist(&trusted_memories, target_path).await?;
             return Ok(MemoryPersistenceOutcome::DurableWritten {
@@ -579,6 +605,18 @@ fn hosted_memory_candidate_reason(config: &HostedReviewConfig) -> String {
         source_trust_label(config.memory_source_trust()),
         source_trust_label(config.memory_trust_threshold())
     )
+}
+
+fn memory_secret_labels(memories: &[ExtractedMemory]) -> Vec<String> {
+    let mut labels = Vec::new();
+    for memory in memories {
+        for finding in scan_for_secrets(&memory.content) {
+            if !labels.iter().any(|label| label == &finding.label) {
+                labels.push(finding.label);
+            }
+        }
+    }
+    labels
 }
 
 fn source_trust_label(trust: MemorySourceTrust) -> &'static str {
@@ -958,6 +996,50 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             candidate.rejection_reason.as_deref(),
             Some("hosted-approval-required")
         );
+    }
+
+    #[tokio::test]
+    async fn hosted_secret_memory_writes_redaction_candidate_without_secret_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let candidate_store = MemoryCandidateStore::for_working_dir(dir.path());
+        let secret = format!("ghp_{}", "A".repeat(36));
+        let memories = vec![ExtractedMemory {
+            content: format!("Store token {secret} for later"),
+            category: MemoryCategory::Constraint,
+            confidence: 0.9,
+            source_trust: MemorySourceTrust::Unknown,
+        }];
+        let config = HostedReviewConfig {
+            enabled: true,
+            allow_auto_memory_persistence: true,
+            memory_source_trust: MemorySourceTrust::MaintainerApproved,
+            ..Default::default()
+        };
+
+        let outcome = SessionMemoryExtractor::persist_with_policy(
+            &memories,
+            &target,
+            &candidate_store,
+            RuntimeMode::HostedReview,
+            &config,
+            "session:test-session;source:session-memory-extraction",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            MemoryPersistenceOutcome::CandidatesWritten { .. }
+        ));
+        assert!(!target.exists());
+        let candidate_dir = dir.path().join(".coven-code").join("memory-candidates");
+        let mut entries = fs::read_dir(&candidate_dir).await.unwrap();
+        let entry = entries.next_entry().await.unwrap().unwrap();
+        let candidate_text = fs::read_to_string(entry.path()).await.unwrap();
+        assert!(candidate_text.contains("redaction-required"));
+        assert!(candidate_text.contains("GitHub personal access token"));
+        assert!(!candidate_text.contains(&secret));
     }
 
     #[tokio::test]

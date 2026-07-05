@@ -14,6 +14,7 @@
 // and values are the UTF-8 file contents (JSON or Markdown).
 
 use crate::hosted_review::{hosted_project_id, HostedReviewScope};
+use crate::team_memory_sync::scan_for_secrets;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
@@ -288,6 +289,8 @@ impl SettingsSyncManager {
     ///
     /// Compares with existing remote entries and only uploads changed keys.
     pub async fn upload(&self, local_entries: HashMap<String, String>) -> Result<()> {
+        let local_entries = filter_entries_with_secrets(local_entries, "Settings sync");
+
         // Fetch current remote state for diff
         let remote_entries = match self.download().await? {
             Some(data) => data.memory_files,
@@ -350,6 +353,31 @@ impl SettingsSyncManager {
             }
         });
     }
+}
+
+fn filter_entries_with_secrets(
+    entries: HashMap<String, String>,
+    context: &str,
+) -> HashMap<String, String> {
+    entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let secrets = scan_for_secrets(&value);
+            if secrets.is_empty() {
+                return Some((key, value));
+            }
+
+            let labels: Vec<&str> = secrets.iter().map(|m| m.label.as_str()).collect();
+            warn!(
+                "{}: blocking {:?} from upload: detected {} ({} secret pattern(s))",
+                context,
+                key,
+                labels.join(", "),
+                labels.len(),
+            );
+            None
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +569,20 @@ mod tests {
         let data = entries_to_synced_data(HashMap::new());
         assert!(data.settings.is_none());
         assert!(data.memory_files.is_empty());
+    }
+
+    #[test]
+    fn filter_entries_with_secrets_blocks_secret_values() {
+        let mut entries = HashMap::new();
+        let secret = format!("ghp_{}", "A".repeat(36));
+        entries.insert(SYNC_KEY_USER_MEMORY.to_string(), format!("token={secret}"));
+        entries.insert("safe.md".to_string(), "# Safe".to_string());
+
+        let filtered = filter_entries_with_secrets(entries, "test");
+
+        assert!(filtered.contains_key("safe.md"));
+        assert!(!filtered.contains_key(SYNC_KEY_USER_MEMORY));
+        assert!(!filtered.values().any(|value| value.contains(&secret)));
     }
 
     #[test]

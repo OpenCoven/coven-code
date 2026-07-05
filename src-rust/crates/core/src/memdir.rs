@@ -410,6 +410,26 @@ fn hosted_memory_path(scope: &HostedReviewScope) -> PathBuf {
         .join("memory")
 }
 
+pub fn hosted_memory_path_for_scope(scope: &HostedReviewScope) -> PathBuf {
+    hosted_memory_path(scope)
+}
+
+pub fn delete_hosted_memory_for_scope(scope: &HostedReviewScope) -> std::io::Result<()> {
+    let path = hosted_memory_path(scope);
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+pub fn redact_memory_file(path: &Path, reason: &str) -> std::io::Result<()> {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let stub = format!(
+        "---\nredacted_at: {timestamp}\nretention_class: security\nsource: redaction\n---\n\n[REDACTED: {reason}]\n"
+    );
+    std::fs::write(path, stub)
+}
+
 /// Sanitize an arbitrary string into a directory-name-safe component.
 /// Matches `sanitizePath` used inside `getAutoMemPath` in `paths.ts`.
 pub fn sanitize_path_component(s: &str) -> String {
@@ -1028,5 +1048,47 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(first, branch);
         assert!(branch.to_string_lossy().contains("branch-feature_review"));
+    }
+
+    #[test]
+    fn hosted_memory_delete_removes_scope_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
+        let scope = crate::hosted_review::HostedReviewScope::new(
+            "tenant-delete".to_string(),
+            "install-delete".to_string(),
+            "repo-delete".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let path = hosted_memory_path_for_scope(&scope);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("MEMORY.md"), "delete me").unwrap();
+
+        delete_hosted_memory_for_scope(&scope).unwrap();
+
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn redact_memory_file_preserves_audit_stub_without_original_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MEMORY.md");
+        std::fs::write(&path, "secret incident detail").unwrap();
+
+        redact_memory_file(&path, "operator request").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("redacted_at:"));
+        assert!(content.contains("[REDACTED: operator request]"));
+        assert!(!content.contains("secret incident detail"));
     }
 }
