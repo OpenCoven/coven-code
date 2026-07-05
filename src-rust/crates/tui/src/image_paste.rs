@@ -306,10 +306,11 @@ fn try_save_linux_image(path: &PathBuf) -> bool {
             .args(["-selection", "clipboard", "-t", "image/png", "-o"])
             .output()
         {
-            if out.status.success() && !out.stdout.is_empty() {
-                if std::fs::write(path, &out.stdout).is_ok() {
-                    return true;
-                }
+            if out.status.success()
+                && !out.stdout.is_empty()
+                && std::fs::write(path, &out.stdout).is_ok()
+            {
+                return true;
             }
         }
     }
@@ -320,10 +321,11 @@ fn try_save_linux_image(path: &PathBuf) -> bool {
             .args(["--type", "image/png"])
             .output()
         {
-            if out.status.success() && !out.stdout.is_empty() {
-                if std::fs::write(path, &out.stdout).is_ok() {
-                    return true;
-                }
+            if out.status.success()
+                && !out.stdout.is_empty()
+                && std::fs::write(path, &out.stdout).is_ok()
+            {
+                return true;
             }
         }
     }
@@ -427,14 +429,13 @@ fn write_text_windows_w(text: &str) -> bool {
     use std::io::Write;
     use std::process::Stdio;
     // PowerShell Set-Clipboard reads from stdin via pipe
-    let script = "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard"
-        .to_string();
+    let script = "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard";
     let powershell = match trusted_windows_powershell() {
         Some(path) => path,
         None => return false,
     };
     let mut child = match Command::new(powershell)
-        .args(["-NoProfile", "-Command", &script])
+        .args(["-NoProfile", "-Command", script])
         .stdin(Stdio::piped())
         .spawn()
     {

@@ -425,8 +425,10 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
         let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
         std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
 
         let files =
             load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
@@ -438,6 +440,10 @@ mod tests {
         match original_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
 
         assert!(files.iter().all(|file| file.scope != MemoryScope::User));
@@ -506,8 +512,10 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
         let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
         std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
 
         let files = load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::local());
 
@@ -518,6 +526,10 @@ mod tests {
         match original_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
 
         assert!(files
