@@ -10,6 +10,8 @@
 //   Linux  : xclip / wl-paste
 //   Windows: PowerShell Get-Clipboard
 
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
