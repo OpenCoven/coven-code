@@ -6,6 +6,7 @@
 //!
 //! Pull is server-wins: remote content overwrites local files unconditionally.
 
+use crate::hosted_review::{hosted_team_memory_repo_key, HostedReviewScope};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -132,6 +133,24 @@ impl TeamMemorySync {
             token,
             team_dir,
         }
+    }
+
+    pub fn hosted(
+        api_base: String,
+        scope: &HostedReviewScope,
+        token: String,
+        team_dir: PathBuf,
+    ) -> Self {
+        Self::new(
+            api_base,
+            hosted_team_memory_repo_key(scope),
+            token,
+            team_dir,
+        )
+    }
+
+    pub fn repo_key(&self) -> &str {
+        &self.repo
     }
 
     // -----------------------------------------------------------------------
@@ -497,6 +516,40 @@ mod tests {
     #[test]
     fn test_checksum_distinct() {
         assert_ne!(content_checksum("foo"), content_checksum("bar"));
+    }
+
+    #[test]
+    fn hosted_team_memory_key_splits_installations_for_same_repo_name() {
+        let tmp = TempDir::new().unwrap();
+        let first = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let second = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-2".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        let first_sync = TeamMemorySync::hosted(
+            "https://example.com".to_string(),
+            &first,
+            "token".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let second_sync = TeamMemorySync::hosted(
+            "https://example.com".to_string(),
+            &second,
+            "token".to_string(),
+            tmp.path().to_path_buf(),
+        );
+
+        assert_ne!(first_sync.repo_key(), second_sync.repo_key());
+        assert!(first_sync.repo_key().contains("installations/install-1"));
+        assert!(second_sync.repo_key().contains("installations/install-2"));
     }
 
     // --- validate_memory_path ---

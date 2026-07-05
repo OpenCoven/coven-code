@@ -377,7 +377,7 @@ pub fn auto_memory_path_for_mode(
         RuntimeMode::HostedReview => {
             let scope = scope.ok_or_else(|| {
                 crate::ClaudeError::Config(
-                    "hosted review memory persistence requires tenant scope and canonical repo identity"
+                    "hosted review memory persistence requires tenant scope, installation scope, and canonical repo identity"
                         .to_string(),
                 )
             })?;
@@ -400,9 +400,13 @@ fn hosted_memory_path(scope: &HostedReviewScope) -> PathBuf {
     crate::config::Settings::config_dir()
         .join("hosted-review")
         .join("tenants")
-        .join(sanitize_path_component(&scope.tenant_id))
+        .join(scope.tenant_component())
+        .join("installations")
+        .join(scope.installation_component())
         .join("repos")
-        .join(sanitize_path_component(&scope.canonical_repo_identity))
+        .join(scope.repo_component())
+        .join("domains")
+        .join(scope.domain_component())
         .join("memory")
 }
 
@@ -956,7 +960,9 @@ mod tests {
         let project = PathBuf::from("/tmp/repo");
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
-            "github.com/OpenCoven/coven-code".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
         );
 
         let local = auto_memory_path(&project);
@@ -970,8 +976,57 @@ mod tests {
         assert_ne!(hosted, local);
         assert!(hosted.to_string_lossy().contains("hosted-review"));
         assert!(hosted.to_string_lossy().contains("tenant-a"));
-        assert!(hosted
-            .to_string_lossy()
-            .contains("github.com_OpenCoven_coven-code"));
+        assert!(hosted.to_string_lossy().contains("install-1"));
+        assert!(hosted.to_string_lossy().contains("repo-1"));
+        assert!(hosted.to_string_lossy().contains("default-branch"));
+    }
+
+    #[test]
+    fn hosted_memory_path_splits_installations_and_domains() {
+        let project = PathBuf::from("/tmp/repo");
+        let first_install = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let second_install = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-2".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let branch_domain = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        )
+        .with_domain(crate::hosted_review::MemoryDomain::Branch(
+            "feature/review".to_string(),
+        ));
+
+        let first = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&first_install),
+        )
+        .unwrap();
+        let second = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&second_install),
+        )
+        .unwrap();
+        let branch = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&branch_domain),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, branch);
+        assert!(branch.to_string_lossy().contains("branch-feature_review"));
     }
 }

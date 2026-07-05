@@ -531,8 +531,10 @@ Hosted review mode is enabled with `--hosted-review`,
 Coven Code does not load user-scope memory by default. The prompt records that
 hosted review mode is active and lists the AGENTS.md scopes that were loaded.
 Durable hosted memory and transcript namespaces are separated under a hosted
-review path and require tenant scope plus a canonical repository identity before
-they can be resolved for persistence.
+review path and require tenant scope, GitHub App installation id, stable repo
+id, and canonical repository identity before they can be resolved for
+persistence. Hosted namespaces include a domain component so default branch,
+branch, pull-request, release, and security-private memory stay separated.
 
 Hosted review mode also disables write/execute-capable tools, configured MCP
 servers, plugins, user memory, and managed rules by default. Trusted hosted

@@ -10363,6 +10363,8 @@ pub(crate) mod test_env {
 
     pub(crate) struct CommandEnvGuard {
         old_home: Option<String>,
+        old_test_home: Option<String>,
+        old_userprofile: Option<String>,
         old_coven_home: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
@@ -10376,6 +10378,8 @@ pub(crate) mod test_env {
             let lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
             let guard = Self {
                 old_home: std::env::var("HOME").ok(),
+                old_test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
+                old_userprofile: std::env::var("USERPROFILE").ok(),
                 old_coven_home: std::env::var("COVEN_HOME").ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
@@ -10384,6 +10388,8 @@ pub(crate) mod test_env {
                 _lock: lock,
             };
             std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_CODE_TEST_HOME", home);
+            std::env::set_var("USERPROFILE", home);
             std::env::set_var("COVEN_HOME", coven_home);
             match user {
                 Some(value) => std::env::set_var("USER", value),
@@ -10414,6 +10420,14 @@ pub(crate) mod test_env {
             match &self.old_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
             }
             match &self.old_coven_home {
                 Some(value) => std::env::set_var("COVEN_HOME", value),

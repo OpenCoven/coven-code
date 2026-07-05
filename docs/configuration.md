@@ -129,8 +129,11 @@ Or in `settings.json`:
 When hosted review mode is active, Coven Code skips user-scope memory
 (`~/.coven-code/AGENTS.md` and `~/.coven-code/CLAUDE.md`) by default, marks
 new session artifacts as hosted review artifacts, and requires a tenant plus
-canonical repository identity before resolving hosted durable memory paths.
-Local-personal mode remains the default and continues to load user memory.
+GitHub App installation id, stable repository id, and canonical repository
+identity before resolving hosted durable memory paths. Hosted memory and
+transcripts are also split by memory domain, such as default branch, named
+branch, pull request, release, or security-private review. Local-personal mode
+remains the default and continues to load user memory.
 
 Hosted review also disables write/execute-capable tools, configured MCP
 servers, and plugins by default. A trusted hosted policy can opt individual

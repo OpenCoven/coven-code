@@ -47,7 +47,18 @@ pub struct DiscoveredCredential {
 // ---------------------------------------------------------------------------
 
 fn claude_code_credentials_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".claude").join(".credentials.json"))
+    Some(cli_home_dir()?.join(".claude").join(".credentials.json"))
+}
+
+fn cli_home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+
+    dirs::home_dir()
 }
 
 fn ant_credentials_dir() -> Option<PathBuf> {

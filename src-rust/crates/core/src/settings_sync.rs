@@ -13,6 +13,7 @@
 // The sync API stores a flat key→value map where keys are canonical file paths
 // and values are the UTF-8 file contents (JSON or Markdown).
 
+use crate::hosted_review::{hosted_project_id, HostedReviewScope};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,6 +49,18 @@ pub fn sync_key_project_settings(project_id: &str) -> String {
 /// Canonical sync key for per-project memory (keyed by git-remote hash).
 pub fn sync_key_project_memory(project_id: &str) -> String {
     format!("projects/{project_id}/AGENTS.local.md")
+}
+
+/// Canonical hosted project settings key. The project id is derived from
+/// tenant, installation, and repo id rather than accepted from a caller.
+pub fn sync_key_hosted_project_settings(scope: &HostedReviewScope) -> String {
+    sync_key_project_settings(&hosted_project_id(scope))
+}
+
+/// Canonical hosted project memory key. The project id is derived from
+/// tenant, installation, and repo id rather than accepted from a caller.
+pub fn sync_key_hosted_project_memory(scope: &HostedReviewScope) -> String {
+    sync_key_project_memory(&hosted_project_id(scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +423,11 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
     entries
 }
 
+pub async fn collect_hosted_entries(scope: &HostedReviewScope) -> HashMap<String, String> {
+    let project_id = hosted_project_id(scope);
+    collect_local_entries(Some(&project_id)).await
+}
+
 /// Try to read a file, applying the 500 KB size limit.
 /// Returns `None` if the file doesn't exist, is empty, or exceeds the limit.
 async fn try_read_for_sync(path: &PathBuf) -> Option<String> {
@@ -469,6 +487,25 @@ mod tests {
         assert_eq!(
             sync_key_project_memory("abc123"),
             "projects/abc123/AGENTS.local.md"
+        );
+    }
+
+    #[test]
+    fn hosted_sync_keys_derive_project_id_from_scope() {
+        let scope = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        assert_eq!(
+            sync_key_hosted_project_settings(&scope),
+            "projects/hosted-tenant-tenant-a-installation-install-1-repo-repo-99/.coven-code/settings.local.json"
+        );
+        assert_eq!(
+            sync_key_hosted_project_memory(&scope),
+            "projects/hosted-tenant-tenant-a-installation-install-1-repo-repo-99/AGENTS.local.md"
         );
     }
 

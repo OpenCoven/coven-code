@@ -253,18 +253,20 @@ pub fn transcript_dir_for_mode(
         RuntimeMode::HostedReview => {
             let scope = scope.ok_or_else(|| {
                 crate::ClaudeError::Config(
-                    "hosted review transcript persistence requires tenant scope and canonical repo identity"
+                    "hosted review transcript persistence requires tenant scope, installation scope, and canonical repo identity"
                         .to_string(),
                 )
             })?;
             Ok(projects_dir()
                 .join("hosted-review")
                 .join("tenants")
-                .join(crate::memdir::sanitize_path_component(&scope.tenant_id))
+                .join(scope.tenant_component())
+                .join("installations")
+                .join(scope.installation_component())
                 .join("repos")
-                .join(crate::memdir::sanitize_path_component(
-                    &scope.canonical_repo_identity,
-                ))
+                .join(scope.repo_component())
+                .join("domains")
+                .join(scope.domain_component())
                 .join("transcripts"))
         }
     }
@@ -832,7 +834,9 @@ mod tests {
     fn hosted_transcript_path_uses_separate_namespace() {
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
-            "github.com/OpenCoven/coven-code".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
         );
         let local = transcript_path(Path::new("/tmp/repo"), "sess-1");
         let hosted = transcript_path_for_mode(
@@ -846,6 +850,57 @@ mod tests {
         assert_ne!(hosted, local);
         assert!(hosted.to_string_lossy().contains("hosted-review"));
         assert!(hosted.to_string_lossy().contains("tenant-a"));
+        assert!(hosted.to_string_lossy().contains("install-1"));
+        assert!(hosted.to_string_lossy().contains("repo-1"));
+    }
+
+    #[test]
+    fn hosted_transcript_path_splits_repos_and_domains() {
+        let repo_one = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let repo_two = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-2".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let security_domain = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        )
+        .with_domain(crate::hosted_review::MemoryDomain::SecurityPrivate);
+
+        let first = transcript_path_for_mode(
+            Path::new("/tmp/repo"),
+            "sess-1",
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&repo_one),
+        )
+        .unwrap();
+        let second = transcript_path_for_mode(
+            Path::new("/tmp/repo"),
+            "sess-1",
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&repo_two),
+        )
+        .unwrap();
+        let security = transcript_path_for_mode(
+            Path::new("/tmp/repo"),
+            "sess-1",
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&security_domain),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, security);
+        assert!(security.to_string_lossy().contains("security-private"));
     }
 
     #[test]
