@@ -7420,22 +7420,22 @@ role = "Research"
 
     #[test]
     fn windows_system_root_prefers_absolute_system_root() {
-        let root = windows_system_root_from_env(
-            Some(std::ffi::OsString::from(r"C:\Windows")),
-            Some(std::ffi::OsString::from(r"D:\WinDir")),
-        );
+        let system_root = std::env::temp_dir().join("windows-root").into_os_string();
+        let windir = std::env::temp_dir().join("windir").into_os_string();
+        let root = windows_system_root_from_env(Some(system_root.clone()), Some(windir));
 
-        assert_eq!(root, std::ffi::OsString::from(r"C:\Windows"));
+        assert_eq!(root, system_root);
     }
 
     #[test]
     fn windows_system_root_falls_back_to_absolute_windir() {
+        let windir = std::env::temp_dir().join("windir").into_os_string();
         let root = windows_system_root_from_env(
             Some(std::ffi::OsString::from("relative-system-root")),
-            Some(std::ffi::OsString::from(r"D:\WinDir")),
+            Some(windir.clone()),
         );
 
-        assert_eq!(root, std::ffi::OsString::from(r"D:\WinDir"));
+        assert_eq!(root, windir);
     }
 
     #[test]
