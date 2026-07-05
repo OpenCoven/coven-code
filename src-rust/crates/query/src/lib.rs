@@ -32,7 +32,8 @@ pub use compact::{
 pub use cron_scheduler::start_cron_scheduler;
 pub use goal_loop::{check_and_continue_goal, mark_goal_complete, GoalContinuation, StopReason};
 pub use session_memory::{
-    ExtractedMemory, MemoryCategory, SessionMemoryExtractor, SessionMemoryState,
+    ExtractedMemory, MemoryCandidate, MemoryCandidateStatus, MemoryCandidateStore, MemoryCategory,
+    MemoryPersistenceOutcome, SessionMemoryExtractor, SessionMemoryState,
 };
 pub use skill_prefetch::{
     format_skill_listing, prefetch_skills, SharedSkillIndex, SkillDefinition, SkillIndex,
@@ -1956,6 +1957,8 @@ pub async fn run_query_loop(
                     let model_clone = config.model.clone();
                     let messages_clone = messages.clone();
                     let working_dir_clone = tool_ctx.working_dir.clone();
+                    let runtime_mode = tool_ctx.config.runtime_mode();
+                    let hosted_review_config = tool_ctx.config.hosted_review.clone();
 
                     // Build a fresh client using the same API key.  This avoids
                     // requiring an Arc in the existing run_query_loop signature.
@@ -1979,15 +1982,22 @@ pub async fn run_query_loop(
                                             let target = working_dir_clone
                                                 .join(".coven-code")
                                                 .join("AGENTS.md");
-                                            if let Err(e) =
-                                                session_memory::SessionMemoryExtractor::persist(
-                                                    &memories, &target,
-                                                )
-                                                .await
+                                            let candidate_store =
+                                                session_memory::MemoryCandidateStore::for_working_dir(
+                                                    &working_dir_clone,
+                                                );
+                                            if let Err(e) = session_memory::SessionMemoryExtractor::persist_with_policy(
+                                                &memories,
+                                                &target,
+                                                &candidate_store,
+                                                runtime_mode,
+                                                &hosted_review_config,
+                                            )
+                                            .await
                                             {
                                                 tracing::warn!(
                                                     error = %e,
-                                                    "Failed to persist session memories"
+                                                    "Failed to store session memories"
                                                 );
                                             }
                                         }

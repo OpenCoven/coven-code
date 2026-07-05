@@ -157,6 +157,35 @@ shared surfaces back in:
 review jobs should prefer tenant-approved managed rules over operator-global
 user memory.
 
+Auto-extracted memories are approval-gated in hosted review mode. By default,
+hosted sessions write reviewable JSON candidates under
+`.coven-code/memory-candidates/` instead of appending directly to durable
+`.coven-code/AGENTS.md` memory. Each candidate records content, category,
+confidence, provenance, source trust, proposed scope, proposed visibility,
+status, and any rejection reason.
+
+Trusted deployments can opt into direct durable writes only when the source
+trust meets the configured threshold:
+
+```json
+{
+  "config": {
+    "hostedReview": {
+      "enabled": true,
+      "allowAutoMemoryPersistence": true,
+      "memorySourceTrust": "maintainer-approved",
+      "memoryTrustThreshold": "maintainer-approved"
+    }
+  }
+}
+```
+
+Supported `memorySourceTrust` and `memoryTrustThreshold` values are
+`system-policy`, `maintainer-approved`, `default-branch-code`,
+`contributor-input`, `fork-input`, `model-inferred`, and `unknown`.
+Untrusted fork or contributor contexts should leave durable persistence
+disabled and promote only reviewed candidates.
+
 ### Tool access
 
 | Key | Type | Default | Description |

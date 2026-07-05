@@ -543,6 +543,20 @@ policy settings such as `hostedReview.allowManagedRules`,
 `hostedReview.allowPlugins` can opt specific surfaces back in for controlled
 deployments. Prefer tenant-approved managed rules over `allowUserMemory`.
 
+Session memory extraction is also approval-gated in hosted review mode.
+Untrusted fork or contributor sessions cannot automatically append learned
+facts to durable `.coven-code/AGENTS.md` memory. Instead, extracted memories
+are written as JSON candidates under `.coven-code/memory-candidates/` with
+content, semantic category, confidence, provenance, source trust, proposed
+scope, proposed visibility, status, and rejection reason metadata. Approved
+candidates can be promoted into durable memory as maintainer-approved entries;
+rejected candidates remain artifacts and are not loaded into future prompts.
+
+Direct hosted auto-persistence requires an explicit trusted policy:
+`hostedReview.allowAutoMemoryPersistence` must be true and
+`hostedReview.memorySourceTrust` must meet or exceed
+`hostedReview.memoryTrustThreshold`.
+
 ---
 
 ## Security and permissions

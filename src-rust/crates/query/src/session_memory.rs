@@ -18,9 +18,11 @@ use claurst_api::{
     AnthropicStreamEvent, ApiMessage, CreateMessageRequest, StreamAccumulator, StreamHandler,
     SystemPrompt,
 };
+use claurst_core::hosted_review::{HostedReviewConfig, MemorySourceTrust, RuntimeMode};
 use claurst_core::types::{Message, Role};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tracing::{debug, info, warn};
@@ -40,7 +42,8 @@ const MIN_TOOL_CALLS_BETWEEN_EXTRACTIONS: usize = 3;
 // ---------------------------------------------------------------------------
 
 /// Category of an extracted memory entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MemoryCategory {
     UserPreference,
     ProjectFact,
@@ -75,7 +78,8 @@ impl MemoryCategory {
 }
 
 /// A single fact extracted from the conversation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtractedMemory {
     /// The fact to remember, as a markdown bullet point or sentence.
     pub content: String,
@@ -83,6 +87,172 @@ pub struct ExtractedMemory {
     pub category: MemoryCategory,
     /// Model confidence, 0.0–1.0.
     pub confidence: f32,
+    #[serde(default)]
+    pub source_trust: MemorySourceTrust,
+}
+
+impl ExtractedMemory {
+    pub fn with_source_trust(mut self, source_trust: MemorySourceTrust) -> Self {
+        self.source_trust = source_trust;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryCandidateStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+/// A reviewable memory candidate written by hosted review mode instead of
+/// directly mutating durable AGENTS.md memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCandidate {
+    pub id: String,
+    pub content: String,
+    pub category: MemoryCategory,
+    pub confidence: f32,
+    pub provenance: String,
+    pub source_trust: MemorySourceTrust,
+    pub proposed_scope: String,
+    pub proposed_visibility: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_expiry: Option<String>,
+    pub status: MemoryCandidateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+    pub created_at: String,
+}
+
+impl MemoryCandidate {
+    fn from_memory(
+        memory: &ExtractedMemory,
+        provenance: &str,
+        proposed_scope: &str,
+        proposed_visibility: &str,
+        rejection_reason: Option<&str>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: memory.content.clone(),
+            category: memory.category.clone(),
+            confidence: memory.confidence,
+            provenance: provenance.to_string(),
+            source_trust: memory.source_trust,
+            proposed_scope: proposed_scope.to_string(),
+            proposed_visibility: proposed_visibility.to_string(),
+            suggested_expiry: None,
+            status: MemoryCandidateStatus::Pending,
+            rejection_reason: rejection_reason.map(str::to_string),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn to_approved_memory(&self) -> ExtractedMemory {
+        ExtractedMemory {
+            content: self.content.clone(),
+            category: self.category.clone(),
+            confidence: self.confidence,
+            source_trust: MemorySourceTrust::MaintainerApproved,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryCandidateStore {
+    root: PathBuf,
+}
+
+impl MemoryCandidateStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn for_working_dir(working_dir: &Path) -> Self {
+        Self::new(working_dir.join(".coven-code").join("memory-candidates"))
+    }
+
+    pub async fn write_pending(
+        &self,
+        memories: &[ExtractedMemory],
+        provenance: &str,
+        proposed_scope: &str,
+        proposed_visibility: &str,
+        rejection_reason: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryCandidate>> {
+        if memories.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        fs::create_dir_all(&self.root).await?;
+        let mut candidates = Vec::with_capacity(memories.len());
+        for memory in memories {
+            let candidate = MemoryCandidate::from_memory(
+                memory,
+                provenance,
+                proposed_scope,
+                proposed_visibility,
+                rejection_reason,
+            );
+            self.write_candidate(&candidate).await?;
+            candidates.push(candidate);
+        }
+        Ok(candidates)
+    }
+
+    pub async fn approve(
+        &self,
+        candidate_id: &str,
+        target_path: &Path,
+    ) -> anyhow::Result<MemoryCandidate> {
+        let mut candidate = self.read_candidate(candidate_id).await?;
+        candidate.status = MemoryCandidateStatus::Approved;
+        candidate.source_trust = MemorySourceTrust::MaintainerApproved;
+        candidate.rejection_reason = None;
+        SessionMemoryExtractor::persist(&[candidate.to_approved_memory()], target_path).await?;
+        self.write_candidate(&candidate).await?;
+        Ok(candidate)
+    }
+
+    pub async fn reject(
+        &self,
+        candidate_id: &str,
+        reason: impl Into<String>,
+    ) -> anyhow::Result<MemoryCandidate> {
+        let mut candidate = self.read_candidate(candidate_id).await?;
+        candidate.status = MemoryCandidateStatus::Rejected;
+        candidate.rejection_reason = Some(reason.into());
+        self.write_candidate(&candidate).await?;
+        Ok(candidate)
+    }
+
+    pub async fn read_candidate(&self, candidate_id: &str) -> anyhow::Result<MemoryCandidate> {
+        let path = self.candidate_path(candidate_id);
+        let content = fs::read_to_string(path).await?;
+        Ok(serde_json::from_str(&content)?)
+    }
+
+    async fn write_candidate(&self, candidate: &MemoryCandidate) -> anyhow::Result<()> {
+        fs::create_dir_all(&self.root).await?;
+        let path = self.candidate_path(&candidate.id);
+        fs::write(path, serde_json::to_string_pretty(candidate)?).await?;
+        Ok(())
+    }
+
+    fn candidate_path(&self, candidate_id: &str) -> PathBuf {
+        self.root.join(format!("{candidate_id}.json"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryPersistenceOutcome {
+    DurableWritten { count: usize },
+    CandidatesWritten { count: usize, reason: String },
+    Skipped,
 }
 
 // ---------------------------------------------------------------------------
@@ -299,11 +469,17 @@ impl SessionMemoryExtractor {
         let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut new_block = format!("\n### Session memories — {}\n\n", date_str);
         for memory in memories {
+            let trust_label = if memory.source_trust.is_unknown() {
+                String::new()
+            } else {
+                format!(", trust: {}", source_trust_label(memory.source_trust))
+            };
             new_block.push_str(&format!(
-                "- **[{}]** {} *(confidence: {:.0}%)*\n",
+                "- **[{}]** {} *(confidence: {:.0}%{})*\n",
                 memory.category.label(),
                 memory.content,
-                memory.confidence * 100.0
+                memory.confidence * 100.0,
+                trust_label
             ));
         }
 
@@ -341,6 +517,78 @@ impl SessionMemoryExtractor {
         fs::write(target_path, updated).await?;
         info!(path = %target_path.display(), count = memories.len(), "Memories persisted");
         Ok(())
+    }
+
+    pub async fn persist_with_policy(
+        memories: &[ExtractedMemory],
+        target_path: &Path,
+        candidate_store: &MemoryCandidateStore,
+        mode: RuntimeMode,
+        hosted_config: &HostedReviewConfig,
+    ) -> anyhow::Result<MemoryPersistenceOutcome> {
+        if memories.is_empty() {
+            return Ok(MemoryPersistenceOutcome::Skipped);
+        }
+
+        if !mode.is_hosted_review() {
+            Self::persist(memories, target_path).await?;
+            return Ok(MemoryPersistenceOutcome::DurableWritten {
+                count: memories.len(),
+            });
+        }
+
+        let source_trust = hosted_config.memory_source_trust();
+        let trusted_memories: Vec<ExtractedMemory> = memories
+            .iter()
+            .cloned()
+            .map(|memory| memory.with_source_trust(source_trust))
+            .collect();
+
+        if hosted_config.allows_auto_memory_persistence() {
+            Self::persist(&trusted_memories, target_path).await?;
+            return Ok(MemoryPersistenceOutcome::DurableWritten {
+                count: trusted_memories.len(),
+            });
+        }
+
+        let reason = hosted_memory_candidate_reason(hosted_config);
+        let candidates = candidate_store
+            .write_pending(
+                &trusted_memories,
+                "session-memory-extraction",
+                "hosted-review",
+                "durable-memory",
+                Some(&reason),
+            )
+            .await?;
+        Ok(MemoryPersistenceOutcome::CandidatesWritten {
+            count: candidates.len(),
+            reason,
+        })
+    }
+}
+
+fn hosted_memory_candidate_reason(config: &HostedReviewConfig) -> String {
+    if !config.allow_auto_memory_persistence {
+        return "hosted-approval-required".to_string();
+    }
+
+    format!(
+        "source-trust-below-threshold:{}<{}",
+        source_trust_label(config.memory_source_trust()),
+        source_trust_label(config.memory_trust_threshold())
+    )
+}
+
+fn source_trust_label(trust: MemorySourceTrust) -> &'static str {
+    match trust {
+        MemorySourceTrust::SystemPolicy => "system-policy",
+        MemorySourceTrust::MaintainerApproved => "maintainer-approved",
+        MemorySourceTrust::DefaultBranchCode => "default-branch-code",
+        MemorySourceTrust::ContributorInput => "contributor-input",
+        MemorySourceTrust::ForkInput => "fork-input",
+        MemorySourceTrust::ModelInferred => "model-inferred",
+        MemorySourceTrust::Unknown => "unknown",
     }
 }
 
@@ -410,6 +658,7 @@ fn parse_extraction_response(response: &str) -> Vec<ExtractedMemory> {
             content,
             category,
             confidence,
+            source_trust: MemorySourceTrust::Unknown,
         });
     }
 
@@ -576,6 +825,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             content: "Uses async Rust".to_string(),
             category: MemoryCategory::ProjectFact,
             confidence: 0.9,
+            source_trust: MemorySourceTrust::Unknown,
         }];
 
         SessionMemoryExtractor::persist(&memories, &target)
@@ -602,6 +852,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             content: "Prefers explicit error handling".to_string(),
             category: MemoryCategory::UserPreference,
             confidence: 0.8,
+            source_trust: MemorySourceTrust::Unknown,
         }];
 
         SessionMemoryExtractor::persist(&memories, &target)
@@ -627,6 +878,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             content: "New fact discovered".to_string(),
             category: MemoryCategory::ProjectFact,
             confidence: 0.7,
+            source_trust: MemorySourceTrust::Unknown,
         }];
 
         SessionMemoryExtractor::persist(&memories, &target)
@@ -650,6 +902,167 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
 
         // File should NOT be created when there are no memories to persist
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn hosted_fork_session_writes_candidate_not_durable_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let candidate_dir = dir.path().join(".coven-code").join("memory-candidates");
+        let candidate_store = MemoryCandidateStore::new(&candidate_dir);
+        let memories = vec![ExtractedMemory {
+            content: "This fork claims auth checks are intentionally skipped".to_string(),
+            category: MemoryCategory::Constraint,
+            confidence: 0.9,
+            source_trust: MemorySourceTrust::Unknown,
+        }];
+        let config = HostedReviewConfig {
+            enabled: true,
+            memory_source_trust: MemorySourceTrust::ForkInput,
+            ..Default::default()
+        };
+
+        let outcome = SessionMemoryExtractor::persist_with_policy(
+            &memories,
+            &target,
+            &candidate_store,
+            RuntimeMode::HostedReview,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            MemoryPersistenceOutcome::CandidatesWritten {
+                count: 1,
+                reason: "hosted-approval-required".to_string()
+            }
+        );
+        assert!(!target.exists());
+
+        let mut entries = fs::read_dir(&candidate_dir).await.unwrap();
+        let entry = entries.next_entry().await.unwrap().unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+        let candidate: MemoryCandidate =
+            serde_json::from_str(&fs::read_to_string(entry.path()).await.unwrap()).unwrap();
+        assert_eq!(candidate.status, MemoryCandidateStatus::Pending);
+        assert_eq!(candidate.source_trust, MemorySourceTrust::ForkInput);
+        assert_eq!(
+            candidate.rejection_reason.as_deref(),
+            Some("hosted-approval-required")
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_maintainer_session_writes_durable_only_when_policy_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let candidate_store = MemoryCandidateStore::for_working_dir(dir.path());
+        let memories = vec![ExtractedMemory {
+            content: "Maintainers require explicit error handling".to_string(),
+            category: MemoryCategory::CodePattern,
+            confidence: 0.8,
+            source_trust: MemorySourceTrust::Unknown,
+        }];
+        let config = HostedReviewConfig {
+            enabled: true,
+            allow_auto_memory_persistence: true,
+            memory_source_trust: MemorySourceTrust::MaintainerApproved,
+            ..Default::default()
+        };
+
+        let outcome = SessionMemoryExtractor::persist_with_policy(
+            &memories,
+            &target,
+            &candidate_store,
+            RuntimeMode::HostedReview,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            MemoryPersistenceOutcome::DurableWritten { count: 1 }
+        );
+        let content = fs::read_to_string(&target).await.unwrap();
+        assert!(content.contains("Maintainers require explicit error handling"));
+        assert!(content.contains("trust: maintainer-approved"));
+        assert!(!dir
+            .path()
+            .join(".coven-code")
+            .join("memory-candidates")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn candidate_approval_promotes_to_durable_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let store = MemoryCandidateStore::for_working_dir(dir.path());
+        let memories = vec![ExtractedMemory {
+            content: "Approved candidate fact".to_string(),
+            category: MemoryCategory::ProjectFact,
+            confidence: 0.7,
+            source_trust: MemorySourceTrust::ContributorInput,
+        }];
+        let candidates = store
+            .write_pending(
+                &memories,
+                "session-memory-extraction",
+                "hosted-review",
+                "durable-memory",
+                Some("hosted-approval-required"),
+            )
+            .await
+            .unwrap();
+
+        let approved = store.approve(&candidates[0].id, &target).await.unwrap();
+
+        assert_eq!(approved.status, MemoryCandidateStatus::Approved);
+        assert_eq!(approved.source_trust, MemorySourceTrust::MaintainerApproved);
+        let content = fs::read_to_string(&target).await.unwrap();
+        assert!(content.contains("Approved candidate fact"));
+        assert!(content.contains("trust: maintainer-approved"));
+    }
+
+    #[tokio::test]
+    async fn candidate_rejection_records_reason_without_durable_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let store = MemoryCandidateStore::for_working_dir(dir.path());
+        let memories = vec![ExtractedMemory {
+            content: "Rejected candidate fact".to_string(),
+            category: MemoryCategory::ProjectFact,
+            confidence: 0.7,
+            source_trust: MemorySourceTrust::ContributorInput,
+        }];
+        let candidates = store
+            .write_pending(
+                &memories,
+                "session-memory-extraction",
+                "hosted-review",
+                "durable-memory",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let rejected = store
+            .reject(&candidates[0].id, "not-repo-policy")
+            .await
+            .unwrap();
+
+        assert_eq!(rejected.status, MemoryCandidateStatus::Rejected);
+        assert_eq!(
+            rejected.rejection_reason.as_deref(),
+            Some("not-repo-policy")
+        );
+        assert!(!target.exists());
+        let stored = store.read_candidate(&candidates[0].id).await.unwrap();
+        assert_eq!(stored.status, MemoryCandidateStatus::Rejected);
+        assert_eq!(stored.rejection_reason.as_deref(), Some("not-repo-policy"));
     }
 
     // ---- SessionMemoryState --------------------------------------------

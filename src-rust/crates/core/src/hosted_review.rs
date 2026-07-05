@@ -19,7 +19,7 @@ impl RuntimeMode {
 }
 
 /// Settings-backed hosted review configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostedReviewConfig {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -34,6 +34,31 @@ pub struct HostedReviewConfig {
     pub allow_mcp_servers: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_plugins: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_auto_memory_persistence: bool,
+    #[serde(default, skip_serializing_if = "MemorySourceTrust::is_unknown")]
+    pub memory_source_trust: MemorySourceTrust,
+    #[serde(
+        default = "default_memory_trust_threshold",
+        skip_serializing_if = "is_default_memory_trust_threshold"
+    )]
+    pub memory_trust_threshold: MemorySourceTrust,
+}
+
+impl Default for HostedReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_user_memory: false,
+            allow_managed_rules: false,
+            allow_write_tools: false,
+            allow_mcp_servers: false,
+            allow_plugins: false,
+            allow_auto_memory_persistence: false,
+            memory_source_trust: MemorySourceTrust::Unknown,
+            memory_trust_threshold: default_memory_trust_threshold(),
+        }
+    }
 }
 
 impl HostedReviewConfig {
@@ -44,7 +69,69 @@ impl HostedReviewConfig {
             && !self.allow_write_tools
             && !self.allow_mcp_servers
             && !self.allow_plugins
+            && !self.allow_auto_memory_persistence
+            && self.memory_source_trust == MemorySourceTrust::Unknown
+            && self.memory_trust_threshold == default_memory_trust_threshold()
     }
+
+    pub fn memory_source_trust(&self) -> MemorySourceTrust {
+        self.memory_source_trust
+    }
+
+    pub fn memory_trust_threshold(&self) -> MemorySourceTrust {
+        self.memory_trust_threshold
+    }
+
+    pub fn allows_auto_memory_persistence(&self) -> bool {
+        self.allow_auto_memory_persistence
+            && self
+                .memory_source_trust
+                .meets_threshold(self.memory_trust_threshold)
+    }
+}
+
+/// Trust classification for the source that produced or approved memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemorySourceTrust {
+    SystemPolicy,
+    MaintainerApproved,
+    DefaultBranchCode,
+    ContributorInput,
+    ForkInput,
+    ModelInferred,
+    #[default]
+    Unknown,
+}
+
+impl MemorySourceTrust {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    pub fn meets_threshold(self, threshold: Self) -> bool {
+        self.rank() >= threshold.rank()
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::ForkInput => 10,
+            Self::ContributorInput => 20,
+            Self::ModelInferred => 30,
+            Self::DefaultBranchCode => 60,
+            Self::MaintainerApproved => 80,
+            Self::SystemPolicy => 100,
+        }
+    }
+}
+
+fn default_memory_trust_threshold() -> MemorySourceTrust {
+    MemorySourceTrust::MaintainerApproved
+}
+
+fn is_default_memory_trust_threshold(value: &MemorySourceTrust) -> bool {
+    *value == default_memory_trust_threshold()
 }
 
 /// Canonical repository identity supplied by the hosted control plane or
@@ -325,6 +412,31 @@ mod tests {
             hosted_team_memory_repo_key(&scope),
             "tenants/tenant-a/installations/install-1/repos/repo-99/domains/pr-42"
         );
+    }
+
+    #[test]
+    fn memory_source_trust_enforces_threshold_order() {
+        assert!(MemorySourceTrust::MaintainerApproved
+            .meets_threshold(MemorySourceTrust::DefaultBranchCode));
+        assert!(!MemorySourceTrust::ContributorInput
+            .meets_threshold(MemorySourceTrust::MaintainerApproved));
+        assert!(!MemorySourceTrust::ForkInput.meets_threshold(MemorySourceTrust::ContributorInput));
+    }
+
+    #[test]
+    fn hosted_memory_persistence_requires_explicit_trusted_policy() {
+        let mut config = HostedReviewConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(!config.allows_auto_memory_persistence());
+
+        config.allow_auto_memory_persistence = true;
+        config.memory_source_trust = MemorySourceTrust::ContributorInput;
+        assert!(!config.allows_auto_memory_persistence());
+
+        config.memory_source_trust = MemorySourceTrust::MaintainerApproved;
+        assert!(config.allows_auto_memory_persistence());
     }
 
     #[test]
