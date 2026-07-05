@@ -10,7 +10,9 @@
 //   Linux  : xclip / wl-paste
 //   Windows: PowerShell Get-Clipboard
 
-use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[cfg(not(target_os = "windows"))]
@@ -425,14 +427,13 @@ fn write_text_windows_w(text: &str) -> bool {
     use std::io::Write;
     use std::process::Stdio;
     // PowerShell Set-Clipboard reads from stdin via pipe
-    let script =
-        format!("[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard");
+    let script = "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard";
     let powershell = match trusted_windows_powershell() {
         Some(path) => path,
         None => return false,
     };
     let mut child = match Command::new(powershell)
-        .args(["-NoProfile", "-Command", &script])
+        .args(["-NoProfile", "-Command", script])
         .stdin(Stdio::piped())
         .spawn()
     {

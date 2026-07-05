@@ -83,6 +83,17 @@ impl MemoryLoadOptions {
     }
 }
 
+fn memory_home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("COVEN_CODE_TEST_HOME") {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+
+    dirs::home_dir()
+}
+
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------
@@ -172,7 +183,7 @@ pub fn expand_includes(
             let path_str = path_str.trim();
             // Resolve relative to base_dir; expand ~ to home dir.
             let include_path = if path_str.starts_with('~') {
-                dirs::home_dir().unwrap_or_default().join(&path_str[2..])
+                memory_home_dir().unwrap_or_default().join(&path_str[2..])
             } else if Path::new(path_str).is_absolute() {
                 PathBuf::from(path_str)
             } else {
@@ -284,7 +295,7 @@ pub fn load_all_memory_files_with_options(
     let mut files = Vec::new();
 
     // 1. Managed: ~/.coven-code/rules/*.md
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = memory_home_dir() {
         if options.allow_managed_rules {
             let rules_dir = home.join(".coven-code/rules");
             if let Ok(entries) = std::fs::read_dir(&rules_dir) {
@@ -412,8 +423,12 @@ mod tests {
         let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
         let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
 
         let files =
             load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
@@ -421,6 +436,14 @@ mod tests {
         match original_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
 
         assert!(files.iter().all(|file| file.scope != MemoryScope::User));
@@ -442,14 +465,26 @@ mod tests {
         let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
         let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
 
         let files = load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::local());
 
         match original_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+        match original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
 
         assert!(files

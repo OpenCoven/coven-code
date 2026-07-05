@@ -1459,6 +1459,13 @@ pub mod config {
     impl Settings {
         /// The per-user configuration directory (`~/.coven-code`).
         pub fn config_dir() -> PathBuf {
+            #[cfg(test)]
+            if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+                if !home.is_empty() {
+                    return PathBuf::from(home).join(".coven-code");
+                }
+            }
+
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".coven-code")
@@ -4940,6 +4947,8 @@ mod tests {
     fn test_imported_anthropic_cli_token_resolves_without_coven_oauth_client() {
         struct EnvRestore {
             home: Option<String>,
+            test_home: Option<String>,
+            userprofile: Option<String>,
             api_key: Option<String>,
             client_id: Option<String>,
         }
@@ -4949,6 +4958,14 @@ mod tests {
                 match self.home.take() {
                     Some(value) => std::env::set_var("HOME", value),
                     None => std::env::remove_var("HOME"),
+                }
+                match self.test_home.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                    None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+                }
+                match self.userprofile.take() {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
                 }
                 match self.api_key.take() {
                     Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
@@ -4974,10 +4991,14 @@ mod tests {
         let temp_home = tempfile::tempdir().expect("temp home");
         let _restore = EnvRestore {
             home: std::env::var("HOME").ok(),
+            test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
+            userprofile: std::env::var("USERPROFILE").ok(),
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             client_id: std::env::var(crate::oauth::CLIENT_ID_ENV).ok(),
         };
         std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("COVEN_CODE_TEST_HOME", temp_home.path());
+        std::env::set_var("USERPROFILE", temp_home.path());
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var(crate::oauth::CLIENT_ID_ENV);
 
