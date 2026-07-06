@@ -43,6 +43,7 @@
         "mode",
         "evidence_status",
         "reviewed_files",
+        "supporting_files",
         "findings",
         "tests_run",
         "no_findings_reason",
@@ -58,6 +59,10 @@
           "enum": ["not_applicable", "complete", "partial", "missing"]
         },
         "reviewed_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "supporting_files": {
           "type": "array",
           "items": { "type": "string" }
         },

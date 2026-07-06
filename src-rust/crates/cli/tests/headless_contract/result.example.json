@@ -12,6 +12,7 @@
     "mode": "none",
     "evidence_status": "not_applicable",
     "reviewed_files": [],
+    "supporting_files": [],
     "findings": [],
     "tests_run": [
       {

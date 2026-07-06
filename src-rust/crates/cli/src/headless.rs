@@ -496,6 +496,7 @@ pub struct ReviewResult {
     pub mode: ReviewMode,
     pub evidence_status: ReviewEvidenceStatus,
     pub reviewed_files: Vec<String>,
+    pub supporting_files: Vec<String>,
     pub findings: Vec<ReviewFinding>,
     pub tests_run: Vec<ReviewTestRun>,
     pub no_findings_reason: Option<String>,
@@ -508,6 +509,7 @@ impl ReviewResult {
             mode: ReviewMode::None,
             evidence_status: ReviewEvidenceStatus::NotApplicable,
             reviewed_files: Vec::new(),
+            supporting_files: Vec::new(),
             findings: Vec::new(),
             tests_run: Vec::new(),
             no_findings_reason: None,
@@ -543,11 +545,16 @@ impl ReviewResult {
         } else {
             ReviewEvidenceStatus::Complete
         };
+        limitations.push(
+            "Supporting-code inspection is not yet trace-backed; supporting_files is empty until tool-read tracing is wired."
+                .to_string(),
+        );
 
         Self {
             mode,
             evidence_status,
             reviewed_files,
+            supporting_files: Vec::new(),
             findings: Vec::new(),
             tests_run: Vec::new(),
             no_findings_reason: Some(
@@ -1079,8 +1086,14 @@ mod tests {
             env.review.reviewed_files,
             vec!["src/lib.rs".to_string(), "README.md".to_string()]
         );
+        assert!(env.review.supporting_files.is_empty());
         assert!(env.review.findings.is_empty());
         assert!(env.review.no_findings_reason.is_some());
+        assert!(env
+            .review
+            .limitations
+            .iter()
+            .any(|item| item.contains("Supporting-code inspection")));
     }
 
     #[test]

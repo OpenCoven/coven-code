@@ -141,6 +141,7 @@ the file MAY be absent.
     "mode": "pull_request",
     "evidence_status": "complete",
     "reviewed_files": ["src/auth/refresh.rs"],
+    "supporting_files": ["src/auth/mod.rs", "tests/auth_refresh.rs"],
     "findings": [],
     "tests_run": [],
     "no_findings_reason": "Reviewed the supplied PR file and found no blocking issues.",
@@ -181,6 +182,7 @@ the intended code. It is required on every result. Non-review tasks MUST set
 | `mode` | string enum | `none`, `pull_request`, or `review_comment`. |
 | `evidence_status` | string enum | `not_applicable`, `complete`, `partial`, or `missing`. PR review modes MUST NOT use `not_applicable`. |
 | `reviewed_files` | string[] | Workspace-relative files supplied to or inspected by the runtime. PR review modes MUST include at least one file unless `evidence_status` is `missing`. |
+| `supporting_files` | string[] | Workspace-relative files beyond the changed-file list that the runtime can prove were inspected for context. Empty means no broader-codebase inspection was proven, not that none was needed. |
 | `findings` | array | Structured findings. Empty is allowed only when `no_findings_reason` is a non-empty string. |
 | `tests_run` | array | Commands run while reviewing, with `passed`, `failed`, `not_run`, or `unknown` status. |
 | `no_findings_reason` | string \| null | Required when `mode` is a review mode and `findings` is empty. |
