@@ -28,6 +28,8 @@
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
@@ -67,6 +69,8 @@ pub struct SessionBrief {
     pub workspace: WorkspaceBrief,
     #[serde(default)]
     pub review_context: Option<ReviewContext>,
+    #[serde(default)]
+    pub audit_instruction: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +227,25 @@ impl SessionBrief {
                 "Apply these skills where relevant: {}.",
                 self.familiar.skills.join(", ")
             ));
+        }
+
+        if self.review_mode() != ReviewMode::None {
+            lines.push(String::new());
+            lines.push(
+                "Review mode: inspect the changed files and read relevant supporting code before \
+                 reaching conclusions. Use Read, Grep, or Glob for the supporting context you rely on."
+                    .to_string(),
+            );
+        }
+
+        if let Some(instruction) = self
+            .audit_instruction
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            lines.push(String::new());
+            lines.push("Additional review instruction:".to_string());
+            lines.push(instruction.trim().to_string());
         }
 
         lines.push(String::new());
@@ -517,7 +540,7 @@ impl ReviewResult {
         }
     }
 
-    pub fn from_brief(brief: Option<&SessionBrief>) -> Self {
+    pub fn from_brief(brief: Option<&SessionBrief>, trace: Option<&ReviewTrace>) -> Self {
         let Some(brief) = brief else {
             return Self::none();
         };
@@ -538,6 +561,10 @@ impl ReviewResult {
             })
             .unwrap_or_default();
 
+        let supporting_files = trace
+            .map(|trace| trace.supporting_files(&reviewed_files))
+            .unwrap_or_default();
+
         let mut limitations = Vec::new();
         let evidence_status = if reviewed_files.is_empty() {
             limitations.push("No PR file evidence was supplied in the session brief.".to_string());
@@ -545,16 +572,18 @@ impl ReviewResult {
         } else {
             ReviewEvidenceStatus::Complete
         };
-        limitations.push(
-            "Supporting-code inspection is not yet trace-backed; supporting_files is empty until tool-read tracing is wired."
-                .to_string(),
-        );
+        if supporting_files.is_empty() {
+            limitations.push(
+                "No supporting-code file reads or search results were captured during this review."
+                    .to_string(),
+            );
+        }
 
         Self {
             mode,
             evidence_status,
             reviewed_files,
-            supporting_files: Vec::new(),
+            supporting_files,
             findings: Vec::new(),
             tests_run: Vec::new(),
             no_findings_reason: Some(
@@ -564,6 +593,170 @@ impl ReviewResult {
             limitations,
         }
     }
+}
+
+/// Files observed through read/search tool telemetry during headless review.
+#[derive(Debug, Default, Clone)]
+pub struct ReviewTrace {
+    workspace_root: PathBuf,
+    files: BTreeSet<String>,
+}
+
+impl ReviewTrace {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            files: BTreeSet::new(),
+        }
+    }
+
+    pub fn record_tool_start(&mut self, tool_name: &str, input_json: &str) {
+        let Ok(input) = serde_json::from_str::<Value>(input_json) else {
+            return;
+        };
+        match tool_name {
+            "Read" => {
+                if let Some(path) = input.get("file_path").and_then(Value::as_str) {
+                    self.record_path(path);
+                }
+            }
+            "Grep" => {
+                if let Some(path) = input.get("path").and_then(Value::as_str) {
+                    self.record_path(path);
+                }
+            }
+            "Glob" => {
+                if let Some(path) = input.get("path").and_then(Value::as_str) {
+                    self.record_path(path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn record_tool_end(&mut self, tool_name: &str, result: &str, is_error: bool) {
+        if is_error || !matches!(tool_name, "Grep" | "Glob") {
+            return;
+        }
+
+        for line in result
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if line.starts_with("No files matched")
+                || line.starts_with("No matches found")
+                || line.starts_with("...")
+                || line == "--"
+            {
+                continue;
+            }
+            if let Some(candidate) = path_prefix(line) {
+                self.record_path(candidate);
+            }
+        }
+    }
+
+    pub fn supporting_files(&self, reviewed_files: &[String]) -> Vec<String> {
+        let reviewed: BTreeSet<String> = reviewed_files
+            .iter()
+            .filter_map(|path| normalize_relative_path(path))
+            .collect();
+        self.files
+            .iter()
+            .filter(|path| !reviewed.contains(*path))
+            .cloned()
+            .collect()
+    }
+
+    fn record_path(&mut self, path: &str) {
+        if let Some(path) = self.normalize_path(path) {
+            self.files.insert(path);
+        }
+    }
+
+    fn normalize_path(&self, raw: &str) -> Option<String> {
+        let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let path = PathBuf::from(trimmed);
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            self.workspace_root.join(path)
+        };
+
+        let normalized = normalize_existing_or_lexical(&absolute);
+        let root = normalize_existing_or_lexical(&self.workspace_root);
+        let relative = normalized.strip_prefix(&root).ok()?;
+        normalize_relative_path(&relative.to_string_lossy())
+    }
+}
+
+fn normalize_existing_or_lexical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    })
+}
+
+fn normalize_relative_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.contains('\0')
+        || normalized.split('/').any(|part| part == "..")
+    {
+        return None;
+    }
+
+    let normalized = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn path_prefix(line: &str) -> Option<&str> {
+    let colon_search_start = if line.len() > 2 && line.as_bytes()[1] == b':' {
+        2
+    } else {
+        0
+    };
+    for (idx, _) in line
+        .char_indices()
+        .filter(|(idx, ch)| *ch == ':' && *idx >= colon_search_start && line[..*idx].contains('.'))
+    {
+        let candidate = &line[..idx];
+        if Path::new(candidate).extension().is_some() {
+            return Some(candidate);
+        }
+    }
+
+    if Path::new(line).extension().is_some() {
+        return Some(line);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -653,6 +846,7 @@ pub enum RunOutcome {
 pub struct HeadlessRun {
     pub outcome: RunOutcome,
     pub final_text: String,
+    pub review_trace: ReviewTrace,
 }
 
 /// Map a run outcome to the contract's `(status, exit_reason, exit_code)`.
@@ -700,6 +894,7 @@ pub fn build_result(
     git: &GitSummary,
     outcome: RunOutcome,
     final_text: &str,
+    review_trace: Option<&ReviewTrace>,
 ) -> (ResultEnvelope, i32) {
     let comment_only = brief.map(SessionBrief::is_comment_only).unwrap_or(false);
     let (status, exit_reason, code) = classify(outcome, !git.commits.is_empty(), comment_only);
@@ -715,7 +910,7 @@ pub fn build_result(
         files_changed: git.files_changed.clone(),
         summary,
         pr_body,
-        review: ReviewResult::from_brief(brief),
+        review: ReviewResult::from_brief(brief, review_trace),
         exit_reason,
     };
     (envelope, code)
@@ -739,7 +934,7 @@ pub fn infra_error_result(
         pr_body: format!(
             "## {name}\n\nThe headless session failed before completing the task:\n\n```\n{message}\n```"
         ),
-        review: ReviewResult::from_brief(brief),
+        review: ReviewResult::from_brief(brief, None),
         exit_reason: Some(ExitReason::InfraError),
     };
     (envelope, 2)
@@ -1045,6 +1240,7 @@ mod tests {
             &git,
             RunOutcome::Completed,
             "## Hey, I'm Cody\n\nAdded a 60s clock-skew buffer to the refresh path.",
+            None,
         );
         assert_eq!(code, 0);
         assert_eq!(env.status, Status::Success);
@@ -1077,6 +1273,7 @@ mod tests {
             &GitSummary::default(),
             RunOutcome::Completed,
             "Reviewed the PR.",
+            None,
         );
 
         assert_eq!(code, 0);
@@ -1093,7 +1290,85 @@ mod tests {
             .review
             .limitations
             .iter()
-            .any(|item| item.contains("Supporting-code inspection")));
+            .any(|item| item.contains("No supporting-code")));
+    }
+
+    #[test]
+    fn review_trace_records_supporting_files_and_filters_reviewed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "").unwrap();
+        std::fs::write(ws.join("src/support.rs"), "").unwrap();
+        std::fs::write(ws.join("src/config.rs"), "").unwrap();
+        std::fs::write(ws.join("README.md"), "").unwrap();
+
+        let mut trace = ReviewTrace::new(ws);
+        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
+        trace.record_tool_start(
+            "Read",
+            &format!(
+                r#"{{"file_path":"{}"}}"#,
+                ws.join("src/support.rs").display()
+            ),
+        );
+        trace.record_tool_end(
+            "Grep",
+            &format!(
+                "{}:12:fn helper() {{}}\n{}",
+                ws.join("src/config.rs").display(),
+                ws.join("README.md").display()
+            ),
+            false,
+        );
+        trace.record_tool_end("Glob", "src/lib.rs\nsrc/support.rs\n", false);
+        trace.record_tool_start("Read", r#"{"file_path":"../outside.rs"}"#);
+
+        assert_eq!(
+            trace.supporting_files(&["src/lib.rs".to_string()]),
+            vec![
+                "README.md".to_string(),
+                "src/config.rs".to_string(),
+                "src/support.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn review_result_uses_trace_backed_supporting_files() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "issue_mention",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "audit_instruction": "Inspect supporting code.",
+            "review_context": {
+                "kind": "pull_request",
+                "files": [
+                    { "filename": "src/lib.rs" }
+                ]
+            }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let mut trace = ReviewTrace::new("/tmp/ws");
+        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
+        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+
+        let (env, _) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "Reviewed the PR.",
+            Some(&trace),
+        );
+
+        assert_eq!(env.review.supporting_files, vec!["src/support.rs"]);
+        assert!(env.review.limitations.is_empty());
+        assert!(brief
+            .to_prompt()
+            .contains("Additional review instruction:\nInspect supporting code."));
     }
 
     #[test]
@@ -1169,6 +1444,7 @@ mod tests {
             &git,
             RunOutcome::Completed,
             "## Fixed it\n\nI added the buffer and it works now.",
+            None,
         );
         assert_eq!(
             env.pr_body,
@@ -1187,7 +1463,13 @@ mod tests {
             }],
             files_changed: vec!["a.rs".to_string(), "b.rs".to_string()],
         };
-        let (env, _) = build_result(Some(&sample_brief()), &git, RunOutcome::Completed, "   ");
+        let (env, _) = build_result(
+            Some(&sample_brief()),
+            &git,
+            RunOutcome::Completed,
+            "   ",
+            None,
+        );
         assert!(env.pr_body.contains("Cody"));
         assert!(env.pr_body.contains("`a.rs`"));
         assert!(env.summary.contains("1 commit"), "summary: {}", env.summary);

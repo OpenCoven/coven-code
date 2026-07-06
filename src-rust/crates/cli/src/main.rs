@@ -923,6 +923,7 @@ async fn main() -> anyhow::Result<()> {
                     &git_summary,
                     r.outcome,
                     &r.final_text,
+                    Some(&r.review_trace),
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),
@@ -1698,6 +1699,7 @@ async fn run_headless(
 
     // Drain events and print streaming text
     let mut full_text = String::new();
+    let mut review_trace = headless::ReviewTrace::new(tool_ctx.working_dir.clone());
 
     while let Some(event) = event_rx.recv().await {
         match &event {
@@ -1715,13 +1717,26 @@ async fn run_headless(
                     println!("{}", chunk);
                 }
             }
-            QueryEvent::ToolStart { tool_name, .. } => {
+            QueryEvent::ToolStart {
+                tool_name,
+                input_json,
+                ..
+            } => {
+                review_trace.record_tool_start(tool_name, input_json);
                 if !is_json_output {
                     eprintln!("\n[{}...]", tool_name);
                 } else {
                     let ev = serde_json::json!({ "type": "tool_start", "tool": tool_name });
                     println!("{}", ev);
                 }
+            }
+            QueryEvent::ToolEnd {
+                tool_name,
+                result,
+                is_error,
+                ..
+            } => {
+                review_trace.record_tool_end(tool_name, result, *is_error);
             }
             QueryEvent::Error(msg) => {
                 if is_json_output {
@@ -1842,6 +1857,7 @@ async fn run_headless(
     Ok(headless::HeadlessRun {
         outcome: run_outcome,
         final_text,
+        review_trace,
     })
 }
 
