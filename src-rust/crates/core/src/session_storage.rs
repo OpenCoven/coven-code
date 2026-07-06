@@ -273,8 +273,8 @@ pub fn transcript_dir_for_mode(
 }
 
 /// Returns the full path to a session's JSONL transcript file.
-pub fn transcript_path(project_root: &Path, session_id: &str) -> PathBuf {
-    transcript_dir(project_root).join(format!("{}.jsonl", session_id))
+pub fn transcript_path(project_root: &Path, session_id: &str) -> crate::Result<PathBuf> {
+    Ok(transcript_dir(project_root).join(transcript_filename(session_id)?))
 }
 
 pub fn transcript_path_for_mode(
@@ -283,7 +283,27 @@ pub fn transcript_path_for_mode(
     mode: RuntimeMode,
     scope: Option<&HostedReviewScope>,
 ) -> crate::Result<PathBuf> {
-    Ok(transcript_dir_for_mode(project_root, mode, scope)?.join(format!("{session_id}.jsonl")))
+    Ok(transcript_dir_for_mode(project_root, mode, scope)?.join(transcript_filename(session_id)?))
+}
+
+fn transcript_filename(session_id: &str) -> crate::Result<String> {
+    validate_session_id_component(session_id)?;
+    Ok(format!("{session_id}.jsonl"))
+}
+
+fn validate_session_id_component(session_id: &str) -> crate::Result<()> {
+    let is_safe_filename_component = !session_id.is_empty()
+        && session_id != "."
+        && session_id != ".."
+        && session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if !is_safe_filename_component {
+        return Err(crate::ClaudeError::Config(
+            "invalid transcript session id".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +825,7 @@ mod tests {
     #[test]
     fn transcript_path_encoding_is_reversible() {
         let root = Path::new("/Users/alice/my-project");
-        let path = transcript_path(root, "test-session");
+        let path = transcript_path(root, "test-session").unwrap();
         // The directory component after "projects/" should decode back to the root.
         let encoded_dir = path
             .parent()
@@ -832,6 +852,42 @@ mod tests {
     }
 
     #[test]
+    fn transcript_paths_reject_traversal_session_ids() {
+        let scope = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        for bad_id in [
+            "../outside",
+            "..\\outside",
+            "/tmp/outside",
+            "C:outside",
+            ".",
+            "..",
+            "",
+        ] {
+            let local_err = transcript_path(Path::new("/tmp/repo"), bad_id).unwrap_err();
+            assert!(local_err
+                .to_string()
+                .contains("invalid transcript session id"));
+
+            let hosted_err = transcript_path_for_mode(
+                Path::new("/tmp/repo"),
+                bad_id,
+                crate::hosted_review::RuntimeMode::HostedReview,
+                Some(&scope),
+            )
+            .unwrap_err();
+            assert!(hosted_err
+                .to_string()
+                .contains("invalid transcript session id"));
+        }
+    }
+
+    #[test]
     fn hosted_transcript_path_uses_separate_namespace() {
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
@@ -839,7 +895,7 @@ mod tests {
             "repo-1".to_string(),
             "OpenCoven/coven-code".to_string(),
         );
-        let local = transcript_path(Path::new("/tmp/repo"), "sess-1");
+        let local = transcript_path(Path::new("/tmp/repo"), "sess-1").unwrap();
         let hosted = transcript_path_for_mode(
             Path::new("/tmp/repo"),
             "sess-1",

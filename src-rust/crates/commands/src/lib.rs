@@ -8165,7 +8165,15 @@ impl SlashCommand for RevertCommand {
         // Truncate the session transcript at the target turn.
         let project_root = claurst_core::git_utils::get_repo_root(&ctx.working_dir)
             .unwrap_or_else(|| ctx.working_dir.clone());
-        let path = claurst_core::session_storage::transcript_path(&project_root, &ctx.session_id);
+        let path =
+            match claurst_core::session_storage::transcript_path(&project_root, &ctx.session_id) {
+                Ok(path) => path,
+                Err(e) => {
+                    return CommandResult::Error(format!(
+                        "Invalid session id for transcript lookup: {e}"
+                    ))
+                }
+            };
         if path.exists() {
             if let Err(e) = claurst_core::session_storage::truncate_after(&path, &target_uuid).await
             {
