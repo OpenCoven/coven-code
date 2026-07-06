@@ -84,6 +84,32 @@
       "properties": {
         "root": { "type": "string" }
       }
+    },
+    "audit_instruction": {
+      "type": ["string", "null"],
+      "description": "Additional review instruction supplied by the adapter."
+    },
+    "review_context": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "files"],
+      "properties": {
+        "kind": {
+          "type": ["string", "null"],
+          "enum": ["pull_request", null]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["filename"],
+            "properties": {
+              "filename": { "type": "string" }
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -113,6 +113,14 @@ impl MemorySourceTrust {
         self.rank() >= threshold.rank()
     }
 
+    pub fn capped_at(self, max: Self) -> Self {
+        if self.rank() > max.rank() {
+            max
+        } else {
+            self
+        }
+    }
+
     fn rank(self) -> u8 {
         match self {
             Self::Unknown => 0,
@@ -364,16 +372,20 @@ fn parse_scp_remote(remote_url: &str) -> Option<CanonicalRepoIdentity> {
 }
 
 fn safe_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
     let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-            out.push(ch);
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_') {
+            out.push(*byte as char);
         } else {
-            out.push('_');
+            out.push('~');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0F) as usize] as char);
         }
     }
     if out.is_empty() {
-        "unknown".to_string()
+        "~".to_string()
     } else {
         out
     }
@@ -412,6 +424,49 @@ mod tests {
             hosted_team_memory_repo_key(&scope),
             "tenants/tenant-a/installations/install-1/repos/repo-99/domains/pr-42"
         );
+    }
+
+    #[test]
+    fn hosted_scope_components_encode_traversal_and_separators() {
+        let scope = HostedReviewScope::new(
+            "..".to_string(),
+            "install/one".to_string(),
+            r"repo\one".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        )
+        .with_domain(MemoryDomain::Branch("../feature".to_string()));
+
+        assert_eq!(scope.tenant_component(), "~2E~2E");
+        assert_eq!(scope.installation_component(), "install~2Fone");
+        assert_eq!(scope.repo_component(), "repo~5Cone");
+        assert_eq!(scope.domain_component(), "branch-~2E~2E~2Ffeature");
+        for component in [
+            scope.tenant_component(),
+            scope.installation_component(),
+            scope.repo_component(),
+            scope.domain_component(),
+        ] {
+            assert!(!matches!(component.as_str(), "." | ".."));
+            assert!(!component.contains('/'));
+            assert!(!component.contains('\\'));
+        }
+    }
+
+    #[test]
+    fn hosted_scope_component_encoding_is_collision_resistant_for_common_inputs() {
+        let encoded = [
+            safe_component("a/b"),
+            safe_component("a_b"),
+            safe_component("a.b"),
+            safe_component("a~2Fb"),
+            safe_component(""),
+        ];
+        let unique: std::collections::BTreeSet<_> = encoded.iter().collect();
+
+        assert_eq!(unique.len(), encoded.len());
+        assert_eq!(safe_component("."), "~2E");
+        assert_eq!(safe_component(".."), "~2E~2E");
+        assert_eq!(safe_component(""), "~");
     }
 
     #[test]

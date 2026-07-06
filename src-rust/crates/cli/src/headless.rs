@@ -29,7 +29,7 @@
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
@@ -175,6 +175,7 @@ impl SessionBrief {
     /// completion — for those, no diff is still a success.
     pub fn is_comment_only(&self) -> bool {
         matches!(self.task, TaskBrief::RespondToMention { .. })
+            || self.review_mode() != ReviewMode::None
     }
 
     pub fn review_mode(&self) -> ReviewMode {
@@ -326,6 +327,14 @@ pub fn apply_to_config(config: &mut claurst_core::config::Config, brief: &Sessio
         config.model = Some(model.clone());
     }
     config.permission_mode = claurst_core::config::PermissionMode::BypassPermissions;
+    if brief.review_mode() != ReviewMode::None {
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_user_memory = false;
+        config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
+    }
 
     let context = format!(
         "coven-github headless task for familiar {} ({}). Repository: {}/{}. Default branch: {}. Workspace: {}.",
@@ -861,7 +870,7 @@ fn parse_no_findings_reason(
         .filter(|line| !line.is_empty() && !is_none_marker(line))
         .collect::<Vec<_>>()
         .join(" ");
-    if reason.len() < 40 || is_generic_review_text(&reason) {
+    if reason.len() < 40 {
         return None;
     }
 
@@ -1005,6 +1014,7 @@ fn contains_any_ci(text: &str, needles: &[&str]) -> bool {
 pub struct ReviewTrace {
     workspace_root: PathBuf,
     files: BTreeSet<String>,
+    pending_reads: VecDeque<String>,
 }
 
 impl ReviewTrace {
@@ -1012,6 +1022,7 @@ impl ReviewTrace {
         Self {
             workspace_root: workspace_root.into(),
             files: BTreeSet::new(),
+            pending_reads: VecDeque::new(),
         }
     }
 
@@ -1022,24 +1033,24 @@ impl ReviewTrace {
         match tool_name {
             "Read" => {
                 if let Some(path) = input.get("file_path").and_then(Value::as_str) {
-                    self.record_path(path);
+                    self.pending_reads.push_back(path.to_string());
                 }
             }
-            "Grep" => {
-                if let Some(path) = input.get("path").and_then(Value::as_str) {
-                    self.record_path(path);
-                }
-            }
-            "Glob" => {
-                if let Some(path) = input.get("path").and_then(Value::as_str) {
-                    self.record_path(path);
-                }
-            }
+            "Grep" | "Glob" => {}
             _ => {}
         }
     }
 
     pub fn record_tool_end(&mut self, tool_name: &str, result: &str, is_error: bool) {
+        if tool_name == "Read" {
+            let path = self.pending_reads.pop_front();
+            if !is_error {
+                if let Some(path) = path {
+                    self.record_path(&path);
+                }
+            }
+            return;
+        }
         if is_error || !matches!(tool_name, "Grep" | "Glob") {
             return;
         }
@@ -1096,7 +1107,7 @@ impl ReviewTrace {
         let normalized = normalize_existing_or_lexical(&absolute);
         let root = normalize_existing_or_lexical(&self.workspace_root);
         let relative = normalized.strip_prefix(&root).ok()?;
-        if normalized.exists() && !normalized.is_file() {
+        if !normalized.is_file() {
             return None;
         }
         let path = normalize_relative_path(&relative.to_string_lossy())?;
@@ -1160,15 +1171,26 @@ fn path_prefix(line: &str) -> Option<&str> {
         .filter(|(idx, ch)| *ch == ':' && *idx >= colon_search_start && line[..*idx].contains('.'))
     {
         let candidate = &line[..idx];
-        if Path::new(candidate).extension().is_some() {
+        if looks_like_tool_path(candidate) {
             return Some(candidate);
         }
     }
 
-    if Path::new(line).extension().is_some() {
+    if looks_like_tool_path(line) {
         return Some(line);
     }
     None
+}
+
+fn looks_like_tool_path(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    !trimmed.is_empty()
+        && trimmed == candidate
+        && !trimmed.contains("://")
+        && !trimmed
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '`' | '<' | '>' | '|' | '{' | '}'))
+        && Path::new(trimmed).extension().is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1506,6 +1528,21 @@ mod tests {
         serde_json::from_str(raw).expect("review brief parses")
     }
 
+    fn review_workspace() -> (tempfile::TempDir, ReviewTrace) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        for path in ["src/lib.rs", "src/support.rs", "src/config.rs", "README.md"] {
+            std::fs::write(ws.join(path), "").unwrap();
+        }
+        (dir, ReviewTrace::new(ws))
+    }
+
+    fn record_successful_read(trace: &mut ReviewTrace, path: &str) {
+        trace.record_tool_start("Read", &json!({ "file_path": path }).to_string());
+        trace.record_tool_end("Read", "", false);
+    }
+
     // ── Input conformance ───────────────────────────────────────────────────
 
     #[test]
@@ -1627,6 +1664,35 @@ mod tests {
         assert!(!prompt.contains("make the change on a new branch"));
     }
 
+    #[test]
+    fn review_brief_applies_hosted_read_only_lockdown_to_config() {
+        let brief = sample_review_brief();
+        let mut config = claurst_core::config::Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                allow_write_tools: true,
+                allow_mcp_servers: true,
+                allow_plugins: true,
+                allow_user_memory: true,
+                allow_auto_memory_persistence: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        apply_to_config(&mut config, &brief);
+
+        assert!(config.hosted_review.enabled);
+        assert!(!config.hosted_review.allow_write_tools);
+        assert!(!config.hosted_review.allow_mcp_servers);
+        assert!(!config.hosted_review.allow_plugins);
+        assert!(!config.hosted_review.allow_user_memory);
+        assert!(!config.hosted_review.allow_auto_memory_persistence);
+        assert_eq!(
+            config.permission_mode,
+            claurst_core::config::PermissionMode::BypassPermissions
+        );
+    }
+
     // ── Output conformance ──────────────────────────────────────────────────
 
     #[test]
@@ -1683,6 +1749,28 @@ mod tests {
             let er_enum = props["exit_reason"]["enum"].as_array().unwrap();
             assert!(er_enum.contains(er), "exit_reason `{er}` out of enum");
         }
+    }
+
+    #[test]
+    fn session_brief_schema_defines_review_mode_fields() {
+        let schema: Value =
+            serde_json::from_str(&fixture("session-brief.schema.json")).expect("schema parses");
+        let props = schema["properties"].as_object().unwrap();
+
+        assert!(props.contains_key("review_context"));
+        assert!(props.contains_key("audit_instruction"));
+    }
+
+    #[test]
+    fn result_schema_allows_partial_review_without_oneof_ambiguity() {
+        let schema: Value =
+            serde_json::from_str(&fixture("result.schema.json")).expect("schema parses");
+        let review_then = &schema["properties"]["review"]["allOf"][0]["then"];
+
+        assert!(
+            review_then.get("oneOf").is_none(),
+            "review schema must not use oneOf for findings/no-findings because degraded and mixed outputs are valid"
+        );
     }
 
     #[test]
@@ -1767,14 +1855,8 @@ mod tests {
         std::fs::write(ws.join(".git/config"), "").unwrap();
 
         let mut trace = ReviewTrace::new(ws);
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
-        trace.record_tool_start(
-            "Read",
-            &format!(
-                r#"{{"file_path":"{}"}}"#,
-                ws.join("src/support.rs").display()
-            ),
-        );
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, &ws.join("src/support.rs").to_string_lossy());
         trace.record_tool_end(
             "Grep",
             &format!(
@@ -1787,6 +1869,7 @@ mod tests {
         trace.record_tool_end("Glob", "src/lib.rs\nsrc/support.rs\n", false);
         trace.record_tool_end("Glob", ".git\n.git/config\nsrc\n", false);
         trace.record_tool_start("Read", r#"{"file_path":"../outside.rs"}"#);
+        trace.record_tool_end("Read", "outside", true);
 
         assert_eq!(
             trace.supporting_files(&["src/lib.rs".to_string()]),
@@ -1799,11 +1882,37 @@ mod tests {
     }
 
     #[test]
+    fn review_trace_ignores_failed_reads_and_non_file_paths() {
+        let (_dir, mut trace) = review_workspace();
+
+        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+        trace.record_tool_end("Read", "not found", true);
+        trace.record_tool_start("Read", r#"{"file_path":"src/missing.rs"}"#);
+        trace.record_tool_end("Read", "", false);
+        trace.record_tool_end("Glob", "src\n.git/config\n", false);
+
+        assert!(trace.supporting_files(&[]).is_empty());
+    }
+
+    #[test]
+    fn review_trace_ignores_grep_match_text_that_is_not_a_path_prefix() {
+        let (_dir, mut trace) = review_workspace();
+
+        trace.record_tool_end(
+            "Grep",
+            "let version = config.rs:42;\nsrc/config.rs:12:fn config() {}\n",
+            false,
+        );
+
+        assert_eq!(trace.supporting_files(&[]), vec!["src/config.rs"]);
+    }
+
+    #[test]
     fn review_result_uses_trace_backed_supporting_files() {
         let brief = sample_review_brief();
-        let mut trace = ReviewTrace::new("/tmp/ws");
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
-        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
 
         let (env, _) = build_result(
             Some(&brief),
@@ -1823,10 +1932,33 @@ mod tests {
     }
 
     #[test]
+    fn concise_file_backed_no_findings_reason_is_substantive() {
+        let brief = sample_review_brief();
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
+
+        let (env, _) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "### Files inspected\n- `src/lib.rs`\n\n### Supporting context used\n- `src/support.rs` validates the API behavior used by `src/lib.rs`.\n\n### Findings\nNone\n\n### No-findings justification\nNo findings: `src/lib.rs` and `src/support.rs` agree on the review contract.\n\n### Tests/commands considered\n- `cargo test -p claurst-cli headless` - not run: parser unit coverage applies.\n\n### Confidence/limitations\nConfidence is medium. No limitations.",
+            Some(&trace),
+        );
+
+        assert_eq!(
+            env.review.no_findings_reason.as_deref(),
+            Some("No findings: `src/lib.rs` and `src/support.rs` agree on the review contract.")
+        );
+        assert_eq!(env.review.evidence_status, ReviewEvidenceStatus::Complete);
+        assert_eq!(env.status, Status::Success);
+    }
+
+    #[test]
     fn structured_review_without_supporting_trace_is_partial() {
         let brief = sample_review_brief();
-        let mut trace = ReviewTrace::new("/tmp/ws");
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
 
         let (env, _) = build_result(
             Some(&brief),
@@ -1849,9 +1981,9 @@ mod tests {
     #[test]
     fn generic_review_output_is_marked_partial() {
         let brief = sample_review_brief();
-        let mut trace = ReviewTrace::new("/tmp/ws");
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
-        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
 
         let (env, code) = build_result(
             Some(&brief),
@@ -1876,9 +2008,9 @@ mod tests {
     #[test]
     fn missing_supporting_context_rationale_is_marked_partial() {
         let brief = sample_review_brief();
-        let mut trace = ReviewTrace::new("/tmp/ws");
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
-        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
 
         let (env, _) = build_result(
             Some(&brief),
@@ -1900,9 +2032,9 @@ mod tests {
     #[test]
     fn structured_review_parser_extracts_findings_tests_and_limitations() {
         let brief = sample_review_brief();
-        let mut trace = ReviewTrace::new("/tmp/ws");
-        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
-        trace.record_tool_start("Read", r#"{"file_path":"src/support.rs"}"#);
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
         let final_text = r#"### Files inspected
 - `src/lib.rs`
 
@@ -2000,6 +2132,37 @@ N/A
             let got = classify(outcome, has_commits, comment_only);
             assert_eq!(got, (status, reason, code), "outcome {outcome:?}");
         }
+    }
+
+    #[test]
+    fn address_review_comment_without_commits_is_successful_review_output() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "pr_review_comment",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "address_review_comment", "pr_number": 7, "comment_body": "Please review this behavior.", "diff_hunk": null },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "review_context": { "kind": "pull_request", "files": [{ "filename": "src/lib.rs" }] }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let (_dir, mut trace) = review_workspace();
+        record_successful_read(&mut trace, "src/lib.rs");
+        record_successful_read(&mut trace, "src/support.rs");
+
+        let (env, code) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "### Files inspected\n- `src/lib.rs`\n\n### Supporting context used\n- `src/support.rs` confirms the behavior used by `src/lib.rs`.\n\n### Findings\nNone\n\n### No-findings justification\nNo findings: `src/lib.rs` and `src/support.rs` are consistent.\n\n### Tests/commands considered\n- `cargo test -p claurst-cli headless` - not run: parser unit coverage applies.\n\n### Confidence/limitations\nConfidence is medium. No limitations.",
+            Some(&trace),
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(env.status, Status::Success);
+        assert!(env.exit_reason.is_none());
+        assert_eq!(env.review.mode, ReviewMode::ReviewComment);
+        assert!(env.commits.is_empty());
     }
 
     #[test]

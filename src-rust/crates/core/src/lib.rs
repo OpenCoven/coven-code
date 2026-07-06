@@ -2341,7 +2341,7 @@ pub mod context {
                                 global_claude_md.display(),
                                 crate::claudemd::format_memory_file_for_prompt(
                                     &file,
-                                    self.memory_load_options.mode.is_hosted_review(),
+                                    &self.memory_load_options,
                                 )
                             ));
                         }
@@ -2371,7 +2371,7 @@ pub mod context {
                             candidate.display(),
                             crate::claudemd::format_memory_file_for_prompt(
                                 &file,
-                                self.memory_load_options.mode.is_hosted_review(),
+                                &self.memory_load_options,
                             )
                         ));
                     }
@@ -2411,7 +2411,7 @@ pub mod context {
         use super::*;
 
         #[test]
-        fn hosted_review_context_skips_global_user_memory() {
+        fn hosted_review_context_skips_user_and_pr_controlled_project_memory() {
             let project = tempfile::tempdir().unwrap();
             std::fs::write(
                 project.path().join("AGENTS.md"),
@@ -2447,8 +2447,8 @@ pub mod context {
             }
 
             assert!(context.contains("Mode: hosted-review"));
-            assert!(context.contains("Loaded AGENTS.md scopes: project"));
-            assert!(context.contains("project instructions"));
+            assert!(context.contains("Loaded AGENTS.md scopes: none"));
+            assert!(!context.contains("project instructions"));
             assert!(!context.contains("private user instructions"));
         }
     }

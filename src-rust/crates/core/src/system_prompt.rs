@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use crate::hosted_review::RuntimeMode;
+
 // ---------------------------------------------------------------------------
 // Dynamic boundary marker
 // ---------------------------------------------------------------------------
@@ -204,6 +206,8 @@ pub struct SystemPromptOptions {
     pub working_directory: Option<String>,
     /// Pre-built memory content from memdir (injected as dynamic section).
     pub memory_content: String,
+    /// Runtime mode that produced `memory_content`; controls hosted metadata wrappers.
+    pub memory_runtime_mode: RuntimeMode,
     /// Custom system prompt (--system-prompt flag or settings).
     pub custom_system_prompt: Option<String>,
     /// Additional text appended after everything else (--append-system-prompt).
@@ -306,7 +310,7 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 
     // 12. Memory injection (from memdir)
     if !opts.memory_content.is_empty() {
-        if opts.memory_content.contains("<memory id=") {
+        if opts.memory_runtime_mode.is_hosted_review() {
             parts.push(format!(
                 "\n<memory_context>\n{}\n</memory_context>\n\
                  If a finding, recommendation, or decision depends on a memory entry, cite its memory id in `memory_refs`.",
@@ -629,6 +633,7 @@ mod tests {
             memory_content:
                 "<memory id=\"mem_123\" trust=\"maintainer-approved\">\nUse repo auth policy.\n</memory>"
                     .to_string(),
+            memory_runtime_mode: RuntimeMode::HostedReview,
             ..Default::default()
         };
         let prompt = build_system_prompt(&opts);
@@ -637,6 +642,21 @@ mod tests {
         assert!(prompt.contains("id=\"mem_123\""));
         assert!(prompt.contains("memory_refs"));
         assert!(!prompt.contains("<memory>\n<memory id=\"mem_123\""));
+    }
+
+    #[test]
+    fn local_memory_content_does_not_trigger_hosted_wrapper_by_substring() {
+        let opts = SystemPromptOptions {
+            memory_content: "Local note that mentions <memory id=\"mem_123\"> as plain text."
+                .to_string(),
+            memory_runtime_mode: RuntimeMode::Local,
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&opts);
+
+        assert!(prompt.contains("<memory>\nLocal note"));
+        assert!(!prompt.contains("<memory_context>"));
+        assert!(!prompt.contains("memory_refs"));
     }
 
     #[test]

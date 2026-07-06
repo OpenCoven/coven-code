@@ -86,7 +86,9 @@ The adapter is the **producer**; the runtime is the **consumer**. The brief is
   },
   "workspace": {
     "root": "/tmp/task-abc123"
-  }
+  },
+  "review_context": null,
+  "audit_instruction": null
 }
 ```
 
@@ -106,6 +108,8 @@ The adapter is the **producer**; the runtime is the **consumer**. The brief is
 | `familiar.model` | string \| null | BYOM model id; `null`/absent means runtime default. |
 | `familiar.skills` | string[] | Skill ids to load for the session. MAY be empty. |
 | `workspace.root` | string | Absolute path to the pre-cloned, isolated workspace. The runtime operates **inside** this directory and MUST NOT write outside it. |
+| `review_context` | object \| null | Optional structured review context. `kind: "pull_request"` puts the runtime in PR review mode and carries changed-file metadata. |
+| `audit_instruction` | string \| null | Optional adapter-authored review instruction appended to the review prompt. |
 
 ### 2.2 Task kinds
 
@@ -183,9 +187,9 @@ the intended code. It is required on every result. Non-review tasks MUST set
 | `evidence_status` | string enum | `not_applicable`, `complete`, `partial`, or `missing`. PR review modes MUST NOT use `not_applicable`. |
 | `reviewed_files` | string[] | Workspace-relative files supplied to or inspected by the runtime. PR review modes MUST include at least one file unless `evidence_status` is `missing`. |
 | `supporting_files` | string[] | Workspace-relative files beyond the changed-file list that the runtime can prove were inspected for context. Empty means no broader-codebase inspection was proven, not that none was needed. |
-| `findings` | array | Structured findings. Empty is allowed only when `no_findings_reason` is a non-empty string. |
+| `findings` | array | Structured findings. Empty is allowed. For complete no-finding reviews, `no_findings_reason` SHOULD explain the clean outcome. |
 | `tests_run` | array | Commands run while reviewing, with `passed`, `failed`, `not_run`, or `unknown` status. |
-| `no_findings_reason` | string \| null | Required when `mode` is a review mode and `findings` is empty. |
+| `no_findings_reason` | string \| null | File-backed explanation for a clean review. MAY be `null` for degraded/partial output when `evidence_status` and `limitations` explain why a substantive clean-review conclusion was not possible. |
 | `limitations` | string[] | Evidence gaps, skipped checks, or other caveats. |
 
 Each finding carries `severity`, `file`, optional `line`, `title`, `body`, and

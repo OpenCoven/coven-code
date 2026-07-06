@@ -1047,7 +1047,7 @@ mod tests {
 
         assert_ne!(first, second);
         assert_ne!(first, branch);
-        assert!(branch.to_string_lossy().contains("branch-feature_review"));
+        assert!(branch.to_string_lossy().contains("branch-feature~2Freview"));
     }
 
     #[test]

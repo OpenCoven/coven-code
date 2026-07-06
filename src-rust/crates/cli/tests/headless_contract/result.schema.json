@@ -117,15 +117,6 @@
             "anyOf": [
               { "properties": { "reviewed_files": { "minItems": 1 } }, "required": ["reviewed_files"] },
               { "properties": { "evidence_status": { "const": "missing" } }, "required": ["evidence_status"] }
-            ],
-            "oneOf": [
-              { "properties": { "findings": { "minItems": 1 } }, "required": ["findings"] },
-              {
-                "properties": {
-                  "no_findings_reason": { "type": "string", "minLength": 1 }
-                },
-                "required": ["no_findings_reason"]
-              }
             ]
           }
         }
