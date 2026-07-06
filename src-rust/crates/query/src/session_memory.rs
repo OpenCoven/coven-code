@@ -232,21 +232,36 @@ impl MemoryCandidateStore {
     }
 
     pub async fn read_candidate(&self, candidate_id: &str) -> anyhow::Result<MemoryCandidate> {
-        let path = self.candidate_path(candidate_id);
+        let path = self.candidate_path(candidate_id)?;
         let content = fs::read_to_string(path).await?;
         Ok(serde_json::from_str(&content)?)
     }
 
     async fn write_candidate(&self, candidate: &MemoryCandidate) -> anyhow::Result<()> {
         fs::create_dir_all(&self.root).await?;
-        let path = self.candidate_path(&candidate.id);
+        let path = self.candidate_path(&candidate.id)?;
         fs::write(path, serde_json::to_string_pretty(candidate)?).await?;
         Ok(())
     }
 
-    fn candidate_path(&self, candidate_id: &str) -> PathBuf {
-        self.root.join(format!("{candidate_id}.json"))
+    fn candidate_path(&self, candidate_id: &str) -> anyhow::Result<PathBuf> {
+        validate_candidate_id(candidate_id)?;
+        Ok(self.root.join(format!("{candidate_id}.json")))
     }
+}
+
+fn validate_candidate_id(candidate_id: &str) -> anyhow::Result<()> {
+    let is_uuid_component = candidate_id.len() == 36
+        && candidate_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|idx| candidate_id.as_bytes().get(idx) == Some(&b'-'));
+    if !is_uuid_component {
+        anyhow::bail!("invalid memory candidate id");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1152,6 +1167,28 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         let stored = store.read_candidate(&candidates[0].id).await.unwrap();
         assert_eq!(stored.status, MemoryCandidateStatus::Rejected);
         assert_eq!(stored.rejection_reason.as_deref(), Some("not-repo-policy"));
+    }
+
+    #[tokio::test]
+    async fn candidate_store_rejects_traversal_candidate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".coven-code").join("AGENTS.md");
+        let store = MemoryCandidateStore::for_working_dir(dir.path());
+
+        for bad_id in ["../outside", "..\\outside", "/tmp/outside", "not-a-uuid"] {
+            let read_err = store.read_candidate(bad_id).await.unwrap_err();
+            assert!(read_err.to_string().contains("invalid memory candidate id"));
+
+            let approve_err = store.approve(bad_id, &target).await.unwrap_err();
+            assert!(approve_err
+                .to_string()
+                .contains("invalid memory candidate id"));
+
+            let reject_err = store.reject(bad_id, "bad id").await.unwrap_err();
+            assert!(reject_err
+                .to_string()
+                .contains("invalid memory candidate id"));
+        }
     }
 
     // ---- SessionMemoryState --------------------------------------------
