@@ -1573,7 +1573,7 @@ fn apply_headless_review_query_defaults(
         .map(|brief| brief.review_mode() != headless::ReviewMode::None)
         .unwrap_or(false)
     {
-        query_config.max_turns = query_config.max_turns.max(20);
+        query_config.max_turns = query_config.max_turns.max(40);
     }
 }
 
@@ -5285,7 +5285,7 @@ mod tests {
 
         apply_headless_review_query_defaults(&mut query_config, Some(&brief));
 
-        assert_eq!(query_config.max_turns, 20);
+        assert_eq!(query_config.max_turns, 40);
     }
 
     #[test]

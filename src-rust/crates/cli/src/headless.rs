@@ -232,6 +232,14 @@ impl SessionBrief {
         if self.review_mode() != ReviewMode::None {
             lines.push(String::new());
             lines.push("Review mode: inspect the changed files and read relevant supporting code before reaching conclusions. Use Read, Grep, or Glob for the supporting context you rely on.".to_string());
+            lines.push(
+                "Keep the review bounded: start from the changed files and patch text already supplied in this brief, read only targeted supporting files you expect to cite, and avoid broad repository scans unless a concrete finding requires them."
+                    .to_string(),
+            );
+            lines.push(
+                "After inspecting the changed files and the relevant supporting context, stop using tools and write the final review sections."
+                    .to_string(),
+            );
             lines.push("Your final review must use these exact markdown sections:".to_string());
             lines.push("### Files inspected".to_string());
             lines.push("List the changed files you inspected.".to_string());
