@@ -1569,11 +1569,13 @@ fn apply_headless_review_query_defaults(
     query_config: &mut claurst_query::QueryConfig,
     github_context: Option<&SessionBrief>,
 ) {
+    const HOSTED_REVIEW_MAX_TURNS: u32 = 40;
+
     if github_context
         .map(|brief| brief.review_mode() != headless::ReviewMode::None)
         .unwrap_or(false)
     {
-        query_config.max_turns = query_config.max_turns.max(40);
+        query_config.max_turns = HOSTED_REVIEW_MAX_TURNS;
     }
 }
 
@@ -5280,6 +5282,28 @@ mod tests {
         let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
         let mut query_config = claurst_query::QueryConfig {
             max_turns: 10,
+            ..Default::default()
+        };
+
+        apply_headless_review_query_defaults(&mut query_config, Some(&brief));
+
+        assert_eq!(query_config.max_turns, 40);
+    }
+
+    #[test]
+    fn hosted_review_headless_caps_existing_turn_budget() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "issue_mention",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "review_context": { "kind": "pull_request", "files": [{ "filename": "src/lib.rs" }] }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let mut query_config = claurst_query::QueryConfig {
+            max_turns: 99,
             ..Default::default()
         };
 
