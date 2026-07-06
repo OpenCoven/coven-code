@@ -165,6 +165,19 @@ git pull --rebase && git push
 - If a conflict touches a file you didn't modify, abort the rebase and ask the user.
 - NEVER force-push.
 
-### User Override
+### Contributor Attribution
+
+When you re-land or build on another person's work (a fork PR, an issue author's proposal, a co-author), credit the human contributor with a working GitHub-linked trailer so they appear in the contributors graph:
+
+```
+Co-authored-by: Name <ID+username@users.noreply.github.com>
+```
+
+- Use the numeric-id no-reply form. Get the id with `gh api users/<login> --jq .id`.
+- Never use a machine or `.local` email in a co-author trailer; it links to no account and gives zero credit.
+- When a squash-merge collapses a contributor's PR into an internal branch, preserve their `Co-authored-by:` line in the squash commit message.
+- This applies to human contributors only. Do not add trailers or credit lines naming an AI model, assistant, vendor, or coding harness.
+
+## User Override
 
 If the user's instructions conflict with the rules above, ask for confirmation that they want to override the rules. Only then execute their instructions.
