@@ -81,6 +81,8 @@ pub mod bridge_state;
 pub mod bypass_permissions_dialog;
 /// Context window and rate-limit visualization overlay (/context).
 pub mod context_viz;
+
+pub mod coven_status;
 /// Device code / browser-based auth overlay (Claude OAuth, Codex login).
 pub mod device_auth_dialog;
 /// Reusable fuzzy-search selection dialog widget.

@@ -6,6 +6,23 @@
 
 use crate::kitty_image::{detect_image_protocol, ImageProtocol};
 use base64::Engine;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How long a rendered (or confirmed-absent) image sequence stays cached.
+/// Encoding a card image is disk I/O plus base64/Sixel work — far too heavy
+/// for the per-frame draw path, and the source files essentially never
+/// change mid-session. The TTL keeps a newly dropped-in image discoverable
+/// without restarting.
+const IMAGE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+type ImageCache = HashMap<String, (Instant, Option<String>)>;
+
+fn image_cache() -> &'static Mutex<ImageCache> {
+    static CACHE: OnceLock<Mutex<ImageCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Look up a user's familiar image at runtime from known paths.
 ///
@@ -42,6 +59,9 @@ pub fn familiar_image_path(familiar_id: &str) -> Option<std::path::PathBuf> {
 ///
 /// `width_cells` and `height_cells` are hints for the rendered size (currently
 /// passed as Kitty `c=`/`r=` column/row counts when non-zero).
+///
+/// Results (including "no image found") are cached per familiar id for
+/// [`IMAGE_CACHE_TTL`], since this is called from the per-frame render path.
 pub fn render_familiar_image(
     familiar_id: &str,
     _width_cells: u16,
@@ -52,6 +72,25 @@ pub fn render_familiar_image(
         return None;
     }
 
+    let now = Instant::now();
+    {
+        let cache = image_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, seq)) = cache.get(familiar_id) {
+            if now.duration_since(*at) < IMAGE_CACHE_TTL {
+                return seq.clone();
+            }
+        }
+    }
+
+    let seq = encode_familiar_image(familiar_id, protocol);
+    let mut cache = image_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(familiar_id.to_string(), (now, seq.clone()));
+    seq
+}
+
+/// Uncached image lookup + encode. Split from [`render_familiar_image`] so the
+/// cache wrapper stays trivial.
+fn encode_familiar_image(familiar_id: &str, protocol: ImageProtocol) -> Option<String> {
     let path = familiar_image_path(familiar_id)?;
     let bytes = std::fs::read(&path).ok()?;
 

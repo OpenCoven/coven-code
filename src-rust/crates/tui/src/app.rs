@@ -298,6 +298,8 @@ pub(crate) mod test_env {
                 None => std::env::remove_var("USER"),
             }
             std::env::remove_var("USERNAME");
+            // COVEN_HOME changed — drop any roster cached from the old home.
+            crate::coven_status::invalidate_roster_cache();
             guard
         }
     }
@@ -332,6 +334,8 @@ pub(crate) mod test_env {
                 Some(value) => std::env::set_var("USERNAME", value),
                 None => std::env::remove_var("USERNAME"),
             }
+            // COVEN_HOME restored — drop any roster cached from the temp home.
+            crate::coven_status::invalidate_roster_cache();
         }
     }
 }
@@ -1561,9 +1565,7 @@ impl App {
             managed_agents_active: false,
             last_exit_key_warning: None,
             exit_key_sequence_start: None,
-            daemon_online: dirs::home_dir()
-                .map(|h| h.join(".coven").join("coven.sock").exists())
-                .unwrap_or(false),
+            daemon_online: crate::coven_status::daemon_looks_online(),
             daemon_last_checked: 0,
             familiar_switcher_open: false,
             familiar_switcher_list: Self::default_familiar_switcher_list(),
@@ -1685,6 +1687,7 @@ impl App {
         }
         match coven_shared::write_starter_roster() {
             Ok(fams) => {
+                crate::coven_status::invalidate_roster_cache();
                 self.familiar_switcher_list = fams.iter().map(|f| f.id.clone()).collect();
                 self.familiar_switcher_open = true;
                 self.familiar_switcher_filter.clear();
@@ -4583,25 +4586,31 @@ impl App {
             KeyCode::F(2) => {
                 if self.familiar_switcher_open {
                     self.close_familiar_switcher();
-                } else if self.familiar_switcher_list.is_empty() {
-                    self.bootstrap_or_prompt_familiar_roster();
                 } else {
-                    self.familiar_switcher_open = true;
-                    self.familiar_switcher_filter.clear();
-                    // Highlight the active familiar if one is set; otherwise
-                    // start at the top. Entries lead with the "clear" row, so
-                    // account for that offset when locating the active id.
-                    let entries = self.familiar_switcher_entries();
-                    self.familiar_switcher_idx = self
-                        .config
-                        .familiar
-                        .as_deref()
-                        .and_then(|current| {
-                            entries.iter().position(|e| {
-                                matches!(e, FamiliarSwitcherEntry::Familiar(id) if id == current)
+                    // Re-read the roster on open so mid-session edits to
+                    // ~/.coven/familiars.toml (by the user or the daemon)
+                    // show up without restarting.
+                    self.familiar_switcher_list = Self::default_familiar_switcher_list();
+                    if self.familiar_switcher_list.is_empty() {
+                        self.bootstrap_or_prompt_familiar_roster();
+                    } else {
+                        self.familiar_switcher_open = true;
+                        self.familiar_switcher_filter.clear();
+                        // Highlight the active familiar if one is set; otherwise
+                        // start at the top. Entries lead with the "clear" row, so
+                        // account for that offset when locating the active id.
+                        let entries = self.familiar_switcher_entries();
+                        self.familiar_switcher_idx = self
+                            .config
+                            .familiar
+                            .as_deref()
+                            .and_then(|current| {
+                                entries.iter().position(|e| {
+                                    matches!(e, FamiliarSwitcherEntry::Familiar(id) if id == current)
+                                })
                             })
-                        })
-                        .unwrap_or(0);
+                            .unwrap_or(0);
+                    }
                 }
             }
             KeyCode::Char('?')
@@ -6781,12 +6790,12 @@ impl App {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
-            // Re-check daemon socket ~every 30 seconds (300 frames at 10fps).
+            // Re-check daemon reachability ~every 30 seconds (300 frames at
+            // 10fps). The probe is cached and non-blocking; it also honors
+            // COVEN_HOME, unlike a hardcoded ~/.coven/coven.sock check.
             if self.frame_count.wrapping_sub(self.daemon_last_checked) >= 300 {
                 self.daemon_last_checked = self.frame_count;
-                self.daemon_online = dirs::home_dir()
-                    .map(|h| h.join(".coven").join("coven.sock").exists())
-                    .unwrap_or(false);
+                self.daemon_online = crate::coven_status::daemon_looks_online();
             }
 
             // Drain background session-list results.
@@ -7360,6 +7369,39 @@ role = "Research"
             vec!["sage".to_string(), "forge".to_string()]
         );
         assert!(coven_home.join("familiars.toml").exists());
+    }
+
+    #[test]
+    fn f2_refreshes_roster_added_mid_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"wisp\"\n",
+        )
+        .expect("familiars file");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        assert_eq!(app.familiar_switcher_list, vec!["wisp".to_string()]);
+
+        // A familiar added after startup (external edit or daemon write) must
+        // appear when the switcher is opened, without restarting.
+        std::fs::write(
+            coven_home.join("familiars.toml"),
+            "[[familiar]]\nid = \"wisp\"\n\n[[familiar]]\nid = \"onyx\"\n",
+        )
+        .expect("familiars rewrite");
+        app.handle_key_event(press_key(KeyCode::F(2), KeyModifiers::NONE));
+
+        assert!(app.familiar_switcher_open);
+        assert_eq!(
+            app.familiar_switcher_list,
+            vec!["wisp".to_string(), "onyx".to_string()]
+        );
     }
 
     #[test]

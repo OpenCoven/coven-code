@@ -1595,17 +1595,12 @@ fn welcome_provider_label(app: &App) -> String {
 
 /// One-glance daemon status: "Daemon: online" / "Daemon: offline".
 ///
-/// Uses [`DaemonClient::check_reachability`] with a 2 s budget so a busy
-/// daemon doesn't flip the welcome panel to "offline" mid-load. A
-/// `TimedOut` result is rendered as "online" (best-effort) since by far
-/// the most common cause of a missed probe on a working install is the
-/// daemon being mid-request — see issue #50.
+/// Uses the cached, non-blocking probe in [`crate::coven_status`]: the render
+/// path must never wait on a socket round-trip. The underlying background
+/// probe keeps the 2 s budget so a busy daemon doesn't flip the welcome panel
+/// to "offline" mid-load — see issue #50.
 fn welcome_daemon_label() -> String {
-    use claurst_core::coven_shared::{DaemonClient, DaemonReachability};
-    let reachable = DaemonClient::new()
-        .map(|c| c.check_reachability(std::time::Duration::from_millis(2000)))
-        .unwrap_or(DaemonReachability::Offline);
-    if reachable.looks_alive() {
+    if crate::coven_status::daemon_looks_online() {
         "Daemon: online".to_string()
     } else {
         "Daemon: offline".to_string()
@@ -1621,7 +1616,7 @@ fn welcome_familiar_label(app: &App) -> String {
 
 fn visible_familiar(app: &App) -> Option<claurst_core::coven_shared::CovenFamiliar> {
     let id = app.config.familiar.as_deref()?;
-    claurst_core::coven_shared::load_familiars()?
+    crate::coven_status::cached_familiars()
         .into_iter()
         .find(|familiar| familiar.id == id)
 }
@@ -1806,7 +1801,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Welcome back!".to_string()
     };
-    let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
+    let daemon_familiars = crate::coven_status::cached_familiars();
     let left_w_usize = left_w as usize;
 
     let mut left_lines: Vec<Line> = Vec::new();
@@ -1868,9 +1863,14 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
 
     // --- Right column: Tips + What's new, left-aligned like the image ---
     let right_w_usize = right_w.saturating_sub(1).max(1) as usize;
-    let tip_text = claurst_core::tips::select_tip(0)
-        .map(|t| t.content.to_string())
-        .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string());
+    // The tip for a session is stable; selecting it re-reads tip history from
+    // disk, so do that once per process instead of on every frame.
+    static WELCOME_TIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let tip_text = WELCOME_TIP.get_or_init(|| {
+        claurst_core::tips::select_tip(0)
+            .map(|t| t.content.to_string())
+            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string())
+    });
 
     let mut right_lines: Vec<Line> = Vec::new();
     // When unauthenticated, lead the right column with a prominent /connect
@@ -1898,7 +1898,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     )));
     // Word-wrap the tip on word boundaries; when the CTA is also shown, keep it
     // to a single line so the fixed-height box doesn't clip What's new.
-    let tip_lines = crate::dialogs::word_wrap(&tip_text, right_w_usize);
+    let tip_lines = crate::dialogs::word_wrap(tip_text, right_w_usize);
     let tip_take = if app.has_credentials {
         tip_lines.len()
     } else {
@@ -3394,7 +3394,7 @@ fn render_familiar_switcher(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let pink = crate::overlays::COVEN_CODE_ACCENT;
-    let daemon_familiars = claurst_core::coven_shared::load_familiars().unwrap_or_default();
+    let daemon_familiars = crate::coven_status::cached_familiars();
     let interior_w = popup_w.saturating_sub(2);
 
     // Footer shows the active filter (or a hint when empty) so incremental

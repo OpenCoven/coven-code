@@ -455,6 +455,7 @@ impl AgentsMenuState {
                 .to_string();
             match claurst_core::coven_shared::remove_familiar(&fam_id) {
                 Ok(removed) => {
+                    crate::coven_status::invalidate_roster_cache();
                     if let Some(root) = self.project_root.clone() {
                         self.definitions = load_agent_definitions(&root);
                     } else {
@@ -504,6 +505,7 @@ impl AgentsMenuState {
         let root = self.project_root.clone();
         let summary = claurst_core::reset_familiars_and_agents(root.as_deref())
             .map_err(|err| format!("Failed to reset agents and familiars: {err}"))?;
+        crate::coven_status::invalidate_roster_cache();
         if let Some(root) = root {
             self.definitions = load_agent_definitions(&root);
         } else {
