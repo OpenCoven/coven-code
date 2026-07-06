@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/OpenCoven/coven-github/docs/contracts/session-brief.schema.json",
   "title": "coven-code headless session brief",
-  "description": "Tokenless read-context payload the adapter writes for coven-code --headless --context. Contract version 1.",
+  "description": "Tokenless read-context payload the adapter writes for coven-code --headless --context. Contract version 2.",
   "type": "object",
   "additionalProperties": false,
   "required": ["trigger", "repo", "task", "familiar", "workspace"],
   "properties": {
     "contract_version": {
       "type": "string",
-      "const": "1"
+      "const": "2"
     },
     "trigger": {
       "type": "string",

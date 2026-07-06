@@ -1,4 +1,4 @@
-//! coven-github headless execution contract (contract version `1`).
+//! coven-github headless execution contract (contract version `2`).
 //!
 //! This module is the **coven-code side** of the interface locked in the
 //! `coven-github` repo (`docs/headless-contract.md` + `docs/contracts/`). The
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
-pub const CONTRACT_VERSION: &str = "1";
+pub const CONTRACT_VERSION: &str = "2";
 
 /// Environment variable carrying the GitHub App **installation access token**
 /// used to authenticate `git push`. This is the ONLY git credential channel; it
@@ -65,6 +65,8 @@ pub struct SessionBrief {
     pub task: TaskBrief,
     pub familiar: FamiliarBrief,
     pub workspace: WorkspaceBrief,
+    #[serde(default)]
+    pub review_context: Option<ReviewContext>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +111,19 @@ pub struct FamiliarBrief {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkspaceBrief {
     pub root: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewContext {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub files: Vec<ReviewContextFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewContextFile {
+    pub filename: String,
 }
 
 impl SessionBrief {
@@ -156,6 +171,21 @@ impl SessionBrief {
     /// completion — for those, no diff is still a success.
     pub fn is_comment_only(&self) -> bool {
         matches!(self.task, TaskBrief::RespondToMention { .. })
+    }
+
+    pub fn review_mode(&self) -> ReviewMode {
+        if matches!(self.task, TaskBrief::AddressReviewComment { .. }) {
+            return ReviewMode::ReviewComment;
+        }
+        if self
+            .review_context
+            .as_ref()
+            .and_then(|context| context.kind.as_deref())
+            == Some("pull_request")
+        {
+            return ReviewMode::PullRequest;
+        }
+        ReviewMode::None
     }
 
     /// Build the first-turn user prompt injected into the headless session.
@@ -409,7 +439,7 @@ pub enum Status {
         not(test),
         expect(
             dead_code,
-            reason = "contract v1 reserves needs_input for the M2 clarification path"
+            reason = "contract v2 reserves needs_input for the M2 clarification path"
         )
     )]
     NeedsInput,
@@ -424,7 +454,7 @@ pub enum ExitReason {
         not(test),
         expect(
             dead_code,
-            reason = "contract v1 reserves test_failure for future verifier integration"
+            reason = "contract v2 reserves test_failure for future verifier integration"
         )
     )]
     TestFailure,
@@ -433,7 +463,7 @@ pub enum ExitReason {
         not(test),
         expect(
             dead_code,
-            reason = "contract v1 reserves git_conflict for future git conflict detection"
+            reason = "contract v2 reserves git_conflict for future git conflict detection"
         )
     )]
     GitConflict,
@@ -457,7 +487,141 @@ pub struct ResultEnvelope {
     pub files_changed: Vec<String>,
     pub summary: String,
     pub pr_body: String,
+    pub review: ReviewResult,
     pub exit_reason: Option<ExitReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewResult {
+    pub mode: ReviewMode,
+    pub evidence_status: ReviewEvidenceStatus,
+    pub reviewed_files: Vec<String>,
+    pub findings: Vec<ReviewFinding>,
+    pub tests_run: Vec<ReviewTestRun>,
+    pub no_findings_reason: Option<String>,
+    pub limitations: Vec<String>,
+}
+
+impl ReviewResult {
+    pub fn none() -> Self {
+        Self {
+            mode: ReviewMode::None,
+            evidence_status: ReviewEvidenceStatus::NotApplicable,
+            reviewed_files: Vec::new(),
+            findings: Vec::new(),
+            tests_run: Vec::new(),
+            no_findings_reason: None,
+            limitations: Vec::new(),
+        }
+    }
+
+    pub fn from_brief(brief: Option<&SessionBrief>) -> Self {
+        let Some(brief) = brief else {
+            return Self::none();
+        };
+        let mode = brief.review_mode();
+        if mode == ReviewMode::None {
+            return Self::none();
+        }
+
+        let reviewed_files = brief
+            .review_context
+            .as_ref()
+            .map(|context| {
+                context
+                    .files
+                    .iter()
+                    .map(|file| file.filename.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut limitations = Vec::new();
+        let evidence_status = if reviewed_files.is_empty() {
+            limitations.push("No PR file evidence was supplied in the session brief.".to_string());
+            ReviewEvidenceStatus::Missing
+        } else {
+            ReviewEvidenceStatus::Complete
+        };
+
+        Self {
+            mode,
+            evidence_status,
+            reviewed_files,
+            findings: Vec::new(),
+            tests_run: Vec::new(),
+            no_findings_reason: Some(
+                "The run completed review mode without returning structured findings; see pr_body for the narrative review."
+                    .to_string(),
+            ),
+            limitations,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    None,
+    PullRequest,
+    ReviewComment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewEvidenceStatus {
+    NotApplicable,
+    Complete,
+    #[allow(
+        dead_code,
+        reason = "contract v2 reserves partial review evidence for future adapters"
+    )]
+    Partial,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewFinding {
+    pub severity: ReviewSeverity,
+    pub file: String,
+    pub line: Option<u64>,
+    pub title: String,
+    pub body: String,
+    pub recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(
+    dead_code,
+    reason = "contract v2 reserves structured findings for the review parser"
+)]
+pub enum ReviewSeverity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewTestRun {
+    pub command: String,
+    pub status: ReviewTestStatus,
+    pub output_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(
+    dead_code,
+    reason = "contract v2 reserves structured test evidence for verifier integration"
+)]
+pub enum ReviewTestStatus {
+    Passed,
+    Failed,
+    NotRun,
+    Unknown,
 }
 
 /// How the headless run terminated, decoupled from the query crate so this
@@ -544,6 +708,7 @@ pub fn build_result(
         files_changed: git.files_changed.clone(),
         summary,
         pr_body,
+        review: ReviewResult::from_brief(brief),
         exit_reason,
     };
     (envelope, code)
@@ -567,6 +732,7 @@ pub fn infra_error_result(
         pr_body: format!(
             "## {name}\n\nThe headless session failed before completing the task:\n\n```\n{message}\n```"
         ),
+        review: ReviewResult::from_brief(brief),
         exit_reason: Some(ExitReason::InfraError),
     };
     (envelope, 2)
@@ -714,7 +880,7 @@ mod tests {
                 ..
             }
         ));
-        brief.ensure_supported_version().expect("v1 is supported");
+        brief.ensure_supported_version().expect("v2 is supported");
     }
 
     #[test]
@@ -733,7 +899,7 @@ mod tests {
         // The adapter emits a tokenless brief; the runtime must NOT require an
         // `auth`/`token` field to parse it.
         let raw = r#"{
-            "contract_version": "1",
+            "contract_version": "2",
             "trigger": "issue_assigned",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "fix_issue", "issue_number": 1, "issue_title": "t", "issue_body": "b" },
@@ -765,7 +931,7 @@ mod tests {
         // Contract §6: additive fields within a major version are backward
         // compatible; the consumer must not choke on them.
         let raw = r#"{
-            "contract_version": "1",
+            "contract_version": "2",
             "trigger": "issue_assigned",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main", "topics": ["x"] },
             "task": { "kind": "fix_issue", "issue_number": 1, "issue_title": "t", "issue_body": "b" },
@@ -780,10 +946,10 @@ mod tests {
     #[test]
     fn rejects_unsupported_major_version() {
         let mut brief = sample_brief();
-        brief.contract_version = "2".to_string();
+        brief.contract_version = "3".to_string();
         assert!(
             brief.ensure_supported_version().is_err(),
-            "a v2 brief must be rejected by a v1 runtime"
+            "a v3 brief must be rejected by a v2 runtime"
         );
     }
 
@@ -844,7 +1010,7 @@ mod tests {
                 "result has key `{key}` not permitted by schema (additionalProperties:false)"
             );
         }
-        assert_eq!(obj["contract_version"], json!("1"));
+        assert_eq!(obj["contract_version"], json!("2"));
 
         let status_enum = props["status"]["enum"].as_array().unwrap();
         assert!(status_enum.contains(&obj["status"]), "status out of enum");
@@ -875,9 +1041,46 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert_eq!(env.status, Status::Success);
+        assert_eq!(env.review.mode, ReviewMode::None);
         assert!(env.exit_reason.is_none());
         let value = serde_json::to_value(&env).unwrap();
         assert_matches_result_schema(&value);
+    }
+
+    #[test]
+    fn review_context_produces_structured_pr_review_evidence() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "issue_mention",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "review_context": {
+                "kind": "pull_request",
+                "files": [
+                    { "filename": "src/lib.rs" },
+                    { "filename": "README.md" }
+                ]
+            }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let (env, code) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "Reviewed the PR.",
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(env.review.mode, ReviewMode::PullRequest);
+        assert_eq!(env.review.evidence_status, ReviewEvidenceStatus::Complete);
+        assert_eq!(
+            env.review.reviewed_files,
+            vec!["src/lib.rs".to_string(), "README.md".to_string()]
+        );
+        assert!(env.review.findings.is_empty());
+        assert!(env.review.no_findings_reason.is_some());
     }
 
     #[test]
