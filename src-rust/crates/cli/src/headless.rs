@@ -1086,7 +1086,14 @@ impl ReviewTrace {
         let normalized = normalize_existing_or_lexical(&absolute);
         let root = normalize_existing_or_lexical(&self.workspace_root);
         let relative = normalized.strip_prefix(&root).ok()?;
-        normalize_relative_path(&relative.to_string_lossy())
+        if normalized.exists() && !normalized.is_file() {
+            return None;
+        }
+        let path = normalize_relative_path(&relative.to_string_lossy())?;
+        if path.split('/').any(|part| part == ".git") {
+            return None;
+        }
+        Some(path)
     }
 }
 
@@ -1746,6 +1753,8 @@ mod tests {
         std::fs::write(ws.join("src/support.rs"), "").unwrap();
         std::fs::write(ws.join("src/config.rs"), "").unwrap();
         std::fs::write(ws.join("README.md"), "").unwrap();
+        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+        std::fs::write(ws.join(".git/config"), "").unwrap();
 
         let mut trace = ReviewTrace::new(ws);
         trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
@@ -1766,6 +1775,7 @@ mod tests {
             false,
         );
         trace.record_tool_end("Glob", "src/lib.rs\nsrc/support.rs\n", false);
+        trace.record_tool_end("Glob", ".git\n.git/config\nsrc\n", false);
         trace.record_tool_start("Read", r#"{"file_path":"../outside.rs"}"#);
 
         assert_eq!(

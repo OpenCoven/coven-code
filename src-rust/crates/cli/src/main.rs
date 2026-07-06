@@ -865,6 +865,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tools
     };
+    apply_headless_review_query_defaults(&mut query_config, github_context.as_ref());
     let tools = filter_tools_for_hosted_review(tools, &config);
 
     // Spawn the background cron scheduler (fires cron tasks at scheduled times).
@@ -1562,6 +1563,18 @@ fn filter_search_only_tools() -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
         .filter(|t| SEARCH_TOOLS.contains(&t.name()))
         .collect();
     Arc::new(filtered)
+}
+
+fn apply_headless_review_query_defaults(
+    query_config: &mut claurst_query::QueryConfig,
+    github_context: Option<&SessionBrief>,
+) {
+    if github_context
+        .map(|brief| brief.review_mode() != headless::ReviewMode::None)
+        .unwrap_or(false)
+    {
+        query_config.max_turns = query_config.max_turns.max(20);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5251,6 +5264,49 @@ mod tests {
                 "search-only emitted disallowed tool {name}, expected subset of {ALLOWED:?}"
             );
         }
+    }
+
+    #[test]
+    fn hosted_review_headless_gets_extra_turn_budget() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "issue_mention",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "review_context": { "kind": "pull_request", "files": [{ "filename": "src/lib.rs" }] }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let mut query_config = claurst_query::QueryConfig {
+            max_turns: 10,
+            ..Default::default()
+        };
+
+        apply_headless_review_query_defaults(&mut query_config, Some(&brief));
+
+        assert_eq!(query_config.max_turns, 20);
+    }
+
+    #[test]
+    fn non_review_headless_keeps_turn_budget() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "issue_mention",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "answer this" },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("brief parses");
+        let mut query_config = claurst_query::QueryConfig {
+            max_turns: 10,
+            ..Default::default()
+        };
+
+        apply_headless_review_query_defaults(&mut query_config, Some(&brief));
+
+        assert_eq!(query_config.max_turns, 10);
     }
 
     #[test]
