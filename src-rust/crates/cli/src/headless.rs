@@ -259,6 +259,15 @@ impl SessionBrief {
             lines.push(instruction.trim().to_string());
         }
 
+        if self.review_mode() != ReviewMode::None {
+            lines.push(String::new());
+            lines.push(
+                "Complete the review end to end. Do not modify files, create commits, or push a branch unless the review comment explicitly asks for code changes. Your final message is the hosted review body and must include the exact review sections above."
+                    .to_string(),
+            );
+            return lines.join("\n");
+        }
+
         lines.push(String::new());
         lines.push(
             "Complete the task end to end: make the change on a new branch named like \
@@ -1597,6 +1606,8 @@ mod tests {
         }
         assert!(prompt.contains("specific file references"));
         assert!(prompt.contains("Do not end with a generic completion message."));
+        assert!(prompt.contains("Do not modify files, create commits, or push a branch"));
+        assert!(!prompt.contains("make the change on a new branch"));
     }
 
     // ── Output conformance ──────────────────────────────────────────────────
