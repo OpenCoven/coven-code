@@ -436,16 +436,7 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
     // Project-specific files
     if let Some(pid) = project_id {
         let cwd = std::env::current_dir().unwrap_or_default();
-
-        let local_settings = cwd.join(".coven-code").join("settings.local.json");
-        if let Some(content) = try_read_for_sync(&local_settings).await {
-            entries.insert(sync_key_project_settings(pid), content);
-        }
-
-        let local_memory = cwd.join("AGENTS.local.md");
-        if let Some(content) = try_read_for_sync(&local_memory).await {
-            entries.insert(sync_key_project_memory(pid), content);
-        }
+        entries.extend(collect_project_entries(pid, cwd).await);
     }
 
     entries
@@ -453,7 +444,24 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
 
 pub async fn collect_hosted_entries(scope: &HostedReviewScope) -> HashMap<String, String> {
     let project_id = hosted_project_id(scope);
-    collect_local_entries(Some(&project_id)).await
+    let cwd = std::env::current_dir().unwrap_or_default();
+    collect_project_entries(&project_id, cwd).await
+}
+
+async fn collect_project_entries(project_id: &str, cwd: PathBuf) -> HashMap<String, String> {
+    let mut entries = HashMap::new();
+
+    let local_settings = cwd.join(".coven-code").join("settings.local.json");
+    if let Some(content) = try_read_for_sync(&local_settings).await {
+        entries.insert(sync_key_project_settings(project_id), content);
+    }
+
+    let local_memory = cwd.join("AGENTS.local.md");
+    if let Some(content) = try_read_for_sync(&local_memory).await {
+        entries.insert(sync_key_project_memory(project_id), content);
+    }
+
+    entries
 }
 
 /// Try to read a file, applying the 500 KB size limit.
@@ -583,6 +591,33 @@ mod tests {
         assert!(filtered.contains_key("safe.md"));
         assert!(!filtered.contains_key(SYNC_KEY_USER_MEMORY));
         assert!(!filtered.values().any(|value| value.contains(&secret)));
+    }
+
+    #[tokio::test]
+    async fn hosted_project_collection_excludes_global_user_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_dir = tmp.path().join(".coven-code");
+        tokio::fs::create_dir_all(&settings_dir).await.unwrap();
+        tokio::fs::write(settings_dir.join("settings.local.json"), r#"{"model":"x"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("AGENTS.local.md"), "# Project memory")
+            .await
+            .unwrap();
+        let scope = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let project_id = hosted_project_id(&scope);
+
+        let entries = collect_project_entries(&project_id, tmp.path().to_path_buf()).await;
+
+        assert!(entries.contains_key(&sync_key_hosted_project_settings(&scope)));
+        assert!(entries.contains_key(&sync_key_hosted_project_memory(&scope)));
+        assert!(!entries.contains_key(SYNC_KEY_USER_SETTINGS));
+        assert!(!entries.contains_key(SYNC_KEY_USER_MEMORY));
     }
 
     #[test]
