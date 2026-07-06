@@ -604,7 +604,8 @@ impl ReviewResult {
         } else {
             ReviewEvidenceStatus::Complete
         };
-        if supporting_files.is_empty() {
+        let has_supporting_evidence = !supporting_files.is_empty();
+        if !has_supporting_evidence {
             limitations.push(
                 "No supporting-code file reads or search results were captured during this review."
                     .to_string(),
@@ -626,6 +627,7 @@ impl ReviewResult {
                 evidence_status
             } else if parsed.has_substantive_review
                 && evidence_status == ReviewEvidenceStatus::Complete
+                && has_supporting_evidence
             {
                 ReviewEvidenceStatus::Complete
             } else {
@@ -1818,6 +1820,30 @@ mod tests {
         assert!(brief
             .to_prompt()
             .contains("Additional review instruction:\nInspect supporting code."));
+    }
+
+    #[test]
+    fn structured_review_without_supporting_trace_is_partial() {
+        let brief = sample_review_brief();
+        let mut trace = ReviewTrace::new("/tmp/ws");
+        trace.record_tool_start("Read", r#"{"file_path":"src/lib.rs"}"#);
+
+        let (env, _) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "### Files inspected\n- `src/lib.rs`\n\n### Supporting context used\nNone.\n\n### Findings\nNone\n\n### No-findings justification\nNo issues were found because `src/lib.rs` preserves the expected review result contract.\n\n### Tests/commands considered\n- `cargo test -p claurst headless` - not run: regression test covers this path.\n\n### Confidence/limitations\nConfidence is medium. No limitations.",
+            Some(&trace),
+        );
+
+        assert!(env.review.supporting_files.is_empty());
+        assert_eq!(env.review.evidence_status, ReviewEvidenceStatus::Partial);
+        assert_eq!(env.status, Status::Partial);
+        assert!(env
+            .review
+            .limitations
+            .iter()
+            .any(|item| item.contains("No supporting-code")));
     }
 
     #[test]
