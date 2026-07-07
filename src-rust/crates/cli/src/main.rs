@@ -5353,7 +5353,7 @@ mod tests {
     #[test]
     fn hosted_review_headless_gets_extra_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -5375,7 +5375,7 @@ mod tests {
     #[test]
     fn hosted_review_headless_caps_existing_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -5397,7 +5397,7 @@ mod tests {
     #[test]
     fn non_review_headless_keeps_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "answer this" },

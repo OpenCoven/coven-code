@@ -1,4 +1,4 @@
-//! coven-github headless execution contract (contract version `2`).
+//! coven-github headless execution contract (contract version `3`).
 //!
 //! This module is the **coven-code side** of the interface locked in the
 //! `coven-github` repo (`docs/headless-contract.md` + `docs/contracts/`). The
@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
-pub const CONTRACT_VERSION: &str = "2";
+pub const CONTRACT_VERSION: &str = "3";
 
 /// Environment variable carrying the GitHub App **installation access token**
 /// used to authenticate `git push`. This is the ONLY git credential channel; it
@@ -499,7 +499,7 @@ pub enum Status {
         not(test),
         expect(
             dead_code,
-            reason = "contract v2 reserves needs_input for the M2 clarification path"
+            reason = "contract v3 reserves needs_input for the M2 clarification path"
         )
     )]
     NeedsInput,
@@ -514,7 +514,7 @@ pub enum ExitReason {
         not(test),
         expect(
             dead_code,
-            reason = "contract v2 reserves test_failure for future verifier integration"
+            reason = "contract v3 reserves test_failure for future verifier integration"
         )
     )]
     TestFailure,
@@ -523,7 +523,7 @@ pub enum ExitReason {
         not(test),
         expect(
             dead_code,
-            reason = "contract v2 reserves git_conflict for future git conflict detection"
+            reason = "contract v3 reserves git_conflict for future git conflict detection"
         )
     )]
     GitConflict,
@@ -587,6 +587,24 @@ pub struct ReviewMemoryEntry {
     pub visibility: Option<String>,
     /// Memory scope the entry was loaded from (managed/user/project/local).
     pub scope: String,
+    /// Provenance source kind, for example `manual` or `session-memory-extraction`.
+    pub source: Option<String>,
+    /// Non-secret reference to the source artifact, such as owner/repo#123.
+    pub source_ref: Option<String>,
+    /// Repository slug associated with the memory provenance.
+    pub source_repo: Option<String>,
+    /// Commit SHA associated with the memory provenance.
+    pub source_commit: Option<String>,
+    /// Actor associated with the memory source, when known.
+    pub source_actor: Option<String>,
+    /// Session id that produced the memory, when known.
+    pub session_id: Option<String>,
+    /// Non-secret transcript reference or hash, when known.
+    pub transcript_ref: Option<String>,
+    /// Tool or actor that created the memory metadata.
+    pub created_by: Option<String>,
+    /// Compact per-entry provenance strings found in durable memory content.
+    pub provenance: Vec<String>,
 }
 
 /// Enumerate the memory entries and domains loaded for a review of
@@ -610,6 +628,15 @@ pub fn collect_review_memory(
             )),
             visibility: file.frontmatter.visibility.map(|v| serde_enum_label(&v)),
             scope: serde_enum_label(&file.scope),
+            source: file.frontmatter.source.clone(),
+            source_ref: file.frontmatter.source_ref.clone(),
+            source_repo: file.frontmatter.source_repo.clone(),
+            source_commit: file.frontmatter.source_commit.clone(),
+            source_actor: file.frontmatter.source_actor.clone(),
+            session_id: file.frontmatter.session_id.clone(),
+            transcript_ref: file.frontmatter.transcript_ref.clone(),
+            created_by: file.frontmatter.created_by.clone(),
+            provenance: memory_inline_provenance(&file.content),
         })
         .collect();
     let domains_loaded = if config.hosted_review_enabled() {
@@ -623,6 +650,27 @@ pub fn collect_review_memory(
         domains_loaded,
         entries,
     }
+}
+
+fn memory_inline_provenance(content: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    for line in content.lines() {
+        let Some((_, rest)) = line.rsplit_once("provenance:") else {
+            continue;
+        };
+        let trimmed = rest
+            .split(")*")
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .trim_end_matches('*')
+            .trim_end_matches(')')
+            .trim();
+        if !trimmed.is_empty() {
+            seen.insert(trimmed.to_string());
+        }
+    }
+    seen.into_iter().collect()
 }
 
 /// Render a unit enum's serde label (kebab/snake-case string form).
@@ -1289,7 +1337,7 @@ pub enum ReviewEvidenceStatus {
     Complete,
     #[allow(
         dead_code,
-        reason = "contract v2 reserves partial review evidence for future adapters"
+        reason = "contract v3 reserves partial review evidence for future adapters"
     )]
     Partial,
     Missing,
@@ -1309,7 +1357,7 @@ pub struct ReviewFinding {
 #[serde(rename_all = "snake_case")]
 #[allow(
     dead_code,
-    reason = "contract v2 reserves structured findings for the review parser"
+    reason = "contract v3 reserves structured findings for the review parser"
 )]
 pub enum ReviewSeverity {
     Info,
@@ -1330,7 +1378,7 @@ pub struct ReviewTestRun {
 #[serde(rename_all = "snake_case")]
 #[allow(
     dead_code,
-    reason = "contract v2 reserves structured test evidence for verifier integration"
+    reason = "contract v3 reserves structured test evidence for verifier integration"
 )]
 pub enum ReviewTestStatus {
     Passed,
@@ -1612,7 +1660,7 @@ mod tests {
 
     fn sample_review_brief() -> SessionBrief {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -1652,7 +1700,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         std::fs::write(
             ws.path().join("AGENTS.md"),
-            "---\nid: mem_local_fact\ntrust: maintainer_approved\nsource: unit-test\n---\nLocal fact.",
+            "---\nid: mem_local_fact\ntrust: maintainer_approved\nsource: unit-test\nsource_ref: OpenCoven/coven-code#106\nsource_repo: OpenCoven/coven-code\nsource_commit: 0123456789abcdef0123456789abcdef01234567\nsession_id: sess-review-memory\ncreated_by: coven-code\n---\n- **[project-fact]** Local fact. *(confidence: 90%, provenance: session:sess-review-memory;source:session-memory-extraction;repo:OpenCoven/coven-code;commit:0123456)*\n",
         )
         .unwrap();
         let config = claurst_core::config::Config::default();
@@ -1667,6 +1715,25 @@ mod tests {
             .expect("project memory entry is reported");
         assert_eq!(entry.scope, "project");
         assert_eq!(entry.trust, "maintainer-approved");
+        assert_eq!(entry.source.as_deref(), Some("unit-test"));
+        assert_eq!(
+            entry.source_ref.as_deref(),
+            Some("OpenCoven/coven-code#106")
+        );
+        assert_eq!(entry.source_repo.as_deref(), Some("OpenCoven/coven-code"));
+        assert_eq!(
+            entry.source_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(entry.session_id.as_deref(), Some("sess-review-memory"));
+        assert_eq!(entry.created_by.as_deref(), Some("coven-code"));
+        assert_eq!(
+            entry.provenance,
+            vec![
+                "session:sess-review-memory;source:session-memory-extraction;repo:OpenCoven/coven-code;commit:0123456"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1705,6 +1772,17 @@ mod tests {
                 trust: "maintainer-approved".to_string(),
                 visibility: Some("public_review".to_string()),
                 scope: "managed".to_string(),
+                source: Some("session-memory-extraction".to_string()),
+                source_ref: None,
+                source_repo: Some("OpenCoven/coven-code".to_string()),
+                source_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                source_actor: Some("BunsDev".to_string()),
+                session_id: Some("sess-artifact".to_string()),
+                transcript_ref: Some("sha256:abc123".to_string()),
+                created_by: Some("coven-code".to_string()),
+                provenance: vec![
+                    "session:sess-artifact;source:session-memory-extraction".to_string()
+                ],
             }],
         };
 
@@ -1723,6 +1801,29 @@ mod tests {
         assert_eq!(memory_value["entries"][0]["id"], "mem_policy");
         assert_eq!(memory_value["entries"][0]["trust"], "maintainer-approved");
         assert_eq!(memory_value["entries"][0]["scope"], "managed");
+        assert_eq!(
+            memory_value["entries"][0]["source"],
+            "session-memory-extraction"
+        );
+        assert_eq!(
+            memory_value["entries"][0]["source_repo"],
+            "OpenCoven/coven-code"
+        );
+        assert_eq!(memory_value["entries"][0]["session_id"], "sess-artifact");
+        assert_eq!(
+            memory_value["entries"][0]["provenance"][0],
+            "session:sess-artifact;source:session-memory-extraction"
+        );
+    }
+
+    #[test]
+    fn inline_memory_provenance_uses_trailing_metadata_field() {
+        let content = "- **[project-fact]** The artifact has `provenance: Vec<String>` entries *(confidence: 90%, provenance: session:sess-1;source:session-memory-extraction)*";
+
+        assert_eq!(
+            memory_inline_provenance(content),
+            vec!["session:sess-1;source:session-memory-extraction".to_string()]
+        );
     }
 
     // ── Input conformance ───────────────────────────────────────────────────
@@ -1742,7 +1843,7 @@ mod tests {
                 ..
             }
         ));
-        brief.ensure_supported_version().expect("v2 is supported");
+        brief.ensure_supported_version().expect("v3 is supported");
     }
 
     #[test]
@@ -1761,7 +1862,7 @@ mod tests {
         // The adapter emits a tokenless brief; the runtime must NOT require an
         // `auth`/`token` field to parse it.
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_assigned",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "fix_issue", "issue_number": 1, "issue_title": "t", "issue_body": "b" },
@@ -1793,7 +1894,7 @@ mod tests {
         // Contract §6: additive fields within a major version are backward
         // compatible; the consumer must not choke on them.
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_assigned",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main", "topics": ["x"] },
             "task": { "kind": "fix_issue", "issue_number": 1, "issue_title": "t", "issue_body": "b" },
@@ -1808,10 +1909,10 @@ mod tests {
     #[test]
     fn rejects_unsupported_major_version() {
         let mut brief = sample_brief();
-        brief.contract_version = "3".to_string();
+        brief.contract_version = "4".to_string();
         assert!(
             brief.ensure_supported_version().is_err(),
-            "a v3 brief must be rejected by a v2 runtime"
+            "a v4 brief must be rejected by a v3 runtime"
         );
     }
 
@@ -1920,7 +2021,7 @@ mod tests {
                 "result has key `{key}` not permitted by schema (additionalProperties:false)"
             );
         }
-        assert_eq!(obj["contract_version"], json!("2"));
+        assert_eq!(obj["contract_version"], json!("3"));
 
         let status_enum = props["status"]["enum"].as_array().unwrap();
         assert!(status_enum.contains(&obj["status"]), "status out of enum");
@@ -1983,7 +2084,7 @@ mod tests {
     #[test]
     fn review_context_produces_structured_pr_review_evidence() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -2319,7 +2420,7 @@ N/A
     #[test]
     fn address_review_comment_without_commits_is_successful_review_output() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "pr_review_comment",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "address_review_comment", "pr_number": 7, "comment_body": "Please review this behavior.", "diff_hunk": null },

@@ -161,8 +161,10 @@ Auto-extracted memories are approval-gated in hosted review mode. By default,
 hosted sessions write reviewable JSON candidates under
 `.coven-code/memory-candidates/` instead of appending directly to durable
 `.coven-code/AGENTS.md` memory. Each candidate records content, category,
-confidence, provenance, source trust, proposed scope, proposed visibility,
-status, and any rejection reason.
+confidence, structured provenance, source trust, proposed scope, proposed
+visibility, status, and any rejection reason. Auto-extracted provenance records
+the session id, source kind, creator, and best-effort repository and commit
+references; it does not store secret values.
 
 Trusted deployments can opt into direct durable writes only when the source
 trust meets the configured threshold:
@@ -373,8 +375,9 @@ Frontmatter fields:
 | `scope` | Intended scope, such as `user`, `tenant`, `installation`, `repo`, `branch`, or `pr`. |
 | `trust` | Source trust. Hosted review enforces this against `hostedReview.memoryTrustThreshold`. Supported values include `system_policy`, `maintainer_approved`, `default_branch_code`, `model_inferred`, `contributor_input`, `fork_input`, and `unknown`. |
 | `visibility` | Intended review visibility: `public_review`, `private_review`, or `security_private`. Hosted public reviews exclude `security_private` memory by default. |
-| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session_memory_extraction`. |
+| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session-memory-extraction`. |
 | `source_ref` | Source reference such as `owner/repo#123`, a commit SHA, or another non-secret audit handle. |
+| `source_repo`, `source_commit`, `source_actor` | Optional structured provenance for repository slug, commit SHA, and source actor. Store references only, not secret values. |
 | `expires_at` | Optional expiry date in `YYYY-MM-DD` format. Expired hosted memory is ignored. |
 | `retention_class` | Optional lifecycle class such as `standard`, `short_lived`, `security`, or `legal_hold`. |
 | `redacted_at` | Marks content as redacted. Hosted review keeps the metadata visible but replaces the body with a redaction stub. |

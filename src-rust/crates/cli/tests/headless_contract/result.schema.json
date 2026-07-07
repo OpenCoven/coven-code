@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/OpenCoven/coven-github/docs/contracts/result.schema.json",
   "title": "coven-code headless result envelope",
-  "description": "Terminal task state coven-code --headless writes to --output. Contract version 2.",
+  "description": "Terminal task state coven-code --headless writes to --output. Contract version 3.",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "status", "commits", "files_changed", "summary", "pr_body", "review"],
   "properties": {
     "contract_version": {
       "type": "string",
-      "const": "2"
+      "const": "3"
     },
     "status": {
       "type": "string",
@@ -120,12 +120,38 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["id", "trust", "visibility", "scope"],
+                "required": [
+                  "id",
+                  "trust",
+                  "visibility",
+                  "scope",
+                  "source",
+                  "source_ref",
+                  "source_repo",
+                  "source_commit",
+                  "source_actor",
+                  "session_id",
+                  "transcript_ref",
+                  "created_by",
+                  "provenance"
+                ],
                 "properties": {
                   "id": { "type": "string" },
                   "trust": { "type": "string" },
                   "visibility": { "type": ["string", "null"] },
-                  "scope": { "type": "string" }
+                  "scope": { "type": "string" },
+                  "source": { "type": ["string", "null"] },
+                  "source_ref": { "type": ["string", "null"] },
+                  "source_repo": { "type": ["string", "null"] },
+                  "source_commit": { "type": ["string", "null"] },
+                  "source_actor": { "type": ["string", "null"] },
+                  "session_id": { "type": ["string", "null"] },
+                  "transcript_ref": { "type": ["string", "null"] },
+                  "created_by": { "type": ["string", "null"] },
+                  "provenance": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
                 }
               }
             }

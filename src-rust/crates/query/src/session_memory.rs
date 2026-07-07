@@ -18,6 +18,7 @@ use claurst_api::{
     AnthropicStreamEvent, ApiMessage, CreateMessageRequest, StreamAccumulator, StreamHandler,
     SystemPrompt,
 };
+use claurst_core::claudemd::MemoryProvenance;
 use claurst_core::hosted_review::{HostedReviewConfig, MemorySourceTrust, RuntimeMode};
 use claurst_core::team_memory_sync::scan_for_secrets;
 use claurst_core::types::{Message, Role};
@@ -117,7 +118,7 @@ pub struct MemoryCandidate {
     pub content: String,
     pub category: MemoryCategory,
     pub confidence: f32,
-    pub provenance: String,
+    pub provenance: MemoryProvenance,
     pub source_trust: MemorySourceTrust,
     pub proposed_scope: String,
     pub proposed_visibility: String,
@@ -132,7 +133,7 @@ pub struct MemoryCandidate {
 impl MemoryCandidate {
     fn from_memory(
         memory: &ExtractedMemory,
-        provenance: &str,
+        provenance: &MemoryProvenance,
         proposed_scope: &str,
         proposed_visibility: &str,
         rejection_reason: Option<&str>,
@@ -142,7 +143,7 @@ impl MemoryCandidate {
             content: memory.content.clone(),
             category: memory.category.clone(),
             confidence: memory.confidence,
-            provenance: provenance.to_string(),
+            provenance: provenance.clone(),
             source_trust: memory.source_trust,
             proposed_scope: proposed_scope.to_string(),
             proposed_visibility: proposed_visibility.to_string(),
@@ -180,7 +181,7 @@ impl MemoryCandidateStore {
     pub async fn write_pending(
         &self,
         memories: &[ExtractedMemory],
-        provenance: &str,
+        provenance: &MemoryProvenance,
         proposed_scope: &str,
         proposed_visibility: &str,
         rejection_reason: Option<&str>,
@@ -481,7 +482,7 @@ impl SessionMemoryExtractor {
     pub async fn persist_with_provenance(
         memories: &[ExtractedMemory],
         target_path: &Path,
-        provenance: Option<&str>,
+        provenance: Option<&MemoryProvenance>,
     ) -> anyhow::Result<()> {
         if memories.is_empty() {
             return Ok(());
@@ -499,19 +500,26 @@ impl SessionMemoryExtractor {
             Err(e) => return Err(e.into()),
         };
 
+        let existing = if let Some(provenance) = provenance {
+            apply_provenance_frontmatter(existing, provenance)
+        } else {
+            existing
+        };
+
         // Build the new entries block
         let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut new_block = format!("\n### Session memories — {}\n\n", date_str);
+        let provenance_label = provenance
+            .map(MemoryProvenance::compact_string)
+            .filter(|provenance| !provenance.trim().is_empty())
+            .map(|provenance| format!(", provenance: {provenance}"))
+            .unwrap_or_default();
         for memory in memories {
             let trust_label = if memory.source_trust.is_unknown() {
                 String::new()
             } else {
                 format!(", trust: {}", source_trust_label(memory.source_trust))
             };
-            let provenance_label = provenance
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| format!(", provenance: {}", p))
-                .unwrap_or_default();
             new_block.push_str(&format!(
                 "- **[{}]** {} *(confidence: {:.0}%{}{})*\n",
                 memory.category.label(),
@@ -564,7 +572,7 @@ impl SessionMemoryExtractor {
         candidate_store: &MemoryCandidateStore,
         mode: RuntimeMode,
         hosted_config: &HostedReviewConfig,
-        provenance: &str,
+        provenance: &MemoryProvenance,
     ) -> anyhow::Result<MemoryPersistenceOutcome> {
         if memories.is_empty() {
             return Ok(MemoryPersistenceOutcome::Skipped);
@@ -631,6 +639,53 @@ impl SessionMemoryExtractor {
             reason,
         })
     }
+}
+
+fn apply_provenance_frontmatter(existing: String, provenance: &MemoryProvenance) -> String {
+    let pairs = provenance
+        .frontmatter_pairs()
+        .into_iter()
+        .filter(|(key, _)| matches!(*key, "source" | "created_by"))
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return existing;
+    }
+
+    let rendered_pairs = pairs
+        .iter()
+        .map(|(key, value)| format!("{key}: {}", quote_frontmatter_value(value)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !existing.starts_with("---") {
+        return format!("---\n{rendered_pairs}\n---\n{existing}");
+    }
+
+    let after_first = &existing[3..];
+    let Some(end) = after_first.find("\n---") else {
+        return format!("---\n{rendered_pairs}\n---\n{existing}");
+    };
+    let yaml = after_first[..end].trim();
+    let body = &after_first[end + 4..];
+    let mut preserved = Vec::new();
+    for line in yaml.lines() {
+        let key = line.split_once(':').map(|(key, _)| key.trim());
+        if key.is_some_and(|key| pairs.iter().any(|(pair_key, _)| *pair_key == key)) {
+            continue;
+        }
+        preserved.push(line.to_string());
+    }
+    preserved.push(rendered_pairs);
+    format!("---\n{}\n---{body}", preserved.join("\n"))
+}
+
+fn quote_frontmatter_value(value: &str) -> String {
+    let escaped = value
+        .trim()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    format!("\"{escaped}\"")
 }
 
 fn hosted_memory_candidate_reason(config: &HostedReviewConfig) -> String {
@@ -749,7 +804,14 @@ fn parse_extraction_response(response: &str) -> Vec<ExtractedMemory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claurst_core::claudemd::{load_memory_file, MemoryScope};
     use claurst_core::types::Message;
+
+    fn test_provenance() -> MemoryProvenance {
+        MemoryProvenance::session_memory_extraction("test-session")
+            .with_source_repo("OpenCoven/coven-code")
+            .with_source_commit("0123456789abcdef0123456789abcdef01234567")
+    }
 
     fn make_user(text: &str) -> Message {
         Message::user(text)
@@ -1005,7 +1067,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             &candidate_store,
             RuntimeMode::HostedReview,
             &config,
-            "session:test-session;source:session-memory-extraction",
+            &test_provenance(),
         )
         .await
         .unwrap();
@@ -1027,8 +1089,20 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         assert_eq!(candidate.status, MemoryCandidateStatus::Pending);
         assert_eq!(candidate.source_trust, MemorySourceTrust::ForkInput);
         assert_eq!(
-            candidate.provenance,
-            "session:test-session;source:session-memory-extraction"
+            candidate.provenance.session_id.as_deref(),
+            Some("test-session")
+        );
+        assert_eq!(
+            candidate.provenance.source_kind.as_deref(),
+            Some("session-memory-extraction")
+        );
+        assert_eq!(
+            candidate.provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            candidate.provenance.source_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
         );
         assert_eq!(
             candidate.rejection_reason.as_deref(),
@@ -1061,7 +1135,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             &candidate_store,
             RuntimeMode::HostedReview,
             &config,
-            "session:test-session;source:session-memory-extraction",
+            &test_provenance(),
         )
         .await
         .unwrap();
@@ -1104,7 +1178,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
             &candidate_store,
             RuntimeMode::HostedReview,
             &config,
-            "session:test-session;source:session-memory-extraction",
+            &test_provenance(),
         )
         .await
         .unwrap();
@@ -1117,7 +1191,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         assert!(content.contains("Maintainers require explicit error handling"));
         assert!(content.contains("trust: maintainer-approved"));
         assert!(
-            content.contains("provenance: session:test-session;source:session-memory-extraction"),
+            content.contains("provenance: session:test-session;source:session-memory-extraction;repo:OpenCoven/coven-code;commit:0123456"),
             "durable hosted entries must carry source/session provenance: {content}"
         );
         assert!(!dir
@@ -1141,14 +1215,95 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         SessionMemoryExtractor::persist_with_provenance(
             &memories,
             &target,
-            Some("session:sess-42;source:unit-test"),
+            Some(
+                &MemoryProvenance::new("unit-test", "coven-code")
+                    .with_session_id("sess-42")
+                    .with_source_repo("OpenCoven/coven-code")
+                    .with_source_commit("abcdef0123456789abcdef0123456789abcdef01"),
+            ),
         )
         .await
         .unwrap();
 
         let content = fs::read_to_string(&target).await.unwrap();
-        assert!(content.contains("provenance: session:sess-42;source:unit-test"));
+        assert!(content.contains(
+            "provenance: session:sess-42;source:unit-test;repo:OpenCoven/coven-code;commit:abcdef0"
+        ));
         assert!(content.contains("trust: maintainer-approved"));
+    }
+
+    #[tokio::test]
+    async fn persisted_auto_extracted_memory_records_structured_source_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("AGENTS.md");
+        let memories = vec![ExtractedMemory {
+            content: "Structured provenance fact".to_string(),
+            category: MemoryCategory::ProjectFact,
+            confidence: 0.85,
+            source_trust: MemorySourceTrust::MaintainerApproved,
+        }];
+        let provenance = MemoryProvenance::session_memory_extraction("sess-structured")
+            .with_source_repo("OpenCoven/coven-code")
+            .with_source_commit("fedcba9876543210fedcba9876543210fedcba98");
+
+        SessionMemoryExtractor::persist_with_provenance(&memories, &target, Some(&provenance))
+            .await
+            .unwrap();
+
+        let content = fs::read_to_string(&target).await.unwrap();
+        assert!(content.contains(
+            "provenance: session:sess-structured;source:session-memory-extraction;repo:OpenCoven/coven-code;commit:fedcba9"
+        ));
+        assert!(content.contains("confidence: 85%"));
+        let loaded = load_memory_file(&target, MemoryScope::Local).unwrap();
+        assert_eq!(
+            loaded.frontmatter.source.as_deref(),
+            Some("session-memory-extraction")
+        );
+        assert_eq!(loaded.frontmatter.created_by.as_deref(), Some("coven-code"));
+        assert!(loaded.frontmatter.session_id.is_none());
+        assert!(loaded.frontmatter.source_repo.is_none());
+        assert!(loaded.frontmatter.source_commit.is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_candidate_json_round_trips_structured_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryCandidateStore::for_working_dir(dir.path());
+        let memories = vec![ExtractedMemory {
+            content: "Candidate provenance fact".to_string(),
+            category: MemoryCategory::ProjectFact,
+            confidence: 0.75,
+            source_trust: MemorySourceTrust::ContributorInput,
+        }];
+        let provenance = MemoryProvenance::session_memory_extraction("sess-json")
+            .with_source_repo("OpenCoven/coven-code")
+            .with_source_commit("1111111111111111111111111111111111111111")
+            .with_source_actor("BunsDev");
+
+        let candidates = store
+            .write_pending(
+                &memories,
+                &provenance,
+                "hosted-review",
+                "durable-memory",
+                Some("hosted-approval-required"),
+            )
+            .await
+            .unwrap();
+
+        let stored = store.read_candidate(&candidates[0].id).await.unwrap();
+        assert_eq!(stored.provenance, provenance);
+        assert_eq!(stored.provenance.session_id.as_deref(), Some("sess-json"));
+        assert_eq!(
+            stored.provenance.source_kind.as_deref(),
+            Some("session-memory-extraction")
+        );
+        assert_eq!(
+            stored.provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(stored.provenance.source_actor.as_deref(), Some("BunsDev"));
     }
 
     #[tokio::test]
@@ -1165,7 +1320,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         let candidates = store
             .write_pending(
                 &memories,
-                "session-memory-extraction",
+                &test_provenance(),
                 "hosted-review",
                 "durable-memory",
                 Some("hosted-approval-required"),
@@ -1196,7 +1351,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         let candidates = store
             .write_pending(
                 &memories,
-                "session-memory-extraction",
+                &test_provenance(),
                 "hosted-review",
                 "durable-memory",
                 None,

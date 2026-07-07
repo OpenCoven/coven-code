@@ -1,6 +1,6 @@
 # coven-code Headless Execution Contract
 
-**Contract version: `2`** - Status: **Locked** (V2 / structured review output)
+**Contract version: `3`** - Status: **Locked** (V3 / memory provenance in review artifacts)
 
 This document is the single source of truth for the interface between
 `coven-github` (the GitHub ingress adapter) and `coven-code` (the execution
@@ -64,7 +64,7 @@ The adapter is the **producer**; the runtime is the **consumer**. The brief is
 
 ```json
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "trigger": "issue_assigned",
   "repo": {
     "owner": "OpenCoven",
@@ -96,7 +96,7 @@ The adapter is the **producer**; the runtime is the **consumer**. The brief is
 
 | Field | Type | Notes |
 |---|---|---|
-| `contract_version` | string | MUST be `"2"`. Consumers MUST reject a brief whose major version they do not implement. |
+| `contract_version` | string | MUST be `"3"`. Consumers MUST reject a brief whose major version they do not implement. |
 | `trigger` | string enum | `issue_assigned` \| `pr_review_comment` \| `issue_mention`. |
 | `repo.owner` | string | |
 | `repo.name` | string | |
@@ -132,7 +132,7 @@ the file MAY be absent.
 
 ```json
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "status": "success",
   "branch": "cody/fix-issue-42",
   "commits": [
@@ -157,7 +157,18 @@ the file MAY be absent.
           "id": "mem_review_policy",
           "trust": "maintainer-approved",
           "visibility": "public_review",
-          "scope": "managed"
+          "scope": "managed",
+          "source": "session-memory-extraction",
+          "source_ref": null,
+          "source_repo": "OpenCoven/coven-code",
+          "source_commit": "0123456789abcdef0123456789abcdef01234567",
+          "source_actor": "BunsDev",
+          "session_id": "sess-artifact",
+          "transcript_ref": "sha256:abc123",
+          "created_by": "coven-code",
+          "provenance": [
+            "session:sess-artifact;source:session-memory-extraction;repo:OpenCoven/coven-code;commit:0123456"
+          ]
         }
       ]
     }
@@ -170,7 +181,7 @@ the file MAY be absent.
 
 | Field | Type | Notes |
 |---|---|---|
-| `contract_version` | string | MUST be `"2"`. Producers MUST emit it. |
+| `contract_version` | string | MUST be `"3"`. Producers MUST emit it. |
 | `status` | string enum | `success` \| `failure` \| `partial` \| `needs_input`. See [3.3](#33-status). |
 | `branch` | string \| null | Branch the runtime pushed. `null` when no branch was created. The adapter only opens a PR when `branch` is set **and** `commits` is non-empty. |
 | `commits` | array | `{ "sha": string, "message": string }`. MAY be empty. |
@@ -181,9 +192,9 @@ the file MAY be absent.
 | `exit_reason` | string enum \| null | `null` on success; otherwise the terminal cause. See [3.4](#34-exit_reason). |
 
 > **Drift note (supersedes `COVEN-GITHUB.md`):** the prose result envelope listed
-> an `events` array. Progress/event streaming is **not** part of the v2 result
+> an `events` array. Progress/event streaming is **not** part of the v3 result
 > envelope — it is deferred to M2 and will travel over a separate channel. The
-> v2 envelope carries terminal task state only. Producers MUST NOT rely on
+> v3 envelope carries terminal task state only. Producers MUST NOT rely on
 > `events` being read.
 
 ### 3.2 `review`
@@ -202,7 +213,7 @@ the intended code. It is required on every result. Non-review tasks MUST set
 | `tests_run` | array | Commands run while reviewing, with `passed`, `failed`, `not_run`, or `unknown` status. |
 | `no_findings_reason` | string \| null | File-backed explanation for a clean review. MAY be `null` for degraded/partial output when `evidence_status` and `limitations` explain why a substantive clean-review conclusion was not possible. |
 | `limitations` | string[] | Evidence gaps, skipped checks, or other caveats. |
-| `memory` | object | Memory audit report: `domains_loaded` (hosted memory domains eligible for this review, e.g. `default-branch`; empty for local runs) and `entries` (every loaded memory entry with its stable `id`, effective `trust` label after hosted caps/floors, optional `visibility`, and load `scope`). Lets the consumer audit which memory inputs could have influenced findings and cross-check `memory_refs` citations. |
+| `memory` | object | Memory audit report: `domains_loaded` (hosted memory domains eligible for this review, e.g. `default-branch`; empty for local runs) and `entries` (every loaded memory entry with its stable `id`, effective `trust` label after hosted caps/floors, optional `visibility`, load `scope`, structured file-level provenance fields such as `source`, `source_ref`, `source_repo`, `source_commit`, `session_id`, and `created_by`, plus compact per-entry `provenance` strings found in durable memory content). Lets the consumer audit which memory inputs could have influenced findings and cross-check `memory_refs` citations. |
 
 Each finding carries `severity`, `file`, optional `line`, `title`, `body`, and
 optional `recommendation`. Valid severities are `info`, `low`, `medium`, `high`,
@@ -259,7 +270,7 @@ A process **killed by signal**, or one that **times out** (the adapter enforces
 
 ## 5. Security invariants
 
-These are non-negotiable for v2:
+These are non-negotiable for v3:
 
 1. The session brief is **tokenless**. Serializing a brief MUST NOT produce an
    `auth` field, a `"token"` field, or a credential-bearing `clone_url`
@@ -284,10 +295,15 @@ The contract is versioned by the single `contract_version` string, which tracks
   the version.
 - A change that adds a **required** field, removes a field, renames a field,
   changes a type, or changes exit-code/status semantics is **breaking** and MUST
-  bump `contract_version` to `"2"`, update both schemas and fixtures, and ship a
-  migration note here.
+  bump `contract_version` to the next major version, update both schemas and
+  fixtures, and ship a migration note here.
 - Consumers MUST reject a payload whose major version they do not implement,
   rather than silently mis-parsing it.
+
+Migration note for v3: `review.memory.entries[]` now includes structured
+file-level provenance fields and compact per-entry provenance strings alongside
+memory ids and effective trust labels. Consumers that validate result envelopes
+must accept the new required nullable provenance fields and `provenance` arrays.
 
 ---
 
