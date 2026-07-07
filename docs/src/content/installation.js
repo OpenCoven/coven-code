@@ -24,7 +24,7 @@ export function render() {
 # or
 bun install -g @opencoven/coven-code</code></pre>
 
-    <p>The installed command is <code>coven-code</code>; <code>coven</code> and <code>coven-cave</code> are installed as aliases for the same CLI. Run <code>coven-code</code> with no arguments for the interactive UI. The postinstall script downloads the correct pre-built binary from GitHub Releases — no compilation needed.</p>
+    <p>The installed command is <code>coven-code</code>; <code>coven-cave</code> is installed as an alias for the same CLI. The bare <code>coven</code> command is owned by the Coven daemon CLI (<code>@opencoven/cli</code>) and is not installed by this package. Run <code>coven-code</code> with no arguments for the interactive UI. The postinstall script downloads the correct pre-built binary from GitHub Releases — no compilation needed.</p>
 
     <pre><code data-lang="bash">npx @opencoven/coven-code
 bunx @opencoven/coven-code</code></pre>
@@ -115,13 +115,13 @@ sudo pacman -S base-devel pkgconf openssl</code></pre>
 
     <h2>Shell Completions</h2>
 
-    <p>Coven does not currently ship a dedicated completions subcommand. All flags can be discovered via <code>coven --help</code>. If you want basic tab completion in bash or zsh, use the generic completion helper built into your shell:</p>
+    <p>Coven does not currently ship a dedicated completions subcommand. All flags can be discovered via <code>coven-code --help</code>. If you want basic tab completion in bash or zsh, use the generic completion helper built into your shell:</p>
 
     <pre><code data-lang="bash"># bash — add to ~/.bashrc
-complete -C coven coven
+complete -C coven-code coven-code
 
 # zsh — add to ~/.zshrc (requires compinit)
-compdef _gnu_generic coven</code></pre>
+compdef _gnu_generic coven-code</code></pre>
 
     <h2>Uninstalling</h2>
 

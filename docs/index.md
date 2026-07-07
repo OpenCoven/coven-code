@@ -76,8 +76,9 @@ Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85
 npm install -g @opencoven/coven-code
 ```
 
-The package installs the `coven-code` CLI (with `coven` and `coven-cave`
-aliases). Run `coven-code` with no arguments for the interactive UI. See
+The package installs the `coven-code` CLI (with a `coven-cave` alias). Run
+`coven-code` with no arguments for the interactive UI. The bare `coven`
+command belongs to the Coven daemon CLI (`@opencoven/cli`). See
 [Installation](installation)
 for npm, bun, standalone binary, and source install options.
 
@@ -90,7 +91,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 **3. Run interactively**
 
 ```bash
-coven
+coven-code
 ```
 
 Or launch a direct harness session:
