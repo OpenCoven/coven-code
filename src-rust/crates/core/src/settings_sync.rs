@@ -242,8 +242,17 @@ impl SettingsSyncManager {
             }
         }
 
-        // Project-specific files
+        // Project-specific files. The claimed project id must match the
+        // identity derived from the origin remote of the current repository;
+        // a mismatch or an underivable identity fails closed and the project
+        // files are skipped.
         if let Some(pid) = project_id {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let repo_root = crate::git_utils::get_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+            if let Err(e) = crate::git_utils::verified_local_project_id(&repo_root, Some(pid)) {
+                warn!("Settings sync: refusing project apply: {}", e);
+                return result;
+            }
             let proj_settings_key = sync_key_project_settings(pid);
             if let Some(content) = data.memory_files.get(&proj_settings_key) {
                 let path = std::env::current_dir()
@@ -433,19 +442,30 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
         entries.insert(SYNC_KEY_USER_MEMORY.to_string(), content);
     }
 
-    // Project-specific files
+    // Project-specific files. Verify the claimed project id against the
+    // identity derived from the origin remote before reading anything keyed
+    // by it; fail closed on mismatch or an underivable identity.
     if let Some(pid) = project_id {
         let cwd = std::env::current_dir().unwrap_or_default();
-        entries.extend(collect_project_entries(pid, cwd).await);
+        let repo_root = crate::git_utils::get_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+        match crate::git_utils::verified_local_project_id(&repo_root, Some(pid)) {
+            Ok(_) => entries.extend(collect_project_entries(pid, cwd).await),
+            Err(e) => warn!("Settings sync: skipping project entries: {}", e),
+        }
     }
 
     entries
 }
 
-pub async fn collect_hosted_entries(scope: &HostedReviewScope) -> HashMap<String, String> {
+/// Collect hosted project entries for upload. Fails when the scope carries
+/// empty identity components (which would collapse the hosted namespace).
+pub async fn collect_hosted_entries(scope: &HostedReviewScope) -> Result<HashMap<String, String>> {
+    scope
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("hosted settings sync refused: {reason}"))?;
     let project_id = hosted_project_id(scope);
     let cwd = std::env::current_dir().unwrap_or_default();
-    collect_project_entries(&project_id, cwd).await
+    Ok(collect_project_entries(&project_id, cwd).await)
 }
 
 async fn collect_project_entries(project_id: &str, cwd: PathBuf) -> HashMap<String, String> {
@@ -618,6 +638,19 @@ mod tests {
         assert!(entries.contains_key(&sync_key_hosted_project_memory(&scope)));
         assert!(!entries.contains_key(SYNC_KEY_USER_SETTINGS));
         assert!(!entries.contains_key(SYNC_KEY_USER_MEMORY));
+    }
+
+    #[tokio::test]
+    async fn hosted_collection_refuses_empty_scope_components() {
+        let scope = HostedReviewScope::new(
+            " ".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        let err = collect_hosted_entries(&scope).await.unwrap_err();
+        assert!(err.to_string().contains("empty tenant_id"));
     }
 
     #[test]

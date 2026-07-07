@@ -561,6 +561,74 @@ pub struct ReviewResult {
     pub tests_run: Vec<ReviewTestRun>,
     pub no_findings_reason: Option<String>,
     pub limitations: Vec<String>,
+    /// Memory entries and domains that were loaded for this review, so the
+    /// artifact records the trust level and provenance scope of every memory
+    /// input that could have influenced findings.
+    pub memory: ReviewMemoryUse,
+}
+
+/// Memory usage report attached to a review artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct ReviewMemoryUse {
+    /// Hosted memory domains that were eligible for this review (e.g.
+    /// `default-branch`). Empty for local, non-hosted runs.
+    pub domains_loaded: Vec<String>,
+    /// Every memory entry loaded into the review context.
+    pub entries: Vec<ReviewMemoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewMemoryEntry {
+    /// Stable memory id (frontmatter `id` or content hash).
+    pub id: String,
+    /// Effective trust after hosted caps/floors (kebab-case label).
+    pub trust: String,
+    /// Declared visibility, when present.
+    pub visibility: Option<String>,
+    /// Memory scope the entry was loaded from (managed/user/project/local).
+    pub scope: String,
+}
+
+/// Enumerate the memory entries and domains the current configuration loads
+/// for a review of `workspace_root`. Uses the same load options as the live
+/// context build, so the report matches what the model actually saw.
+pub fn collect_review_memory(
+    workspace_root: &Path,
+    config: &claurst_core::config::Config,
+) -> ReviewMemoryUse {
+    let options = config.memory_load_options();
+    let files =
+        claurst_core::claudemd::load_all_memory_files_with_options(workspace_root, &options);
+    let entries = files
+        .iter()
+        .map(|file| ReviewMemoryEntry {
+            id: claurst_core::claudemd::memory_id(file),
+            trust: serde_enum_label(&claurst_core::claudemd::effective_memory_trust(
+                file, &options,
+            )),
+            visibility: file.frontmatter.visibility.map(|v| serde_enum_label(&v)),
+            scope: serde_enum_label(&file.scope),
+        })
+        .collect();
+    let domains_loaded = if config.hosted_review_enabled() {
+        // Hosted review currently loads only the default-branch domain;
+        // security-private and branch domains are excluded by policy.
+        vec![claurst_core::hosted_review::MemoryDomain::DefaultBranch.path_component()]
+    } else {
+        Vec::new()
+    };
+    ReviewMemoryUse {
+        domains_loaded,
+        entries,
+    }
+}
+
+/// Render a unit enum's serde label (kebab/snake-case string form).
+fn serde_enum_label<T: Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(label)) => label,
+        _ => "unknown".to_string(),
+    }
 }
 
 impl ReviewResult {
@@ -574,6 +642,7 @@ impl ReviewResult {
             tests_run: Vec::new(),
             no_findings_reason: None,
             limitations: Vec::new(),
+            memory: ReviewMemoryUse::default(),
         }
     }
 
@@ -581,6 +650,15 @@ impl ReviewResult {
         brief: Option<&SessionBrief>,
         trace: Option<&ReviewTrace>,
         final_text: &str,
+    ) -> Self {
+        Self::from_brief_with_memory(brief, trace, final_text, ReviewMemoryUse::default())
+    }
+
+    pub fn from_brief_with_memory(
+        brief: Option<&SessionBrief>,
+        trace: Option<&ReviewTrace>,
+        final_text: &str,
+        memory: ReviewMemoryUse,
     ) -> Self {
         let Some(brief) = brief else {
             return Self::none();
@@ -648,6 +726,7 @@ impl ReviewResult {
             tests_run: parsed.tests_run,
             no_findings_reason: parsed.no_findings_reason,
             limitations,
+            memory,
         }
     }
 }
@@ -1322,19 +1401,40 @@ fn classify(
     }
 }
 
-/// Build the `result.json` envelope and the process exit code from the run.
-pub fn build_result(
+/// Test convenience: build the result envelope with an empty memory report.
+#[cfg(test)]
+fn build_result(
     brief: Option<&SessionBrief>,
     git: &GitSummary,
     outcome: RunOutcome,
     final_text: &str,
     review_trace: Option<&ReviewTrace>,
 ) -> (ResultEnvelope, i32) {
+    build_result_with_memory(
+        brief,
+        git,
+        outcome,
+        final_text,
+        review_trace,
+        ReviewMemoryUse::default(),
+    )
+}
+
+/// Build the result envelope with an explicit memory-usage report attached to
+/// the review artifact.
+pub fn build_result_with_memory(
+    brief: Option<&SessionBrief>,
+    git: &GitSummary,
+    outcome: RunOutcome,
+    final_text: &str,
+    review_trace: Option<&ReviewTrace>,
+    memory: ReviewMemoryUse,
+) -> (ResultEnvelope, i32) {
     let comment_only = brief.map(SessionBrief::is_comment_only).unwrap_or(false);
     let (mut status, mut exit_reason, code) =
         classify(outcome, !git.commits.is_empty(), comment_only);
 
-    let review = ReviewResult::from_brief(brief, review_trace, final_text);
+    let review = ReviewResult::from_brief_with_memory(brief, review_trace, final_text, memory);
     if review.mode != ReviewMode::None
         && status == Status::Success
         && review.evidence_status != ReviewEvidenceStatus::Complete
@@ -1541,6 +1641,86 @@ mod tests {
     fn record_successful_read(trace: &mut ReviewTrace, path: &str) {
         trace.record_tool_start("Read", &json!({ "file_path": path }).to_string());
         trace.record_tool_end("Read", "", false);
+    }
+
+    // ── Review memory report ────────────────────────────────────────────────
+
+    #[test]
+    fn collect_review_memory_local_lists_project_entries() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("AGENTS.md"),
+            "---\nid: mem_local_fact\ntrust: maintainer_approved\nsource: unit-test\n---\nLocal fact.",
+        )
+        .unwrap();
+        let config = claurst_core::config::Config::default();
+
+        let memory = collect_review_memory(ws.path(), &config);
+
+        assert!(memory.domains_loaded.is_empty());
+        let entry = memory
+            .entries
+            .iter()
+            .find(|entry| entry.id == "mem_local_fact")
+            .expect("project memory entry is reported");
+        assert_eq!(entry.scope, "project");
+        assert_eq!(entry.trust, "maintainer-approved");
+    }
+
+    #[test]
+    fn collect_review_memory_hosted_reports_domain_and_excludes_untrusted() {
+        let ws = tempfile::tempdir().unwrap();
+        // A repo file self-attesting high trust must not survive hosted caps.
+        std::fs::write(
+            ws.path().join("AGENTS.md"),
+            "---\nid: mem_attacker\ntrust: maintainer_approved\nsource: repo\n---\nAttacker fact.",
+        )
+        .unwrap();
+        let mut config = claurst_core::config::Config::default();
+        config.hosted_review.enabled = true;
+
+        let memory = collect_review_memory(ws.path(), &config);
+
+        assert_eq!(memory.domains_loaded, vec!["default-branch".to_string()]);
+        assert!(
+            memory.entries.is_empty(),
+            "hosted review must not report untrusted repo memory as loaded: {:?}",
+            memory.entries
+        );
+    }
+
+    #[test]
+    fn result_envelope_serializes_review_memory_report() {
+        let (dir, mut trace) = review_workspace();
+        record_successful_read(
+            &mut trace,
+            dir.path().join("src/support.rs").to_str().unwrap(),
+        );
+        let memory = ReviewMemoryUse {
+            domains_loaded: vec!["default-branch".to_string()],
+            entries: vec![ReviewMemoryEntry {
+                id: "mem_policy".to_string(),
+                trust: "maintainer-approved".to_string(),
+                visibility: Some("public_review".to_string()),
+                scope: "managed".to_string(),
+            }],
+        };
+
+        let (envelope, _) = build_result_with_memory(
+            Some(&sample_review_brief()),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "## Findings\n- [low] src/lib.rs:1 — fine\n\n## Supporting Context Used\n- src/support.rs: checked",
+            Some(&trace),
+            memory,
+        );
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        let memory_value = &value["review"]["memory"];
+        assert_eq!(memory_value["domains_loaded"][0], "default-branch");
+        assert_eq!(memory_value["entries"][0]["id"], "mem_policy");
+        assert_eq!(memory_value["entries"][0]["trust"], "maintainer-approved");
+        assert_eq!(memory_value["entries"][0]["scope"], "managed");
     }
 
     // ── Input conformance ───────────────────────────────────────────────────

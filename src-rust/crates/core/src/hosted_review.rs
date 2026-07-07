@@ -176,6 +176,27 @@ impl CanonicalRepoIdentity {
         }
     }
 
+    /// Reject identities with empty or whitespace-only components. An empty
+    /// component would collapse the derived namespace across repositories.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("provider", &self.provider),
+            ("host", &self.host),
+            ("owner", &self.owner),
+            ("name", &self.name),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("canonical repo identity has empty {field}"));
+            }
+        }
+        if let Some(repo_id) = &self.repo_id {
+            if repo_id.trim().is_empty() {
+                return Err("canonical repo identity has empty repo_id".to_string());
+            }
+        }
+        Ok(())
+    }
+
     pub fn with_repo_id(mut self, repo_id: impl Into<String>) -> Self {
         self.repo_id = Some(repo_id.into());
         self
@@ -286,6 +307,28 @@ impl HostedReviewScope {
     pub fn with_domain(mut self, memory_domain: MemoryDomain) -> Self {
         self.memory_domain = memory_domain;
         self
+    }
+
+    /// Full-scope validation: every identity component must be non-empty
+    /// after trimming. Hosted namespaces derived from a scope with an empty
+    /// component would collapse tenant/installation/repo isolation, so all
+    /// hosted persistence and sync surfaces must call this before keying
+    /// anything durable on the scope.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("tenant_id", &self.tenant_id),
+            ("installation_id", &self.installation_id),
+            ("repo_id", &self.repo_id),
+            ("repo_full_name", &self.repo_full_name),
+            ("canonical_repo_identity", &self.canonical_repo_identity),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "hosted review scope has empty {field}; refusing to derive a hosted namespace"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn tenant_component(&self) -> String {
@@ -499,6 +542,75 @@ mod tests {
         assert!(!MemoryDomain::SecurityPrivate.can_load_in_public_review(false));
         assert!(MemoryDomain::SecurityPrivate.can_load_in_public_review(true));
         assert!(MemoryDomain::DefaultBranch.can_load_in_public_review(false));
+    }
+
+    #[test]
+    fn hosted_scope_validate_rejects_empty_components() {
+        let valid = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        assert!(valid.validate().is_ok());
+
+        for (tenant, installation, repo) in [
+            ("", "install-1", "repo-99"),
+            ("tenant-a", "  ", "repo-99"),
+            ("tenant-a", "install-1", ""),
+        ] {
+            let scope = HostedReviewScope::new(
+                tenant.to_string(),
+                installation.to_string(),
+                repo.to_string(),
+                "OpenCoven/coven-code".to_string(),
+            );
+            let err = scope.validate().unwrap_err();
+            assert!(err.contains("empty"), "expected empty-field error: {err}");
+        }
+
+        let scope = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "\t".to_string(),
+        );
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn canonical_identity_validate_rejects_empty_components() {
+        let valid = CanonicalRepoIdentity::github("github.com", "OpenCoven", "coven-code");
+        assert!(valid.validate().is_ok());
+
+        let empty_owner = CanonicalRepoIdentity::github("github.com", " ", "coven-code");
+        assert!(empty_owner.validate().is_err());
+
+        let empty_repo_id = CanonicalRepoIdentity::github("github.com", "OpenCoven", "coven-code")
+            .with_repo_id("  ");
+        assert!(empty_repo_id.validate().is_err());
+    }
+
+    #[test]
+    fn two_repos_under_same_installation_have_distinct_namespaces() {
+        let first = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/repo-one".to_string(),
+        );
+        let second = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-2".to_string(),
+            "OpenCoven/repo-two".to_string(),
+        );
+
+        assert_ne!(hosted_project_id(&first), hosted_project_id(&second));
+        assert_ne!(
+            hosted_team_memory_repo_key(&first),
+            hosted_team_memory_repo_key(&second)
+        );
     }
 
     #[test]

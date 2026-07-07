@@ -384,11 +384,25 @@ pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLo
     effective_memory_trust(file, options).meets_threshold(options.min_trust)
 }
 
-fn effective_memory_trust(file: &MemoryFileInfo, options: &MemoryLoadOptions) -> MemorySourceTrust {
+/// Effective trust of a loaded memory file under the given load options.
+/// Hosted mode floors unattributed entries and caps repo-writable scopes.
+pub fn effective_memory_trust(
+    file: &MemoryFileInfo,
+    options: &MemoryLoadOptions,
+) -> MemorySourceTrust {
     let declared = file.frontmatter.trust.unwrap_or(MemorySourceTrust::Unknown);
     if !options.mode.is_hosted_review() {
         return declared;
     }
+
+    // Hosted loads floor the trust of entries that carry no provenance:
+    // without a `source` attribution the declared trust level cannot be
+    // audited, so it is treated as contributor input at best.
+    let declared = if memory_has_provenance(&file.frontmatter) {
+        declared
+    } else {
+        declared.capped_at(MemorySourceTrust::ContributorInput)
+    };
 
     match file.scope {
         MemoryScope::Project | MemoryScope::Local => {
@@ -397,6 +411,13 @@ fn effective_memory_trust(file: &MemoryFileInfo, options: &MemoryLoadOptions) ->
         MemoryScope::User => declared.capped_at(MemorySourceTrust::ContributorInput),
         MemoryScope::Managed => declared,
     }
+}
+
+fn memory_has_provenance(frontmatter: &MemoryFrontmatter) -> bool {
+    frontmatter
+        .source
+        .as_deref()
+        .is_some_and(|source| !source.trim().is_empty())
 }
 
 fn memory_is_expired(expires_at: Option<&str>) -> bool {
@@ -729,7 +750,7 @@ mod tests {
         std::fs::create_dir_all(&rules).unwrap();
         std::fs::write(
             rules.join("managed.md"),
-            "---\ntrust: system_policy\nvisibility: public_review\n---\nmanaged hosted policy",
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: coven-managed-rules\n---\nmanaged hosted policy",
         )
         .unwrap();
 
@@ -809,6 +830,68 @@ mod tests {
             files.is_empty(),
             "project/local memory must not self-attest trusted hosted provenance"
         );
+    }
+
+    #[test]
+    fn hosted_review_floors_trust_for_entries_missing_provenance() {
+        let no_source = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: "unattributed policy".to_string(),
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::SystemPolicy),
+                visibility: Some(MemoryVisibility::PublicReview),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+        let options = MemoryLoadOptions::hosted_review();
+
+        assert_eq!(
+            effective_memory_trust(&no_source, &options),
+            MemorySourceTrust::ContributorInput,
+            "hosted trust must be floored when no source provenance is present"
+        );
+        assert!(
+            !memory_file_allowed_for_options(&no_source, &options),
+            "unattributed entries must not pass the hosted trust threshold"
+        );
+
+        let with_source = MemoryFileInfo {
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::SystemPolicy),
+                visibility: Some(MemoryVisibility::PublicReview),
+                source: Some("coven-managed-rules".to_string()),
+                ..Default::default()
+            },
+            ..no_source
+        };
+        assert_eq!(
+            effective_memory_trust(&with_source, &options),
+            MemorySourceTrust::SystemPolicy
+        );
+        assert!(memory_file_allowed_for_options(&with_source, &options));
+    }
+
+    #[test]
+    fn local_mode_does_not_floor_unattributed_trust() {
+        let file = MemoryFileInfo {
+            path: PathBuf::from("AGENTS.md"),
+            scope: MemoryScope::Project,
+            content: "local memory".to_string(),
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::MaintainerApproved),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+        let options = MemoryLoadOptions::local();
+
+        assert_eq!(
+            effective_memory_trust(&file, &options),
+            MemorySourceTrust::MaintainerApproved
+        );
+        assert!(memory_file_allowed_for_options(&file, &options));
     }
 
     #[test]

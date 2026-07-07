@@ -257,6 +257,7 @@ pub fn transcript_dir_for_mode(
                         .to_string(),
                 )
             })?;
+            scope.validate().map_err(crate::ClaudeError::Config)?;
             Ok(projects_dir()
                 .join("hosted-review")
                 .join("tenants")

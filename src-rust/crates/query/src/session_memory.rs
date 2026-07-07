@@ -214,7 +214,12 @@ impl MemoryCandidateStore {
         candidate.status = MemoryCandidateStatus::Approved;
         candidate.source_trust = MemorySourceTrust::MaintainerApproved;
         candidate.rejection_reason = None;
-        SessionMemoryExtractor::persist(&[candidate.to_approved_memory()], target_path).await?;
+        SessionMemoryExtractor::persist_with_provenance(
+            &[candidate.to_approved_memory()],
+            target_path,
+            Some(&candidate.provenance),
+        )
+        .await?;
         self.write_candidate(&candidate).await?;
         Ok(candidate)
     }
@@ -464,7 +469,20 @@ impl SessionMemoryExtractor {
 
     /// Persist extracted memories to `target_path` (creates directories and
     /// the file if they don't exist).  Appends under `## Auto-extracted memories`.
+    ///
+    /// Convenience wrapper for local writes with no provenance attribution.
     pub async fn persist(memories: &[ExtractedMemory], target_path: &Path) -> anyhow::Result<()> {
+        Self::persist_with_provenance(memories, target_path, None).await
+    }
+
+    /// Persist extracted memories with provenance attribution. Every durable
+    /// entry records its source/session provenance next to the trust label so
+    /// hosted loads can audit where a memory came from.
+    pub async fn persist_with_provenance(
+        memories: &[ExtractedMemory],
+        target_path: &Path,
+        provenance: Option<&str>,
+    ) -> anyhow::Result<()> {
         if memories.is_empty() {
             return Ok(());
         }
@@ -490,12 +508,17 @@ impl SessionMemoryExtractor {
             } else {
                 format!(", trust: {}", source_trust_label(memory.source_trust))
             };
+            let provenance_label = provenance
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| format!(", provenance: {}", p))
+                .unwrap_or_default();
             new_block.push_str(&format!(
-                "- **[{}]** {} *(confidence: {:.0}%{})*\n",
+                "- **[{}]** {} *(confidence: {:.0}%{}{})*\n",
                 memory.category.label(),
                 memory.content,
                 memory.confidence * 100.0,
-                trust_label
+                trust_label,
+                provenance_label
             ));
         }
 
@@ -548,7 +571,7 @@ impl SessionMemoryExtractor {
         }
 
         if !mode.is_hosted_review() {
-            Self::persist(memories, target_path).await?;
+            Self::persist_with_provenance(memories, target_path, Some(provenance)).await?;
             return Ok(MemoryPersistenceOutcome::DurableWritten {
                 count: memories.len(),
             });
@@ -587,7 +610,7 @@ impl SessionMemoryExtractor {
         }
 
         if hosted_config.allows_auto_memory_persistence() {
-            Self::persist(&trusted_memories, target_path).await?;
+            Self::persist_with_provenance(&trusted_memories, target_path, Some(provenance)).await?;
             return Ok(MemoryPersistenceOutcome::DurableWritten {
                 count: trusted_memories.len(),
             });
@@ -1093,11 +1116,39 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
         let content = fs::read_to_string(&target).await.unwrap();
         assert!(content.contains("Maintainers require explicit error handling"));
         assert!(content.contains("trust: maintainer-approved"));
+        assert!(
+            content.contains("provenance: session:test-session;source:session-memory-extraction"),
+            "durable hosted entries must carry source/session provenance: {content}"
+        );
         assert!(!dir
             .path()
             .join(".coven-code")
             .join("memory-candidates")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn persist_with_provenance_records_attribution() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("AGENTS.md");
+        let memories = vec![ExtractedMemory {
+            content: "Provenance-tracked fact".to_string(),
+            category: MemoryCategory::ProjectFact,
+            confidence: 0.9,
+            source_trust: MemorySourceTrust::MaintainerApproved,
+        }];
+
+        SessionMemoryExtractor::persist_with_provenance(
+            &memories,
+            &target,
+            Some("session:sess-42;source:unit-test"),
+        )
+        .await
+        .unwrap();
+
+        let content = fs::read_to_string(&target).await.unwrap();
+        assert!(content.contains("provenance: session:sess-42;source:unit-test"));
+        assert!(content.contains("trust: maintainer-approved"));
     }
 
     #[tokio::test]

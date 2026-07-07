@@ -105,6 +105,31 @@
         "limitations": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["domains_loaded", "entries"],
+          "properties": {
+            "domains_loaded": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "trust", "visibility", "scope"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "trust": { "type": "string" },
+                  "visibility": { "type": ["string", "null"] },
+                  "scope": { "type": "string" }
+                }
+              }
+            }
+          }
         }
       },
       "allOf": [

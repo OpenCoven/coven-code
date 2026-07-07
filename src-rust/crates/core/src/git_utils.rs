@@ -73,6 +73,33 @@ pub fn local_project_id_from_origin(repo_root: &Path) -> Option<String> {
         .map(|identity| local_project_id_from_identity(&identity))
 }
 
+/// Derive the local project id from the repository's origin remote and verify
+/// any caller-claimed id against it.
+///
+/// Fails closed: a repository with no usable origin remote (missing remote,
+/// unparseable URL, or not a git repository) yields an error instead of
+/// falling back to a caller-controlled identity, and a claimed id that does
+/// not match the derived one is rejected.
+pub fn verified_local_project_id(
+    repo_root: &Path,
+    claimed: Option<&str>,
+) -> anyhow::Result<String> {
+    let derived = local_project_id_from_origin(repo_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot derive a project id for {}: no usable origin remote; refusing caller-provided identity",
+            repo_root.display()
+        )
+    })?;
+    if let Some(claimed) = claimed {
+        if claimed != derived {
+            anyhow::bail!(
+                "claimed project id {claimed:?} does not match the identity derived from the origin remote"
+            );
+        }
+    }
+    Ok(derived)
+}
+
 /// Return list of files modified (staged or unstaged).
 pub fn list_modified_files(repo_root: &Path) -> Vec<PathBuf> {
     let output = git_output(repo_root, &["diff", "--name-only", "HEAD"]);
@@ -255,5 +282,61 @@ mod tests {
             local_project_id_from_identity(&https),
             local_project_id_from_identity(&ssh)
         );
+    }
+
+    fn init_repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "--quiet"]);
+    }
+
+    #[test]
+    fn verified_project_id_fails_closed_without_origin_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+
+        let err = verified_local_project_id(tmp.path(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("no usable origin remote"),
+            "missing remote must fail closed: {err}"
+        );
+
+        // A claimed id cannot substitute for a derivable identity.
+        let err = verified_local_project_id(tmp.path(), Some("local-git-deadbeef")).unwrap_err();
+        assert!(err.to_string().contains("no usable origin remote"));
+    }
+
+    #[test]
+    fn verified_project_id_rejects_mismatched_claimed_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let status = Command::new("git")
+            .current_dir(tmp.path())
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OpenCoven/coven-code.git",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let derived = verified_local_project_id(tmp.path(), None).unwrap();
+        assert!(derived.starts_with("local-git-"));
+
+        // Matching claim passes; mismatched claim is rejected.
+        assert_eq!(
+            verified_local_project_id(tmp.path(), Some(&derived)).unwrap(),
+            derived
+        );
+        let err = verified_local_project_id(tmp.path(), Some("local-git-spoofed")).unwrap_err();
+        assert!(err.to_string().contains("does not match"));
     }
 }

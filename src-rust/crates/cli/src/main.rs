@@ -919,12 +919,13 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "main".to_string());
             let git_summary = headless::collect_git_summary(&cwd, &default_branch);
             let (envelope, exit_code) = match &run {
-                Ok(r) => headless::build_result(
+                Ok(r) => headless::build_result_with_memory(
                     github_context.as_ref(),
                     &git_summary,
                     r.outcome,
                     &r.final_text,
                     Some(&r.review_trace),
+                    headless::collect_review_memory(&cwd, &config),
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),

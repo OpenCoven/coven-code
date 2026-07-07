@@ -3443,6 +3443,73 @@ pub fn validate_structured_review_memory_refs(review: &StructuredReviewOutput) -
         .collect()
 }
 
+/// Extract `mem_...` citation tokens from free-form review text.
+pub fn extract_memory_citations(text: &str) -> Vec<String> {
+    let mut cited: Vec<String> = Vec::new();
+    for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if token.len() > "mem_".len()
+            && token.starts_with("mem_")
+            && !cited.iter().any(|existing| existing == token)
+        {
+            cited.push(token.to_string());
+        }
+    }
+    cited
+}
+
+/// Validate the memory citations in a review against the loaded entry ids.
+///
+/// Returns one warning per citation that does not correspond to a loaded
+/// memory entry, plus structured-output warnings for findings marked
+/// memory-dependent without any `memory_refs`.
+pub fn validate_review_memory_citations(review_text: &str, loaded_ids: &[String]) -> Vec<String> {
+    let mut warnings: Vec<String> = extract_memory_citations(review_text)
+        .into_iter()
+        .filter(|cited| !loaded_ids.iter().any(|id| id == cited))
+        .map(|cited| {
+            format!(
+                "review cites memory entry '{}' that was not among the loaded entries",
+                cited
+            )
+        })
+        .collect();
+    if let Some(structured) = parse_structured_review_output(review_text) {
+        warnings.extend(validate_structured_review_memory_refs(&structured));
+    }
+    warnings
+}
+
+/// Build the memory-citation prompt block for `/review`: lists every loaded
+/// memory entry with its stable id and effective trust so the model can cite
+/// them via `memory_refs`. Returns `None` when no memory entries are loaded.
+fn build_review_memory_citation_block(
+    files: &[claurst_core::claudemd::MemoryFileInfo],
+    options: &claurst_core::claudemd::MemoryLoadOptions,
+) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "Loaded memory entries (when a finding depends on one, cite it with \
+         memory_refs: [\"<id>\"] on that bullet):\n",
+    );
+    for file in files {
+        let trust = serde_json::to_value(claurst_core::claudemd::effective_memory_trust(
+            file, options,
+        ))
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+        block.push_str(&format!(
+            "- {} (trust: {}, from {})\n",
+            claurst_core::claudemd::memory_id(file),
+            trust,
+            file.path.display()
+        ));
+    }
+    Some(block)
+}
+
 #[async_trait]
 impl SlashCommand for ReviewCommand {
     fn name(&self) -> &str {
@@ -3580,6 +3647,20 @@ impl SlashCommand for ReviewCommand {
             }
         };
 
+        // Enumerate the loaded memory entries so the model can cite them and
+        // the output can be validated against what was actually loaded.
+        let memory_options = ctx.config.memory_load_options();
+        let memory_files =
+            claurst_core::claudemd::load_all_memory_files_with_options(&repo_root, &memory_options);
+        let loaded_memory_ids: Vec<String> = memory_files
+            .iter()
+            .map(claurst_core::claudemd::memory_id)
+            .collect();
+        let memory_citation_block =
+            build_review_memory_citation_block(&memory_files, &memory_options)
+                .map(|block| format!("{block}\n"))
+                .unwrap_or_default();
+
         let review_prompt = format!(
             "You are a senior software engineer performing a pull-request code review.\n\
              Provide a concise, actionable review of the following diff.\n\n\
@@ -3595,11 +3676,11 @@ impl SlashCommand for ReviewCommand {
              ## Verdict\n\
              APPROVE / REQUEST_CHANGES / COMMENT — one line with brief rationale\n\n\
              ---\n\
-             {}\n\n\
+             {}{}\n\n\
              ```diff\n\
              {}\n\
              ```",
-            file_summary, diff_for_llm
+            memory_citation_block, file_summary, diff_for_llm
         );
 
         let request = claurst_api::ProviderRequest {
@@ -3706,6 +3787,14 @@ impl SlashCommand for ReviewCommand {
         // 5. Compose and return the final output
         // ------------------------------------------------------------------
         let mut output = format!("## Code Review\n\n{}\n\n{}", file_summary, review_text);
+
+        let citation_warnings = validate_review_memory_citations(&review_text, &loaded_memory_ids);
+        if !citation_warnings.is_empty() {
+            output.push_str("\n\n### Memory citation warnings\n");
+            for warning in &citation_warnings {
+                output.push_str(&format!("- {}\n", warning));
+            }
+        }
 
         if let Some(ref note) = github_post_result {
             output.push_str(note);
@@ -10581,6 +10670,65 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Auth check"));
         assert!(warnings[0].contains("memory_refs"));
+    }
+
+    #[test]
+    fn extract_memory_citations_finds_ids_in_prose() {
+        // The hex id below is a fake memory id fixture. # gitleaks:allow
+        let text = "Issue depends on mem_auth_policy (see memory_refs: [\"mem_1a2b3c4d5e6f7a8b\"]). mem_auth_policy repeated.";
+        let cited = extract_memory_citations(text);
+        assert_eq!(cited, vec!["mem_auth_policy", "mem_1a2b3c4d5e6f7a8b"]); // gitleaks:allow
+    }
+
+    #[test]
+    fn review_citation_validation_flags_unknown_ids() {
+        let loaded = vec!["mem_known".to_string()];
+        let warnings = validate_review_memory_citations(
+            "- [MAJOR] src/auth.rs:10 — violates mem_unknown policy",
+            &loaded,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mem_unknown"));
+
+        assert!(validate_review_memory_citations(
+            "- [MAJOR] src/auth.rs:10 — violates mem_known policy",
+            &loaded,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn review_citation_validation_covers_structured_output() {
+        let loaded = vec!["mem_known".to_string()];
+        let warnings = validate_review_memory_citations(
+            r#"{"findings":[{"title":"Needs memory","memory_dependent":true}]}"#,
+            &loaded,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("memory_refs"));
+    }
+
+    #[test]
+    fn review_memory_citation_block_lists_loaded_entries() {
+        let options = claurst_core::claudemd::MemoryLoadOptions::hosted_review();
+        let file = claurst_core::claudemd::MemoryFileInfo {
+            path: std::path::PathBuf::from("managed.md"),
+            scope: claurst_core::claudemd::MemoryScope::Managed,
+            content: "Cite this policy.".to_string(),
+            frontmatter: claurst_core::claudemd::MemoryFrontmatter {
+                id: Some("mem_cite_policy".to_string()),
+                trust: Some(claurst_core::hosted_review::MemorySourceTrust::MaintainerApproved),
+                source: Some("managed-rules".to_string()),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+
+        let block = build_review_memory_citation_block(&[file], &options).unwrap();
+        assert!(block.contains("mem_cite_policy"));
+        assert!(block.contains("maintainer-approved"));
+
+        assert!(build_review_memory_citation_block(&[], &options).is_none());
     }
 
     #[tokio::test]
