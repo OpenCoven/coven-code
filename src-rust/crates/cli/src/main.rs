@@ -4173,6 +4173,73 @@ async fn run_interactive(
                 }
             }
         }
+        // Advance the rate-limit recovery countdown and pick up any retry
+        // directive (auto-retry deadline reached, or the user pressed a
+        // recovery key). The retry re-dispatches the query loop over the
+        // existing conversation — the failed turn's prompt is never lost and
+        // never duplicated.
+        app.rate_limit_recovery.tick();
+        if current_query.is_none() && !app.is_streaming {
+            if let Some(directive) = app.rate_limit_recovery.take_retry_directive() {
+                if !messages.is_empty() {
+                    app.status_message = Some(match &directive.model {
+                        Some(model) => format!("Rate limit recovery — retrying on {}…", model),
+                        None => "Rate limit recovery — retrying…".to_string(),
+                    });
+                    app.is_streaming = true;
+                    app.streaming_text.clear();
+
+                    let ct = CancellationToken::new();
+                    cancel = Some(ct.clone());
+
+                    let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
+                    let msgs_arc_clone = msgs_arc.clone();
+                    let tools_arc_clone = tools_arc.clone();
+                    let ctx_clone = tool_ctx.clone();
+                    let mut qcfg = base_query_config.clone();
+                    qcfg.model =
+                        claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+                    qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
+                    qcfg.append_system_prompt = cmd_ctx.config.append_system_prompt.clone();
+                    qcfg.system_prompt = base_query_config.system_prompt.clone();
+                    qcfg.output_style = cmd_ctx.config.effective_output_style();
+                    qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
+                    qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
+                    let turn_effort = if app.effort_is_set {
+                        Some(app.effort_level.to_core())
+                    } else {
+                        current_effort
+                    };
+                    if let Some(level) = turn_effort {
+                        qcfg.effort_level = Some(level);
+                    }
+                    let tracker = cost_tracker.clone();
+                    let tx = event_tx.clone();
+                    let client_clone = client.clone();
+                    goal_turn_start = std::time::Instant::now();
+
+                    let handle = tokio::spawn(async move {
+                        let mut msgs = msgs_arc_clone.lock().await.clone();
+                        let outcome = claurst_query::run_query_loop(
+                            client_clone.as_ref(),
+                            &mut msgs,
+                            tools_arc_clone.as_slice(),
+                            &ctx_clone,
+                            &qcfg,
+                            tracker,
+                            Some(tx),
+                            ct,
+                            None,
+                        )
+                        .await;
+                        *msgs_arc_clone.lock().await = msgs;
+                        outcome
+                    });
+                    current_query = Some((handle, msgs_arc));
+                }
+            }
+        }
+
         // Check if query task is done; sync messages from the task
         let task_finished = current_query
             .as_ref()
@@ -4184,6 +4251,23 @@ async fn run_interactive(
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
+                    // Structured rate limit → interactive recovery flow
+                    // (countdown auto-retry, one-key tier switch, duplicate
+                    // account cleanup) instead of a dead-end error modal.
+                    Ok(QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit {
+                        retry_after_secs,
+                        message,
+                    })) => {
+                        while app.notifications.current_is_error() {
+                            app.notifications.dismiss_current();
+                        }
+                        app.open_rate_limit_recovery(
+                            message
+                                .clone()
+                                .unwrap_or_else(|| "Rate limit exceeded.".to_string()),
+                            *retry_after_secs,
+                        );
+                    }
                     Ok(QueryOutcome::Error(err)) => {
                         while app.notifications.current_is_error() {
                             app.notifications.dismiss_current();
@@ -4193,6 +4277,11 @@ async fn run_interactive(
                             err.to_string(),
                             None,
                         );
+                    }
+                    Ok(QueryOutcome::EndTurn { .. }) => {
+                        // Successful turn — refresh the auto-retry budget for
+                        // any future rate-limit episode.
+                        app.rate_limit_recovery.reset_episode();
                     }
                     Err(err) => {
                         while app.notifications.current_is_error() {

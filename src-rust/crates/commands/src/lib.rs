@@ -3056,13 +3056,32 @@ impl SlashCommand for AccountsCommand {
         "List stored Anthropic and Codex accounts"
     }
     fn help(&self) -> &str {
-        "Usage: /accounts\n\n\
+        "Usage: /accounts [dedupe]\n\n\
          Lists every stored Anthropic and Codex account along with the\n\
          currently active one (marked with `*`). Use /switch to change\n\
-         accounts, /login to add a new one, /logout to remove one."
+         accounts, /login to add a new one, /logout to remove one.\n\n\
+         `/accounts dedupe` collapses duplicate Anthropic profiles that\n\
+         point at the same underlying account (re-imports of the same\n\
+         Claude Code credential), keeping the active/freshest one."
     }
 
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        if args.trim() == "dedupe" {
+            let mut registry = claurst_core::accounts::AccountRegistry::load();
+            return match claurst_core::accounts::dedupe_anthropic_profiles(&mut registry) {
+                Ok(summary) if summary.removed.is_empty() => CommandResult::Message(
+                    "No duplicate Anthropic profiles found — every stored profile is a distinct account.".to_string(),
+                ),
+                Ok(summary) => CommandResult::Message(format!(
+                    "Removed {} duplicate profile{}: {}\nKept: {}",
+                    summary.removed.len(),
+                    if summary.removed.len() == 1 { "" } else { "s" },
+                    summary.removed.join(", "),
+                    summary.kept.join(", ")
+                )),
+                Err(err) => CommandResult::Error(format!("Dedupe failed: {err}")),
+            };
+        }
         let registry = claurst_core::accounts::AccountRegistry::load();
         let mut out = String::new();
         for (provider, label) in [
@@ -3086,6 +3105,15 @@ impl SlashCommand for AccountsCommand {
                     .unwrap_or_default();
                 out.push_str(&format!("  {} {}{}  {}\n", marker, p.id, tier, email));
             }
+        }
+        let duplicates = claurst_core::accounts::count_duplicate_anthropic_profiles(&registry);
+        if duplicates > 0 {
+            out.push_str(&format!(
+                "\n⚠ {} Anthropic profile{} duplicate{} of another (same underlying account). Run `/accounts dedupe` to clean up.\n",
+                duplicates,
+                if duplicates == 1 { " is a" } else { "s are" },
+                if duplicates == 1 { "" } else { "s" },
+            ));
         }
         if out.is_empty() {
             out.push_str("No accounts stored. Use /login to add one.");
@@ -10101,6 +10129,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(DoctorCommand),
         Box::new(LoginCommand),
         Box::new(LogoutCommand),
+        Box::new(AccountsCommand),
         Box::new(SwitchCommand),
         Box::new(RefreshCommand),
         Box::new(IncantCommand),

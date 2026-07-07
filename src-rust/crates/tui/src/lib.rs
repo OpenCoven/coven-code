@@ -155,6 +155,7 @@ pub mod overlays;
 pub mod plugin_views;
 /// Complete prompt input with vim mode, history, typeahead, and paste handling.
 pub mod prompt_input;
+pub mod rate_limit_recovery;
 /// All ratatui rendering logic.
 pub mod render;
 /// Session branching overlay (Ctrl+B) — create and switch between conversation branches.

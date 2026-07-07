@@ -844,6 +844,24 @@ Codex:
 
 ---
 
+### /accounts
+
+List every stored account across providers (same listing as `/login switch`
+with no arguments). When several Anthropic profiles point at the same
+underlying account — the usual cause is importing the same Claude Code
+credential more than once — the listing flags the duplicates.
+
+```
+/accounts          — list stored accounts, flagging duplicates
+/accounts dedupe   — collapse duplicate profiles, keeping the active/freshest
+```
+
+Duplicate profiles all bill the same subscription, so switching between them
+never escapes a rate limit. The rate-limit recovery dialog offers the same
+cleanup with a single key when it detects this situation.
+
+---
+
 ### /login refresh
 
 Refresh the provider authentication state. Forces a token refresh without full re-authentication. Useful when a session token has expired mid-session. Replaces the former `/refresh` command.

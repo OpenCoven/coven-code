@@ -753,25 +753,36 @@ pub mod client {
                 }
 
                 // 429 (rate limit) or 529 (overloaded): retry
-                if (status == 429 || status == 529) && attempts <= self.config.max_retries {
+                if status == 429 || status == 529 {
                     // Honour Retry-After header if present
                     let retry_after = resp
                         .headers()
                         .get("retry-after")
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                        .and_then(|v| v.parse::<u64>().ok());
 
-                    let wait = retry_after.unwrap_or(delay);
-                    debug!(
-                        status,
-                        attempt = attempts,
-                        wait_secs = wait.as_secs(),
-                        "Retryable API error, backing off"
-                    );
-                    tokio::time::sleep(wait).await;
-                    delay = (delay * 2).min(self.config.max_retry_delay);
-                    continue;
+                    let wait = retry_after.map(Duration::from_secs).unwrap_or(delay);
+
+                    // Waiting inside the request looks like a stalled turn to
+                    // the caller. Short waits are absorbed silently; anything
+                    // longer (or retries exhausted) surfaces a structured
+                    // rate-limit error so the UI can run its recovery flow
+                    // (visible countdown, model switch, immediate retry).
+                    const MAX_SILENT_WAIT: Duration = Duration::from_secs(20);
+                    if attempts <= self.config.max_retries && wait <= MAX_SILENT_WAIT {
+                        debug!(
+                            status,
+                            attempt = attempts,
+                            wait_secs = wait.as_secs(),
+                            "Retryable API error, backing off"
+                        );
+                        tokio::time::sleep(wait).await;
+                        delay = (delay * 2).min(self.config.max_retry_delay);
+                        continue;
+                    }
+
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(self.parse_api_error_with_retry(status, &text, retry_after));
                 }
 
                 // Non-retryable error – return immediately
@@ -782,12 +793,24 @@ pub mod client {
 
         /// Parse an API error body into a typed `ClaudeError`.
         pub(crate) fn parse_api_error(&self, status: u16, body: &str) -> ClaudeError {
+            self.parse_api_error_with_retry(status, body, None)
+        }
+
+        /// Like [`Self::parse_api_error`], but threads a caller-extracted
+        /// `Retry-After` delay into rate-limit errors so downstream recovery
+        /// UI can show a real countdown instead of a dead-end message.
+        pub(crate) fn parse_api_error_with_retry(
+            &self,
+            status: u16,
+            body: &str,
+            retry_after_secs: Option<u64>,
+        ) -> ClaudeError {
             if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(body) {
                 match status {
                     401 => ClaudeError::Auth(err.error.message),
-                    429 => ClaudeError::ApiStatus {
-                        status,
-                        message: err.error.message,
+                    429 => ClaudeError::RateLimit {
+                        retry_after_secs,
+                        message: Some(err.error.message),
                     },
                     529 => ClaudeError::ApiStatus {
                         status,
@@ -796,6 +819,15 @@ pub mod client {
                     _ => ClaudeError::ApiStatus {
                         status,
                         message: err.error.message,
+                    },
+                }
+            } else if status == 429 {
+                ClaudeError::RateLimit {
+                    retry_after_secs,
+                    message: if body.trim().is_empty() {
+                        None
+                    } else {
+                        Some(body.to_string())
                     },
                 }
             } else {
@@ -1284,19 +1316,23 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_429_preserves_provider_message() {
+    fn anthropic_429_preserves_provider_message_and_retry_after() {
         let client = AnthropicClient::new(client::ClientConfig::default()).expect("client");
-        let err = client.parse_api_error(
+        let err = client.parse_api_error_with_retry(
             429,
             r#"{"type":"error","error":{"type":"rate_limit_error","message":"model is temporarily unavailable"}}"#,
+            Some(42),
         );
 
         match err {
-            ClaudeError::ApiStatus { status, message } => {
-                assert_eq!(status, 429);
-                assert_eq!(message, "model is temporarily unavailable");
+            ClaudeError::RateLimit {
+                retry_after_secs,
+                message,
+            } => {
+                assert_eq!(retry_after_secs, Some(42));
+                assert_eq!(message.as_deref(), Some("model is temporarily unavailable"));
             }
-            other => panic!("expected ApiStatus, got {other:?}"),
+            other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 

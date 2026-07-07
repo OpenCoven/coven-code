@@ -52,6 +52,10 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
+    (
+        "accounts",
+        "List stored accounts; `dedupe` collapses duplicate profiles",
+    ),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -874,6 +878,9 @@ pub struct App {
     pub notifications: NotificationQueue,
     /// Scroll offset for error modal text (in lines).
     pub error_modal_scroll_offset: usize,
+    /// Interactive rate-limit recovery modal (auto-retry countdown, one-key
+    /// tier switch, duplicate-account cleanup).
+    pub rate_limit_recovery: crate::rate_limit_recovery::RateLimitRecoveryState,
     /// Plugin hint banners.
     pub plugin_hints: Vec<PluginHintBanner>,
     /// Optional session title shown in the status bar.
@@ -1417,6 +1424,7 @@ impl App {
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
             error_modal_scroll_offset: 0,
+            rate_limit_recovery: crate::rate_limit_recovery::RateLimitRecoveryState::default(),
             plugin_hints: Vec::new(),
             session_title: None,
             remote_session_url: None,
@@ -2664,6 +2672,7 @@ impl App {
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
         self.permission_request.is_some()
+            || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
             || self.help_overlay.visible
@@ -2983,6 +2992,93 @@ impl App {
             self.error_modal_scroll_offset = 0;
         }
         self.notifications.push(kind, msg, duration_secs);
+    }
+
+    // -------------------------------------------------------------------
+    // Rate-limit recovery
+    // -------------------------------------------------------------------
+
+    /// Open the interactive rate-limit recovery modal for a structured 429.
+    ///
+    /// Performs a one-shot duplicate-profile scan (disk I/O — this runs in
+    /// event handling, never in a render path) so the modal can tell the user
+    /// when "switch accounts" would be a no-op and offer a one-key cleanup.
+    pub fn open_rate_limit_recovery(&mut self, message: String, retry_after_secs: Option<u64>) {
+        let duplicates = if self.config.provider.as_deref().unwrap_or("anthropic") == "anthropic" {
+            let registry = claurst_core::accounts::AccountRegistry::load();
+            claurst_core::accounts::count_duplicate_anthropic_profiles(&registry)
+        } else {
+            0
+        };
+        let model = self.model_name.clone();
+        self.rate_limit_recovery
+            .open(message, model, retry_after_secs, duplicates);
+    }
+
+    /// Handle a key press while the recovery modal is open.
+    fn handle_rate_limit_recovery_key(&mut self, key: KeyEvent) {
+        use crate::rate_limit_recovery::{HAIKU_MODEL, SONNET_MODEL};
+        match key.code {
+            KeyCode::Esc => {
+                self.rate_limit_recovery.dismiss();
+                self.status_message =
+                    Some("Recovery dismissed — prompt is yours. Retry any time.".to_string());
+            }
+            KeyCode::Char('r') | KeyCode::Enter => {
+                self.rate_limit_recovery.request_retry(None);
+                self.status_message = Some("Retrying…".to_string());
+            }
+            KeyCode::Char('s')
+                if !self.rate_limit_recovery.model.contains("sonnet")
+                    && !self.rate_limit_recovery.model.contains("haiku") =>
+            {
+                self.set_model(SONNET_MODEL.to_string());
+                self.persist_provider_and_model();
+                self.rate_limit_recovery
+                    .request_retry(Some(SONNET_MODEL.to_string()));
+                self.status_message = Some(format!("Retrying on {}…", SONNET_MODEL));
+            }
+            KeyCode::Char('h') if !self.rate_limit_recovery.model.contains("haiku") => {
+                self.set_model(HAIKU_MODEL.to_string());
+                self.persist_provider_and_model();
+                self.rate_limit_recovery
+                    .request_retry(Some(HAIKU_MODEL.to_string()));
+                self.status_message = Some(format!("Retrying on {}…", HAIKU_MODEL));
+            }
+            KeyCode::Char('d') if self.rate_limit_recovery.duplicate_profiles > 0 => {
+                let mut registry = claurst_core::accounts::AccountRegistry::load();
+                match claurst_core::accounts::dedupe_anthropic_profiles(&mut registry) {
+                    Ok(summary) => {
+                        self.rate_limit_recovery.duplicate_profiles = 0;
+                        // The modal stays open (the user may still want to
+                        // retry), so surface the result inside it as well as
+                        // via a toast for after it closes.
+                        self.rate_limit_recovery.message.push_str(&format!(
+                            "\n\n✓ Cleaned {} duplicate profile{} — kept {}.",
+                            summary.removed.len(),
+                            if summary.removed.len() == 1 { "" } else { "s" },
+                            summary.kept.join(", ")
+                        ));
+                        self.push_notification(
+                            NotificationKind::Success,
+                            format!(
+                                "Cleaned {} duplicate profile{} — kept {}.",
+                                summary.removed.len(),
+                                if summary.removed.len() == 1 { "" } else { "s" },
+                                summary.kept.join(", ")
+                            ),
+                            Some(8),
+                        );
+                    }
+                    Err(err) => {
+                        self.rate_limit_recovery
+                            .message
+                            .push_str(&format!("\n\n✗ Profile cleanup failed: {err}"));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Surface a completion signal for a long-running background bash task
@@ -3370,6 +3466,12 @@ impl App {
         // Permission requests render above other overlays, so they own input.
         if self.permission_request.is_some() {
             self.handle_permission_key(key);
+            return false;
+        }
+
+        // Rate-limit recovery modal owns input while visible.
+        if self.rate_limit_recovery.visible {
+            self.handle_rate_limit_recovery_key(key);
             return false;
         }
 

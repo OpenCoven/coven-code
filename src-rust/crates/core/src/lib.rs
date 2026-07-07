@@ -157,8 +157,14 @@ pub mod error {
         #[error("HTTP error: {0}")]
         Http(#[from] reqwest::Error),
 
-        #[error("Rate limit exceeded")]
-        RateLimit,
+        #[error("{}", .message.as_deref().unwrap_or("Rate limit exceeded"))]
+        RateLimit {
+            /// Seconds until the limit resets, from the provider's
+            /// `Retry-After` header when available.
+            retry_after_secs: Option<u64>,
+            /// Human-readable diagnostic (provider message or enriched notice).
+            message: Option<String>,
+        },
 
         #[error("Context window exceeded")]
         ContextWindowExceeded,
@@ -187,7 +193,7 @@ pub mod error {
         pub fn is_retryable(&self) -> bool {
             matches!(
                 self,
-                ClaudeError::RateLimit
+                ClaudeError::RateLimit { .. }
                     | ClaudeError::ApiStatus { status: 429, .. }
                     | ClaudeError::ApiStatus { status: 529, .. }
             )
@@ -4756,7 +4762,11 @@ mod tests {
 
     #[test]
     fn test_error_retryable() {
-        assert!(ClaudeError::RateLimit.is_retryable());
+        assert!(ClaudeError::RateLimit {
+            retry_after_secs: None,
+            message: None
+        }
+        .is_retryable());
         assert!(ClaudeError::ApiStatus {
             status: 429,
             message: "rate limited".into()

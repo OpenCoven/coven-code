@@ -307,6 +307,138 @@ pub(crate) fn set_user_only_perms(path: &std::path::Path) {
 }
 
 // ---------------------------------------------------------------------------
+// Duplicate-profile detection & cleanup
+// ---------------------------------------------------------------------------
+
+/// Summary of a duplicate-profile cleanup run.
+#[derive(Debug, Clone, Default)]
+pub struct DedupeSummary {
+    /// Profile ids that were kept (one per distinct credential).
+    pub kept: Vec<String>,
+    /// Profile ids that were removed as duplicates.
+    pub removed: Vec<String>,
+}
+
+/// Read the refresh-token identity of a stored Anthropic profile.
+///
+/// Two profiles whose credential files carry the same refresh token are the
+/// same underlying Anthropic account — re-importing an external CLI login used
+/// to stack `claude-code-2`, `-3`, … duplicates that all bill one subscription.
+/// Access tokens rotate on refresh, so the refresh token (falling back to the
+/// access token) is the stable identity. Best-effort: unreadable or malformed
+/// files return `None` and are never treated as duplicates of anything.
+///
+/// This does synchronous disk I/O — call it from command/event handling, never
+/// from a render path.
+fn anthropic_profile_identity(profile_id: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(anthropic_token_path(profile_id)).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // account_uuid is the strongest identity when present.
+    if let Some(uuid) = json.get("account_uuid").and_then(|v| v.as_str()) {
+        if !uuid.is_empty() {
+            return Some(format!("uuid:{uuid}"));
+        }
+    }
+    let refresh = json.get("refresh_token").and_then(|v| v.as_str());
+    let access = json.get("access_token").and_then(|v| v.as_str());
+    match (refresh, access) {
+        (Some(r), _) if !r.is_empty() => Some(format!("refresh:{r}")),
+        (_, Some(a)) if !a.is_empty() => Some(format!("access:{a}")),
+        _ => None,
+    }
+}
+
+/// Millisecond expiry of a stored Anthropic profile's access token (0 when
+/// missing/unreadable). Used to pick the freshest credential among duplicates.
+fn anthropic_profile_expiry_ms(profile_id: &str) -> u64 {
+    std::fs::read_to_string(anthropic_token_path(profile_id))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|json| json.get("expires_at_ms").and_then(|v| v.as_u64()))
+        .unwrap_or(0)
+}
+
+/// Count how many stored Anthropic profiles are redundant duplicates of
+/// another profile (same underlying account). `0` means the registry is clean.
+pub fn count_duplicate_anthropic_profiles(registry: &AccountRegistry) -> usize {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for profile in registry.list(PROVIDER_ANTHROPIC) {
+        if let Some(identity) = anthropic_profile_identity(&profile.id) {
+            *seen.entry(identity).or_insert(0) += 1;
+        }
+    }
+    seen.values().map(|n| n.saturating_sub(1)).sum()
+}
+
+/// Collapse duplicate Anthropic profiles down to one profile per distinct
+/// underlying account.
+///
+/// Within each duplicate group the survivor is chosen by (in order): the
+/// currently-active profile, then the credential with the latest
+/// `expires_at_ms` (freshest token), then lexicographically-smallest id for
+/// determinism. The active profile is always its group's survivor, so the
+/// active pointer never dangles. Credential directories of removed profiles
+/// are deleted.
+pub fn dedupe_anthropic_profiles(registry: &mut AccountRegistry) -> anyhow::Result<DedupeSummary> {
+    let active = registry.active(PROVIDER_ANTHROPIC).map(|id| id.to_string());
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for profile in registry.list(PROVIDER_ANTHROPIC) {
+        if let Some(identity) = anthropic_profile_identity(&profile.id) {
+            groups.entry(identity).or_default().push(profile.id);
+        }
+    }
+
+    let summary = plan_dedupe(groups, active.as_deref(), anthropic_profile_expiry_ms);
+    for id in &summary.removed {
+        registry.remove(PROVIDER_ANTHROPIC, id)?;
+    }
+    Ok(summary)
+}
+
+/// Pure survivor-selection over identity groups. Extracted from
+/// [`dedupe_anthropic_profiles`] so the policy is unit-testable without disk.
+fn plan_dedupe(
+    groups: BTreeMap<String, Vec<String>>,
+    active: Option<&str>,
+    expiry_of: impl Fn(&str) -> u64,
+) -> DedupeSummary {
+    let mut summary = DedupeSummary::default();
+    for (_, mut ids) in groups {
+        if ids.len() < 2 {
+            if let Some(id) = ids.pop() {
+                summary.kept.push(id);
+            }
+            continue;
+        }
+        ids.sort();
+        let survivor = ids
+            .iter()
+            .find(|id| Some(id.as_str()) == active)
+            .cloned()
+            .unwrap_or_else(|| {
+                // No active profile in this group — keep the freshest token.
+                let mut best = ids[0].clone();
+                let mut best_expiry = expiry_of(&best);
+                for id in &ids[1..] {
+                    let expiry = expiry_of(id);
+                    if expiry > best_expiry {
+                        best = id.clone();
+                        best_expiry = expiry;
+                    }
+                }
+                best
+            });
+        for id in ids {
+            if id != survivor {
+                summary.removed.push(id);
+            }
+        }
+        summary.kept.push(survivor);
+    }
+    summary
+}
+
+// ---------------------------------------------------------------------------
 // JWT identity extraction
 // ---------------------------------------------------------------------------
 
@@ -465,5 +597,64 @@ mod tests {
         assert_eq!(p.display_name(), "kuber@example.com");
         p.label = Some("Personal".into());
         assert_eq!(p.display_name(), "Personal");
+    }
+
+    #[test]
+    fn plan_dedupe_keeps_active_profile_in_its_group() {
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        groups.insert(
+            "refresh:tok-a".into(),
+            vec![
+                "claude-code".into(),
+                "claude-code-2".into(),
+                "claude-code-3".into(),
+            ],
+        );
+        let plan = plan_dedupe(groups, Some("claude-code-2"), |_| 0);
+        assert_eq!(plan.kept, vec!["claude-code-2".to_string()]);
+        assert_eq!(
+            plan.removed,
+            vec!["claude-code".to_string(), "claude-code-3".to_string()]
+        );
+    }
+
+    #[test]
+    fn plan_dedupe_prefers_freshest_token_when_active_elsewhere() {
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        groups.insert(
+            "refresh:tok-a".into(),
+            vec!["old".into(), "fresh".into(), "stale".into()],
+        );
+        let plan = plan_dedupe(groups, None, |id| match id {
+            "fresh" => 300,
+            "old" => 200,
+            _ => 100,
+        });
+        assert_eq!(plan.kept, vec!["fresh".to_string()]);
+        assert_eq!(plan.removed, vec!["old".to_string(), "stale".to_string()]);
+    }
+
+    #[test]
+    fn plan_dedupe_leaves_distinct_accounts_alone() {
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        groups.insert("refresh:tok-a".into(), vec!["work".into()]);
+        groups.insert("refresh:tok-b".into(), vec!["personal".into()]);
+        let plan = plan_dedupe(groups, Some("work"), |_| 0);
+        assert!(plan.removed.is_empty());
+        let mut kept = plan.kept.clone();
+        kept.sort();
+        assert_eq!(kept, vec!["personal".to_string(), "work".to_string()]);
+    }
+
+    #[test]
+    fn plan_dedupe_ties_break_lexicographically() {
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        groups.insert(
+            "refresh:tok-a".into(),
+            vec!["b-profile".into(), "a-profile".into()],
+        );
+        let plan = plan_dedupe(groups, None, |_| 42);
+        assert_eq!(plan.kept, vec!["a-profile".to_string()]);
+        assert_eq!(plan.removed, vec!["b-profile".to_string()]);
     }
 }

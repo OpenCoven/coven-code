@@ -737,7 +737,7 @@ fn selected_model_for_query(config: &QueryConfig) -> String {
 
 fn is_fallback_worthy_api_error(err: &ClaudeError) -> bool {
     match err {
-        ClaudeError::RateLimit => true,
+        ClaudeError::RateLimit { .. } => true,
         ClaudeError::ApiStatus { status, message } => {
             *status == 429 || *status == 529 || message.to_lowercase().contains("overloaded")
         }
@@ -758,16 +758,31 @@ fn enrich_error_notice(
     account: Option<&str>,
 ) -> ClaudeError {
     match err {
-        ClaudeError::RateLimit => ClaudeError::ApiStatus {
-            status: 429,
-            message: rate_limit_notice(provider, model, account, None),
+        ClaudeError::RateLimit {
+            retry_after_secs,
+            message,
+        } => ClaudeError::RateLimit {
+            retry_after_secs,
+            message: Some(rate_limit_notice(
+                provider,
+                model,
+                account,
+                message.as_deref(),
+                retry_after_secs,
+            )),
         },
         ClaudeError::ApiStatus {
             status: 429,
             message,
-        } => ClaudeError::ApiStatus {
-            status: 429,
-            message: rate_limit_notice(provider, model, account, Some(&message)),
+        } => ClaudeError::RateLimit {
+            retry_after_secs: None,
+            message: Some(rate_limit_notice(
+                provider,
+                model,
+                account,
+                Some(&message),
+                None,
+            )),
         },
         other => other,
     }
@@ -778,6 +793,7 @@ fn rate_limit_notice(
     model: &str,
     account: Option<&str>,
     provider_message: Option<&str>,
+    retry_after_secs: Option<u64>,
 ) -> String {
     let account_part = account
         .filter(|value| !value.trim().is_empty())
@@ -788,6 +804,12 @@ fn rate_limit_notice(
          Anthropic/Claude Max limits are model-tier scoped: Sonnet/Opus can be limited while Haiku still works.\n\
          Try switching to Haiku, switching Anthropic accounts, or waiting before retrying."
     );
+    if let Some(secs) = retry_after_secs {
+        message.push_str(&format!(
+            "\n\nThe provider says the limit resets in {}.",
+            format_reset_delay(secs)
+        ));
+    }
     if account
         .map(|value| value.to_lowercase().contains("claude-code"))
         .unwrap_or(false)
@@ -808,6 +830,30 @@ fn rate_limit_notice(
     }
 
     message
+}
+
+/// Format a reset delay in seconds as a compact human duration ("45s",
+/// "3m 20s", "1h 12m").
+pub fn format_reset_delay(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn active_account_notice(provider: &str) -> Option<String> {
@@ -2730,14 +2776,20 @@ mod tests {
         let s = format!("{:?}", outcome);
         assert!(s.contains("Cancelled"));
 
-        let err_outcome = QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit);
+        let err_outcome = QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit {
+            retry_after_secs: None,
+            message: None,
+        });
         let s2 = format!("{:?}", err_outcome);
         assert!(s2.contains("Error"));
     }
 
     #[test]
     fn test_typed_rate_limit_uses_fallback() {
-        let err = claurst_core::error::ClaudeError::RateLimit;
+        let err = claurst_core::error::ClaudeError::RateLimit {
+            retry_after_secs: Some(30),
+            message: None,
+        };
         assert!(is_fallback_worthy_api_error(&err));
     }
 
@@ -2756,7 +2808,6 @@ mod tests {
         );
 
         let text = enriched.to_string();
-        assert!(text.contains("API error 429"));
         assert!(text.contains("Claude rate limit"));
         assert!(text.contains("claude-sonnet-4-6"));
         assert!(text.contains("claude-code-10 [max]"));
@@ -2777,12 +2828,29 @@ mod tests {
 
         let enriched = enrich_error_notice(err, "anthropic", "claude-opus-4-8", None);
 
+        // Structure survives enrichment so the TUI recovery flow can use it.
+        match &enriched {
+            claurst_core::error::ClaudeError::RateLimit {
+                retry_after_secs, ..
+            } => assert_eq!(*retry_after_secs, Some(60)),
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+
         let text = enriched.to_string();
-        assert!(text.contains("API error 429"));
         assert!(text.contains("Claude rate limit"));
         assert!(text.contains("claude-opus-4-8"));
         assert!(text.contains("model-tier"));
         assert!(text.contains("Haiku"));
+        assert!(text.contains("resets in 1m"));
+    }
+
+    #[test]
+    fn test_format_reset_delay_buckets() {
+        assert_eq!(format_reset_delay(45), "45s");
+        assert_eq!(format_reset_delay(60), "1m");
+        assert_eq!(format_reset_delay(200), "3m 20s");
+        assert_eq!(format_reset_delay(3600), "1h");
+        assert_eq!(format_reset_delay(4320), "1h 12m");
     }
 
     #[test]

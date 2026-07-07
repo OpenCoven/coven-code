@@ -757,6 +757,27 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_mcp_approval_dialog(&app.mcp_approval, size, frame.buffer_mut());
     }
 
+    // Rate-limit recovery modal takes precedence over the generic error modal:
+    // it is the actionable form of the same failure. Permission dialogs still
+    // render on top for the input they own.
+    if app.rate_limit_recovery.visible {
+        let is_welcome_screen = app.messages.is_empty()
+            && app.streaming_text.is_empty()
+            && app.streaming_thinking.is_empty()
+            && app.tool_use_blocks.is_empty();
+        crate::rate_limit_recovery::render_rate_limit_recovery(
+            frame,
+            size,
+            &app.rate_limit_recovery,
+            app.footer_right_column_area.get(),
+            is_welcome_screen,
+        );
+        if let Some(ref pr) = app.permission_request {
+            render_permission_dialog(frame, pr, size);
+        }
+        return;
+    }
+
     // Error modals sit above non-security overlays. If a permission request is
     // also pending, render the permission dialog after the error modal so the
     // security-sensitive prompt remains visible for the input it owns.

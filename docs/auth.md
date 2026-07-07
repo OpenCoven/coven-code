@@ -250,12 +250,17 @@ commands — Anthropic is the default, pass `--codex` to target Codex:
 /logout --codex                 # clear active Codex credentials
 /logout --all                   # purge every stored Anthropic profile
 /accounts                       # list every stored account
+/accounts dedupe                # collapse duplicate profiles of the same account
 /login switch personal          # set active Anthropic to "personal"
 /login switch --codex work      # set active Codex to "work"
 ```
 
 `/accounts` lists every profile with a `*` next to the active one and shows
-email and subscription tier when known.
+email and subscription tier when known. If several profiles point at the
+same underlying account (repeated imports of the same Claude Code
+credential), the listing flags them and `/accounts dedupe` collapses each
+duplicate group down to one profile — keeping the active or freshest
+credential.
 
 ### Identity detection
 

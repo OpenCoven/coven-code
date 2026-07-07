@@ -414,6 +414,33 @@ These flags are intended for automated use where runaway sessions would be costl
 
 ---
 
+## Rate-limit recovery
+
+When a provider returns HTTP 429 mid-session, Coven Code opens an interactive
+recovery dialog instead of a dead-end error. The failed turn's conversation is
+preserved — retrying re-dispatches it as-is, with nothing to retype and no
+duplicated messages.
+
+The dialog offers:
+
+- **Auto-retry countdown** — when the provider supplies a `Retry-After` delay
+  of 15 minutes or less, the session retries automatically when it elapses
+  (up to 3 automatic attempts per episode; the budget refreshes after any
+  successful turn). Longer waits only offer manual actions.
+- **`r` / `Enter`** — retry immediately.
+- **`s` / `h`** — switch to Sonnet or Haiku and retry at once. Anthropic
+  Max limits are model-tier scoped, so a lower tier usually still works.
+- **`d`** — clean duplicate account profiles. If multiple stored profiles
+  point at the same underlying account (repeated Claude Code credential
+  imports), switching between them cannot escape the limit; this collapses
+  them to one (same as `/accounts dedupe`).
+- **`Esc`** — dismiss. The prompt is immediately usable; nothing is lost.
+
+Short waits (20 seconds or less) are absorbed silently by the client's
+built-in retry with backoff and never surface the dialog.
+
+---
+
 ## The Buddy companion system
 
 Every Coven Code user gets a persistent companion derived deterministically from their user ID. The companion appears as a small sprite in the terminal UI and occasionally comments on activity.
