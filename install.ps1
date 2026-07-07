@@ -168,12 +168,14 @@ function Install-FromBinary {
 
 function Install-Binary($source) {
     $target = Join-Path $InstallDir 'coven-code.exe'
-    $shortTarget = Join-Path $InstallDir 'coven.exe'
     $aliasTarget = Join-Path $InstallDir 'coven-cave.exe'
+    # `coven.exe` belongs to the Coven daemon CLI (@opencoven/cli); older
+    # installers shipped it as an alias, so clean it up on upgrade.
+    $staleShort = Join-Path $InstallDir 'coven.exe'
 
     # The currently running coven-code.exe (if any) holds an exclusive file lock on
     # Windows.  Try to swap by renaming the old one first.
-    foreach ($path in @($target, $shortTarget, $aliasTarget)) {
+    foreach ($path in @($target, $aliasTarget, $staleShort)) {
         if (-not (Test-Path $path)) { continue }
         $stale = "$path.old"
         if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
@@ -181,10 +183,8 @@ function Install-Binary($source) {
     }
 
     Copy-Item -Force $source $target
-    Copy-Item -Force $source $shortTarget
     Copy-Item -Force $source $aliasTarget
     Write-Success "Installed: $target"
-    Write-Success "Installed short command: $shortTarget"
     Write-Success "Installed alias: $aliasTarget"
 }
 

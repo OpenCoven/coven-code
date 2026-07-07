@@ -41,8 +41,9 @@ Releases — no compilation needed. After installation, run:
 coven-code
 ```
 
-The installed command is `coven-code`; `coven` and `coven-cave` are installed
-as aliases for the same CLI.
+The installed command is `coven-code`; `coven-cave` is installed as an alias
+for the same CLI. The bare `coven` command is owned by the Coven daemon CLI
+(`@opencoven/cli`) and is not installed by this package.
 
 You can also run Coven Code without a permanent install:
 
@@ -297,15 +298,15 @@ cross build --release --locked --package claurst --target aarch64-unknown-linux-
 ## Shell Completions
 
 Coven does not currently ship a dedicated `completions` subcommand. All
-flags can be discovered via `coven --help`. If you want basic tab completion
+flags can be discovered via `coven-code --help`. If you want basic tab completion
 in bash or zsh you can use the generic completion helper built into your shell:
 
 ```bash
 # bash — add to ~/.bashrc
-complete -C coven coven
+complete -C coven-code coven-code
 
 # zsh — add to ~/.zshrc (requires compinit)
-compdef _gnu_generic coven
+compdef _gnu_generic coven-code
 ```
 
 Richer completion scripts may be added in a future release.

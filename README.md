@@ -44,7 +44,7 @@ Recent highlights:
 npm install -g @opencoven/coven-code
 ```
 
-Then open a new terminal and run `coven-code`. The `coven` and `coven-cave` aliases are also installed.
+Then open a new terminal and run `coven-code`. The `coven-cave` alias is also installed. (The bare `coven` command belongs to the [Coven daemon CLI](https://github.com/OpenCoven/coven) — `@opencoven/cli` — which execs into `coven-code` for the TUI.)
 
 ### Upgrade
 

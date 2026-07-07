@@ -10,7 +10,7 @@ export function render() {
     <h3>npm</h3>
     <pre><code data-lang="bash">npm install -g @opencoven/coven-code</code></pre>
 
-    <p>This installs the <code>coven-code</code> CLI (with <code>coven</code> and <code>coven-cave</code> aliases). Run <code>coven-code</code> with no arguments for the interactive UI.</p>
+    <p>This installs the <code>coven-code</code> CLI (with a <code>coven-cave</code> alias). Run <code>coven-code</code> with no arguments for the interactive UI. The bare <code>coven</code> command belongs to the Coven daemon CLI (<code>@opencoven/cli</code>).</p>
 
     <h3>From Source</h3>
     <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
