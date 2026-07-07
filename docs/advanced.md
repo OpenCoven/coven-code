@@ -430,6 +430,8 @@ The dialog offers:
 - **`r` / `Enter`** — retry immediately.
 - **`s` / `h`** — switch to Sonnet or Haiku and retry at once. Anthropic
   Max limits are model-tier scoped, so a lower tier usually still works.
+  Offered only when the active provider is Anthropic — switching a Codex
+  session to an Anthropic model would persist a broken provider config.
 - **`d`** — clean duplicate account profiles. If multiple stored profiles
   point at the same underlying account (repeated Claude Code credential
   imports), switching between them cannot escape the limit; this collapses

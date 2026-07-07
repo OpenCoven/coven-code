@@ -3009,7 +3009,8 @@ impl App {
     /// event handling, never in a render path) so the modal can tell the user
     /// when "switch accounts" would be a no-op and offer a one-key cleanup.
     pub fn open_rate_limit_recovery(&mut self, message: String, retry_after_secs: Option<u64>) {
-        let duplicates = if self.config.provider.as_deref().unwrap_or("anthropic") == "anthropic" {
+        let is_anthropic = self.config.provider.as_deref().unwrap_or("anthropic") == "anthropic";
+        let duplicates = if is_anthropic {
             let registry = claurst_core::accounts::AccountRegistry::load();
             claurst_core::accounts::count_duplicate_anthropic_profiles(&registry)
         } else {
@@ -3017,7 +3018,7 @@ impl App {
         };
         let model = self.model_name.clone();
         self.rate_limit_recovery
-            .open(message, model, retry_after_secs, duplicates);
+            .open(message, model, retry_after_secs, duplicates, is_anthropic);
     }
 
     /// Handle a key press while the recovery modal is open.
@@ -3034,7 +3035,8 @@ impl App {
                 self.status_message = Some("Retrying…".to_string());
             }
             KeyCode::Char('s')
-                if !self.rate_limit_recovery.model.contains("sonnet")
+                if self.rate_limit_recovery.tier_switch_available
+                    && !self.rate_limit_recovery.model.contains("sonnet")
                     && !self.rate_limit_recovery.model.contains("haiku") =>
             {
                 self.set_model(SONNET_MODEL.to_string());
@@ -3043,7 +3045,10 @@ impl App {
                     .request_retry(Some(SONNET_MODEL.to_string()));
                 self.status_message = Some(format!("Retrying on {}…", SONNET_MODEL));
             }
-            KeyCode::Char('h') if !self.rate_limit_recovery.model.contains("haiku") => {
+            KeyCode::Char('h')
+                if self.rate_limit_recovery.tier_switch_available
+                    && !self.rate_limit_recovery.model.contains("haiku") =>
+            {
                 self.set_model(HAIKU_MODEL.to_string());
                 self.persist_provider_and_model();
                 self.rate_limit_recovery

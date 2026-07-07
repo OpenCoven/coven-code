@@ -62,6 +62,10 @@ pub struct RateLimitRecoveryState {
     /// Redundant duplicate profiles detected in the account registry
     /// (same underlying account imported more than once).
     pub duplicate_profiles: usize,
+    /// Whether the one-key Anthropic tier-switch actions (`s`/`h`) apply.
+    /// False when the active provider is not Anthropic — switching a Codex
+    /// session to Sonnet/Haiku would persist a broken provider config.
+    pub tier_switch_available: bool,
     /// Retry directive waiting to be consumed by the main loop.
     pending_retry: Option<RetryDirective>,
 }
@@ -77,12 +81,14 @@ impl RateLimitRecoveryState {
         model: String,
         retry_after_secs: Option<u64>,
         duplicate_profiles: usize,
+        tier_switch_available: bool,
     ) {
         self.visible = true;
         self.message = message;
         self.model = model;
         self.retry_after_secs = retry_after_secs;
         self.duplicate_profiles = duplicate_profiles;
+        self.tier_switch_available = tier_switch_available;
         self.pending_retry = None;
         self.auto_retry_deadline = retry_after_secs
             .map(Duration::from_secs)
@@ -282,13 +288,15 @@ fn action_lines(state: &RateLimitRecoveryState) -> Vec<Line<'static>> {
 
     let mut keys: Vec<Span<'static>> = vec![Span::styled("[r]", key_style)];
     keys.push(Span::styled(" retry now   ", text_style));
-    if !state.is_sonnet() && !state.is_haiku() {
-        keys.push(Span::styled("[s]", key_style));
-        keys.push(Span::styled(" continue on Sonnet   ", text_style));
-    }
-    if !state.is_haiku() {
-        keys.push(Span::styled("[h]", key_style));
-        keys.push(Span::styled(" continue on Haiku", text_style));
+    if state.tier_switch_available {
+        if !state.is_sonnet() && !state.is_haiku() {
+            keys.push(Span::styled("[s]", key_style));
+            keys.push(Span::styled(" continue on Sonnet   ", text_style));
+        }
+        if !state.is_haiku() {
+            keys.push(Span::styled("[h]", key_style));
+            keys.push(Span::styled(" continue on Haiku", text_style));
+        }
     }
     lines.push(Line::from(keys));
 
@@ -325,7 +333,13 @@ mod tests {
     #[test]
     fn open_arms_countdown_for_short_delays() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(30), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(30),
+            0,
+            true,
+        );
         assert!(s.visible);
         assert!(s.auto_retry_deadline.is_some());
         assert!(s.countdown_secs().unwrap() <= 30);
@@ -334,7 +348,13 @@ mod tests {
     #[test]
     fn open_does_not_arm_countdown_for_long_delays() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(3600), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(3600),
+            0,
+            true,
+        );
         assert!(s.visible);
         assert!(s.auto_retry_deadline.is_none());
     }
@@ -342,7 +362,7 @@ mod tests {
     #[test]
     fn open_does_not_arm_countdown_without_retry_after() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 0);
+        s.open("limited".into(), "claude-opus-4-8".into(), None, 0, true);
         assert!(s.auto_retry_deadline.is_none());
     }
 
@@ -352,20 +372,38 @@ mod tests {
             auto_retries_used: MAX_AUTO_RETRIES,
             ..Default::default()
         };
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(10),
+            0,
+            true,
+        );
         assert!(
             s.auto_retry_deadline.is_none(),
             "budget exhausted — no more auto-retries"
         );
         s.reset_episode();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(10),
+            0,
+            true,
+        );
         assert!(s.auto_retry_deadline.is_some());
     }
 
     #[test]
     fn tick_fires_retry_at_deadline() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(10),
+            0,
+            true,
+        );
         // Force the deadline into the past.
         s.auto_retry_deadline = Some(Instant::now() - Duration::from_secs(1));
         s.tick();
@@ -379,7 +417,13 @@ mod tests {
     #[test]
     fn manual_retry_with_model_switch() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(3600), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(3600),
+            0,
+            true,
+        );
         s.request_retry(Some(HAIKU_MODEL.to_string()));
         assert!(!s.visible);
         let directive = s.take_retry_directive().expect("retry queued");
@@ -389,7 +433,13 @@ mod tests {
     #[test]
     fn dismiss_cancels_everything() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), 0);
+        s.open(
+            "limited".into(),
+            "claude-opus-4-8".into(),
+            Some(10),
+            0,
+            true,
+        );
         s.dismiss();
         assert!(!s.visible);
         s.tick();
@@ -399,7 +449,7 @@ mod tests {
     #[test]
     fn tier_actions_reflect_current_model() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 0);
+        s.open("limited".into(), "claude-opus-4-8".into(), None, 0, true);
         let text = lines_text(&action_lines(&s));
         assert!(text.contains("[s]"));
         assert!(text.contains("[h]"));
@@ -416,9 +466,19 @@ mod tests {
     }
 
     #[test]
+    fn tier_actions_hidden_for_non_anthropic_provider() {
+        let mut s = RateLimitRecoveryState::default();
+        s.open("limited".into(), "gpt-5-codex".into(), None, 0, false);
+        let text = lines_text(&action_lines(&s));
+        assert!(!text.contains("[s]"));
+        assert!(!text.contains("[h]"));
+        assert!(text.contains("[r]"));
+    }
+
+    #[test]
     fn duplicate_cleanup_action_appears_when_duplicates_exist() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 18);
+        s.open("limited".into(), "claude-opus-4-8".into(), None, 18, true);
         let text = lines_text(&action_lines(&s));
         assert!(text.contains("[d]"));
         assert!(text.contains("18 duplicate account profiles"));
@@ -436,6 +496,7 @@ mod tests {
             "claude-opus-4-8".into(),
             Some(30),
             2,
+            true,
         );
         let area = Rect {
             x: 0,
