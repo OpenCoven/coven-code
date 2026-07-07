@@ -203,6 +203,11 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
 
+    // Scan tests call the env-independent `scan_buffer` directly:
+    // `scan_buffer_for_urls` consults COVEN_CODE_NO_HYPERLINKS, and
+    // `enabled_respects_env_var` mutates that variable while sibling tests
+    // run in parallel, which made these tests flaky.
+
     fn buffer_with(lines: &[&str]) -> Buffer {
         let h = lines.len() as u16;
         let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
@@ -216,7 +221,7 @@ mod tests {
     #[test]
     fn detects_simple_http_url() {
         let buf = buffer_with(&["Visit https://example.com today"]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].display, "https://example.com");
         assert_eq!(hits[0].url, "https://example.com");
@@ -227,7 +232,7 @@ mod tests {
     #[test]
     fn strips_trailing_period_and_paren() {
         let buf = buffer_with(&["See (https://example.com)."]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 1, "hits: {hits:?}");
         assert_eq!(hits[0].display, "https://example.com");
     }
@@ -235,7 +240,7 @@ mod tests {
     #[test]
     fn keeps_balanced_paren_inside_url() {
         let buf = buffer_with(&["see https://en.wikipedia.org/wiki/Foo_(bar) ok"]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].display, "https://en.wikipedia.org/wiki/Foo_(bar)");
     }
@@ -243,7 +248,7 @@ mod tests {
     #[test]
     fn detects_www_and_normalizes_to_https() {
         let buf = buffer_with(&["go to www.example.com now"]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].display, "www.example.com");
         assert_eq!(hits[0].url, "https://www.example.com");
@@ -252,14 +257,14 @@ mod tests {
     #[test]
     fn no_urls_no_hits() {
         let buf = buffer_with(&["just some text without urls"]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert!(hits.is_empty());
     }
 
     #[test]
     fn two_urls_one_line() {
         let buf = buffer_with(&["a https://one.test and https://two.test x"]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].display, "https://one.test");
         assert_eq!(hits[1].display, "https://two.test");
@@ -273,7 +278,7 @@ mod tests {
             "https://opencoven.github.io/coven-code/session/#c2cc4dd0ae0d3fa6dc7ab21f2a79d7a1";
         let line = format!("Share URL: {url}");
         let buf = buffer_with(&[&line]);
-        let hits = scan_buffer_for_urls(&buf);
+        let hits = scan_buffer(&buf);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].display, url);
     }

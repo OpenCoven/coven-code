@@ -56,6 +56,10 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "accounts",
         "List stored accounts; `dedupe` collapses duplicate profiles",
     ),
+    (
+        "attach",
+        "Save and manage file attachments in the structured stash",
+    ),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -99,6 +103,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "learn",
         "Codify the script/workflow we just built into a reusable skill",
     ),
+    ("link", "Save and manage links in the structured stash"),
     ("login", "Log in, switch accounts, or refresh provider auth"),
     ("logout", "Log out of Coven Code"),
     ("mcp", "Browse configured MCP servers"),
