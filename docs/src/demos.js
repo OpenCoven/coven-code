@@ -19,7 +19,7 @@ export function registerDemos(Alpine) {
       },
       daemon: {
         title: 'Daemon',
-        body: 'Coven daemon online/offline status. A cheap socket check — no RPC. Install @opencoven/coven to bring it online; familiars and skills light up when it is.',
+        body: 'Coven daemon online/offline status. A cheap socket check — no RPC. Install @opencoven/cli to bring it online; familiars and skills light up when it is.',
       },
       familiar: {
         title: 'Familiar',

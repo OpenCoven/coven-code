@@ -1,8 +1,8 @@
 # Coven Code Installation Guide
 
 Coven Code is a Rust reimplementation of the Claude Code CLI. The recommended
-npm install path is the Coven package, which installs the `coven` CLI. Run
-`coven` with no arguments, or `coven tui` explicitly, to open the interactive
+npm install path is the `@opencoven/coven-code` package, which installs the
+`coven-code` CLI. Run `coven-code` with no arguments to open the interactive
 Coven Code UI.
 
 ---
@@ -24,33 +24,31 @@ possible; on Linux it links against the system glibc.
 
 ## Quick install (recommended)
 
-If you have Node.js or Bun installed, install the Coven CLI globally:
+If you have Node.js or Bun installed, install Coven Code globally:
 
 ```bash
 # npm
-npm install -g @opencoven/coven
+npm install -g @opencoven/coven-code
 
 # bun
-bun install -g @opencoven/coven
+bun install -g @opencoven/coven-code
 ```
 
-After installation, run:
+The postinstall script downloads the correct pre-built binary from GitHub
+Releases — no compilation needed. After installation, run:
 
 ```bash
-coven
-# or explicitly:
-coven tui
+coven-code
 ```
 
-The installed command is `coven`. Use `coven doctor` to inspect local setup,
-`coven daemon start` to start the local daemon, and
-`coven run <harness> "<task>"` for direct harness sessions.
+The installed command is `coven-code`; `coven` and `coven-cave` are installed
+as aliases for the same CLI.
 
-You can also run Coven without a permanent install:
+You can also run Coven Code without a permanent install:
 
 ```bash
-npx @opencoven/coven          # via npm
-bunx @opencoven/coven         # via bun
+npx @opencoven/coven-code          # via npm
+bunx @opencoven/coven-code         # via bun
 ```
 
 ---
@@ -98,29 +96,20 @@ Example: `curl -fsSL https://.../install.sh | bash -s -- --version 0.1.0`
 
 ---
 
-## Coven Code npm package
+## Coven daemon (optional)
 
-The lower-level Coven Code npm package installs the `coven-code` binary
-directly. Prefer `@opencoven/coven` for the user-facing `coven` CLI unless you
-specifically need the underlying Coven Code binary.
-
-```bash
-# npm
-npm install -g @opencoven/coven-code
-
-# bun
-bun install -g @opencoven/coven-code
-```
-
-After installation, run `coven-code` directly from your terminal. `coven-cave`
-is installed as an alias for the same CLI.
-
-You can also run Coven Code without a permanent install:
+The Coven daemon unlocks the ecosystem features (familiars as agents,
+daemon-registered skills, roster glyphs). It ships separately as the Coven
+CLI:
 
 ```bash
-npx @opencoven/coven-code          # via npm
-bunx @opencoven/coven-code         # via bun
+npm install -g @opencoven/cli
+coven daemon start
 ```
+
+Use `coven doctor` to inspect local setup and
+`coven run <harness> "<task>"` for direct harness sessions. Coven Code is
+fully standalone without the daemon.
 
 **Supported platforms via npm:**
 
@@ -137,9 +126,9 @@ bunx @opencoven/coven-code         # via bun
 Once installed, upgrade in place at any time:
 
 ```bash
-npm install -g @opencoven/coven@latest
+npm install -g @opencoven/coven-code@latest
 # or
-bun install -g @opencoven/coven@latest
+bun install -g @opencoven/coven-code@latest
 ```
 
 Settings in `~/.coven/` and `~/.coven-code/` are preserved.
@@ -330,7 +319,7 @@ cd coven-code/src-rust
 cargo install --path crates/cli --locked --force
 ```
 
-For npm or bun installs, reinstall the `@opencoven/coven` package — see the
+For npm or bun installs, reinstall the `@opencoven/coven-code` package — see the
 [Upgrading](#upgrading) section above.
 
 ---
@@ -340,9 +329,9 @@ For npm or bun installs, reinstall the `@opencoven/coven` package — see the
 If you used the recommended npm or bun package, remove it globally:
 
 ```bash
-npm uninstall -g @opencoven/coven
+npm uninstall -g @opencoven/coven-code
 # or
-bun remove -g @opencoven/coven
+bun remove -g @opencoven/coven-code
 ```
 
 If you used the install script, remove the install directory:

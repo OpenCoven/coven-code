@@ -20,14 +20,14 @@ export function render() {
 
     <h2>Quick Install</h2>
 
-    <pre><code data-lang="bash">npm install -g @opencoven/coven
+    <pre><code data-lang="bash">npm install -g @opencoven/coven-code
 # or
-bun install -g @opencoven/coven</code></pre>
+bun install -g @opencoven/coven-code</code></pre>
 
-    <p>The installed command is <code>coven</code>. Run <code>coven</code> with no arguments, or <code>coven tui</code> explicitly, for the interactive UI. Use <code>coven doctor</code> to inspect local setup, <code>coven daemon start</code> to start the local daemon, and <code>coven run &lt;harness&gt; "&lt;task&gt;"</code> for direct harness sessions.</p>
+    <p>The installed command is <code>coven-code</code>; <code>coven</code> and <code>coven-cave</code> are installed as aliases for the same CLI. Run <code>coven-code</code> with no arguments for the interactive UI. The postinstall script downloads the correct pre-built binary from GitHub Releases — no compilation needed.</p>
 
-    <pre><code data-lang="bash">npx @opencoven/coven
-bunx @opencoven/coven</code></pre>
+    <pre><code data-lang="bash">npx @opencoven/coven-code
+bunx @opencoven/coven-code</code></pre>
 
     <h2>Standalone Coven Code Binary</h2>
 
@@ -53,24 +53,18 @@ bunx @opencoven/coven</code></pre>
       </tbody>
     </table>
 
-    <h2>Coven Code npm Package</h2>
+    <h2>Coven Daemon (Optional)</h2>
 
-    <p>Prefer <code>@opencoven/coven</code> for the user-facing <code>coven</code> CLI. The lower-level Coven Code package installs the <code>coven-code</code> binary directly.</p>
+    <p>The Coven daemon unlocks the ecosystem features (familiars as agents, daemon-registered skills). It ships separately as the Coven CLI. Use <code>coven doctor</code> to inspect local setup and <code>coven daemon start</code> to start the daemon.</p>
 
-    <pre><code data-lang="bash">npm install -g @opencoven/coven-code
-# or
-bun install -g @opencoven/coven-code</code></pre>
-
-    <p>The postinstall script downloads the correct pre-built binary from GitHub Releases — no compilation needed. Or run without a permanent install:</p>
-
-    <pre><code data-lang="bash">npx @opencoven/coven-code
-bunx @opencoven/coven-code</code></pre>
+    <pre><code data-lang="bash">npm install -g @opencoven/cli
+coven daemon start</code></pre>
 
     <h2>Upgrading</h2>
 
-    <pre><code data-lang="bash">npm install -g @opencoven/coven@latest
+    <pre><code data-lang="bash">npm install -g @opencoven/coven-code@latest
 # or
-bun install -g @opencoven/coven@latest</code></pre>
+bun install -g @opencoven/coven-code@latest</code></pre>
 
     <p>Settings under <code>~/.coven/</code> and <code>~/.coven-code/</code> are preserved.</p>
 
@@ -131,9 +125,9 @@ compdef _gnu_generic coven</code></pre>
 
     <h2>Uninstalling</h2>
 
-    <pre><code data-lang="bash">npm uninstall -g @opencoven/coven
+    <pre><code data-lang="bash">npm uninstall -g @opencoven/coven-code
 # or
-bun remove -g @opencoven/coven
+bun remove -g @opencoven/coven-code
 
 rm -rf ~/.coven ~/.coven-code     # Linux / macOS
 

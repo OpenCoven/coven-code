@@ -258,7 +258,7 @@ function bindCopyBtn() {
   const btn = document.getElementById('hero-copy-btn');
   if (!btn) return;
   btn.addEventListener('click', () => {
-    navigator.clipboard.writeText('npm i -g @opencoven/coven').then(() => {
+    navigator.clipboard.writeText('npm i -g @opencoven/coven-code').then(() => {
       btn.querySelector('.hero-copy-icon').classList.add('hidden');
       btn.querySelector('.hero-check-icon').classList.remove('hidden');
       setTimeout(() => {
