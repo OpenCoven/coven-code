@@ -12,14 +12,17 @@ tc_palette() {
 
   # Typing "/" as the first character opens the palette.
   tui_type "/"
-  if ! wait_for "/config"; then
-    _fail "palette opened on '/' (/config never appeared)" "$(tui_capture)"
+  if ! wait_for "/clear"; then
+    _fail "palette opened on '/' (/clear never appeared)" "$(tui_capture)"
     tui_stop; return 0
   fi
   local s; s="$(tui_capture)"
-  assert_contains "$s" "/clear"   "palette lists /clear"
-  assert_contains "$s" "/compact" "palette lists /compact"
-  assert_contains "$s" "/config"  "palette lists /config"
+  # Assert on entries near the top of the alphabetical list — the palette
+  # viewport shows a handful of rows, so entries further down (e.g. /config)
+  # scroll out of view as new commands are registered.
+  assert_contains "$s" "/accounts" "palette lists /accounts"
+  assert_contains "$s" "/chrome"   "palette lists /chrome"
+  assert_contains "$s" "/clear"    "palette lists /clear"
 
   # Filtering narrows the list: "/config" should keep /config, drop /clear.
   tui_type "config"
