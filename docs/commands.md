@@ -545,7 +545,7 @@ Save and manage links in the structured stash. Links are stored in `~/.coven-cod
 /link remove <id>                                     — delete a link
 ```
 
-`/link list` shows each entry's short id, save date, title, URL, and tags. `--project` limits the listing to links saved from the current repository. The stash is a personal local store and is disabled in [hosted review mode](configuration#hosted-review-mode).
+`/link list` shows each entry's short id, save date, title, URL, and tags. `--project` limits the listing to links saved from the current repository. The stash is a personal local store and is disabled in [hosted review mode](./configuration.md#hosted-review-mode).
 
 ```
 /link https://docs.rs/tokio --title Tokio docs --tags rust,async

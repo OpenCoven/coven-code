@@ -11121,6 +11121,101 @@ mod tests {
         }
     }
 
+    fn message_text(result: CommandResult) -> String {
+        match result {
+            CommandResult::Message(msg) => msg,
+            other => panic!("expected message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn link_and_attach_round_trip_against_temp_home() {
+        let _guard = CommandEnvGuard::with_coven_home(Some("tester"));
+        let mut ctx = make_ctx();
+
+        // Save and list a link.
+        let saved = message_text(
+            LinkCommand
+                .execute(
+                    "https://example.com/docs --title \"Example docs\" --tags demo",
+                    &mut ctx,
+                )
+                .await,
+        );
+        assert!(saved.contains("Saved link"), "{saved}");
+        let listing = message_text(LinkCommand.execute("list --tag demo", &mut ctx).await);
+        assert!(listing.contains("https://example.com/docs"), "{listing}");
+        assert!(listing.contains("Example docs"), "{listing}");
+
+        // Attach a file whose path contains spaces (quoted).
+        let files = tempfile::tempdir().unwrap();
+        let src = files.path().join("my spec.txt");
+        std::fs::write(&src, "attached-content").unwrap();
+        let saved = message_text(
+            AttachCommand
+                .execute(
+                    &format!("\"{}\" --title \"API spec\"", src.display()),
+                    &mut ctx,
+                )
+                .await,
+        );
+        assert!(saved.contains("Saved attachment"), "{saved}");
+        // "Saved attachment <id> — stored at <path>"
+        let attachment_id = saved
+            .split_whitespace()
+            .nth(2)
+            .map(str::to_string)
+            .unwrap_or_default();
+        let stored_path = saved
+            .split(" stored at ")
+            .nth(1)
+            .map(str::trim)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        assert!(stored_path.exists(), "stored copy missing: {saved}");
+        assert_eq!(
+            std::fs::read_to_string(&stored_path).unwrap(),
+            "attached-content"
+        );
+
+        // Kind scoping: /link remove cannot resolve the attachment id.
+        let cross = LinkCommand
+            .execute(&format!("remove {attachment_id}"), &mut ctx)
+            .await;
+        assert!(
+            matches!(cross, CommandResult::Error(_)),
+            "cross-kind removal must fail, got {:?}",
+            cross
+        );
+        assert!(stored_path.exists());
+
+        // /attach remove deletes the row and the stored copy.
+        let removed = message_text(
+            AttachCommand
+                .execute(&format!("remove {attachment_id}"), &mut ctx)
+                .await,
+        );
+        assert!(removed.contains("Removed attachment"), "{removed}");
+        assert!(!stored_path.exists());
+
+        // /link remove cleans up the link too.
+        let listing = message_text(LinkCommand.execute("list", &mut ctx).await);
+        let link_id = listing
+            .lines()
+            .nth(1)
+            .and_then(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .unwrap_or_default();
+        let removed = message_text(
+            LinkCommand
+                .execute(&format!("remove {link_id}"), &mut ctx)
+                .await,
+        );
+        assert!(removed.contains("Removed link"), "{removed}");
+        let listing = message_text(LinkCommand.execute("list", &mut ctx).await);
+        assert!(listing.contains("none"), "{listing}");
+    }
+
     #[test]
     fn test_all_commands_have_unique_names() {
         let mut names = std::collections::HashSet::new();

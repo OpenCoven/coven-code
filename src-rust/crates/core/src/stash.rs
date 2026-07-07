@@ -231,7 +231,13 @@ impl StashStore {
             session_id: session_id.map(str::to_string),
             created_at_ms: Self::now_ms(),
         };
-        self.insert(&item)?;
+        // Don't leave an orphaned stored copy behind if the row can't be
+        // recorded (locked/full database).
+        if let Err(err) = self.insert(&item) {
+            let _ = std::fs::remove_file(&dest);
+            let _ = std::fs::remove_dir(&dest_dir);
+            return Err(err);
+        }
         Ok(item)
     }
 
@@ -328,23 +334,34 @@ impl StashStore {
 
     /// Remove an item by id prefix (optionally kind-restricted). For
     /// attachments the stored copy (and its per-item directory) is deleted
-    /// as well.
+    /// first; a filesystem failure keeps the row so the removal can be
+    /// retried, while an already-missing stored copy does not block it.
     pub fn remove(
         &self,
         id_prefix: &str,
         kind: Option<StashKind>,
     ) -> Result<StashItem, StashError> {
         let item = self.get(id_prefix, kind)?;
-        self.conn
-            .execute("DELETE FROM stash_items WHERE id = ?1", [&item.id])
-            .map_err(|e| StashError::Db(e.to_string()))?;
         if item.kind == StashKind::Attachment {
             let stored = Path::new(&item.value);
-            let _ = std::fs::remove_file(stored);
+            match std::fs::remove_file(stored) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(StashError::Io(format!(
+                        "could not delete stored copy {}: {}",
+                        stored.display(),
+                        e
+                    )))
+                }
+            }
             if let Some(dir) = stored.parent() {
                 let _ = std::fs::remove_dir(dir);
             }
         }
+        self.conn
+            .execute("DELETE FROM stash_items WHERE id = ?1", [&item.id])
+            .map_err(|e| StashError::Db(e.to_string()))?;
         Ok(item)
     }
 
