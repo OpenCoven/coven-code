@@ -588,9 +588,21 @@ mod tests {
         }
     }
 
+    fn with_kill_switch_unset<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var(KILL_SWITCH_ENV).ok();
+        std::env::remove_var(KILL_SWITCH_ENV);
+        let result = f();
+        match original {
+            Some(value) => std::env::set_var(KILL_SWITCH_ENV, value),
+            None => std::env::remove_var(KILL_SWITCH_ENV),
+        }
+        result
+    }
+
     #[test]
     fn test_no_tokens_requires_oauth() {
-        let result = check_voice_availability(None);
+        let result = with_kill_switch_unset(|| check_voice_availability(None));
         assert_eq!(result, VoiceAvailability::RequiresOAuth);
         assert!(!result.is_available());
         assert!(result.error_message().is_some());
@@ -599,7 +611,7 @@ mod tests {
     #[test]
     fn test_available_with_all_scopes() {
         let tokens = tokens_with_scopes(vec!["user:inference", "user:profile"]);
-        let result = check_voice_availability(Some(&tokens));
+        let result = with_kill_switch_unset(|| check_voice_availability(Some(&tokens)));
         assert_eq!(result, VoiceAvailability::Available);
         assert!(result.is_available());
         assert!(result.error_message().is_none());
@@ -608,7 +620,7 @@ mod tests {
     #[test]
     fn test_missing_one_scope() {
         let tokens = tokens_with_scopes(vec!["user:inference"]);
-        let result = check_voice_availability(Some(&tokens));
+        let result = with_kill_switch_unset(|| check_voice_availability(Some(&tokens)));
         assert!(matches!(result, VoiceAvailability::MissingScopes { .. }));
         assert!(!result.is_available());
         let msg = result.error_message().unwrap();
@@ -617,10 +629,8 @@ mod tests {
 
     #[test]
     fn test_missing_all_scopes() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var(KILL_SWITCH_ENV);
         let tokens = tokens_with_scopes(vec!["org:create_api_key"]);
-        let result = check_voice_availability(Some(&tokens));
+        let result = with_kill_switch_unset(|| check_voice_availability(Some(&tokens)));
         assert!(matches!(result, VoiceAvailability::MissingScopes { .. }));
         assert!(!result.is_available());
     }
@@ -628,7 +638,7 @@ mod tests {
     #[test]
     fn test_empty_scopes_missing() {
         let tokens = tokens_with_scopes(vec![]);
-        let result = check_voice_availability(Some(&tokens));
+        let result = with_kill_switch_unset(|| check_voice_availability(Some(&tokens)));
         assert!(
             matches!(result, VoiceAvailability::MissingScopes { ref have, .. } if have.is_empty())
         );
@@ -671,7 +681,7 @@ mod tests {
             "org:create_api_key",
             "user:file_upload",
         ]);
-        let result = check_voice_availability(Some(&tokens));
+        let result = with_kill_switch_unset(|| check_voice_availability(Some(&tokens)));
         assert_eq!(result, VoiceAvailability::Available);
     }
 

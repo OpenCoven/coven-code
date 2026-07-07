@@ -6,6 +6,7 @@
 //!
 //! Pull is server-wins: remote content overwrites local files unconditionally.
 
+use crate::hosted_review::{hosted_team_memory_repo_key, HostedReviewScope};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,6 +56,54 @@ pub struct TeamMemoryEntry {
 pub struct TeamMemoryData {
     pub entries: Vec<TeamMemoryEntry>,
     pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullConflictKind {
+    CleanApply,
+    LocalOnly,
+    RemoteOnly,
+    BothChanged,
+    RejectedUnsafePath,
+    RejectedSecret,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamMemoryPullConflict {
+    pub key: String,
+    pub kind: PullConflictKind,
+    pub local_checksum: Option<String>,
+    pub base_checksum: Option<String>,
+    pub remote_checksum: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TeamMemoryPullResult {
+    pub applied: Vec<String>,
+    pub conflicts: Vec<TeamMemoryPullConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostedTeamMemoryScope {
+    pub tenant_id: String,
+    pub installation_id: String,
+    pub repo_id: String,
+    pub repo_full_name: String,
+    pub domain: String,
+}
+
+impl HostedTeamMemoryScope {
+    pub fn from_scope(scope: &HostedReviewScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            installation_id: scope.installation_id.clone(),
+            repo_id: scope.repo_id.clone(),
+            repo_full_name: scope.repo_full_name.clone(),
+            domain: scope.domain_component(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +171,7 @@ pub struct TeamMemorySync {
     token: String,
     /// Local directory that mirrors the server's key namespace.
     team_dir: PathBuf,
+    hosted_scope: Option<HostedTeamMemoryScope>,
 }
 
 impl TeamMemorySync {
@@ -131,18 +181,49 @@ impl TeamMemorySync {
             repo,
             token,
             team_dir,
+            hosted_scope: None,
         }
+    }
+
+    pub fn hosted(
+        api_base: String,
+        scope: &HostedReviewScope,
+        token: String,
+        team_dir: PathBuf,
+    ) -> Self {
+        let mut sync = Self::new(
+            api_base,
+            hosted_team_memory_repo_key(scope),
+            token,
+            team_dir,
+        );
+        sync.hosted_scope = Some(HostedTeamMemoryScope::from_scope(scope));
+        sync
+    }
+
+    pub fn repo_key(&self) -> &str {
+        &self.repo
+    }
+
+    pub fn hosted_scope(&self) -> Option<&HostedTeamMemoryScope> {
+        self.hosted_scope.as_ref()
     }
 
     // -----------------------------------------------------------------------
     // Pull
     // -----------------------------------------------------------------------
 
-    /// Pull all entries from the server.  Server wins: overwrites local files.
+    /// Pull all entries from the server.
     ///
     /// Updates `state.last_known_etag` and `state.server_checksums` on success.
     /// Returns `Ok(())` on HTTP 404 (no remote data yet).
     pub async fn pull(&self, state: &mut SyncState) -> Result<()> {
+        self.pull_with_conflicts(state).await.map(|_| ())
+    }
+
+    /// Pull all entries from the server, preserving local changes when both
+    /// local and remote changed since the last known server checksum.
+    pub async fn pull_with_conflicts(&self, state: &mut SyncState) -> Result<TeamMemoryPullResult> {
         let client = reqwest::Client::new();
         let url = format!(
             "{}/api/claude_code/team_memory?repo={}",
@@ -150,9 +231,18 @@ impl TeamMemorySync {
             urlencoding::encode(&self.repo),
         );
 
-        let response = client
-            .get(&url)
-            .bearer_auth(&self.token)
+        let mut request = client.get(&url).bearer_auth(&self.token);
+        if let Some(scope) = &self.hosted_scope {
+            request = request.query(&[
+                ("tenant_id", scope.tenant_id.as_str()),
+                ("installation_id", scope.installation_id.as_str()),
+                ("repo_id", scope.repo_id.as_str()),
+                ("repo_full_name", scope.repo_full_name.as_str()),
+                ("domain", scope.domain.as_str()),
+            ]);
+        }
+
+        let response = request
             .send()
             .await
             .context("team memory pull: HTTP request failed")?;
@@ -160,7 +250,7 @@ impl TeamMemorySync {
         let http_status = response.status();
 
         if http_status.as_u16() == 404 {
-            return Ok(()); // No remote data yet
+            return Ok(TeamMemoryPullResult::default()); // No remote data yet
         }
 
         if !http_status.is_success() {
@@ -177,32 +267,105 @@ impl TeamMemorySync {
             .await
             .context("team memory pull: failed to parse response JSON")?;
 
-        state.server_checksums.clear();
+        self.apply_remote_entries(data.entries, state).await
+    }
 
-        for entry in &data.entries {
-            validate_memory_path(&entry.key)
-                .with_context(|| format!("server returned unsafe path: {:?}", entry.key))?;
+    async fn apply_remote_entries(
+        &self,
+        entries: Vec<TeamMemoryEntry>,
+        state: &mut SyncState,
+    ) -> Result<TeamMemoryPullResult> {
+        let mut result = TeamMemoryPullResult::default();
 
-            state
-                .server_checksums
-                .insert(entry.key.clone(), entry.checksum.clone());
+        for entry in &entries {
+            if let Err(err) = validate_memory_path(&entry.key) {
+                result.conflicts.push(TeamMemoryPullConflict {
+                    key: entry.key.clone(),
+                    kind: PullConflictKind::RejectedUnsafePath,
+                    local_checksum: None,
+                    base_checksum: state.server_checksums.get(&entry.key).cloned(),
+                    remote_checksum: Some(entry.checksum.clone()),
+                    reason: err.to_string(),
+                });
+                continue;
+            }
+
+            let secrets = scan_for_secrets(&entry.content);
+            if !secrets.is_empty() {
+                let labels: Vec<String> = secrets.into_iter().map(|m| m.label).collect();
+                result.conflicts.push(TeamMemoryPullConflict {
+                    key: entry.key.clone(),
+                    kind: PullConflictKind::RejectedSecret,
+                    local_checksum: None,
+                    base_checksum: state.server_checksums.get(&entry.key).cloned(),
+                    remote_checksum: Some(entry.checksum.clone()),
+                    reason: format!(
+                        "remote entry contains secret patterns: {}",
+                        labels.join(", ")
+                    ),
+                });
+                continue;
+            }
+
+            if entry.content.len() > MAX_FILE_SIZE_BYTES {
+                continue;
+            }
 
             let local_path = self.team_dir.join(&entry.key);
+            let local_content = tokio::fs::read_to_string(&local_path).await.ok();
+            let local_checksum = local_content.as_deref().map(content_checksum);
+            let base_checksum = state.server_checksums.get(&entry.key).cloned();
+
+            let local_changed = match (&local_checksum, &base_checksum) {
+                (Some(local), Some(base)) => local != base,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            let remote_changed = base_checksum.as_deref() != Some(entry.checksum.as_str());
+
+            if local_changed && remote_changed {
+                let conflict = TeamMemoryPullConflict {
+                    key: entry.key.clone(),
+                    kind: PullConflictKind::BothChanged,
+                    local_checksum,
+                    base_checksum,
+                    remote_checksum: Some(entry.checksum.clone()),
+                    reason: "local and remote changed since last pull".to_string(),
+                };
+                self.write_conflict_record(&conflict, local_content.as_deref(), entry)
+                    .await?;
+                result.conflicts.push(conflict);
+                continue;
+            }
+
+            if local_changed && !remote_changed {
+                result.conflicts.push(TeamMemoryPullConflict {
+                    key: entry.key.clone(),
+                    kind: PullConflictKind::LocalOnly,
+                    local_checksum,
+                    base_checksum,
+                    remote_checksum: Some(entry.checksum.clone()),
+                    reason: "local changed and remote did not change".to_string(),
+                });
+                continue;
+            }
+
             if let Some(parent) = local_path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
                     .with_context(|| format!("create_dir_all for {:?}", parent))?;
             }
+            tokio::fs::write(&local_path, &entry.content)
+                .await
+                .with_context(|| format!("writing {:?}", local_path))?;
 
-            if entry.content.len() <= MAX_FILE_SIZE_BYTES {
-                tokio::fs::write(&local_path, &entry.content)
-                    .await
-                    .with_context(|| format!("writing {:?}", local_path))?;
-            }
-            // Files exceeding MAX_FILE_SIZE_BYTES are silently skipped (same behaviour as push)
+            state
+                .server_checksums
+                .insert(entry.key.clone(), entry.checksum.clone());
+            result.applied.push(entry.key.clone());
         }
 
-        Ok(())
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
@@ -292,7 +455,11 @@ impl TeamMemorySync {
             urlencoding::encode(&self.repo),
         );
 
-        let body = serde_json::json!({ "entries": batch });
+        let body = if let Some(scope) = &self.hosted_scope {
+            serde_json::json!({ "entries": batch, "scope": scope })
+        } else {
+            serde_json::json!({ "entries": batch })
+        };
 
         let mut req = client.put(&url).bearer_auth(&self.token).json(&body);
 
@@ -325,6 +492,29 @@ impl TeamMemorySync {
             401 | 403 => anyhow::bail!("Authentication error ({})", status),
             _ => anyhow::bail!("Upload failed with status {}", status),
         }
+    }
+
+    async fn write_conflict_record(
+        &self,
+        conflict: &TeamMemoryPullConflict,
+        local_content: Option<&str>,
+        remote: &TeamMemoryEntry,
+    ) -> Result<()> {
+        let conflict_dir = self.team_dir.join(".conflicts");
+        tokio::fs::create_dir_all(&conflict_dir).await?;
+        let safe_key = remote.key.replace('/', "__");
+        let path = conflict_dir.join(format!("{safe_key}.json"));
+        let record = serde_json::json!({
+            "conflict": conflict,
+            "local": local_content.unwrap_or(""),
+            "remote": {
+                "key": remote.key,
+                "checksum": remote.checksum,
+                "content": remote.content,
+            }
+        });
+        tokio::fs::write(path, serde_json::to_string_pretty(&record)?).await?;
+        Ok(())
     }
 
     /// Recursively scan `team_dir` for `.md` files, returning entries sorted by key.
@@ -497,6 +687,189 @@ mod tests {
     #[test]
     fn test_checksum_distinct() {
         assert_ne!(content_checksum("foo"), content_checksum("bar"));
+    }
+
+    #[test]
+    fn hosted_team_memory_key_splits_installations_for_same_repo_name() {
+        let tmp = TempDir::new().unwrap();
+        let first = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let second = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-2".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        let first_sync = TeamMemorySync::hosted(
+            "https://example.com".to_string(),
+            &first,
+            "token".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let second_sync = TeamMemorySync::hosted(
+            "https://example.com".to_string(),
+            &second,
+            "token".to_string(),
+            tmp.path().to_path_buf(),
+        );
+
+        assert_ne!(first_sync.repo_key(), second_sync.repo_key());
+        assert!(first_sync.repo_key().contains("installations/install-1"));
+        assert!(second_sync.repo_key().contains("installations/install-2"));
+        assert_eq!(
+            first_sync.hosted_scope().unwrap().installation_id,
+            "install-1"
+        );
+        assert_eq!(first_sync.hosted_scope().unwrap().domain, "default-branch");
+    }
+
+    #[tokio::test]
+    async fn pull_clean_remote_entry_applies_file() {
+        let tmp = TempDir::new().unwrap();
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let content = "# Remote";
+        let mut state = SyncState::default();
+        let result = sync
+            .apply_remote_entries(
+                vec![TeamMemoryEntry {
+                    key: "MEMORY.md".to_string(),
+                    content: content.to_string(),
+                    checksum: content_checksum(content),
+                }],
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.applied, vec!["MEMORY.md"]);
+        assert!(result.conflicts.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(tmp.path().join("MEMORY.md"))
+                .await
+                .unwrap(),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_local_only_change_is_not_overwritten() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("MEMORY.md"), "# Local")
+            .await
+            .unwrap();
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let base = "# Base";
+        let mut state = SyncState::default();
+        state
+            .server_checksums
+            .insert("MEMORY.md".to_string(), content_checksum(base));
+        let result = sync
+            .apply_remote_entries(
+                vec![TeamMemoryEntry {
+                    key: "MEMORY.md".to_string(),
+                    content: base.to_string(),
+                    checksum: content_checksum(base),
+                }],
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.conflicts[0].kind, PullConflictKind::LocalOnly);
+        assert_eq!(
+            tokio::fs::read_to_string(tmp.path().join("MEMORY.md"))
+                .await
+                .unwrap(),
+            "# Local"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_both_changed_creates_conflict_record() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("MEMORY.md"), "# Local")
+            .await
+            .unwrap();
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let mut state = SyncState::default();
+        state
+            .server_checksums
+            .insert("MEMORY.md".to_string(), content_checksum("# Base"));
+        let result = sync
+            .apply_remote_entries(
+                vec![TeamMemoryEntry {
+                    key: "MEMORY.md".to_string(),
+                    content: "# Remote".to_string(),
+                    checksum: content_checksum("# Remote"),
+                }],
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.conflicts[0].kind, PullConflictKind::BothChanged);
+        assert!(tmp
+            .path()
+            .join(".conflicts")
+            .join("MEMORY.md.json")
+            .exists());
+        assert_eq!(
+            tokio::fs::read_to_string(tmp.path().join("MEMORY.md"))
+                .await
+                .unwrap(),
+            "# Local"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_remote_secret_is_rejected_without_writing_value() {
+        let tmp = TempDir::new().unwrap();
+        let sync = TeamMemorySync::new(
+            "https://example.com".to_string(),
+            "r".to_string(),
+            "t".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        let secret = format!("ghp_{}", "A".repeat(36));
+        let mut state = SyncState::default();
+        let result = sync
+            .apply_remote_entries(
+                vec![TeamMemoryEntry {
+                    key: "MEMORY.md".to_string(),
+                    content: format!("token={secret}"),
+                    checksum: content_checksum(&secret),
+                }],
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.conflicts[0].kind, PullConflictKind::RejectedSecret);
+        assert!(result.conflicts[0]
+            .reason
+            .contains("GitHub personal access token"));
+        assert!(!result.conflicts[0].reason.contains(&secret));
+        assert!(!tmp.path().join("MEMORY.md").exists());
     }
 
     // --- validate_memory_path ---

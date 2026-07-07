@@ -3382,6 +3382,39 @@ impl SlashCommand for LearnCommand {
 
 // ---- /review -------------------------------------------------------------
 
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct StructuredReviewOutput {
+    #[serde(default)]
+    pub findings: Vec<StructuredReviewFinding>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct StructuredReviewFinding {
+    pub title: String,
+    #[serde(default)]
+    pub memory_refs: Vec<String>,
+    #[serde(default)]
+    pub memory_dependent: bool,
+}
+
+pub fn parse_structured_review_output(text: &str) -> Option<StructuredReviewOutput> {
+    serde_json::from_str::<StructuredReviewOutput>(text).ok()
+}
+
+pub fn validate_structured_review_memory_refs(review: &StructuredReviewOutput) -> Vec<String> {
+    review
+        .findings
+        .iter()
+        .filter(|finding| finding.memory_dependent && finding.memory_refs.is_empty())
+        .map(|finding| {
+            format!(
+                "finding '{}' is marked memory-dependent but has no memory_refs",
+                finding.title
+            )
+        })
+        .collect()
+}
+
 #[async_trait]
 impl SlashCommand for ReviewCommand {
     fn name(&self) -> &str {
@@ -3527,7 +3560,8 @@ impl SlashCommand for ReviewCommand {
              (1-3 sentences describing what changed)\n\n\
              ## Issues\n\
              (bulleted list: [CRITICAL|MAJOR|MINOR] file:line — description; \
-             omit section if none)\n\n\
+             omit section if none; if the issue depends on a loaded memory entry, \
+             include memory_refs: [\"mem_...\"] on that bullet)\n\n\
              ## Suggestions\n\
              (bulleted list of optional improvements; omit section if none)\n\n\
              ## Verdict\n\
@@ -8131,7 +8165,15 @@ impl SlashCommand for RevertCommand {
         // Truncate the session transcript at the target turn.
         let project_root = claurst_core::git_utils::get_repo_root(&ctx.working_dir)
             .unwrap_or_else(|| ctx.working_dir.clone());
-        let path = claurst_core::session_storage::transcript_path(&project_root, &ctx.session_id);
+        let path =
+            match claurst_core::session_storage::transcript_path(&project_root, &ctx.session_id) {
+                Ok(path) => path,
+                Err(e) => {
+                    return CommandResult::Error(format!(
+                        "Invalid session id for transcript lookup: {e}"
+                    ))
+                }
+            };
         if path.exists() {
             if let Err(e) = claurst_core::session_storage::truncate_after(&path, &target_uuid).await
             {
@@ -10363,6 +10405,8 @@ pub(crate) mod test_env {
 
     pub(crate) struct CommandEnvGuard {
         old_home: Option<String>,
+        old_test_home: Option<String>,
+        old_userprofile: Option<String>,
         old_coven_home: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
@@ -10376,6 +10420,8 @@ pub(crate) mod test_env {
             let lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
             let guard = Self {
                 old_home: std::env::var("HOME").ok(),
+                old_test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
+                old_userprofile: std::env::var("USERPROFILE").ok(),
                 old_coven_home: std::env::var("COVEN_HOME").ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
@@ -10384,6 +10430,8 @@ pub(crate) mod test_env {
                 _lock: lock,
             };
             std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_CODE_TEST_HOME", home);
+            std::env::set_var("USERPROFILE", home);
             std::env::set_var("COVEN_HOME", coven_home);
             match user {
                 Some(value) => std::env::set_var("USER", value),
@@ -10414,6 +10462,14 @@ pub(crate) mod test_env {
             match &self.old_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
             }
             match &self.old_coven_home {
                 Some(value) => std::env::set_var("COVEN_HOME", value),
@@ -10472,6 +10528,30 @@ mod tests {
                 cmd.name()
             );
         }
+    }
+
+    #[test]
+    fn structured_review_output_parses_memory_refs() {
+        let review = parse_structured_review_output(
+            r#"{"findings":[{"title":"Auth check","memory_refs":["mem_auth"],"memory_dependent":true}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(review.findings[0].memory_refs, vec!["mem_auth"]);
+        assert!(validate_structured_review_memory_refs(&review).is_empty());
+    }
+
+    #[test]
+    fn structured_review_output_warns_when_memory_refs_missing() {
+        let review = parse_structured_review_output(
+            r#"{"findings":[{"title":"Auth check","memory_dependent":true}]}"#,
+        )
+        .unwrap();
+
+        let warnings = validate_structured_review_memory_refs(&review);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Auth check"));
+        assert!(warnings[0].contains("memory_refs"));
     }
 
     #[tokio::test]

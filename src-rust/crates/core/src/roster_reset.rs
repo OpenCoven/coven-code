@@ -139,17 +139,25 @@ mod tests {
 
     struct HomeGuard {
         old_home: Option<String>,
+        old_test_home: Option<String>,
+        old_userprofile: Option<String>,
         old_coven_home: Option<String>,
     }
 
     impl HomeGuard {
         fn set(home: &Path, coven_home: &Path) -> Self {
             let old_home = std::env::var("HOME").ok();
+            let old_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            let old_userprofile = std::env::var("USERPROFILE").ok();
             let old_coven_home = std::env::var("COVEN_HOME").ok();
             std::env::set_var("HOME", home);
+            std::env::set_var("COVEN_CODE_TEST_HOME", home);
+            std::env::set_var("USERPROFILE", home);
             std::env::set_var("COVEN_HOME", coven_home);
             Self {
                 old_home,
+                old_test_home,
+                old_userprofile,
                 old_coven_home,
             }
         }
@@ -160,6 +168,14 @@ mod tests {
             match &self.old_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
             }
             match &self.old_coven_home {
                 Some(value) => std::env::set_var("COVEN_HOME", value),
@@ -204,12 +220,12 @@ mod tests {
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
         let project = temp.path().join("project");
-        let global_agents = home.join(".coven-code").join("agents");
         let project_agents = project.join(".coven-code").join("agents");
-        std::fs::create_dir_all(&global_agents).expect("global agents dir");
         std::fs::create_dir_all(&project_agents).expect("project agents dir");
         std::fs::create_dir_all(&coven_home).expect("coven home");
         let _guard = HomeGuard::set(&home, &coven_home);
+        let global_agents = Settings::config_dir().join("agents");
+        std::fs::create_dir_all(&global_agents).expect("global agents dir");
 
         std::fs::write(global_agents.join("global.md"), "global").expect("global agent");
         std::fs::write(global_agents.join("README.txt"), "keep").expect("global keep");

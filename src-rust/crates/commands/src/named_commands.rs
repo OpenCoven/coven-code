@@ -1012,12 +1012,12 @@ mod tests {
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
         let project = temp.path().join("project");
-        let global_agents = home.join(".coven-code").join("agents");
         let project_agents = project.join(".coven-code").join("agents");
-        std::fs::create_dir_all(&global_agents).expect("global agents dir");
         std::fs::create_dir_all(&project_agents).expect("project agents dir");
         std::fs::create_dir_all(&coven_home).expect("coven home");
         let _guard = CommandEnvGuard::set(&home, &coven_home, None);
+        let global_agents = claurst_core::Settings::config_dir().join("agents");
+        std::fs::create_dir_all(&global_agents).expect("global agents dir");
 
         let global_agent = global_agents.join("global.md");
         let project_agent = project_agents.join("project.md");

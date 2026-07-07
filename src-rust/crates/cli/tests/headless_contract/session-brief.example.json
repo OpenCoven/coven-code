@@ -1,5 +1,5 @@
 {
-  "contract_version": "1",
+  "contract_version": "2",
   "trigger": "issue_assigned",
   "repo": {
     "owner": "OpenCoven",

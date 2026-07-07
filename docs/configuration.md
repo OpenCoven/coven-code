@@ -129,8 +129,62 @@ Or in `settings.json`:
 When hosted review mode is active, Coven Code skips user-scope memory
 (`~/.coven-code/AGENTS.md` and `~/.coven-code/CLAUDE.md`) by default, marks
 new session artifacts as hosted review artifacts, and requires a tenant plus
-canonical repository identity before resolving hosted durable memory paths.
-Local-personal mode remains the default and continues to load user memory.
+GitHub App installation id, stable repository id, and canonical repository
+identity before resolving hosted durable memory paths. Hosted memory and
+transcripts are also split by memory domain, such as default branch, named
+branch, pull request, release, or security-private review. Local-personal mode
+remains the default and continues to load user memory.
+
+Hosted review also disables write/execute-capable tools, configured MCP
+servers, and plugins by default. A trusted hosted policy can opt individual
+shared surfaces back in:
+
+```json
+{
+  "config": {
+    "hostedReview": {
+      "enabled": true,
+      "allowManagedRules": true,
+      "allowWriteTools": true,
+      "allowMcpServers": true,
+      "allowPlugins": true
+    }
+  }
+}
+```
+
+`allowUserMemory` also exists for explicitly trusted deployments, but hosted
+review jobs should prefer tenant-approved managed rules over operator-global
+user memory.
+
+Auto-extracted memories are approval-gated in hosted review mode. By default,
+hosted sessions write reviewable JSON candidates under
+`.coven-code/memory-candidates/` instead of appending directly to durable
+`.coven-code/AGENTS.md` memory. Each candidate records content, category,
+confidence, provenance, source trust, proposed scope, proposed visibility,
+status, and any rejection reason.
+
+Trusted deployments can opt into direct durable writes only when the source
+trust meets the configured threshold:
+
+```json
+{
+  "config": {
+    "hostedReview": {
+      "enabled": true,
+      "allowAutoMemoryPersistence": true,
+      "memorySourceTrust": "maintainer-approved",
+      "memoryTrustThreshold": "maintainer-approved"
+    }
+  }
+}
+```
+
+Supported `memorySourceTrust` and `memoryTrustThreshold` values are
+`system-policy`, `maintainer-approved`, `default-branch-code`,
+`contributor-input`, `fork-input`, `model-inferred`, and `unknown`.
+Untrusted fork or contributor contexts should leave durable persistence
+disabled and promote only reviewed candidates.
 
 ### Tool access
 
@@ -296,7 +350,12 @@ AGENTS.md files may begin with optional YAML frontmatter to control loading:
 ---
 memory_type: project
 priority: 10
-scope: project
+scope: repo
+trust: maintainer_approved
+visibility: public_review
+source: github_pr
+source_ref: OpenCoven/coven-code#123
+expires_at: 2099-12-31
 ---
 
 # My Project Notes
@@ -308,9 +367,37 @@ Frontmatter fields:
 
 | Field | Description |
 |-------|-------------|
-| `memory_type` | Informal label (currently informational only). |
+| `id` | Stable memory id used for hosted review citation, for example `mem_auth_policy`. If omitted, Coven Code derives a stable id from path and content. |
+| `memory_type` | Memory category label such as `project`, `user`, `reference`, or `feedback`. |
 | `priority` | Integer sort priority (lower numbers are prepended first within the same scope). |
-| `scope` | Informational label for documentation purposes. |
+| `scope` | Intended scope, such as `user`, `tenant`, `installation`, `repo`, `branch`, or `pr`. |
+| `trust` | Source trust. Hosted review enforces this against `hostedReview.memoryTrustThreshold`. Supported values include `system_policy`, `maintainer_approved`, `default_branch_code`, `model_inferred`, `contributor_input`, `fork_input`, and `unknown`. |
+| `visibility` | Intended review visibility: `public_review`, `private_review`, or `security_private`. Hosted public reviews exclude `security_private` memory by default. |
+| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session_memory_extraction`. |
+| `source_ref` | Source reference such as `owner/repo#123`, a commit SHA, or another non-secret audit handle. |
+| `expires_at` | Optional expiry date in `YYYY-MM-DD` format. Expired hosted memory is ignored. |
+| `retention_class` | Optional lifecycle class such as `standard`, `short_lived`, `security`, or `legal_hold`. |
+| `redacted_at` | Marks content as redacted. Hosted review keeps the metadata visible but replaces the body with a redaction stub. |
+| `deleted_at` | Marks memory as deleted. Hosted review excludes deleted entries from prompt loading. |
+| `created_at`, `created_by`, `session_id`, `transcript_ref`, `confidence` | Optional provenance fields for audit and review artifacts. |
+
+Local mode tolerates missing metadata for backward compatibility. Hosted review
+mode treats missing trust as `unknown`, ignores expired memory, and excludes
+memory below the configured trust threshold. Tagged hosted memory is injected
+with memory ids and provenance metadata; findings that rely on memory should
+include those ids in `memory_refs`.
+
+Hosted sync and persistence boundaries run high-confidence secret scanning
+before writing or uploading memory. Entries with detected secret patterns are
+blocked by default. Logs and review candidates include only pattern labels and
+reason codes, not matched secret values. False positives should be handled by
+redacting or editing the memory entry before retrying sync.
+
+Hosted team-memory pull is conflict-aware. Local changes are preserved when
+both local and remote content changed since the last known server checksum; a
+conflict record is written for operator review instead of overwriting local
+memory. Hosted team-memory sync also sends tenant, installation, repo, and
+domain scope metadata so the server can authorize the full tuple.
 
 ### @include directives
 

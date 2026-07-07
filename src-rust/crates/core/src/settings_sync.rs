@@ -13,6 +13,8 @@
 // The sync API stores a flat key→value map where keys are canonical file paths
 // and values are the UTF-8 file contents (JSON or Markdown).
 
+use crate::hosted_review::{hosted_project_id, HostedReviewScope};
+use crate::team_memory_sync::scan_for_secrets;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,6 +50,18 @@ pub fn sync_key_project_settings(project_id: &str) -> String {
 /// Canonical sync key for per-project memory (keyed by git-remote hash).
 pub fn sync_key_project_memory(project_id: &str) -> String {
     format!("projects/{project_id}/AGENTS.local.md")
+}
+
+/// Canonical hosted project settings key. The project id is derived from
+/// tenant, installation, and repo id rather than accepted from a caller.
+pub fn sync_key_hosted_project_settings(scope: &HostedReviewScope) -> String {
+    sync_key_project_settings(&hosted_project_id(scope))
+}
+
+/// Canonical hosted project memory key. The project id is derived from
+/// tenant, installation, and repo id rather than accepted from a caller.
+pub fn sync_key_hosted_project_memory(scope: &HostedReviewScope) -> String {
+    sync_key_project_memory(&hosted_project_id(scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +289,8 @@ impl SettingsSyncManager {
     ///
     /// Compares with existing remote entries and only uploads changed keys.
     pub async fn upload(&self, local_entries: HashMap<String, String>) -> Result<()> {
+        let local_entries = filter_entries_with_secrets(local_entries, "Settings sync");
+
         // Fetch current remote state for diff
         let remote_entries = match self.download().await? {
             Some(data) => data.memory_files,
@@ -339,6 +355,31 @@ impl SettingsSyncManager {
     }
 }
 
+fn filter_entries_with_secrets(
+    entries: HashMap<String, String>,
+    context: &str,
+) -> HashMap<String, String> {
+    entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let secrets = scan_for_secrets(&value);
+            if secrets.is_empty() {
+                return Some((key, value));
+            }
+
+            let labels: Vec<&str> = secrets.iter().map(|m| m.label.as_str()).collect();
+            warn!(
+                "{}: blocking {:?} from upload: detected {} ({} secret pattern(s))",
+                context,
+                key,
+                labels.join(", "),
+                labels.len(),
+            );
+            None
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Apply result
 // ---------------------------------------------------------------------------
@@ -395,16 +436,29 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
     // Project-specific files
     if let Some(pid) = project_id {
         let cwd = std::env::current_dir().unwrap_or_default();
+        entries.extend(collect_project_entries(pid, cwd).await);
+    }
 
-        let local_settings = cwd.join(".coven-code").join("settings.local.json");
-        if let Some(content) = try_read_for_sync(&local_settings).await {
-            entries.insert(sync_key_project_settings(pid), content);
-        }
+    entries
+}
 
-        let local_memory = cwd.join("AGENTS.local.md");
-        if let Some(content) = try_read_for_sync(&local_memory).await {
-            entries.insert(sync_key_project_memory(pid), content);
-        }
+pub async fn collect_hosted_entries(scope: &HostedReviewScope) -> HashMap<String, String> {
+    let project_id = hosted_project_id(scope);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    collect_project_entries(&project_id, cwd).await
+}
+
+async fn collect_project_entries(project_id: &str, cwd: PathBuf) -> HashMap<String, String> {
+    let mut entries = HashMap::new();
+
+    let local_settings = cwd.join(".coven-code").join("settings.local.json");
+    if let Some(content) = try_read_for_sync(&local_settings).await {
+        entries.insert(sync_key_project_settings(project_id), content);
+    }
+
+    let local_memory = cwd.join("AGENTS.local.md");
+    if let Some(content) = try_read_for_sync(&local_memory).await {
+        entries.insert(sync_key_project_memory(project_id), content);
     }
 
     entries
@@ -473,6 +527,25 @@ mod tests {
     }
 
     #[test]
+    fn hosted_sync_keys_derive_project_id_from_scope() {
+        let scope = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+
+        assert_eq!(
+            sync_key_hosted_project_settings(&scope),
+            "projects/hosted-tenant-tenant-a-installation-install-1-repo-repo-99/.coven-code/settings.local.json"
+        );
+        assert_eq!(
+            sync_key_hosted_project_memory(&scope),
+            "projects/hosted-tenant-tenant-a-installation-install-1-repo-repo-99/AGENTS.local.md"
+        );
+    }
+
+    #[test]
     fn test_entries_to_synced_data_settings_parsed() {
         let mut entries = HashMap::new();
         entries.insert(
@@ -504,6 +577,47 @@ mod tests {
         let data = entries_to_synced_data(HashMap::new());
         assert!(data.settings.is_none());
         assert!(data.memory_files.is_empty());
+    }
+
+    #[test]
+    fn filter_entries_with_secrets_blocks_secret_values() {
+        let mut entries = HashMap::new();
+        let secret = format!("ghp_{}", "A".repeat(36));
+        entries.insert(SYNC_KEY_USER_MEMORY.to_string(), format!("token={secret}"));
+        entries.insert("safe.md".to_string(), "# Safe".to_string());
+
+        let filtered = filter_entries_with_secrets(entries, "test");
+
+        assert!(filtered.contains_key("safe.md"));
+        assert!(!filtered.contains_key(SYNC_KEY_USER_MEMORY));
+        assert!(!filtered.values().any(|value| value.contains(&secret)));
+    }
+
+    #[tokio::test]
+    async fn hosted_project_collection_excludes_global_user_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_dir = tmp.path().join(".coven-code");
+        tokio::fs::create_dir_all(&settings_dir).await.unwrap();
+        tokio::fs::write(settings_dir.join("settings.local.json"), r#"{"model":"x"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("AGENTS.local.md"), "# Project memory")
+            .await
+            .unwrap();
+        let scope = HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-99".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let project_id = hosted_project_id(&scope);
+
+        let entries = collect_project_entries(&project_id, tmp.path().to_path_buf()).await;
+
+        assert!(entries.contains_key(&sync_key_hosted_project_settings(&scope)));
+        assert!(entries.contains_key(&sync_key_hosted_project_memory(&scope)));
+        assert!(!entries.contains_key(SYNC_KEY_USER_SETTINGS));
+        assert!(!entries.contains_key(SYNC_KEY_USER_MEMORY));
     }
 
     #[test]

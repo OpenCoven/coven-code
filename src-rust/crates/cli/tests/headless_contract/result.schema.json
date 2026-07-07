@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/OpenCoven/coven-github/docs/contracts/result.schema.json",
   "title": "coven-code headless result envelope",
-  "description": "Terminal task state coven-code --headless writes to --output. Contract version 1.",
+  "description": "Terminal task state coven-code --headless writes to --output. Contract version 2.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "commits", "files_changed", "summary", "pr_body"],
+  "required": ["contract_version", "status", "commits", "files_changed", "summary", "pr_body", "review"],
   "properties": {
     "contract_version": {
       "type": "string",
-      "const": "1"
+      "const": "2"
     },
     "status": {
       "type": "string",
@@ -36,6 +36,92 @@
     },
     "summary": { "type": "string" },
     "pr_body": { "type": "string" },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "evidence_status",
+        "reviewed_files",
+        "supporting_files",
+        "findings",
+        "tests_run",
+        "no_findings_reason",
+        "limitations"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["none", "pull_request", "review_comment"]
+        },
+        "evidence_status": {
+          "type": "string",
+          "enum": ["not_applicable", "complete", "partial", "missing"]
+        },
+        "reviewed_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "supporting_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["severity", "file", "line", "title", "body", "recommendation"],
+            "properties": {
+              "severity": {
+                "type": "string",
+                "enum": ["info", "low", "medium", "high", "critical"]
+              },
+              "file": { "type": "string" },
+              "line": { "type": ["integer", "null"], "minimum": 1 },
+              "title": { "type": "string" },
+              "body": { "type": "string" },
+              "recommendation": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "tests_run": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "status", "output_summary"],
+            "properties": {
+              "command": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["passed", "failed", "not_run", "unknown"]
+              },
+              "output_summary": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "no_findings_reason": { "type": ["string", "null"] },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "enum": ["pull_request", "review_comment"] } },
+            "required": ["mode"]
+          },
+          "then": {
+            "anyOf": [
+              { "properties": { "reviewed_files": { "minItems": 1 } }, "required": ["reviewed_files"] },
+              { "properties": { "evidence_status": { "const": "missing" } }, "required": ["evidence_status"] }
+            ]
+          }
+        }
+      ]
+    },
     "exit_reason": {
       "type": ["string", "null"],
       "enum": ["test_failure", "ambiguous_spec", "git_conflict", "infra_error", null]

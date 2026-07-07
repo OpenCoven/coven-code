@@ -1,6 +1,8 @@
 //! Git utilities for Coven Code.
 //! Mirrors src/utils/git.ts (926 lines) and src/utils/git/ subdirectory.
 
+use crate::hosted_review::CanonicalRepoIdentity;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -47,6 +49,28 @@ pub fn get_current_branch(repo_root: &Path) -> String {
     } else {
         branch
     }
+}
+
+pub fn get_origin_remote_url(repo_root: &Path) -> Option<String> {
+    let remote = git_output(repo_root, &["remote", "get-url", "origin"]);
+    (!remote.is_empty()).then_some(remote)
+}
+
+pub fn canonical_repo_identity_from_origin(repo_root: &Path) -> Option<CanonicalRepoIdentity> {
+    let remote = get_origin_remote_url(repo_root)?;
+    CanonicalRepoIdentity::from_git_remote_url(&remote)
+}
+
+pub fn local_project_id_from_identity(identity: &CanonicalRepoIdentity) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(identity.canonical_string().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("local-git-{}", &digest[..16])
+}
+
+pub fn local_project_id_from_origin(repo_root: &Path) -> Option<String> {
+    canonical_repo_identity_from_origin(repo_root)
+        .map(|identity| local_project_id_from_identity(&identity))
 }
 
 /// Return list of files modified (staged or unstaged).
@@ -215,5 +239,21 @@ mod tests {
         // smoke test — just ensure it doesn't panic with empty output
         let commits = get_commit_history(Path::new("."), 0);
         assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn local_project_id_normalizes_equivalent_https_and_ssh_remotes() {
+        let https = CanonicalRepoIdentity::from_git_remote_url(
+            "https://github.com/OpenCoven/coven-code.git",
+        )
+        .unwrap();
+        let ssh =
+            CanonicalRepoIdentity::from_git_remote_url("git@github.com:OpenCoven/coven-code.git")
+                .unwrap();
+
+        assert_eq!(
+            local_project_id_from_identity(&https),
+            local_project_id_from_identity(&ssh)
+        );
     }
 }

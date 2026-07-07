@@ -1291,6 +1291,20 @@ pub mod config {
             self.hosted_review.enabled || crate::hosted_review::env_enables_hosted_review()
         }
 
+        pub fn memory_load_options(&self) -> crate::claudemd::MemoryLoadOptions {
+            if !self.hosted_review_enabled() {
+                return crate::claudemd::MemoryLoadOptions::local();
+            }
+
+            crate::claudemd::MemoryLoadOptions {
+                mode: crate::hosted_review::RuntimeMode::HostedReview,
+                allow_user_memory: self.hosted_review.allow_user_memory,
+                allow_managed_rules: self.hosted_review.allow_managed_rules,
+                min_trust: self.hosted_review.memory_trust_threshold(),
+                allow_security_private: false,
+            }
+        }
+
         /// Resolve the effective model, falling back to a provider-appropriate default.
         ///
         /// When a non-Anthropic provider is active and no model is explicitly set,
@@ -1459,6 +1473,13 @@ pub mod config {
     impl Settings {
         /// The per-user configuration directory (`~/.coven-code`).
         pub fn config_dir() -> PathBuf {
+            #[cfg(test)]
+            if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+                if !home.is_empty() {
+                    return PathBuf::from(home).join(".coven-code");
+                }
+            }
+
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".coven-code")
@@ -2063,6 +2084,23 @@ pub mod config {
         }
 
         #[test]
+        fn hosted_review_trusted_policy_controls_memory_options() {
+            let settings: Settings = serde_json::from_str(
+                r#"{"config":{"hostedReview":{"enabled":true,"allowManagedRules":true}}}"#,
+            )
+            .unwrap();
+
+            let options = settings.effective_config().memory_load_options();
+
+            assert_eq!(
+                options.mode,
+                crate::hosted_review::RuntimeMode::HostedReview
+            );
+            assert!(!options.allow_user_memory);
+            assert!(options.allow_managed_rules);
+        }
+
+        #[test]
         fn hosted_review_env_enables_config() {
             let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
                 .lock()
@@ -2287,12 +2325,24 @@ pub mod context {
                         .join(".coven-code")
                         .join(crate::constants::CLAUDE_MD_FILENAME);
                     if global_claude_md.exists() {
-                        if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
+                        if let Some(file) = crate::claudemd::load_memory_file(
+                            &global_claude_md,
+                            crate::claudemd::MemoryScope::User,
+                        )
+                        .filter(|file| {
+                            crate::claudemd::memory_file_allowed_for_options(
+                                file,
+                                &self.memory_load_options,
+                            )
+                        }) {
                             loaded_scopes.push("user");
                             claude_mds.push(format!(
                                 "# Memory (from {})\n{}",
                                 global_claude_md.display(),
-                                content
+                                crate::claudemd::format_memory_file_for_prompt(
+                                    &file,
+                                    &self.memory_load_options,
+                                )
                             ));
                         }
                     }
@@ -2305,12 +2355,24 @@ pub mod context {
             while let Some(d) = dir {
                 let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
                 if candidate.exists() {
-                    if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
+                    if let Some(file) = crate::claudemd::load_memory_file(
+                        &candidate,
+                        crate::claudemd::MemoryScope::Project,
+                    )
+                    .filter(|file| {
+                        crate::claudemd::memory_file_allowed_for_options(
+                            file,
+                            &self.memory_load_options,
+                        )
+                    }) {
                         loaded_scopes.push("project");
                         project_mds.push(format!(
                             "# Project Memory (from {})\n{}",
                             candidate.display(),
-                            content
+                            crate::claudemd::format_memory_file_for_prompt(
+                                &file,
+                                &self.memory_load_options,
+                            )
                         ));
                     }
                 }
@@ -2349,9 +2411,13 @@ pub mod context {
         use super::*;
 
         #[test]
-        fn hosted_review_context_skips_global_user_memory() {
+        fn hosted_review_context_skips_user_and_pr_controlled_project_memory() {
             let project = tempfile::tempdir().unwrap();
-            std::fs::write(project.path().join("AGENTS.md"), "project instructions").unwrap();
+            std::fs::write(
+                project.path().join("AGENTS.md"),
+                "---\ntrust: maintainer_approved\nvisibility: public_review\n---\nproject instructions",
+            )
+            .unwrap();
 
             let home = tempfile::tempdir().unwrap();
             let coven_code = home.path().join(".coven-code");
@@ -2381,8 +2447,8 @@ pub mod context {
             }
 
             assert!(context.contains("Mode: hosted-review"));
-            assert!(context.contains("Loaded AGENTS.md scopes: project"));
-            assert!(context.contains("project instructions"));
+            assert!(context.contains("Loaded AGENTS.md scopes: none"));
+            assert!(!context.contains("project instructions"));
             assert!(!context.contains("private user instructions"));
         }
     }
@@ -4940,6 +5006,8 @@ mod tests {
     fn test_imported_anthropic_cli_token_resolves_without_coven_oauth_client() {
         struct EnvRestore {
             home: Option<String>,
+            test_home: Option<String>,
+            userprofile: Option<String>,
             api_key: Option<String>,
             client_id: Option<String>,
         }
@@ -4949,6 +5017,14 @@ mod tests {
                 match self.home.take() {
                     Some(value) => std::env::set_var("HOME", value),
                     None => std::env::remove_var("HOME"),
+                }
+                match self.test_home.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                    None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+                }
+                match self.userprofile.take() {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
                 }
                 match self.api_key.take() {
                     Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
@@ -4974,10 +5050,14 @@ mod tests {
         let temp_home = tempfile::tempdir().expect("temp home");
         let _restore = EnvRestore {
             home: std::env::var("HOME").ok(),
+            test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
+            userprofile: std::env::var("USERPROFILE").ok(),
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             client_id: std::env::var(crate::oauth::CLIENT_ID_ENV).ok(),
         };
         std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("COVEN_CODE_TEST_HOME", temp_home.path());
+        std::env::set_var("USERPROFILE", temp_home.path());
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var(crate::oauth::CLIENT_ID_ENV);
 

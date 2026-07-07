@@ -1,5 +1,5 @@
 {
-  "contract_version": "1",
+  "contract_version": "2",
   "status": "success",
   "branch": "cody/fix-issue-42",
   "commits": [
@@ -7,6 +7,22 @@
   ],
   "files_changed": ["src/auth/refresh.rs"],
   "summary": "Fixed OAuth token refresh by adding a 60-second clock skew buffer.",
-  "pr_body": "## Hey, I'm Cody 🦄\n\nIssue #42 traced to the OAuth refresh path not accounting for clock skew. I added a 60-second buffer to the expiry check.\n\n**Changed:** `src/auth/refresh.rs` (+12 / -3)\n**Tests:** 8/8 passing (added 2 regression cases)\n",
+  "pr_body": "## Hey, I'm Cody\n\nIssue #42 traced to the OAuth refresh path not accounting for clock skew. I added a 60-second buffer to the expiry check.\n\n**Changed:** `src/auth/refresh.rs` (+12 / -3)\n**Tests:** 8/8 passing (added 2 regression cases)\n",
+  "review": {
+    "mode": "none",
+    "evidence_status": "not_applicable",
+    "reviewed_files": [],
+    "supporting_files": [],
+    "findings": [],
+    "tests_run": [
+      {
+        "command": "cargo test -p auth refresh",
+        "status": "passed",
+        "output_summary": "8/8 passing"
+      }
+    ],
+    "no_findings_reason": null,
+    "limitations": []
+  },
   "exit_reason": null
 }

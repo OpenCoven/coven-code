@@ -531,8 +531,31 @@ Hosted review mode is enabled with `--hosted-review`,
 Coven Code does not load user-scope memory by default. The prompt records that
 hosted review mode is active and lists the AGENTS.md scopes that were loaded.
 Durable hosted memory and transcript namespaces are separated under a hosted
-review path and require tenant scope plus a canonical repository identity before
-they can be resolved for persistence.
+review path and require tenant scope, GitHub App installation id, stable repo
+id, and canonical repository identity before they can be resolved for
+persistence. Hosted namespaces include a domain component so default branch,
+branch, pull-request, release, and security-private memory stay separated.
+
+Hosted review mode also disables write/execute-capable tools, configured MCP
+servers, plugins, user memory, and managed rules by default. Trusted hosted
+policy settings such as `hostedReview.allowManagedRules`,
+`hostedReview.allowWriteTools`, `hostedReview.allowMcpServers`, and
+`hostedReview.allowPlugins` can opt specific surfaces back in for controlled
+deployments. Prefer tenant-approved managed rules over `allowUserMemory`.
+
+Session memory extraction is also approval-gated in hosted review mode.
+Untrusted fork or contributor sessions cannot automatically append learned
+facts to durable `.coven-code/AGENTS.md` memory. Instead, extracted memories
+are written as JSON candidates under `.coven-code/memory-candidates/` with
+content, semantic category, confidence, provenance, source trust, proposed
+scope, proposed visibility, status, and rejection reason metadata. Approved
+candidates can be promoted into durable memory as maintainer-approved entries;
+rejected candidates remain artifacts and are not loaded into future prompts.
+
+Direct hosted auto-persistence requires an explicit trusted policy:
+`hostedReview.allowAutoMemoryPersistence` must be true and
+`hostedReview.memorySourceTrust` must meet or exceed
+`hostedReview.memoryTrustThreshold`.
 
 ---
 

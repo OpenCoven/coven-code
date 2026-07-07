@@ -30,7 +30,7 @@ pub struct ImportPaths {
 
 impl ImportPaths {
     pub fn detect() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = import_home_dir();
         let claude_dir = home.join(".claude");
         let claurst_dir = Settings::config_dir();
         Self {
@@ -40,6 +40,17 @@ impl ImportPaths {
             target_settings_json: claurst_dir.join("settings.json"),
         }
     }
+}
+
+fn import_home_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[derive(Debug, Clone)]
@@ -654,7 +665,11 @@ mod tests {
         .unwrap();
 
         let old_home = std::env::var("HOME").ok();
+        let old_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        let old_userprofile = std::env::var("USERPROFILE").ok();
         std::env::set_var("HOME", home);
+        std::env::set_var("COVEN_CODE_TEST_HOME", home);
+        std::env::set_var("USERPROFILE", home);
 
         let preview = build_import_preview(ImportSelection::Both).unwrap();
         assert!(preview.claude_md.is_some());
@@ -681,6 +696,16 @@ mod tests {
             std::env::set_var("HOME", old);
         } else {
             std::env::remove_var("HOME");
+        }
+        if let Some(old) = old_test_home {
+            std::env::set_var("COVEN_CODE_TEST_HOME", old);
+        } else {
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+        }
+        if let Some(old) = old_userprofile {
+            std::env::set_var("USERPROFILE", old);
+        } else {
+            std::env::remove_var("USERPROFILE");
         }
     }
 

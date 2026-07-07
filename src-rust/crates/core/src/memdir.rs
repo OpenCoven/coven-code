@@ -377,7 +377,7 @@ pub fn auto_memory_path_for_mode(
         RuntimeMode::HostedReview => {
             let scope = scope.ok_or_else(|| {
                 crate::ClaudeError::Config(
-                    "hosted review memory persistence requires tenant scope and canonical repo identity"
+                    "hosted review memory persistence requires tenant scope, installation scope, and canonical repo identity"
                         .to_string(),
                 )
             })?;
@@ -400,10 +400,34 @@ fn hosted_memory_path(scope: &HostedReviewScope) -> PathBuf {
     crate::config::Settings::config_dir()
         .join("hosted-review")
         .join("tenants")
-        .join(sanitize_path_component(&scope.tenant_id))
+        .join(scope.tenant_component())
+        .join("installations")
+        .join(scope.installation_component())
         .join("repos")
-        .join(sanitize_path_component(&scope.canonical_repo_identity))
+        .join(scope.repo_component())
+        .join("domains")
+        .join(scope.domain_component())
         .join("memory")
+}
+
+pub fn hosted_memory_path_for_scope(scope: &HostedReviewScope) -> PathBuf {
+    hosted_memory_path(scope)
+}
+
+pub fn delete_hosted_memory_for_scope(scope: &HostedReviewScope) -> std::io::Result<()> {
+    let path = hosted_memory_path(scope);
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+pub fn redact_memory_file(path: &Path, reason: &str) -> std::io::Result<()> {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let stub = format!(
+        "---\nredacted_at: {timestamp}\nretention_class: security\nsource: redaction\n---\n\n[REDACTED: {reason}]\n"
+    );
+    std::fs::write(path, stub)
 }
 
 /// Sanitize an arbitrary string into a directory-name-safe component.
@@ -956,7 +980,9 @@ mod tests {
         let project = PathBuf::from("/tmp/repo");
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
-            "github.com/OpenCoven/coven-code".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
         );
 
         let local = auto_memory_path(&project);
@@ -970,8 +996,99 @@ mod tests {
         assert_ne!(hosted, local);
         assert!(hosted.to_string_lossy().contains("hosted-review"));
         assert!(hosted.to_string_lossy().contains("tenant-a"));
-        assert!(hosted
-            .to_string_lossy()
-            .contains("github.com_OpenCoven_coven-code"));
+        assert!(hosted.to_string_lossy().contains("install-1"));
+        assert!(hosted.to_string_lossy().contains("repo-1"));
+        assert!(hosted.to_string_lossy().contains("default-branch"));
+    }
+
+    #[test]
+    fn hosted_memory_path_splits_installations_and_domains() {
+        let project = PathBuf::from("/tmp/repo");
+        let first_install = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let second_install = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-2".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let branch_domain = crate::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        )
+        .with_domain(crate::hosted_review::MemoryDomain::Branch(
+            "feature/review".to_string(),
+        ));
+
+        let first = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&first_install),
+        )
+        .unwrap();
+        let second = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&second_install),
+        )
+        .unwrap();
+        let branch = auto_memory_path_for_mode(
+            &project,
+            crate::hosted_review::RuntimeMode::HostedReview,
+            Some(&branch_domain),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, branch);
+        assert!(branch.to_string_lossy().contains("branch-feature~2Freview"));
+    }
+
+    #[test]
+    fn hosted_memory_delete_removes_scope_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
+        let scope = crate::hosted_review::HostedReviewScope::new(
+            "tenant-delete".to_string(),
+            "install-delete".to_string(),
+            "repo-delete".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let path = hosted_memory_path_for_scope(&scope);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("MEMORY.md"), "delete me").unwrap();
+
+        delete_hosted_memory_for_scope(&scope).unwrap();
+
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn redact_memory_file_preserves_audit_stub_without_original_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MEMORY.md");
+        std::fs::write(&path, "secret incident detail").unwrap();
+
+        redact_memory_file(&path, "operator request").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("redacted_at:"));
+        assert!(content.contains("[REDACTED: operator request]"));
+        assert!(!content.contains("secret incident detail"));
     }
 }
