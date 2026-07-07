@@ -21,10 +21,11 @@ tc_palette() {
   # viewport shows a handful of rows, so entries further down (e.g. /config)
   # scroll out of view as new commands are registered.
   assert_contains "$s" "/accounts" "palette lists /accounts"
+  assert_contains "$s" "/attach"   "palette lists /attach"
   assert_contains "$s" "/chrome"   "palette lists /chrome"
   assert_contains "$s" "/clear"    "palette lists /clear"
 
-  # Filtering narrows the list: "/config" should keep /config, drop /clear.
+  # Filtering narrows the list: "/config" should surface /config, drop /clear.
   tui_type "config"
   # Wait for the filter to take effect (a non-matching entry disappears).
   wait_absent "/clear" 5
