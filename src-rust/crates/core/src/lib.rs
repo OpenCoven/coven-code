@@ -50,6 +50,9 @@ pub mod claudemd;
 // Hosted review runtime isolation model.
 pub mod hosted_review;
 
+// Structured link/attachment stash (personal local store).
+pub mod stash;
+
 // OpenClaw installation/agent detection used by Coven integrations.
 pub mod openclaw_agent;
 

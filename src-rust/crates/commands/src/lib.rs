@@ -283,6 +283,8 @@ pub struct FamiliarCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
 pub struct ManagedAgentsCommand;
+pub struct LinkCommand;
+pub struct AttachCommand;
 pub struct CovenCommand;
 pub struct NamedCommandAdapter {
     pub slash_name: &'static str,
@@ -10193,6 +10195,388 @@ impl SlashCommand for CovenCommand {
     }
 }
 
+// ---- /link and /attach — structured link/attachment stash ------------------
+
+/// Split an argument string into positional tokens and `--flag value...` pairs.
+/// Flag values run until the next `--flag` token. `--tags` values are
+/// comma-separated.
+fn parse_stash_args(args: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut positional = Vec::new();
+    let mut flags = BTreeMap::new();
+    let mut current_flag: Option<String> = None;
+    let mut current_value: Vec<String> = Vec::new();
+
+    for token in args.split_whitespace() {
+        if let Some(name) = token.strip_prefix("--") {
+            if let Some(flag) = current_flag.take() {
+                flags.insert(flag, current_value.join(" "));
+                current_value.clear();
+            }
+            current_flag = Some(name.to_string());
+        } else if current_flag.is_some() {
+            current_value.push(token.to_string());
+        } else {
+            positional.push(token.to_string());
+        }
+    }
+    if let Some(flag) = current_flag {
+        flags.insert(flag, current_value.join(" "));
+    }
+    (positional, flags)
+}
+
+fn stash_tags_from_flags(flags: &BTreeMap<String, String>) -> Vec<String> {
+    flags
+        .get("tags")
+        .map(|raw| {
+            raw.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The project scope items are recorded under: the git repo root when inside
+/// a repository, otherwise the working directory.
+fn stash_project_scope(ctx: &CommandContext) -> String {
+    claurst_core::git_utils::get_repo_root(&ctx.working_dir)
+        .unwrap_or_else(|| ctx.working_dir.clone())
+        .display()
+        .to_string()
+}
+
+fn stash_hosted_refusal(ctx: &CommandContext) -> Option<CommandResult> {
+    if ctx.config.hosted_review_enabled() {
+        Some(CommandResult::Message(
+            "The link/attachment stash is a personal local store and is disabled in \
+             hosted review mode."
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+fn format_stash_items(items: &[claurst_core::stash::StashItem], heading: &str) -> String {
+    if items.is_empty() {
+        return format!("{}: none.", heading);
+    }
+    let mut lines = vec![format!("{} ({}):", heading, items.len())];
+    for item in items {
+        let date =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(item.created_at_ms as i64)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+        let mut line = format!("  {}  {}", item.short_id(), date);
+        if let Some(ref title) = item.title {
+            line.push_str(&format!("  {}", title));
+        }
+        line.push_str(&format!("  {}", item.value));
+        if !item.tags.is_empty() {
+            line.push_str(&format!("  [{}]", item.tags.join(", ")));
+        }
+        if let Some(ref note) = item.note {
+            line.push_str(&format!("\n      note: {}", note));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn open_stash_store() -> Result<claurst_core::stash::StashStore, String> {
+    claurst_core::stash::StashStore::open_default()
+        .map_err(|e| format!("Could not open stash: {}", e))
+}
+
+fn looks_like_url(token: &str) -> bool {
+    token.starts_with("http://") || token.starts_with("https://") || token.starts_with("www.")
+}
+
+#[async_trait]
+impl SlashCommand for LinkCommand {
+    fn name(&self) -> &str {
+        "link"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["links"]
+    }
+    fn description(&self) -> &str {
+        "Save and manage links in the structured stash"
+    }
+    fn help(&self) -> &str {
+        "Usage:\n\
+         /link <url> [--title ...] [--note ...] [--tags a,b]   — save a link\n\
+         /link add <url> [flags]                               — same as above\n\
+         /link list [--tag <tag>] [--project]                  — list saved links\n\
+         /link search <term>                                   — search links\n\
+         /link remove <id>                                     — delete a link\n\n\
+         Links are stored in ~/.coven-code/stash.sqlite with title, note,\n\
+         tags, project, and session metadata. Use the short id shown by\n\
+         /link list to remove entries.\n\n\
+         Examples:\n\
+         /link https://docs.rs/tokio --title Tokio docs --tags rust,async\n\
+         /link list --tag rust\n\
+         /link remove 1a2b3c4d"
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        if let Some(refusal) = stash_hosted_refusal(ctx) {
+            return refusal;
+        }
+        let (positional, flags) = parse_stash_args(args);
+        let sub = positional.first().map(String::as_str).unwrap_or("list");
+
+        match sub {
+            "list" => {
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let filter = claurst_core::stash::StashFilter {
+                    kind: Some(claurst_core::stash::StashKind::Link),
+                    tag: flags.get("tag").cloned(),
+                    project: flags
+                        .contains_key("project")
+                        .then(|| stash_project_scope(ctx)),
+                };
+                match store.list(&filter) {
+                    Ok(items) => CommandResult::Message(format_stash_items(&items, "Links")),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "search" => {
+                let term = positional[1..].join(" ");
+                if term.is_empty() {
+                    return CommandResult::Message("Usage: /link search <term>".to_string());
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.search(&term, Some(claurst_core::stash::StashKind::Link)) {
+                    Ok(items) => CommandResult::Message(format_stash_items(
+                        &items,
+                        &format!("Links matching '{}'", term),
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "remove" | "rm" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /link remove <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.remove(id) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Removed link {} ({}).",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            _ => {
+                // `/link add <url>` or bare `/link <url>`.
+                let url = if sub == "add" {
+                    positional.get(1).cloned()
+                } else if looks_like_url(sub) {
+                    Some(sub.to_string())
+                } else {
+                    None
+                };
+                let Some(url) = url else {
+                    return CommandResult::Message(self.help().to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let tags = stash_tags_from_flags(&flags);
+                let project = stash_project_scope(ctx);
+                match store.add_link(
+                    &url,
+                    flags.get("title").map(String::as_str),
+                    flags.get("note").map(String::as_str),
+                    &tags,
+                    Some(&project),
+                    Some(&ctx.session_id),
+                ) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Saved link {} — {}",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SlashCommand for AttachCommand {
+    fn name(&self) -> &str {
+        "attach"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["attachments"]
+    }
+    fn description(&self) -> &str {
+        "Save and manage file attachments in the structured stash"
+    }
+    fn help(&self) -> &str {
+        "Usage:\n\
+         /attach <path> [--title ...] [--note ...] [--tags a,b]  — save a file\n\
+         /attach add <path> [flags]                              — same as above\n\
+         /attach list [--tag <tag>] [--project]                  — list attachments\n\
+         /attach search <term>                                   — search attachments\n\
+         /attach show <id>                                       — show stored/original paths\n\
+         /attach remove <id>                                     — delete an attachment\n\n\
+         Files are copied into ~/.coven-code/attachments/<id>/ so the stored\n\
+         copy survives even if the original moves. Metadata lives in\n\
+         ~/.coven-code/stash.sqlite alongside saved links.\n\n\
+         Examples:\n\
+         /attach ./design/spec.pdf --title API spec --tags design\n\
+         /attach list --tag design\n\
+         /attach show 1a2b3c4d"
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        if let Some(refusal) = stash_hosted_refusal(ctx) {
+            return refusal;
+        }
+        let (positional, flags) = parse_stash_args(args);
+        let sub = positional.first().map(String::as_str).unwrap_or("list");
+
+        match sub {
+            "list" => {
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let filter = claurst_core::stash::StashFilter {
+                    kind: Some(claurst_core::stash::StashKind::Attachment),
+                    tag: flags.get("tag").cloned(),
+                    project: flags
+                        .contains_key("project")
+                        .then(|| stash_project_scope(ctx)),
+                };
+                match store.list(&filter) {
+                    Ok(items) => CommandResult::Message(format_stash_items(&items, "Attachments")),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "search" => {
+                let term = positional[1..].join(" ");
+                if term.is_empty() {
+                    return CommandResult::Message("Usage: /attach search <term>".to_string());
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.search(&term, Some(claurst_core::stash::StashKind::Attachment)) {
+                    Ok(items) => CommandResult::Message(format_stash_items(
+                        &items,
+                        &format!("Attachments matching '{}'", term),
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "show" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /attach show <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.get(id) {
+                    Ok(item) => {
+                        let mut out =
+                            format!("Attachment {}\n  stored:   {}", item.short_id(), item.value);
+                        if let Some(ref original) = item.original_path {
+                            out.push_str(&format!("\n  original: {}", original));
+                        }
+                        if let Some(ref title) = item.title {
+                            out.push_str(&format!("\n  title:    {}", title));
+                        }
+                        if !item.tags.is_empty() {
+                            out.push_str(&format!("\n  tags:     {}", item.tags.join(", ")));
+                        }
+                        if let Some(ref note) = item.note {
+                            out.push_str(&format!("\n  note:     {}", note));
+                        }
+                        CommandResult::Message(out)
+                    }
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "remove" | "rm" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /attach remove <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.remove(id) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Removed attachment {} and its stored copy.",
+                        item.short_id()
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            _ => {
+                let raw_path = if sub == "add" {
+                    positional.get(1).cloned()
+                } else {
+                    Some(sub.to_string())
+                };
+                let Some(raw_path) = raw_path else {
+                    return CommandResult::Message(self.help().to_string());
+                };
+                let mut path = PathBuf::from(&raw_path);
+                if let Ok(stripped) = path.strip_prefix("~") {
+                    if let Some(home) = dirs::home_dir() {
+                        path = home.join(stripped);
+                    }
+                }
+                if path.is_relative() {
+                    path = ctx.working_dir.join(path);
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let tags = stash_tags_from_flags(&flags);
+                let project = stash_project_scope(ctx);
+                match store.add_attachment(
+                    &path,
+                    &claurst_core::stash::StashStore::default_attachments_dir(),
+                    flags.get("title").map(String::as_str),
+                    flags.get("note").map(String::as_str),
+                    &tags,
+                    Some(&project),
+                    Some(&ctx.session_id),
+                ) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Saved attachment {} — stored at {}",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -10308,6 +10692,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ManagedAgentsCommand),
         // Durable long-running goals
         Box::new(GoalCommand),
+        // Structured link/attachment stash
+        Box::new(LinkCommand),
+        Box::new(AttachCommand),
         // Coven daemon control surface (sessions, harness runs, rituals)
         Box::new(CovenCommand),
     ]
@@ -10634,6 +11021,51 @@ mod tests {
     #[test]
     fn test_all_commands_non_empty() {
         assert!(!all_commands().is_empty());
+    }
+
+    #[test]
+    fn parse_stash_args_splits_positionals_and_flags() {
+        let (positional, flags) =
+            parse_stash_args("add https://example.com --title Example site --tags a,b --note x y");
+        assert_eq!(positional, vec!["add", "https://example.com"]);
+        assert_eq!(flags.get("title").map(String::as_str), Some("Example site"));
+        assert_eq!(flags.get("tags").map(String::as_str), Some("a,b"));
+        assert_eq!(flags.get("note").map(String::as_str), Some("x y"));
+    }
+
+    #[test]
+    fn parse_stash_args_handles_valueless_flags() {
+        let (positional, flags) = parse_stash_args("list --project");
+        assert_eq!(positional, vec!["list"]);
+        assert_eq!(flags.get("project").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn stash_tags_are_trimmed_and_non_empty() {
+        let (_, flags) = parse_stash_args("x --tags a, b ,,c");
+        assert_eq!(stash_tags_from_flags(&flags), vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn link_command_refuses_hosted_mode() {
+        let mut ctx = make_ctx();
+        ctx.config.hosted_review.enabled = true;
+        let result = LinkCommand.execute("list", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => assert!(msg.contains("hosted review")),
+            other => panic!("expected refusal message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_command_refuses_hosted_mode() {
+        let mut ctx = make_ctx();
+        ctx.config.hosted_review.enabled = true;
+        let result = AttachCommand.execute("list", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => assert!(msg.contains("hosted review")),
+            other => panic!("expected refusal message, got {:?}", other),
+        }
     }
 
     #[test]
