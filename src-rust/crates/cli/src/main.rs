@@ -896,6 +896,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Snapshot the memory audit BEFORE the run: the report must describe
+        // the memory that influenced the review, and the agent may modify
+        // AGENTS.md files (and commit) during the run.
+        let review_memory = cli
+            .output
+            .as_ref()
+            .map(|_| headless::collect_review_memory(&cwd, &config));
+
         let run = run_headless(
             &cli,
             github_context.as_ref(),
@@ -925,7 +933,7 @@ async fn main() -> anyhow::Result<()> {
                     r.outcome,
                     &r.final_text,
                     Some(&r.review_trace),
-                    headless::collect_review_memory(&cwd, &config),
+                    review_memory.clone().unwrap_or_default(),
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),

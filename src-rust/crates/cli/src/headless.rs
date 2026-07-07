@@ -589,16 +589,18 @@ pub struct ReviewMemoryEntry {
     pub scope: String,
 }
 
-/// Enumerate the memory entries and domains the current configuration loads
-/// for a review of `workspace_root`. Uses the same load options as the live
-/// context build, so the report matches what the model actually saw.
+/// Enumerate the memory entries and domains loaded for a review of
+/// `workspace_root`. Backed by the same
+/// [`claurst_core::claudemd::enumerate_context_memory_files`] enumeration the
+/// live context build formats into the prompt, so the report matches what the
+/// model actually saw. Snapshot this **before** the run starts — the agent can
+/// modify AGENTS.md files during a run.
 pub fn collect_review_memory(
     workspace_root: &Path,
     config: &claurst_core::config::Config,
 ) -> ReviewMemoryUse {
     let options = config.memory_load_options();
-    let files =
-        claurst_core::claudemd::load_all_memory_files_with_options(workspace_root, &options);
+    let files = claurst_core::claudemd::enumerate_context_memory_files(workspace_root, &options);
     let entries = files
         .iter()
         .map(|file| ReviewMemoryEntry {

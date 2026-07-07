@@ -2322,72 +2322,29 @@ pub mod context {
 
         /// Walk up from cwd looking for AGENTS.md files and the global one.
         async fn find_and_read_claude_md(&self) -> Option<String> {
+            // Single source of truth for which memory files enter the context;
+            // the headless `review.memory` audit report uses the same
+            // enumeration so it always matches what the model actually saw.
+            let files = crate::claudemd::enumerate_context_memory_files(
+                &self.cwd,
+                &self.memory_load_options,
+            );
+
             let mut claude_mds = vec![];
             let mut loaded_scopes: Vec<&str> = Vec::new();
-
-            // Global ~/.coven-code/AGENTS.md
-            if self.memory_load_options.allow_user_memory {
-                if let Some(home) = dirs::home_dir() {
-                    let global_claude_md = home
-                        .join(".coven-code")
-                        .join(crate::constants::CLAUDE_MD_FILENAME);
-                    if global_claude_md.exists() {
-                        if let Some(file) = crate::claudemd::load_memory_file(
-                            &global_claude_md,
-                            crate::claudemd::MemoryScope::User,
-                        )
-                        .filter(|file| {
-                            crate::claudemd::memory_file_allowed_for_options(
-                                file,
-                                &self.memory_load_options,
-                            )
-                        }) {
-                            loaded_scopes.push("user");
-                            claude_mds.push(format!(
-                                "# Memory (from {})\n{}",
-                                global_claude_md.display(),
-                                crate::claudemd::format_memory_file_for_prompt(
-                                    &file,
-                                    &self.memory_load_options,
-                                )
-                            ));
-                        }
-                    }
-                }
+            for file in &files {
+                let (scope_label, header) = match file.scope {
+                    crate::claudemd::MemoryScope::User => ("user", "# Memory"),
+                    _ => ("project", "# Project Memory"),
+                };
+                loaded_scopes.push(scope_label);
+                claude_mds.push(format!(
+                    "{} (from {})\n{}",
+                    header,
+                    file.path.display(),
+                    crate::claudemd::format_memory_file_for_prompt(file, &self.memory_load_options,)
+                ));
             }
-
-            // Walk from cwd up to filesystem root, collecting AGENTS.md
-            let mut dir = Some(self.cwd.as_path());
-            let mut project_mds: Vec<String> = vec![];
-            while let Some(d) = dir {
-                let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
-                if candidate.exists() {
-                    if let Some(file) = crate::claudemd::load_memory_file(
-                        &candidate,
-                        crate::claudemd::MemoryScope::Project,
-                    )
-                    .filter(|file| {
-                        crate::claudemd::memory_file_allowed_for_options(
-                            file,
-                            &self.memory_load_options,
-                        )
-                    }) {
-                        loaded_scopes.push("project");
-                        project_mds.push(format!(
-                            "# Project Memory (from {})\n{}",
-                            candidate.display(),
-                            crate::claudemd::format_memory_file_for_prompt(
-                                &file,
-                                &self.memory_load_options,
-                            )
-                        ));
-                    }
-                }
-                dir = d.parent();
-            }
-            // Reverse so outermost directory comes first
-            project_mds.reverse();
-            claude_mds.extend(project_mds);
 
             if self.memory_load_options.mode.is_hosted_review() {
                 loaded_scopes.sort_unstable();

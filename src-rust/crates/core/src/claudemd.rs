@@ -593,6 +593,56 @@ pub fn load_all_memory_files_with_options(
         .collect()
 }
 
+/// Enumerate the memory files the live context build injects into the model
+/// prompt: the user-global `AGENTS.md` (when allowed) followed by every
+/// `AGENTS.md` on the walk from the filesystem root down to `cwd` (outermost
+/// first), each gated through [`memory_file_allowed_for_options`].
+///
+/// This is the single source of truth shared by
+/// `ContextBuilder::find_and_read_claude_md` (which formats these files into
+/// the prompt) and the headless `review.memory` audit report — keeping the
+/// report exactly aligned with what the model actually saw.
+pub fn enumerate_context_memory_files(
+    cwd: &Path,
+    options: &MemoryLoadOptions,
+) -> Vec<MemoryFileInfo> {
+    let mut files: Vec<MemoryFileInfo> = Vec::new();
+
+    if options.allow_user_memory {
+        if let Some(home) = dirs::home_dir() {
+            let global = home
+                .join(".coven-code")
+                .join(crate::constants::CLAUDE_MD_FILENAME);
+            if global.exists() {
+                if let Some(file) = load_memory_file(&global, MemoryScope::User)
+                    .filter(|file| memory_file_allowed_for_options(file, options))
+                {
+                    files.push(file);
+                }
+            }
+        }
+    }
+
+    // Walk from cwd up to the filesystem root, then reverse so the outermost
+    // directory comes first — matching the prompt assembly order.
+    let mut project: Vec<MemoryFileInfo> = Vec::new();
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
+        if candidate.exists() {
+            if let Some(file) = load_memory_file(&candidate, MemoryScope::Project)
+                .filter(|file| memory_file_allowed_for_options(file, options))
+            {
+                project.push(file);
+            }
+        }
+        dir = d.parent();
+    }
+    project.reverse();
+    files.extend(project);
+    files
+}
+
 /// Concatenate all memory file contents into a single system-prompt fragment.
 pub fn build_memory_prompt(files: &[MemoryFileInfo]) -> String {
     let options = MemoryLoadOptions::local();
