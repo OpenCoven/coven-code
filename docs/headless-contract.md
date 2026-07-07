@@ -149,7 +149,18 @@ the file MAY be absent.
     "findings": [],
     "tests_run": [],
     "no_findings_reason": "Reviewed the supplied PR file and found no blocking issues.",
-    "limitations": []
+    "limitations": [],
+    "memory": {
+      "domains_loaded": ["default-branch"],
+      "entries": [
+        {
+          "id": "mem_review_policy",
+          "trust": "maintainer-approved",
+          "visibility": "public_review",
+          "scope": "managed"
+        }
+      ]
+    }
   },
   "exit_reason": null
 }
@@ -191,6 +202,7 @@ the intended code. It is required on every result. Non-review tasks MUST set
 | `tests_run` | array | Commands run while reviewing, with `passed`, `failed`, `not_run`, or `unknown` status. |
 | `no_findings_reason` | string \| null | File-backed explanation for a clean review. MAY be `null` for degraded/partial output when `evidence_status` and `limitations` explain why a substantive clean-review conclusion was not possible. |
 | `limitations` | string[] | Evidence gaps, skipped checks, or other caveats. |
+| `memory` | object | Memory audit report: `domains_loaded` (hosted memory domains eligible for this review, e.g. `default-branch`; empty for local runs) and `entries` (every loaded memory entry with its stable `id`, effective `trust` label after hosted caps/floors, optional `visibility`, and load `scope`). Lets the consumer audit which memory inputs could have influenced findings and cross-check `memory_refs` citations. |
 
 Each finding carries `severity`, `file`, optional `line`, `title`, `body`, and
 optional `recommendation`. Valid severities are `info`, `low`, `medium`, `high`,

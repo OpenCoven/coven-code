@@ -22,7 +22,11 @@
       }
     ],
     "no_findings_reason": null,
-    "limitations": []
+    "limitations": [],
+    "memory": {
+      "domains_loaded": [],
+      "entries": []
+    }
   },
   "exit_reason": null
 }

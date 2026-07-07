@@ -557,6 +557,31 @@ Direct hosted auto-persistence requires an explicit trusted policy:
 `hostedReview.memorySourceTrust` must meet or exceed
 `hostedReview.memoryTrustThreshold`.
 
+Additional hosted invariants:
+
+- Every hosted scope component (tenant, installation, repo id, canonical repo
+  identity) is validated non-empty before any hosted namespace, transcript
+  path, or team-sync key is derived; an empty component fails closed instead
+  of collapsing isolation.
+- Hosted loads floor the trust of memory entries that carry no `source`
+  provenance, so an unattributed entry cannot self-attest a trusted level.
+  Durable auto-extracted entries record their session/source provenance next
+  to the trust label.
+- Memory deletion and redaction write frontmatter tombstones
+  (`deleted_at`/`redacted_at`) that propagate through team-memory sync: a
+  remote tombstone always applies over local content, a local tombstone is
+  never resurrected by a pull, and a file deleted locally after a sync is not
+  silently re-created.
+- A key with an unresolved team-memory pull conflict is blocked from further
+  sync until the persisted conflict record under `.conflicts/` is resolved.
+- `/review` injects the ids and trust labels of every loaded memory entry into
+  the review prompt and validates the returned review's memory citations
+  against that set; unknown citations and memory-dependent findings without
+  `memory_refs` are surfaced as warnings.
+- Headless review results carry a `review.memory` report listing the loaded
+  memory domains and entries (id, effective trust, visibility, scope) — see
+  the [headless contract](headless-contract).
+
 ---
 
 ## Security and permissions
