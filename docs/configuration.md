@@ -420,7 +420,9 @@ coven-code memory resolve-conflict MEMORY.md
 traversal, and never print the original memory body. Deleting a synced team
 memory file writes a `deleted_at` tombstone instead of removing the file, so the
 next sync can propagate the deletion and avoid resurrecting stale content.
-Redaction writes a `redacted_at` audit stub and removes the original body.
+Redaction writes a `redacted_at` audit stub and removes the original body. Keys
+under the reserved `team/` directory require `--team`; with `--team`, keys are
+resolved relative to the team-memory root.
 
 Hosted memory namespace deletion requires the full hosted scope:
 

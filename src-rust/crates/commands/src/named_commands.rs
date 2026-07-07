@@ -496,7 +496,15 @@ fn memory_delete_or_redact(
         _ => return CommandResult::Error("--reason is required".to_string()),
     };
 
-    let root = if has_flag(args, "--team") {
+    let targets_team = has_flag(args, "--team");
+    if !targets_team && is_team_memory_key(key) {
+        return CommandResult::Error(
+            "Team memory keys require --team and must be relative to the team memory root"
+                .to_string(),
+        );
+    }
+
+    let root = if targets_team {
         team_memory_root(ctx)
     } else {
         memory_root(ctx)
@@ -666,6 +674,12 @@ fn memory_file_path(root: &Path, key: &str) -> Result<PathBuf, String> {
     Ok(root.join(key))
 }
 
+fn is_team_memory_key(key: &str) -> bool {
+    key.split('/')
+        .next()
+        .is_some_and(|component| component.eq_ignore_ascii_case("team"))
+}
+
 fn validate_memory_args(
     args: &[&str],
     positional_count: usize,
@@ -673,10 +687,14 @@ fn validate_memory_args(
     bool_flags: &[&str],
 ) -> Result<(), String> {
     let mut index = 1 + positional_count;
+    let mut seen_flags = std::collections::HashSet::new();
     while index < args.len() {
         let arg = args[index];
         if !arg.starts_with("--") {
             return Err(format!("Unexpected argument: {arg}"));
+        }
+        if !seen_flags.insert(arg) {
+            return Err(format!("Duplicate flag: {arg}"));
         }
         if bool_flags.contains(&arg) {
             index += 1;
@@ -1577,6 +1595,31 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_rejects_duplicate_destructive_flags() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(memory_dir.join("policy.md"), "body").expect("memory file");
+
+        let result = MemoryCommand.execute_named(
+            &[
+                "redact",
+                "policy.md",
+                "--reason",
+                "first",
+                "--reason",
+                "second",
+            ],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Duplicate flag: --reason"));
+    }
+
+    #[test]
     fn test_memory_rejects_extra_destructive_positionals() {
         let (ctx, _env) = memory_test_ctx();
         let memory_dir = memory_root(&ctx);
@@ -1592,6 +1635,51 @@ mod tests {
             panic!("Expected Error");
         };
         assert!(msg.contains("Unexpected argument: extra.md"));
+    }
+
+    #[test]
+    fn test_memory_requires_team_flag_for_team_directory_keys() {
+        let (ctx, _env) = memory_test_ctx();
+        let team_dir = team_memory_root(&ctx);
+        std::fs::create_dir_all(&team_dir).expect("team dir");
+        std::fs::write(team_dir.join("policy.md"), "team body").expect("team memory");
+
+        let result = MemoryCommand
+            .execute_named(&["delete", "team/policy.md", "--reason", "operator"], &ctx);
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Team memory keys require --team"));
+        let content = std::fs::read_to_string(team_dir.join("policy.md")).expect("team memory");
+        assert_eq!(content, "team body");
+
+        let result = MemoryCommand
+            .execute_named(&["delete", "TEAM/policy.md", "--reason", "operator"], &ctx);
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Team memory keys require --team"));
+    }
+
+    #[test]
+    fn test_memory_team_flag_treats_key_as_relative_to_team_root() {
+        let (ctx, _env) = memory_test_ctx();
+        let team_dir = team_memory_root(&ctx);
+        std::fs::create_dir_all(team_dir.join("team")).expect("nested team dir");
+        let path = team_dir.join("team").join("policy.md");
+        std::fs::write(&path, "nested team body").expect("nested team memory");
+
+        let result = MemoryCommand.execute_named(
+            &["delete", "team/policy.md", "--reason", "operator", "--team"],
+            &ctx,
+        );
+
+        assert!(matches!(result, CommandResult::Message(_)));
+        let content = std::fs::read_to_string(path).expect("updated team memory");
+        assert!(content.contains("deleted_at:"));
+        assert!(!content.contains("nested team body"));
     }
 
     #[test]
@@ -1753,6 +1841,33 @@ mod tests {
             panic!("Expected Error");
         };
         assert!(msg.contains("Unknown flag: --all"));
+    }
+
+    #[test]
+    fn test_memory_hosted_delete_rejects_duplicate_scope_flags() {
+        let ctx = make_ctx();
+
+        let result = MemoryCommand.execute_named(
+            &[
+                "hosted-delete",
+                "--tenant",
+                "tenant-a",
+                "--tenant",
+                "tenant-b",
+                "--installation",
+                "install-1",
+                "--repo-id",
+                "repo-1",
+                "--repo",
+                "OpenCoven/coven-code",
+            ],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Duplicate flag: --tenant"));
     }
 
     #[test]
