@@ -619,6 +619,7 @@ dependencies = [
  "claurst-query",
  "claurst-tools",
  "claurst-tui",
+ "coven-runtime-spec",
  "crossterm 0.29.0",
  "dirs",
  "nix 0.29.0",
@@ -735,6 +736,8 @@ dependencies = [
  "claurst-plugins",
  "claurst-tools",
  "claurst-tui",
+ "coven-runtime-registry",
+ "coven-runtime-spec",
  "dirs",
  "futures",
  "once_cell",
@@ -1074,6 +1077,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ceec7a6067e62d6f931a2baf6f3a751f4a892595bcec1461a3c94ef9949864b6"
 dependencies = [
  "bindgen",
+]
+
+[[package]]
+name = "coven-runtime-registry"
+version = "0.1.0"
+source = "git+https://github.com/OpenCoven/coven-runtimes?rev=9af3e4cf2fe66e95aa1a3addc867524822ea28ab#9af3e4cf2fe66e95aa1a3addc867524822ea28ab"
+dependencies = [
+ "coven-runtime-spec",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "coven-runtime-spec"
+version = "0.1.0"
+source = "git+https://github.com/OpenCoven/coven-runtimes?rev=9af3e4cf2fe66e95aa1a3addc867524822ea28ab#9af3e4cf2fe66e95aa1a3addc867524822ea28ab"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

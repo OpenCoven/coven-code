@@ -8,8 +8,10 @@ use async_trait::async_trait;
 use claurst_core::config::{Config, Settings, Theme};
 use claurst_core::cost::CostTracker;
 use claurst_core::types::{ContentBlock, Message};
+use coven_runtime_registry::RegistryIndex;
+use coven_runtime_spec::{validate_adapter, AdapterManifest};
 use once_cell::sync::Lazy;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9379,6 +9381,7 @@ fn coven_help_text() -> &'static str {
        /coven status                   Same as /coven\n\
        /coven goal <objective>         Set or manage a durable autonomous goal\n\
        /coven capabilities             Daemon capability catalog (harness manifests)\n\
+       /coven runtimes [--json]        List accepted runtime registry entries\n\
        /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
        /coven daemon start|status|stop|restart\n\
@@ -9598,10 +9601,15 @@ fn coven_read_calls_ledger(limit: usize) -> String {
     out
 }
 
+#[cfg(test)]
 fn coven_executable_names() -> Vec<String> {
+    coven_executable_candidate_names("coven")
+}
+
+fn coven_executable_candidate_names(executable: &str) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        let mut names = vec!["coven.exe".to_string(), "coven.cmd".to_string()];
+        let mut names = vec![executable.to_string()];
         if let Some(path_ext) = std::env::var_os("PATHEXT") {
             for ext in std::env::split_paths(&path_ext) {
                 let ext = ext.to_string_lossy();
@@ -9614,7 +9622,7 @@ fn coven_executable_names() -> Vec<String> {
                 } else {
                     format!(".{}", ext.to_ascii_lowercase())
                 };
-                let candidate = format!("coven{suffix}");
+                let candidate = format!("{executable}{suffix}");
                 if !names
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(&candidate))
@@ -9627,12 +9635,22 @@ fn coven_executable_names() -> Vec<String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec!["coven".to_string()]
+        vec![executable.to_string()]
     }
 }
 
-fn coven_binary_in_dir(dir: &Path) -> Option<PathBuf> {
-    for name in coven_executable_names() {
+fn coven_executable_name_is_bare(executable: &str) -> bool {
+    !executable.trim().is_empty()
+        && !executable.contains('/')
+        && !executable.contains('\\')
+        && !executable.chars().any(char::is_whitespace)
+}
+
+fn coven_executable_in_dir(dir: &Path, executable: &str) -> Option<PathBuf> {
+    if !coven_executable_name_is_bare(executable) {
+        return None;
+    }
+    for name in coven_executable_candidate_names(executable) {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
@@ -9654,12 +9672,20 @@ fn coven_path_entry_is_trusted(dir: &Path, cwd: Option<&Path>) -> bool {
 }
 
 fn coven_binary_from_path(path: Option<&std::ffi::OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
+    coven_executable_from_path("coven", path, cwd)
+}
+
+fn coven_executable_from_path(
+    executable: &str,
+    path: Option<&std::ffi::OsStr>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
     let path = path?;
     for dir in std::env::split_paths(path) {
         if !coven_path_entry_is_trusted(&dir, cwd) {
             continue;
         }
-        if let Some(candidate) = coven_binary_in_dir(&dir) {
+        if let Some(candidate) = coven_executable_in_dir(&dir, executable) {
             return Some(candidate);
         }
     }
@@ -9669,7 +9695,7 @@ fn coven_binary_from_path(path: Option<&std::ffi::OsStr>, cwd: Option<&Path>) ->
 fn coven_binary_path() -> Result<PathBuf, String> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
-            if let Some(candidate) = coven_binary_in_dir(dir) {
+            if let Some(candidate) = coven_executable_in_dir(dir, "coven") {
                 return Ok(candidate);
             }
         }
@@ -9733,6 +9759,265 @@ fn coven_shell_out(args: &[&str]) -> String {
              Install it from https://github.com/OpenCoven/coven or `npm install -g @opencoven/cli`."
         ),
     }
+}
+
+fn coven_registry_runtime_installed(executable: &str) -> bool {
+    coven_executable_from_path(
+        executable,
+        std::env::var_os("PATH").as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+    .is_some()
+}
+
+#[derive(serde::Serialize)]
+struct CovenRuntimeListing<'a> {
+    id: &'a str,
+    label: &'a str,
+    version: &'a str,
+    installed: bool,
+    capabilities: BTreeMap<&'static str, bool>,
+}
+
+fn coven_runtimes_listing(json: bool) -> String {
+    let registry = RegistryIndex::canonical();
+    let mut listings = Vec::new();
+    for id in registry.runtime_ids() {
+        let entry = match registry.resolve_latest(id) {
+            Ok(entry) => entry,
+            Err(err) => {
+                return format!("Could not resolve runtime `{id}` from canonical registry: {err}");
+            }
+        };
+        let adapter = &entry.adapter;
+        let installed = coven_registry_runtime_installed(&adapter.executable);
+        let capabilities = adapter.capabilities.as_pairs().into_iter().collect();
+        listings.push(CovenRuntimeListing {
+            id,
+            label: adapter.label.as_str(),
+            version: entry.version.as_str(),
+            installed,
+            capabilities,
+        });
+    }
+
+    if json {
+        return match serde_json::to_string_pretty(&listings) {
+            Ok(body) => body,
+            Err(err) => format!("Could not serialize runtime registry listing: {err}"),
+        };
+    }
+
+    let mut out = String::new();
+    out.push_str("Accepted runtime registry\n");
+    out.push_str(&format!(
+        "{:<12}  {:<24}  {:<10}  {:<9}  capabilities\n",
+        "id", "label", "version", "installed"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(82)));
+    for listing in &listings {
+        let installed = if listing.installed { "yes" } else { "no" };
+        let capabilities = listing
+            .capabilities
+            .iter()
+            .filter_map(|(name, enabled)| enabled.then_some(*name))
+            .collect::<Vec<_>>();
+        let capabilities = if capabilities.is_empty() {
+            "baseline".to_string()
+        } else {
+            capabilities.join(", ")
+        };
+        out.push_str(&format!(
+            "{:<12}  {:<24}  {:<10}  {:<9}  {}\n",
+            listing.id, listing.label, listing.version, installed, capabilities
+        ));
+        if !listing.installed {
+            let registry_entry = match registry.resolve_latest(listing.id) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            out.push_str(&format!(
+                "  install: {}\n",
+                registry_entry.adapter.install_hint
+            ));
+        }
+    }
+    out
+}
+
+fn coven_local_adapter_ids() -> Vec<String> {
+    let Some(home) = claurst_core::coven_shared::coven_home() else {
+        return Vec::new();
+    };
+    let adapters_dir = home.join("adapters");
+    let Ok(entries) = std::fs::read_dir(adapters_dir) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            ids.push(stem.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn coven_known_harness_ids() -> BTreeSet<String> {
+    let mut ids = BTreeSet::from(["claude".to_string(), "codex".to_string()]);
+    let registry = RegistryIndex::canonical();
+    ids.extend(registry.runtime_ids().into_iter().map(str::to_string));
+    ids.extend(coven_local_adapter_ids());
+    ids
+}
+
+fn coven_suggest_harness_id<'a>(harness: &str, ids: &'a BTreeSet<String>) -> Option<&'a str> {
+    if harness.is_empty() {
+        return None;
+    }
+    ids.iter().map(String::as_str).find(|id| {
+        id.starts_with(harness)
+            || harness.starts_with(*id)
+            || id.contains(harness)
+            || harness.contains(*id)
+    })
+}
+
+fn coven_run_harness_validation_error(harness: &str) -> Option<String> {
+    if matches!(harness, "claude" | "codex") {
+        return None;
+    }
+
+    let registry = RegistryIndex::canonical();
+    if let Ok(entry) = registry.resolve_latest(harness) {
+        if coven_registry_runtime_installed(&entry.adapter.executable) {
+            return None;
+        }
+        return Some(format!(
+            "Runtime `{harness}` is accepted, but executable `{}` is not installed.\nInstall hint: {}",
+            entry.adapter.executable, entry.adapter.install_hint
+        ));
+    }
+
+    if coven_local_adapter_ids().iter().any(|id| id == harness) {
+        return None;
+    }
+
+    let ids = coven_known_harness_ids();
+    let mut msg = format!(
+        "Unknown runtime `{harness}`.\nValid harness ids: {}",
+        ids.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    if let Some(suggestion) = coven_suggest_harness_id(harness, &ids) {
+        msg.push_str(&format!("\nDid you mean `{suggestion}`?"));
+        if let Ok(entry) = registry.resolve_latest(suggestion) {
+            if !coven_registry_runtime_installed(&entry.adapter.executable) {
+                msg.push_str(&format!(
+                    "\nInstall hint for `{suggestion}`: {}",
+                    entry.adapter.install_hint
+                ));
+            }
+        }
+    }
+    Some(msg)
+}
+
+fn coven_adapter_manifest_paths() -> Vec<PathBuf> {
+    let Some(home) = claurst_core::coven_shared::coven_home() else {
+        return Vec::new();
+    };
+    let adapters_dir = home.join("adapters");
+    let Ok(entries) = std::fs::read_dir(adapters_dir) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn coven_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn coven_adapter_spec_validation_report() -> String {
+    let paths = coven_adapter_manifest_paths();
+    let mut adapter_count = 0usize;
+    let mut violations = Vec::new();
+    let mut notes = Vec::new();
+
+    for path in paths {
+        let label = coven_file_label(&path);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                violations.push(format!("{label}:\n  read error: {err}"));
+                continue;
+            }
+        };
+        let manifest = match AdapterManifest::from_json(&raw) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                violations.push(format!("{label}:\n  parse error: {err}"));
+                continue;
+            }
+        };
+        if manifest.adapters.is_empty() {
+            violations.push(format!(
+                "{label}:\n  manifest [adapters]: manifest declares no adapters"
+            ));
+            continue;
+        }
+        for adapter in &manifest.adapters {
+            adapter_count += 1;
+            if adapter.capabilities.is_baseline() {
+                notes.push(format!(
+                    "{label}: {} capabilities: baseline (one-shot only)",
+                    adapter.id
+                ));
+            }
+            let errors = validate_adapter(adapter);
+            if errors.is_empty() {
+                continue;
+            }
+            let mut section = format!("{label}:");
+            for error in errors {
+                section.push_str(&format!("\n  {error}"));
+            }
+            violations.push(section);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("Runtime adapter spec validation\n");
+    if violations.is_empty() {
+        out.push_str(&format!("spec: OK ({adapter_count} adapter(s))\n"));
+    } else {
+        out.push_str("spec violations:\n");
+        for violation in violations {
+            out.push_str(&violation);
+            out.push('\n');
+        }
+    }
+    for note in notes {
+        out.push_str("  ");
+        out.push_str(&note);
+        out.push('\n');
+    }
+    out
 }
 
 #[async_trait]
@@ -9896,6 +10181,17 @@ impl SlashCommand for CovenCommand {
                     }
                     Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+            }
+            "runtimes" => {
+                let mut json = false;
+                for token in rest.split_whitespace() {
+                    if token == "--json" {
+                        json = true;
+                    } else {
+                        return CommandResult::Error("Usage: /coven runtimes [--json]".to_string());
+                    }
+                }
+                CommandResult::Message(coven_runtimes_listing(json))
             }
             "info" => {
                 if rest.is_empty() {
@@ -10076,6 +10372,9 @@ impl SlashCommand for CovenCommand {
                         "Usage: /coven run <harness> <prompt>".to_string(),
                     );
                 }
+                if let Some(msg) = coven_run_harness_validation_error(harness) {
+                    return CommandResult::Message(msg);
+                }
                 CommandResult::Message(coven_shell_out(&["run", harness, prompt]))
             }
             "attach" => {
@@ -10172,7 +10471,15 @@ impl SlashCommand for CovenCommand {
                 }
                 let mut argv: Vec<&str> = vec!["adapter"];
                 argv.extend(rest.split_whitespace());
-                CommandResult::Message(coven_shell_out(&argv))
+                let mut out = coven_shell_out(&argv);
+                if rest.split_whitespace().next() == Some("doctor") {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                    out.push_str(&coven_adapter_spec_validation_report());
+                }
+                CommandResult::Message(out)
             }
             "logs" => {
                 if rest.is_empty() {
@@ -12353,6 +12660,142 @@ mod tests {
                 );
             }
             other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_runtimes_lists_canonical_registry_entries() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("runtimes", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("copilot"), "should list copilot: {msg}");
+                assert!(msg.contains("hermes"), "should list hermes: {msg}");
+                assert!(
+                    msg.contains("capabilities"),
+                    "should show capabilities: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_runtimes_json_is_valid_json() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("runtimes --json", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                let value: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                let runtimes = value.as_array().unwrap();
+                assert!(
+                    runtimes
+                        .iter()
+                        .any(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("copilot")),
+                    "json should list copilot: {msg}"
+                );
+                assert!(
+                    runtimes
+                        .iter()
+                        .any(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("hermes")),
+                    "json should list hermes: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_run_unknown_harness_returns_validation_error_without_shelling_out() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("run unknown-harness do work", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("Unknown runtime `unknown-harness`"),
+                    "should reject unknown harness: {msg}"
+                );
+                assert!(
+                    msg.contains("Valid harness ids"),
+                    "should list valid ids: {msg}"
+                );
+                assert!(msg.contains("claude"), "should include built-in ids: {msg}");
+                assert!(msg.contains("codex"), "should include built-in ids: {msg}");
+                assert!(
+                    msg.contains("copilot"),
+                    "should include registry ids: {msg}"
+                );
+                assert!(
+                    !msg.contains("Could not find a trusted `coven` binary"),
+                    "unknown harness should not shell out: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_adapter_doctor_validates_local_adapter_specs() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let adapters_dir = guard.coven_home().join("adapters");
+        std::fs::create_dir_all(&adapters_dir).unwrap();
+        std::fs::write(
+            adapters_dir.join("valid.json"),
+            r#"{
+              "adapters": [{
+                "id": "localgood",
+                "label": "Local Good",
+                "executable": "localgood",
+                "non_interactive_prompt_prefix_args": ["run"],
+                "install_hint": "install localgood"
+              }]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            adapters_dir.join("invalid.json"),
+            r#"{
+              "adapters": [{
+                "id": "Bad Id!",
+                "label": "",
+                "executable": "bad tool",
+                "non_interactive_prompt_prefix_args": ["run"],
+                "install_hint": ""
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("adapter doctor", &mut ctx).await;
+
+        match result {
+            CommandResult::Message(msg) => {
+                let spec_index = msg.find("Runtime adapter spec validation").unwrap();
+                assert!(
+                    spec_index > 0,
+                    "existing shell-out output should remain first: {msg}"
+                );
+                assert!(
+                    msg.contains("invalid.json"),
+                    "should name invalid file: {msg}"
+                );
+                assert!(msg.contains("valid.json"), "should name valid file: {msg}");
+                assert!(
+                    msg.contains("invalid id"),
+                    "should report spec violation: {msg}"
+                );
+                assert!(
+                    msg.contains("capabilities: baseline (one-shot only)"),
+                    "should report baseline capabilities: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
         }
     }
 

@@ -49,6 +49,7 @@ urlencoding = "2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
+coven-runtime-spec = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]

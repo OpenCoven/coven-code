@@ -11,6 +11,7 @@
 mod codex_oauth_flow;
 mod headless;
 mod oauth_flow;
+mod stream_mode;
 mod upgrade;
 
 use headless::{RunOutcome, SessionBrief};
@@ -881,6 +882,31 @@ async fn main() -> anyhow::Result<()> {
 
     // --print / headless mode
     if is_headless {
+        // Long-lived stream-json mode: the Coven runtime stream protocol.
+        // Turns arrive as stdin JSON frames; the process exits on stdin EOF.
+        // GitHub App runs (--context) never use this path — their prompt
+        // comes from the session brief.
+        if cli.input_format == CliInputFormat::StreamJson && github_context.is_none() {
+            if cli.prompt.is_some() {
+                eprintln!(
+                    "Warning: positional prompt is ignored with --input-format stream-json; \
+                     send user frames on stdin."
+                );
+            }
+            let run = stream_mode::run_stream_loop(stream_mode::StreamLoopParams {
+                client,
+                tools,
+                tool_ctx,
+                query_config,
+                cost_tracker,
+                model: claurst_api::effective_model_for_config(&config, &model_registry),
+                resume_id: cli.resume.clone(),
+            })
+            .await;
+            cron_cancel.cancel();
+            return run;
+        }
+
         // For a coven-github run, configure git auth from COVEN_GIT_TOKEN before
         // the agent starts. This installs an env-backed credential helper in the
         // workspace (the token stays in the environment, never on disk) so the
@@ -1606,75 +1632,29 @@ async fn run_headless(
     use tokio_util::sync::CancellationToken;
 
     // Build initial messages list from input.
-    // --input-format stream-json: stdin is newline-delimited JSON, each line is
-    //   {"role":"user"|"assistant","content":"..."} (mirrors TS --input-format stream-json).
-    // --input-format text (default): read prompt from positional arg or entire stdin as text.
-    let mut messages: Vec<claurst_core::types::Message> =
-        if cli.input_format == CliInputFormat::StreamJson {
-            use tokio::io::{self, AsyncBufReadExt, BufReader};
-            let stdin = io::stdin();
-            let mut reader = BufReader::new(stdin);
-            let mut line = String::new();
-            let mut parsed: Vec<claurst_core::types::Message> = Vec::new();
-            loop {
-                line.clear();
-                let n = reader.read_line(&mut line).await?;
-                if n == 0 {
-                    break;
-                }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<serde_json::Value>(trimmed) {
-                    Ok(v) => {
-                        let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                        let content = v
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if role == "assistant" {
-                            parsed.push(claurst_core::types::Message::assistant(content));
-                        } else {
-                            parsed.push(claurst_core::types::Message::user(content));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: skipping malformed JSON line: {} ({:?})",
-                            trimmed, e
-                        );
-                    }
-                }
-            }
-            if parsed.is_empty() {
-                // Also check positional arg as fallback
-                if let Some(ref p) = cli.prompt {
-                    parsed.push(claurst_core::types::Message::user(p.clone()));
-                }
-            }
-            parsed
+    // --input-format stream-json runs never reach here: main routes them to
+    // stream_mode::run_stream_loop (the long-lived Coven runtime protocol)
+    // before calling run_headless. This path reads the prompt from the
+    // positional arg, the session brief, or stdin as plain text.
+    let mut messages: Vec<claurst_core::types::Message> = {
+        let prompt = if let Some(ref p) = cli.prompt {
+            p.clone()
+        } else if let Some(brief) = github_context {
+            brief.to_prompt()
         } else {
-            // Plain text mode
-            let prompt = if let Some(ref p) = cli.prompt {
-                p.clone()
-            } else if let Some(brief) = github_context {
-                brief.to_prompt()
-            } else {
-                use tokio::io::{self, AsyncReadExt};
-                let mut stdin = io::stdin();
-                let mut buf = String::new();
-                stdin.read_to_string(&mut buf).await?;
-                buf.trim().to_string()
-            };
-
-            if prompt.is_empty() {
-                anyhow::bail!("No prompt provided. Use --print <prompt> or pipe text to stdin.");
-            }
-
-            vec![claurst_core::types::Message::user(prompt)]
+            use tokio::io::{self, AsyncReadExt};
+            let mut stdin = io::stdin();
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).await?;
+            buf.trim().to_string()
         };
+
+        if prompt.is_empty() {
+            anyhow::bail!("No prompt provided. Use --print <prompt> or pipe text to stdin.");
+        }
+
+        vec![claurst_core::types::Message::user(prompt)]
+    };
 
     // --prefill: inject a partial assistant turn before the query so the model
     // continues from that text (mirrors TS --prefill flag).
@@ -5475,4 +5455,130 @@ mod tests {
     // NOTE: the coven-github headless-contract types + behavior moved to the
     // `headless` module; their conformance tests live in `headless.rs`
     // (`#[cfg(test)] mod tests`), pinned to the vendored golden fixtures.
+
+    // ── coven-runtimes manifest drift guard ─────────────────────────────────
+    //
+    // `spec/runtime-manifest/coven-code.json` is the runtime adapter manifest
+    // accepted into the OpenCoven/coven-runtimes canonical registry. Registry
+    // versions are immutable: if one of these tests fails, a CLI flag the
+    // manifest depends on drifted. Fix the flag or publish a new manifest
+    // version and re-accept it in coven-runtimes (`conjure registry add`) —
+    // do not silently edit the shipped 1.0.0 definition.
+
+    const RUNTIME_MANIFEST: &str =
+        include_str!("../../../../spec/runtime-manifest/coven-code.json");
+
+    fn runtime_adapter() -> coven_runtime_spec::RuntimeAdapter {
+        let manifest = coven_runtime_spec::AdapterManifest::from_json(RUNTIME_MANIFEST)
+            .expect("runtime manifest parses");
+        assert_eq!(manifest.adapters.len(), 1, "exactly one adapter expected");
+        manifest.adapters.into_iter().next().expect("one adapter")
+    }
+
+    #[test]
+    fn runtime_manifest_passes_spec_validation() {
+        let adapter = runtime_adapter();
+        let errors = coven_runtime_spec::validate_adapter(&adapter);
+        assert!(errors.is_empty(), "spec violations: {errors:?}");
+        assert_eq!(adapter.id, "coven-code");
+        assert_eq!(adapter.executable, "coven-code");
+    }
+
+    #[test]
+    fn runtime_manifest_declares_full_stream_capabilities() {
+        let caps = runtime_adapter().capabilities;
+        assert!(caps.stream, "stream mode is implemented in stream_mode.rs");
+        assert!(caps.preassigned_session_id);
+        assert!(caps.think, "think maps to --thinking");
+        assert!(caps.speed, "speed maps to --effort");
+    }
+
+    #[test]
+    fn runtime_manifest_stream_launch_args_parse() {
+        let adapter = runtime_adapter();
+        let stream = adapter.stream_args.as_ref().expect("stream_args declared");
+
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(stream.prefix_args.iter().cloned());
+        let session_flag = stream
+            .session_id_flag
+            .as_deref()
+            .expect("session_id_flag declared");
+        argv.push(session_flag.to_string());
+        argv.push("00000000-0000-0000-0000-000000000000".into());
+        argv.push(adapter.model_flag.clone().expect("model_flag declared"));
+        argv.push("claude-sonnet-4-5".into());
+        argv.push(
+            adapter
+                .system_prompt_flag
+                .clone()
+                .expect("system_prompt_flag declared"),
+        );
+        argv.push("identity preamble".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("stream launch argv parses");
+        assert!(cli.print);
+        assert_eq!(cli.input_format, CliInputFormat::StreamJson);
+        assert_eq!(cli.output_format, CliOutputFormat::StreamJson);
+        assert_eq!(
+            cli.session_id_flag.as_deref(),
+            Some("00000000-0000-0000-0000-000000000000")
+        );
+    }
+
+    #[test]
+    fn runtime_manifest_resume_flag_parses() {
+        let adapter = runtime_adapter();
+        let stream = adapter.stream_args.as_ref().expect("stream_args declared");
+        let resume_flag = stream.resume_flag.as_deref().expect("resume_flag declared");
+
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(stream.prefix_args.iter().cloned());
+        argv.push(resume_flag.to_string());
+        argv.push("11111111-1111-1111-1111-111111111111".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("resume argv parses");
+        assert_eq!(
+            cli.resume.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
+    fn runtime_manifest_sandbox_mapping_parses_for_both_policies() {
+        let adapter = runtime_adapter();
+        let sandbox = adapter.sandbox.as_ref().expect("sandbox declared");
+
+        for (permission, expected) in [
+            (
+                coven_runtime_spec::Permission::Full,
+                CliPermissionMode::BypassPermissions,
+            ),
+            (
+                coven_runtime_spec::Permission::ReadOnly,
+                CliPermissionMode::Plan,
+            ),
+        ] {
+            let mut argv: Vec<String> = vec!["coven-code".into()];
+            argv.extend(adapter.non_interactive_prompt_prefix_args.iter().cloned());
+            argv.extend(sandbox.args(permission));
+            argv.push("do the thing".into());
+
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{permission:?} sandbox argv rejected: {e}"));
+            assert_eq!(cli.permission_mode, expected);
+        }
+    }
+
+    #[test]
+    fn runtime_manifest_one_shot_launch_parses() {
+        let adapter = runtime_adapter();
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(adapter.non_interactive_prompt_prefix_args.iter().cloned());
+        argv.push("hello".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("one-shot argv parses");
+        assert!(cli.print);
+        assert_eq!(cli.prompt.as_deref(), Some("hello"));
+    }
 }
