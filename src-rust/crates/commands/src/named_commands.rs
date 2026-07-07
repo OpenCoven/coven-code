@@ -488,6 +488,9 @@ fn memory_delete_or_redact(
             ));
         }
     };
+    if let Err(message) = validate_memory_args(args, 1, &["--reason"], &["--team"]) {
+        return CommandResult::Error(message);
+    }
     let reason = match flag_value(args, "--reason") {
         Some(value) if !value.trim().is_empty() => value,
         _ => return CommandResult::Error("--reason is required".to_string()),
@@ -551,6 +554,12 @@ fn memory_resolve_conflict(args: &[&str], ctx: &CommandContext) -> CommandResult
             )
         }
     };
+    if let Err(message) = validate_memory_args(args, 1, &[], &[]) {
+        return CommandResult::Error(message);
+    }
+    if key.trim().is_empty() {
+        return CommandResult::Error("Memory key is required".to_string());
+    }
     if let Err(err) = claurst_core::team_memory_sync::validate_memory_path(key) {
         return CommandResult::Error(format!("Invalid memory key: {err}"));
     }
@@ -564,6 +573,20 @@ fn memory_resolve_conflict(args: &[&str], ctx: &CommandContext) -> CommandResult
 }
 
 fn memory_hosted_delete(args: &[&str]) -> CommandResult {
+    if let Err(message) = validate_memory_args(
+        args,
+        0,
+        &[
+            "--tenant",
+            "--installation",
+            "--repo-id",
+            "--repo",
+            "--domain",
+        ],
+        &[],
+    ) {
+        return CommandResult::Error(message);
+    }
     let scope = match hosted_scope_from_args(args) {
         Ok(scope) => scope,
         Err(message) => return CommandResult::Error(message),
@@ -641,6 +664,36 @@ fn memory_file_path(root: &Path, key: &str) -> Result<PathBuf, String> {
     claurst_core::team_memory_sync::validate_memory_path(key)
         .map_err(|err| format!("Invalid memory key: {err}"))?;
     Ok(root.join(key))
+}
+
+fn validate_memory_args(
+    args: &[&str],
+    positional_count: usize,
+    value_flags: &[&str],
+    bool_flags: &[&str],
+) -> Result<(), String> {
+    let mut index = 1 + positional_count;
+    while index < args.len() {
+        let arg = args[index];
+        if !arg.starts_with("--") {
+            return Err(format!("Unexpected argument: {arg}"));
+        }
+        if bool_flags.contains(&arg) {
+            index += 1;
+            continue;
+        }
+        if value_flags.contains(&arg) {
+            match args.get(index + 1).copied() {
+                Some(value) if !value.starts_with("--") && !value.trim().is_empty() => {
+                    index += 2;
+                    continue;
+                }
+                _ => return Err(format!("{arg} is required")),
+            }
+        }
+        return Err(format!("Unknown flag: {arg}"));
+    }
+    Ok(())
 }
 
 fn required_flag<'a>(args: &'a [&str], name: &str) -> Result<&'a str, String> {
@@ -1506,6 +1559,42 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_rejects_unknown_destructive_flags() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(memory_dir.join("policy.md"), "body").expect("memory file");
+
+        let result = MemoryCommand.execute_named(
+            &["delete", "policy.md", "--reason", "operator", "--unknown"],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Unknown flag: --unknown"));
+    }
+
+    #[test]
+    fn test_memory_rejects_extra_destructive_positionals() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(memory_dir.join("policy.md"), "body").expect("memory file");
+
+        let result = MemoryCommand.execute_named(
+            &["redact", "policy.md", "extra.md", "--reason", "operator"],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Unexpected argument: extra.md"));
+    }
+
+    #[test]
     fn test_memory_conflicts_lists_pending_records_without_content() {
         let (ctx, _env) = memory_test_ctx();
         let team_dir = team_memory_root(&ctx);
@@ -1554,6 +1643,19 @@ mod tests {
         assert!(matches!(result, CommandResult::Message(_)));
         assert!(!conflict_dir.join("MEMORY.md.json").exists());
         assert!(conflict_dir.join("other.md.json").exists());
+    }
+
+    #[test]
+    fn test_memory_resolve_conflict_rejects_extra_args() {
+        let (ctx, _env) = memory_test_ctx();
+
+        let result =
+            MemoryCommand.execute_named(&["resolve-conflict", "MEMORY.md", "--force"], &ctx);
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Unknown flag: --force"));
     }
 
     #[test]
@@ -1625,6 +1727,32 @@ mod tests {
             panic!("Expected Error");
         };
         assert!(msg.contains("--tenant is required"));
+    }
+
+    #[test]
+    fn test_memory_hosted_delete_rejects_unknown_flags() {
+        let ctx = make_ctx();
+
+        let result = MemoryCommand.execute_named(
+            &[
+                "hosted-delete",
+                "--tenant",
+                "tenant-a",
+                "--installation",
+                "install-1",
+                "--repo-id",
+                "repo-1",
+                "--repo",
+                "OpenCoven/coven-code",
+                "--all",
+            ],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Unknown flag: --all"));
     }
 
     #[test]
