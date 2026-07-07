@@ -402,6 +402,41 @@ conflict record is written for operator review instead of overwriting local
 memory. Hosted team-memory sync also sends tenant, installation, repo, and
 domain scope metadata so the server can authorize the full tuple.
 
+### Memory lifecycle operations
+
+Operators can inspect and apply memory lifecycle controls with the named
+`memory` command:
+
+```bash
+coven-code memory list
+coven-code memory delete policy.md --reason "user requested deletion"
+coven-code memory redact policy.md --reason "security incident"
+coven-code memory redact policy.md --team --reason "security incident"
+coven-code memory conflicts
+coven-code memory resolve-conflict MEMORY.md
+```
+
+`delete` and `redact` accept only repository-relative memory keys, reject path
+traversal, and never print the original memory body. Deleting a synced team
+memory file writes a `deleted_at` tombstone instead of removing the file, so the
+next sync can propagate the deletion and avoid resurrecting stale content.
+Redaction writes a `redacted_at` audit stub and removes the original body.
+
+Hosted memory namespace deletion requires the full hosted scope:
+
+```bash
+coven-code memory hosted-delete \
+  --tenant tenant-a \
+  --installation install-1 \
+  --repo-id repo-99 \
+  --repo OpenCoven/coven-code \
+  --domain pr:42
+```
+
+All hosted delete inputs are explicit; Coven Code does not infer or broaden the
+scope. Supported domains are `default`, `security-private`, `pr:<number>`,
+`branch:<name>`, and `release:<name>`.
+
 ### @include directives
 
 AGENTS.md files support `@include` to pull in content from other files:

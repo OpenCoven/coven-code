@@ -18,6 +18,7 @@
 
 use crate::{CommandContext, CommandResult};
 use once_cell::sync::Lazy;
+use std::path::{Path, PathBuf};
 // `open` crate: used by StickersCommand to launch the browser.
 
 // ---------------------------------------------------------------------------
@@ -385,6 +386,282 @@ impl NamedCommand for AddDirCommand {
             abs_path.display()
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// memory
+// ---------------------------------------------------------------------------
+
+pub struct MemoryCommand;
+
+impl NamedCommand for MemoryCommand {
+    fn name(&self) -> &str {
+        "memory"
+    }
+    fn description(&self) -> &str {
+        "Inspect and manage lifecycle controls for local, team, and hosted memory"
+    }
+    fn usage(&self) -> &str {
+        "coven-code memory [list|delete|redact|conflicts|resolve-conflict|hosted-delete] ..."
+    }
+
+    fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
+        match args.first().copied().unwrap_or("list") {
+            "list" | "status" => memory_list(ctx),
+            "delete" => memory_delete_or_redact(args, ctx, MemoryLifecycleAction::Delete),
+            "redact" => memory_delete_or_redact(args, ctx, MemoryLifecycleAction::Redact),
+            "conflicts" => memory_conflicts(ctx),
+            "resolve-conflict" => memory_resolve_conflict(args, ctx),
+            "hosted-delete" => memory_hosted_delete(args),
+            "--help" | "-h" | "help" => CommandResult::Message(memory_usage()),
+            sub => CommandResult::Error(format!(
+                "Unknown memory subcommand: '{sub}'\n{}",
+                memory_usage()
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemoryLifecycleAction {
+    Delete,
+    Redact,
+}
+
+fn memory_usage() -> String {
+    "Usage: coven-code memory <subcommand>\n\n\
+     Subcommands:\n\
+       list\n\
+       delete <key> --reason <reason> [--team]\n\
+       redact <key> --reason <reason> [--team]\n\
+       conflicts\n\
+       resolve-conflict <key>\n\
+       hosted-delete --tenant <id> --installation <id> --repo-id <id> --repo <owner/name> [--domain <domain>]\n\n\
+     Domains: default, security-private, pr:<number>, branch:<name>, release:<name>"
+        .to_string()
+}
+
+fn memory_root(ctx: &CommandContext) -> PathBuf {
+    claurst_core::memdir::auto_memory_path(&ctx.working_dir)
+}
+
+fn team_memory_root(ctx: &CommandContext) -> PathBuf {
+    claurst_core::memdir::team_memory_path(&memory_root(ctx))
+}
+
+fn memory_list(ctx: &CommandContext) -> CommandResult {
+    let memory_dir = memory_root(ctx);
+    let team_dir = claurst_core::memdir::team_memory_path(&memory_dir);
+    let memories = claurst_core::memdir::scan_memory_dir(&memory_dir);
+    let conflicts = claurst_core::team_memory_sync::pending_conflicts(&team_dir);
+
+    let mut out = String::new();
+    out.push_str("Memory lifecycle status\n");
+    out.push_str(&format!("  Local memory: {}\n", memory_dir.display()));
+    out.push_str(&format!("  Team memory:  {}\n", team_dir.display()));
+    out.push_str(&format!("  Memory files: {}\n", memories.len()));
+    for memory in memories.iter().take(50) {
+        out.push_str(&format!("    {}\n", memory.filename));
+    }
+    if memories.len() > 50 {
+        out.push_str(&format!("    ... {} more\n", memories.len() - 50));
+    }
+    out.push_str(&format!("  Pending team conflicts: {}\n", conflicts.len()));
+
+    CommandResult::Message(out)
+}
+
+fn memory_delete_or_redact(
+    args: &[&str],
+    ctx: &CommandContext,
+    action: MemoryLifecycleAction,
+) -> CommandResult {
+    let key = match args.get(1).copied() {
+        Some(value) if !value.starts_with("--") => value,
+        _ => {
+            let verb = match action {
+                MemoryLifecycleAction::Delete => "delete",
+                MemoryLifecycleAction::Redact => "redact",
+            };
+            return CommandResult::Error(format!(
+                "Usage: coven-code memory {verb} <key> --reason <reason> [--team]"
+            ));
+        }
+    };
+    let reason = match flag_value(args, "--reason") {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => return CommandResult::Error("--reason is required".to_string()),
+    };
+
+    let root = if has_flag(args, "--team") {
+        team_memory_root(ctx)
+    } else {
+        memory_root(ctx)
+    };
+    let path = match memory_file_path(&root, key) {
+        Ok(path) => path,
+        Err(message) => return CommandResult::Error(message),
+    };
+    if !path.is_file() {
+        return CommandResult::Error(format!("Memory file not found: {key}"));
+    }
+
+    let result = match action {
+        MemoryLifecycleAction::Delete => claurst_core::memdir::delete_memory_file(&path, reason),
+        MemoryLifecycleAction::Redact => claurst_core::memdir::redact_memory_file(&path, reason),
+    };
+    match result {
+        Ok(()) => {
+            let verb = match action {
+                MemoryLifecycleAction::Delete => "Deleted",
+                MemoryLifecycleAction::Redact => "Redacted",
+            };
+            CommandResult::Message(format!("{verb} memory file: {key}"))
+        }
+        Err(err) => CommandResult::Error(format!("Failed to update memory file: {err}")),
+    }
+}
+
+fn memory_conflicts(ctx: &CommandContext) -> CommandResult {
+    let team_dir = team_memory_root(ctx);
+    let conflicts = claurst_core::team_memory_sync::pending_conflicts(&team_dir);
+    if conflicts.is_empty() {
+        return CommandResult::Message(format!(
+            "No pending team-memory conflicts.\nTeam memory: {}",
+            team_dir.display()
+        ));
+    }
+
+    let mut out = format!("Pending team-memory conflicts ({})\n", conflicts.len());
+    for conflict in conflicts {
+        out.push_str(&format!(
+            "  {} [{:?}]: {}\n",
+            conflict.key, conflict.kind, conflict.reason
+        ));
+    }
+    CommandResult::Message(out)
+}
+
+fn memory_resolve_conflict(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let key = match args.get(1).copied() {
+        Some(value) if !value.starts_with("--") => value,
+        _ => {
+            return CommandResult::Error(
+                "Usage: coven-code memory resolve-conflict <key>".to_string(),
+            )
+        }
+    };
+    if let Err(err) = claurst_core::team_memory_sync::validate_memory_path(key) {
+        return CommandResult::Error(format!("Invalid memory key: {err}"));
+    }
+
+    let team_dir = team_memory_root(ctx);
+    match claurst_core::team_memory_sync::resolve_conflict(&team_dir, key) {
+        Ok(true) => CommandResult::Message(format!("Resolved team-memory conflict: {key}")),
+        Ok(false) => CommandResult::Error(format!("No pending conflict for key: {key}")),
+        Err(err) => CommandResult::Error(format!("Failed to resolve conflict: {err}")),
+    }
+}
+
+fn memory_hosted_delete(args: &[&str]) -> CommandResult {
+    let scope = match hosted_scope_from_args(args) {
+        Ok(scope) => scope,
+        Err(message) => return CommandResult::Error(message),
+    };
+    let path = claurst_core::memdir::hosted_memory_path_for_scope(&scope);
+    match claurst_core::memdir::delete_hosted_memory_for_scope(&scope) {
+        Ok(()) => CommandResult::Message(format!(
+            "Deleted hosted memory namespace: {}",
+            path.display()
+        )),
+        Err(err) => CommandResult::Error(format!("Failed to delete hosted memory: {err}")),
+    }
+}
+
+fn hosted_scope_from_args(
+    args: &[&str],
+) -> Result<claurst_core::hosted_review::HostedReviewScope, String> {
+    let tenant = required_flag(args, "--tenant")?;
+    let installation = required_flag(args, "--installation")?;
+    let repo_id = required_flag(args, "--repo-id")?;
+    let repo = required_flag(args, "--repo")?;
+    let mut scope = claurst_core::hosted_review::HostedReviewScope::new(
+        tenant.to_string(),
+        installation.to_string(),
+        repo_id.to_string(),
+        repo.to_string(),
+    );
+    if let Some(domain) = flag_value(args, "--domain") {
+        scope = scope.with_domain(parse_memory_domain(domain)?);
+    }
+    scope
+        .validate()
+        .map_err(|err| format!("Invalid hosted scope: {err}"))?;
+    Ok(scope)
+}
+
+fn parse_memory_domain(raw: &str) -> Result<claurst_core::hosted_review::MemoryDomain, String> {
+    if raw == "default" || raw == "default-branch" {
+        return Ok(claurst_core::hosted_review::MemoryDomain::DefaultBranch);
+    }
+    if raw == "security-private" {
+        return Ok(claurst_core::hosted_review::MemoryDomain::SecurityPrivate);
+    }
+    if let Some(value) = raw.strip_prefix("pr:") {
+        let number = value
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid pull request domain: {raw}"))?;
+        return Ok(claurst_core::hosted_review::MemoryDomain::PullRequest(
+            number,
+        ));
+    }
+    if let Some(value) = raw.strip_prefix("branch:") {
+        if value.trim().is_empty() {
+            return Err("branch domain requires a branch name".to_string());
+        }
+        return Ok(claurst_core::hosted_review::MemoryDomain::Branch(
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = raw.strip_prefix("release:") {
+        if value.trim().is_empty() {
+            return Err("release domain requires a release name".to_string());
+        }
+        return Ok(claurst_core::hosted_review::MemoryDomain::Release(
+            value.to_string(),
+        ));
+    }
+    Err(format!("Unsupported hosted memory domain: {raw}"))
+}
+
+fn memory_file_path(root: &Path, key: &str) -> Result<PathBuf, String> {
+    if key.trim().is_empty() {
+        return Err("Memory key is required".to_string());
+    }
+    claurst_core::team_memory_sync::validate_memory_path(key)
+        .map_err(|err| format!("Invalid memory key: {err}"))?;
+    Ok(root.join(key))
+}
+
+fn required_flag<'a>(args: &'a [&str], name: &str) -> Result<&'a str, String> {
+    match flag_value(args, name) {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(format!("{name} is required")),
+    }
+}
+
+fn flag_value<'a>(args: &'a [&str], name: &str) -> Option<&'a str> {
+    args.windows(2).find_map(|window| {
+        if window[0] == name && !window[1].starts_with("--") {
+            Some(window[1])
+        } else {
+            None
+        }
+    })
+}
+
+fn has_flag(args: &[&str], name: &str) -> bool {
+    args.contains(&name)
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +1176,7 @@ static NAMED_COMMANDS: Lazy<Vec<Box<dyn NamedCommand>>> = Lazy::new(|| {
         Box::new(AgentsCommand),
         Box::new(AgentCommand),
         Box::new(AddDirCommand),
+        Box::new(MemoryCommand),
         Box::new(BranchCommand),
         Box::new(TagCommand),
         Box::new(PrCommentsCommand),
@@ -952,6 +1230,58 @@ mod tests {
         }
     }
 
+    struct RemoteMemoryEnvGuard {
+        old_remote_memory_dir: Option<String>,
+    }
+
+    impl RemoteMemoryEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let guard = Self {
+                old_remote_memory_dir: std::env::var("COVEN_CODE_REMOTE_MEMORY_DIR").ok(),
+            };
+            std::env::set_var("COVEN_CODE_REMOTE_MEMORY_DIR", path);
+            guard
+        }
+    }
+
+    impl Drop for RemoteMemoryEnvGuard {
+        fn drop(&mut self) {
+            match &self.old_remote_memory_dir {
+                Some(value) => std::env::set_var("COVEN_CODE_REMOTE_MEMORY_DIR", value),
+                None => std::env::remove_var("COVEN_CODE_REMOTE_MEMORY_DIR"),
+            }
+        }
+    }
+
+    struct MemoryTestEnv {
+        _remote_memory: RemoteMemoryEnvGuard,
+        _command_env: CommandEnvGuard,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn memory_test_ctx() -> (CommandContext, MemoryTestEnv) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let coven_home = tmp.path().join("coven");
+        let project = tmp.path().join("project");
+        let memory_base = tmp.path().join("remote-memory");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::create_dir_all(&memory_base).expect("memory base");
+        let command_env = CommandEnvGuard::set(&home, &coven_home, None);
+        let remote_memory = RemoteMemoryEnvGuard::set(&memory_base);
+        let ctx = make_ctx_at(project);
+        (
+            ctx,
+            MemoryTestEnv {
+                _remote_memory: remote_memory,
+                _command_env: command_env,
+                _tmp: tmp,
+            },
+        )
+    }
+
     #[test]
     fn test_all_named_commands_non_empty() {
         assert!(!all_named_commands().is_empty());
@@ -973,6 +1303,7 @@ mod tests {
     fn test_find_named_command_found() {
         assert!(find_named_command("agents").is_some());
         assert!(find_named_command("branch").is_some());
+        assert!(find_named_command("memory").is_some());
     }
 
     #[test]
@@ -1088,6 +1419,212 @@ mod tests {
         let cmd = BranchCommand;
         let result = cmd.execute_named(&["switch"], &ctx);
         assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[test]
+    fn test_memory_list_shows_paths_without_body() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(memory_dir.join("policy.md"), "secret body").expect("memory file");
+
+        let result = MemoryCommand.execute_named(&["list"], &ctx);
+
+        let CommandResult::Message(msg) = result else {
+            panic!("Expected Message");
+        };
+        assert!(msg.contains("policy.md"));
+        assert!(msg.contains("Team memory:"));
+        assert!(!msg.contains("secret body"));
+    }
+
+    #[test]
+    fn test_memory_delete_writes_tombstone_without_original_body() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        let path = memory_dir.join("policy.md");
+        std::fs::write(&path, "sensitive fact").expect("memory file");
+
+        let result =
+            MemoryCommand.execute_named(&["delete", "policy.md", "--reason", "operator"], &ctx);
+
+        assert!(matches!(result, CommandResult::Message(_)));
+        let content = std::fs::read_to_string(path).expect("updated memory");
+        assert!(content.contains("deleted_at:"));
+        assert!(content.contains("[DELETED: operator]"));
+        assert!(!content.contains("sensitive fact"));
+    }
+
+    #[test]
+    fn test_memory_redact_team_file_writes_stub_without_original_body() {
+        let (ctx, _env) = memory_test_ctx();
+        let team_dir = team_memory_root(&ctx);
+        std::fs::create_dir_all(&team_dir).expect("team dir");
+        let path = team_dir.join("team.md");
+        std::fs::write(&path, "security incident detail").expect("team memory");
+
+        let result = MemoryCommand.execute_named(
+            &["redact", "team.md", "--reason", "request", "--team"],
+            &ctx,
+        );
+
+        assert!(matches!(result, CommandResult::Message(_)));
+        let content = std::fs::read_to_string(path).expect("updated team memory");
+        assert!(content.contains("redacted_at:"));
+        assert!(content.contains("[REDACTED: request]"));
+        assert!(!content.contains("security incident detail"));
+    }
+
+    #[test]
+    fn test_memory_rejects_path_traversal() {
+        let (ctx, _env) = memory_test_ctx();
+
+        let result =
+            MemoryCommand.execute_named(&["delete", "../secret.md", "--reason", "operator"], &ctx);
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("Invalid memory key"));
+    }
+
+    #[test]
+    fn test_memory_rejects_missing_flag_values() {
+        let (ctx, _env) = memory_test_ctx();
+        let memory_dir = memory_root(&ctx);
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(memory_dir.join("policy.md"), "body").expect("memory file");
+
+        let result =
+            MemoryCommand.execute_named(&["delete", "policy.md", "--reason", "--team"], &ctx);
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("--reason is required"));
+    }
+
+    #[test]
+    fn test_memory_conflicts_lists_pending_records_without_content() {
+        let (ctx, _env) = memory_test_ctx();
+        let team_dir = team_memory_root(&ctx);
+        let conflict_dir = team_dir.join(".conflicts");
+        std::fs::create_dir_all(&conflict_dir).expect("conflict dir");
+        let conflict = claurst_core::team_memory_sync::TeamMemoryPullConflict {
+            key: "MEMORY.md".to_string(),
+            kind: claurst_core::team_memory_sync::PullConflictKind::BothChanged,
+            local_checksum: Some("local".to_string()),
+            base_checksum: Some("base".to_string()),
+            remote_checksum: Some("remote".to_string()),
+            reason: "local and remote changed".to_string(),
+        };
+        let record = serde_json::json!({
+            "conflict": conflict,
+            "local": "do not print local body",
+            "remote": { "key": "MEMORY.md", "content": "do not print remote body" }
+        });
+        std::fs::write(
+            conflict_dir.join("MEMORY.md.json"),
+            serde_json::to_string(&record).expect("conflict json"),
+        )
+        .expect("conflict write");
+
+        let result = MemoryCommand.execute_named(&["conflicts"], &ctx);
+
+        let CommandResult::Message(msg) = result else {
+            panic!("Expected Message");
+        };
+        assert!(msg.contains("MEMORY.md"));
+        assert!(msg.contains("BothChanged"));
+        assert!(!msg.contains("do not print"));
+    }
+
+    #[test]
+    fn test_memory_resolve_conflict_removes_only_matching_record() {
+        let (ctx, _env) = memory_test_ctx();
+        let team_dir = team_memory_root(&ctx);
+        let conflict_dir = team_dir.join(".conflicts");
+        std::fs::create_dir_all(&conflict_dir).expect("conflict dir");
+        std::fs::write(conflict_dir.join("MEMORY.md.json"), "{}").expect("first conflict");
+        std::fs::write(conflict_dir.join("other.md.json"), "{}").expect("second conflict");
+
+        let result = MemoryCommand.execute_named(&["resolve-conflict", "MEMORY.md"], &ctx);
+
+        assert!(matches!(result, CommandResult::Message(_)));
+        assert!(!conflict_dir.join("MEMORY.md.json").exists());
+        assert!(conflict_dir.join("other.md.json").exists());
+    }
+
+    #[test]
+    fn test_memory_hosted_delete_targets_only_requested_namespace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let coven_home = tmp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _env_guard = CommandEnvGuard::set(&home, &coven_home, None);
+        let first = claurst_core::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-1".to_string(),
+            "OpenCoven/coven-code".to_string(),
+        );
+        let second = claurst_core::hosted_review::HostedReviewScope::new(
+            "tenant-a".to_string(),
+            "install-1".to_string(),
+            "repo-2".to_string(),
+            "OpenCoven/other".to_string(),
+        );
+        let first_dir = claurst_core::memdir::hosted_memory_path_for_scope(&first);
+        let second_dir = claurst_core::memdir::hosted_memory_path_for_scope(&second);
+        std::fs::create_dir_all(&first_dir).expect("first hosted dir");
+        std::fs::create_dir_all(&second_dir).expect("second hosted dir");
+        std::fs::write(first_dir.join("MEMORY.md"), "first").expect("first memory");
+        std::fs::write(second_dir.join("MEMORY.md"), "second").expect("second memory");
+
+        let result = MemoryCommand.execute_named(
+            &[
+                "hosted-delete",
+                "--tenant",
+                "tenant-a",
+                "--installation",
+                "install-1",
+                "--repo-id",
+                "repo-1",
+                "--repo",
+                "OpenCoven/coven-code",
+            ],
+            &make_ctx(),
+        );
+
+        assert!(matches!(result, CommandResult::Message(_)));
+        assert!(!first_dir.exists());
+        assert!(second_dir.exists());
+    }
+
+    #[test]
+    fn test_memory_hosted_delete_rejects_missing_scope_value() {
+        let ctx = make_ctx();
+
+        let result = MemoryCommand.execute_named(
+            &[
+                "hosted-delete",
+                "--tenant",
+                "--installation",
+                "install-1",
+                "--repo-id",
+                "repo-1",
+                "--repo",
+                "OpenCoven/coven-code",
+            ],
+            &ctx,
+        );
+
+        let CommandResult::Error(msg) = result else {
+            panic!("Expected Error");
+        };
+        assert!(msg.contains("--tenant is required"));
     }
 
     #[test]
