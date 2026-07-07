@@ -1,5 +1,5 @@
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "status": "success",
   "branch": "cody/fix-issue-42",
   "commits": [

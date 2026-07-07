@@ -43,12 +43,15 @@ use claurst_api::{
     AnthropicStreamEvent, ApiMessage, ApiToolDefinition, CreateMessageRequest, StreamAccumulator,
     StreamHandler, SystemPrompt, ThinkingConfig,
 };
+use claurst_core::claudemd::MemoryProvenance;
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::error::ClaudeError;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
 use claurst_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -73,6 +76,85 @@ pub enum QueryOutcome {
     Error(ClaudeError),
     /// The configured USD budget was exceeded.
     BudgetExceeded { cost_usd: f64, limit_usd: f64 },
+}
+
+fn build_session_memory_provenance(session_id: &str, working_dir: &Path) -> MemoryProvenance {
+    let mut provenance = MemoryProvenance::session_memory_extraction(session_id);
+
+    if let Some(remote_url) = git_command_output(working_dir, &["remote", "get-url", "origin"]) {
+        if let Some(repo_slug) = parse_origin_repo_slug(&remote_url) {
+            provenance = provenance.with_source_repo(repo_slug);
+        }
+    }
+
+    if let Some(commit) = git_command_output(working_dir, &["rev-parse", "HEAD"]) {
+        provenance = provenance.with_source_commit(commit);
+    }
+
+    if let Ok(actor) = std::env::var("GITHUB_ACTOR") {
+        provenance = provenance.with_source_actor(actor);
+    }
+
+    provenance
+}
+
+fn git_command_output(working_dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_origin_repo_slug(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim();
+    let cutoff = trimmed
+        .char_indices()
+        .find(|(_, ch)| *ch == '?' || *ch == '#')
+        .map(|(idx, _)| idx)
+        .unwrap_or(trimmed.len());
+    let trimmed = trimmed[..cutoff].trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let candidate = if let Some((_, path)) = without_git.split_once("github.com/") {
+        path
+    } else if let Some((_, path)) = without_git.split_once("github.com:") {
+        path
+    } else if let Some((_, path)) = without_git.rsplit_once(':') {
+        path
+    } else {
+        without_git
+    };
+    let components: Vec<&str> = candidate
+        .trim_matches('/')
+        .split('/')
+        .filter(|component| !component.trim().is_empty())
+        .collect();
+    if components.len() < 2 {
+        return None;
+    }
+    let owner = components[components.len() - 2];
+    let repo = components[components.len() - 1];
+    if [owner, repo].iter().any(|component| {
+        !component
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    }) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 /// Configuration for a single query-loop invocation.
@@ -2005,10 +2087,7 @@ pub async fn run_query_loop(
                     let working_dir_clone = tool_ctx.working_dir.clone();
                     let runtime_mode = tool_ctx.config.runtime_mode();
                     let hosted_review_config = tool_ctx.config.hosted_review.clone();
-                    let memory_provenance = format!(
-                        "session:{};source:session-memory-extraction",
-                        tool_ctx.session_id
-                    );
+                    let session_id_clone = tool_ctx.session_id.clone();
 
                     // Build a fresh client using the same API key.  This avoids
                     // requiring an Arc in the existing run_query_loop signature.
@@ -2022,6 +2101,10 @@ pub async fn run_query_loop(
                             ) {
                                 let sm_client = std::sync::Arc::new(sm_client);
                                 tokio::spawn(async move {
+                                    let memory_provenance = build_session_memory_provenance(
+                                        &session_id_clone,
+                                        &working_dir_clone,
+                                    );
                                     let extractor =
                                         session_memory::SessionMemoryExtractor::new(&model_clone);
                                     match extractor
@@ -2616,6 +2699,40 @@ mod tests {
             managed_agents: None,
             preserve_selected_model: false,
         }
+    }
+
+    #[test]
+    fn parses_github_origin_repo_slug_without_credentials() {
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git").as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("git@github.com:OpenCoven/coven-code.git").as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://token@example@github.com/OpenCoven/coven-code.git")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git?token=SECRET")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git#token=SECRET")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+    }
+
+    #[test]
+    fn ignores_origin_strings_without_repo_slug() {
+        assert!(parse_origin_repo_slug("").is_none());
+        assert!(parse_origin_repo_slug("https://github.com/OpenCoven").is_none());
+        assert!(parse_origin_repo_slug("https://github.com/token@example").is_none());
     }
 
     // ---- build_system_prompt tests ------------------------------------------
