@@ -1081,8 +1081,8 @@ dependencies = [
 
 [[package]]
 name = "coven-runtime-registry"
-version = "0.1.0"
-source = "git+https://github.com/OpenCoven/coven-runtimes?rev=9af3e4cf2fe66e95aa1a3addc867524822ea28ab#9af3e4cf2fe66e95aa1a3addc867524822ea28ab"
+version = "0.1.2"
+source = "git+https://github.com/OpenCoven/coven-runtimes?rev=27f656a531f00e201cf9b82cafc6c00c4d548144#27f656a531f00e201cf9b82cafc6c00c4d548144"
 dependencies = [
  "coven-runtime-spec",
  "serde",
@@ -1092,8 +1092,8 @@ dependencies = [
 
 [[package]]
 name = "coven-runtime-spec"
-version = "0.1.0"
-source = "git+https://github.com/OpenCoven/coven-runtimes?rev=9af3e4cf2fe66e95aa1a3addc867524822ea28ab#9af3e4cf2fe66e95aa1a3addc867524822ea28ab"
+version = "0.1.2"
+source = "git+https://github.com/OpenCoven/coven-runtimes?rev=27f656a531f00e201cf9b82cafc6c00c4d548144#27f656a531f00e201cf9b82cafc6c00c4d548144"
 dependencies = [
  "serde",
  "serde_json",

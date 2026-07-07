@@ -24,6 +24,7 @@ Recent highlights:
 - **/share** — share sessions via unlisted GitHub Gists `[EXPERIMENTAL]`
 - **/goal** — `/goal <objective>` keeps the agent working across multiple turns `[EXPERIMENTAL]`
 - **/coven** — drive the local [Coven daemon](https://github.com/OpenCoven/coven) (sessions, harness runs, rituals) without leaving the TUI. `/coven` is the unified replacement for `coven-cli`'s interactive menu and the legacy `coven-tui` slash shell; when `coven-code` is on `PATH`, `coven` and `coven tui` exec into it automatically (opt out with `COVEN_LEGACY_TUI=1`). Run `/coven help` for the subcommand list.
+- **Coven runtime** — `coven-code` is a registered runtime in the [coven-runtimes](https://github.com/OpenCoven/coven-runtimes) canonical registry, with a long-lived stream-json mode the daemon can drive (`--print --input-format stream-json --output-format stream-json`). `/coven runtimes` lists the accepted runtimes and their local install status. See [docs/coven-runtimes.md](docs/coven-runtimes.md).
 
 ---
 

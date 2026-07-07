@@ -507,6 +507,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(log_filter)
         .with_target(false)
         .without_time()
+        // Logs go to stderr: stdout belongs to the response — plain text in
+        // --print mode, and strictly JSONL in the stream-json runtime protocol
+        // (a stray WARN line on stdout would corrupt the frame stream).
+        .with_writer(std::io::stderr)
         .init();
 
     // --context loads a coven-github session brief (headless contract v1). It
