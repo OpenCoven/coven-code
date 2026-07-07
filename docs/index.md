@@ -73,11 +73,12 @@ Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85
 
 ```bash
 # Linux / macOS
-npm install -g @opencoven/coven
+npm install -g @opencoven/coven-code
 ```
 
-The package installs the `coven` CLI. Run `coven` with no arguments, or
-`coven tui` explicitly, for the interactive UI. See [Installation](installation)
+The package installs the `coven-code` CLI (with `coven` and `coven-cave`
+aliases). Run `coven-code` with no arguments for the interactive UI. See
+[Installation](installation)
 for npm, bun, standalone binary, and source install options.
 
 **2. Set your API key**
@@ -158,7 +159,7 @@ When you launch the interactive UI with `coven` or `coven tui`, the home screen 
 |-------|---------------|---------------|
 | `Model` | Active model id, or the effective default if unset | `model` in [settings.json](configuration), `/model` |
 | `Provider` | Active provider id (`anthropic` when unset) | `provider` in [settings.json](configuration), see [Providers](providers) |
-| `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/coven` to bring it online |
+| `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/cli` to bring it online |
 | `Familiar` | Current familiar id, with an `(F2 to switch)` hint | `familiar` in settings, `/familiar`, or **F2** |
 | `Goal` | Active autonomous goal (only shown when one is set) | `/coven goal <objective>` |
 
@@ -210,7 +211,7 @@ Coven Code connects natively to the [Coven daemon](https://opencoven.ai/docs) wh
 Coven Code is fully standalone without the daemon — install it separately to unlock the Coven ecosystem features.
 
 ```
-npm install -g @opencoven/coven
+npm install -g @opencoven/cli
 ```
 
 See [Coven Familiars](familiars) for the full integration reference.

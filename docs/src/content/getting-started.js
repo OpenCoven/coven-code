@@ -8,9 +8,9 @@ export function render() {
     <h2>1. Install</h2>
 
     <h3>npm</h3>
-    <pre><code data-lang="bash">npm install -g @opencoven/coven</code></pre>
+    <pre><code data-lang="bash">npm install -g @opencoven/coven-code</code></pre>
 
-    <p>This installs the <code>coven</code> CLI. Run <code>coven</code> with no arguments, or <code>coven tui</code> explicitly, for the interactive UI.</p>
+    <p>This installs the <code>coven-code</code> CLI (with <code>coven</code> and <code>coven-cave</code> aliases). Run <code>coven-code</code> with no arguments for the interactive UI.</p>
 
     <h3>From Source</h3>
     <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
@@ -87,7 +87,7 @@ cargo install --path crates/cli</code></pre>
 
     <p>Coven Code connects natively to the Coven daemon when it's running on your machine. With the daemon active, familiars appear as agents, daemon-registered skills become awareness context, and the welcome panel animates with your familiar's glyph.</p>
 
-    <pre><code data-lang="bash">npm install -g @opencoven/coven
+    <pre><code data-lang="bash">npm install -g @opencoven/cli
 coven daemon start</code></pre>
 
     <p>Coven Code is fully standalone without the daemon — install it separately to unlock the Coven ecosystem features.</p>

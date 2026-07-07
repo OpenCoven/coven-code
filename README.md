@@ -41,15 +41,15 @@ Recent highlights:
 ### Install
 
 ```bash
-npm install -g @opencoven/coven
+npm install -g @opencoven/coven-code
 ```
 
-Then open a new terminal and run `coven` or `coven tui`. The lower-level `coven-code` binary and `coven-cave` alias are also installed for compatibility.
+Then open a new terminal and run `coven-code`. The `coven` and `coven-cave` aliases are also installed.
 
 ### Upgrade
 
 ```bash
-npm install -g @opencoven/coven@latest
+npm install -g @opencoven/coven-code@latest
 ```
 
 ---

@@ -264,7 +264,7 @@ The familiar-sourced entry will be suppressed; only the workspace definition app
 If the Coven daemon is not installed or `~/.coven/` does not exist, `load_agent_definitions()` returns only workspace agents. No errors are shown — Coven Code degrades gracefully. Install the Coven daemon to unlock familiars:
 
 ```
-npm install -g @opencoven/coven
+npm install -g @opencoven/cli
 ```
 
 Or check the [Coven documentation](https://opencoven.ai/docs) for installation instructions.
