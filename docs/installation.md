@@ -193,7 +193,7 @@ coven-code --version
 A successful installation prints the version string, for example:
 
 ```
-coven-code 0.4.0
+coven-code 0.5.0
 ```
 
 To confirm the binary is the one you installed:
