@@ -1240,6 +1240,7 @@ are CLI-only.
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
 | `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/usage stats` opens the stats dialog). |
+| `memory` | Operator controls for hosted/local memory lifecycle: list, expire, redact, delete, and export the tombstone audit ledger. |
 
 ---
 

@@ -601,6 +601,11 @@ Additional hosted invariants:
   remote tombstone always applies over local content, a local tombstone is
   never resurrected by a pull, and a file deleted locally after a sync is not
   silently re-created.
+- `coven-code memory` exposes operator controls for hosted memory lifecycle
+  administration: list entries by directory or hosted tenant/repo/domain,
+  expire entries, redact/delete by id or path, delete hosted scopes, and export
+  a tombstone-only audit ledger. The ledger includes timestamps and reason
+  stubs but not original redacted or deleted content.
 - A key with an unresolved team-memory pull conflict is blocked from further
   sync until the persisted conflict record under `.conflicts/` is resolved.
 - `/review` injects the ids and trust labels of every loaded memory entry into

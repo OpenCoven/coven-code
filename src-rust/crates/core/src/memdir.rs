@@ -425,10 +425,31 @@ pub fn delete_hosted_memory_for_scope(scope: &HostedReviewScope) -> std::io::Res
 
 pub fn redact_memory_file(path: &Path, reason: &str) -> std::io::Result<()> {
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let id_line = current_memory_id_frontmatter_line(path);
     let stub = format!(
-        "---\nredacted_at: {timestamp}\nretention_class: security\nsource: redaction\n---\n\n[REDACTED: {reason}]\n"
+        "---\n{id_line}redacted_at: {timestamp}\nretention_class: security\nsource: redaction\n---\n\n[REDACTED: {reason}]\n"
     );
     std::fs::write(path, stub)
+}
+
+pub fn expire_memory_file(path: &Path, expires_at: &str, force: bool) -> std::io::Result<()> {
+    let date = chrono::NaiveDate::parse_from_str(expires_at.trim(), "%Y-%m-%d").map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("expires_at must use YYYY-MM-DD: {err}"),
+        )
+    })?;
+    if !force && memory_file_has_legal_hold(path)? {
+        return Err(legal_hold_error("expire"));
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let updated = crate::claudemd::upsert_frontmatter_key(
+        &content,
+        "expires_at",
+        &date.format("%Y-%m-%d").to_string(),
+    );
+    std::fs::write(path, updated)
 }
 
 /// Delete a single memory file by replacing it with a tombstone stub.
@@ -437,10 +458,42 @@ pub fn redact_memory_file(path: &Path, reason: &str) -> std::io::Result<()> {
 /// disk instead of removing the file so team-memory sync propagates the
 /// deletion instead of resurrecting the old content on the next pull.
 pub fn delete_memory_file(path: &Path, reason: &str) -> std::io::Result<()> {
+    delete_memory_file_with_force(path, reason, false)
+}
+
+pub fn delete_memory_file_with_force(
+    path: &Path,
+    reason: &str,
+    force: bool,
+) -> std::io::Result<()> {
+    if !force && memory_file_has_legal_hold(path)? {
+        return Err(legal_hold_error("delete"));
+    }
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let stub =
-        format!("---\ndeleted_at: {timestamp}\nsource: deletion\n---\n\n[DELETED: {reason}]\n");
+    let id_line = current_memory_id_frontmatter_line(path);
+    let stub = format!(
+        "---\n{id_line}deleted_at: {timestamp}\nsource: deletion\n---\n\n[DELETED: {reason}]\n"
+    );
     std::fs::write(path, stub)
+}
+
+fn current_memory_id_frontmatter_line(path: &Path) -> String {
+    crate::claudemd::load_memory_file(path, crate::claudemd::MemoryScope::Managed)
+        .map(|file| format!("id: {}\n", crate::claudemd::memory_id(&file)))
+        .unwrap_or_default()
+}
+
+pub fn memory_file_has_legal_hold(path: &Path) -> std::io::Result<bool> {
+    let content = std::fs::read_to_string(path)?;
+    let (frontmatter, _) = crate::claudemd::parse_frontmatter(&content);
+    Ok(frontmatter.retention_class == Some(crate::claudemd::RetentionClass::LegalHold))
+}
+
+fn legal_hold_error(operation: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("refusing to {operation} legal_hold memory without --force"),
+    )
 }
 
 /// Sanitize an arbitrary string into a directory-name-safe component.
@@ -1255,14 +1308,84 @@ mod tests {
     }
 
     #[test]
+    fn delete_memory_file_preserves_generated_memory_id_in_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("memory.md");
+        std::fs::write(&path, "sensitive fact").unwrap();
+        let before =
+            crate::claudemd::load_memory_file(&path, crate::claudemd::MemoryScope::Managed)
+                .map(|file| crate::claudemd::memory_id(&file))
+                .unwrap();
+
+        delete_memory_file(&path, "user requested deletion").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&format!("id: {before}")));
+    }
+
+    #[test]
+    fn expire_memory_file_sets_frontmatter_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("memory.md");
+        std::fs::write(&path, "---\nsource: operator\n---\nbody").unwrap();
+
+        expire_memory_file(&path, "2026-07-07", false).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("source: operator\n"));
+        assert!(content.contains("expires_at: 2026-07-07\n"));
+        assert!(content.ends_with("body"));
+    }
+
+    #[test]
+    fn expire_memory_file_refuses_legal_hold_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("memory.md");
+        std::fs::write(
+            &path,
+            "---\nretention_class: legal_hold\nsource: operator\n---\nbody",
+        )
+        .unwrap();
+
+        let err = expire_memory_file(&path, "2026-07-07", false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("expires_at: 2026-07-07"));
+    }
+
+    #[test]
+    fn delete_memory_file_refuses_legal_hold_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("memory.md");
+        std::fs::write(
+            &path,
+            "---\nretention_class: legal_hold\nsource: operator\n---\nlegal hold body",
+        )
+        .unwrap();
+
+        let err = delete_memory_file(&path, "operator request").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("legal hold body"));
+        assert!(!content.contains("deleted_at:"));
+    }
+
+    #[test]
     fn redact_memory_file_preserves_audit_stub_without_original_content() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("MEMORY.md");
         std::fs::write(&path, "secret incident detail").unwrap();
+        let before =
+            crate::claudemd::load_memory_file(&path, crate::claudemd::MemoryScope::Managed)
+                .map(|file| crate::claudemd::memory_id(&file))
+                .unwrap();
 
         redact_memory_file(&path, "operator request").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&format!("id: {before}")));
         assert!(content.contains("redacted_at:"));
         assert!(content.contains("[REDACTED: operator request]"));
         assert!(!content.contains("secret incident detail"));
