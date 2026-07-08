@@ -100,8 +100,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls-vendored"] }
 schemars = { version = "0.8", features = ["derive"] }
 
 # Runtime registry
-coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", rev = "fcae33124e796c07fbc1c12eaa936547844054e8" }
-coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", rev = "fcae33124e796c07fbc1c12eaa936547844054e8" }
+coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
+coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
 
 # Workspace crates
 claurst-core = { path = "crates/core" }
