@@ -10,6 +10,7 @@
 
 mod codex_oauth_flow;
 mod headless;
+mod memory_admin;
 mod oauth_flow;
 mod stream_mode;
 mod upgrade;
@@ -442,6 +443,11 @@ async fn main() -> anyhow::Result<()> {
     //     plus any disk-cached overlay from models.dev.
     if raw_args.get(1).map(|s| s.as_str()) == Some("models") {
         return run_models_command(&raw_args[2..]).await;
+    }
+
+    // Fast-path: `coven-code memory ...` — inspect and administer memory lifecycle controls.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("memory") {
+        return memory_admin::handle_memory_command(&raw_args[2..]).await;
     }
 
     // Fast-path: named commands (`claude agents`, `claude ide`, `claude branch`, …)

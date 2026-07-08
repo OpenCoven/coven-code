@@ -58,7 +58,7 @@ pub struct MemoryFrontmatter {
     #[serde(default)]
     pub expires_at: Option<String>,
     #[serde(default)]
-    pub retention_class: Option<String>,
+    pub retention_class: Option<RetentionClass>,
     #[serde(default)]
     pub redacted_at: Option<String>,
     #[serde(default)]
@@ -73,6 +73,44 @@ pub struct MemoryFrontmatter {
     pub transcript_ref: Option<String>,
     #[serde(default)]
     pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionClass {
+    Standard,
+    ShortLived,
+    Security,
+    LegalHold,
+}
+
+impl RetentionClass {
+    pub fn parse(value: &str) -> Option<Self> {
+        match normalized_frontmatter_value(value).as_str() {
+            "standard" => Some(Self::Standard),
+            "short_lived" => Some(Self::ShortLived),
+            "security" => Some(Self::Security),
+            "legal_hold" => Some(Self::LegalHold),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::ShortLived => "short_lived",
+            Self::Security => "security",
+            Self::LegalHold => "legal_hold",
+        }
+    }
+
+    pub fn default_retention_days(self) -> Option<i64> {
+        match self {
+            Self::ShortLived => Some(30),
+            Self::Security => Some(90),
+            Self::Standard | Self::LegalHold => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -439,9 +477,7 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
                         fm.source_actor = Some(strip_frontmatter_value(&val).to_string())
                     }
                     "expires_at" => fm.expires_at = Some(strip_frontmatter_value(&val).to_string()),
-                    "retention_class" => {
-                        fm.retention_class = Some(strip_frontmatter_value(&val).to_string())
-                    }
+                    "retention_class" => fm.retention_class = RetentionClass::parse(&val),
                     "redacted_at" => {
                         fm.redacted_at = Some(strip_frontmatter_value(&val).to_string())
                     }
@@ -471,6 +507,46 @@ fn normalized_frontmatter_value(value: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace('-', "_")
+}
+
+pub fn upsert_frontmatter_key(content: &str, key: &str, value: &str) -> String {
+    if !content.starts_with("---") {
+        return format!("---\n{key}: {value}\n---\n{content}");
+    }
+
+    let after_first = &content[3..];
+    let Some(end) = after_first.find("\n---") else {
+        return format!("---\n{key}: {value}\n---\n{content}");
+    };
+
+    let yaml = after_first[..end]
+        .strip_prefix('\n')
+        .unwrap_or(&after_first[..end]);
+    let mut updated = Vec::new();
+    let mut replaced = false;
+    for line in yaml.lines() {
+        if line
+            .split_once(':')
+            .map(|(existing_key, _)| existing_key.trim() == key)
+            .unwrap_or(false)
+        {
+            updated.push(format!("{key}: {value}"));
+            replaced = true;
+        } else {
+            updated.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        updated.push(format!("{key}: {value}"));
+    }
+
+    let mut result = String::from("---\n");
+    result.push_str(&updated.join("\n"));
+    result.push('\n');
+    result.push_str("---");
+    result.push_str(&after_first[end + 4..]);
+    result
 }
 
 fn parse_memory_trust(value: &str) -> Option<MemorySourceTrust> {
@@ -607,7 +683,7 @@ pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLo
         return true;
     }
 
-    if memory_is_expired(file.frontmatter.expires_at.as_deref()) {
+    if memory_is_expired(&file.frontmatter) {
         return false;
     }
 
@@ -662,14 +738,39 @@ fn memory_has_provenance(frontmatter: &MemoryFrontmatter) -> bool {
         .is_some_and(|source| !source.trim().is_empty())
 }
 
-fn memory_is_expired(expires_at: Option<&str>) -> bool {
-    let Some(expires_at) = expires_at else {
+pub fn effective_memory_expires_at(frontmatter: &MemoryFrontmatter) -> Option<chrono::NaiveDate> {
+    if let Some(expires_at) = frontmatter.expires_at.as_deref() {
+        return parse_memory_date(expires_at);
+    }
+
+    let retention_class = frontmatter.retention_class?;
+    if retention_class == RetentionClass::LegalHold {
+        return None;
+    }
+    let days = retention_class.default_retention_days()?;
+    let created_at = parse_memory_date(frontmatter.created_at.as_deref()?)?;
+    created_at.checked_add_signed(chrono::Duration::days(days))
+}
+
+fn parse_memory_date(value: &str) -> Option<chrono::NaiveDate> {
+    let trimmed = value.trim();
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Some(date);
+    }
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(timestamp.date_naive());
+    }
+    if let Some((date, _)) = trimmed.split_once('T') {
+        return chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok();
+    }
+    None
+}
+
+fn memory_is_expired(frontmatter: &MemoryFrontmatter) -> bool {
+    let Some(expires) = effective_memory_expires_at(frontmatter) else {
         return false;
     };
-    let Ok(expires) = chrono::NaiveDate::parse_from_str(expires_at.trim(), "%Y-%m-%d") else {
-        return false;
-    };
-    expires < chrono::Local::now().date_naive()
+    expires <= chrono::Local::now().date_naive()
 }
 
 pub fn memory_id(file: &MemoryFileInfo) -> String {
@@ -1290,6 +1391,115 @@ mod tests {
             load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
 
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_excludes_memory_expiring_today() {
+        let expires_at = chrono::Local::now().date_naive().format("%Y-%m-%d");
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nexpires_at: {expires_at}\n---\nexpires today"
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(!memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn hosted_review_expires_short_lived_memory_from_created_at_default() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(31);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: short_lived\ncreated_at: {}\n---\nshort lived memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(!memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn explicit_expires_at_wins_over_retention_class_default() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(31);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: short_lived\ncreated_at: {}\nexpires_at: 2099-12-31\n---\nshort lived memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn legal_hold_memory_never_auto_expires_from_created_at() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(3650);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: legal_hold\ncreated_at: {}\n---\nlegal hold memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn upsert_frontmatter_key_preserves_other_keys_and_body() {
+        let content = "---\ntrust: maintainer_approved\nsource: operator\n---\n\nBody: keep me\n";
+        let updated = upsert_frontmatter_key(content, "expires_at", "2026-07-07");
+
+        assert!(updated.contains("trust: maintainer_approved\n"));
+        assert!(updated.contains("source: operator\n"));
+        assert!(updated.contains("expires_at: 2026-07-07\n"));
+        assert!(updated.ends_with("\nBody: keep me\n"));
+    }
+
+    #[test]
+    fn upsert_frontmatter_key_replaces_existing_key_without_touching_body() {
+        let content =
+            "---\nexpires_at: 2026-01-01\nsource: operator\n---\nBody: 2026-01-01 remains here\n";
+        let updated = upsert_frontmatter_key(content, "expires_at", "2026-07-07");
+
+        assert!(updated.contains("expires_at: 2026-07-07\n"));
+        assert!(!updated.contains("expires_at: 2026-01-01\n"));
+        assert!(updated.ends_with("Body: 2026-01-01 remains here\n"));
     }
 
     #[test]
