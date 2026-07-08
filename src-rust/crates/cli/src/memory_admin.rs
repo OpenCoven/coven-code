@@ -53,6 +53,8 @@ pub(crate) async fn handle_memory_command(args: &[String]) -> anyhow::Result<()>
         Some("expire") => handle_expire(&args[1..]),
         Some("redact") => handle_redact(&args[1..]),
         Some("delete") => handle_delete(&args[1..]),
+        Some("conflicts") => handle_conflicts(&args[1..]),
+        Some("resolve-conflict") => handle_resolve_conflict(&args[1..]),
         Some("ledger") => handle_ledger(&args[1..]),
         Some("-h") | Some("--help") | None => {
             print_usage();
@@ -175,6 +177,96 @@ fn handle_delete(args: &[String]) -> anyhow::Result<()> {
         .with_context(|| format!("failed to delete {}", entry.path.display()))?;
     println!("deleted {}", entry.id);
     Ok(())
+}
+
+fn handle_conflicts(args: &[String]) -> anyhow::Result<()> {
+    let mut json = false;
+    let mut team_dir = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--dir" => {
+                index += 1;
+                team_dir = Some(PathBuf::from(required_arg(args, index, "--dir")?));
+            }
+            value if value.starts_with("--dir=") => {
+                team_dir = Some(PathBuf::from(value.trim_start_matches("--dir=")));
+            }
+            flag if flag.starts_with("--") => bail!("unknown memory conflicts flag: {flag}"),
+            value => bail!("unexpected memory conflicts argument: {value}"),
+        }
+        index += 1;
+    }
+
+    let team_dir = match team_dir {
+        Some(dir) => dir,
+        None => default_team_memory_dir()?,
+    };
+    let conflicts = claurst_core::team_memory_sync::pending_conflicts(&team_dir);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&conflicts)?);
+        return Ok(());
+    }
+    if conflicts.is_empty() {
+        println!("no pending team-memory conflicts in {}", team_dir.display());
+        return Ok(());
+    }
+    println!("pending team-memory conflicts ({})", conflicts.len());
+    for conflict in &conflicts {
+        println!(
+            "  {} [{:?}]: {}",
+            conflict.key, conflict.kind, conflict.reason
+        );
+    }
+    Ok(())
+}
+
+fn handle_resolve_conflict(args: &[String]) -> anyhow::Result<()> {
+    let mut key = None;
+    let mut team_dir = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dir" => {
+                index += 1;
+                team_dir = Some(PathBuf::from(required_arg(args, index, "--dir")?));
+            }
+            value if value.starts_with("--dir=") => {
+                team_dir = Some(PathBuf::from(value.trim_start_matches("--dir=")));
+            }
+            flag if flag.starts_with("--") => {
+                bail!("unknown memory resolve-conflict flag: {flag}")
+            }
+            value => set_single_target(&mut key, value)?,
+        }
+        index += 1;
+    }
+    let key = key.context("usage: coven-code memory resolve-conflict <key> [--dir <path>]")?;
+    claurst_core::team_memory_sync::validate_memory_path(&key)
+        .with_context(|| format!("invalid memory key '{key}'"))?;
+
+    let team_dir = match team_dir {
+        Some(dir) => dir,
+        None => default_team_memory_dir()?,
+    };
+    let resolved = claurst_core::team_memory_sync::resolve_conflict(&team_dir, &key)
+        .with_context(|| format!("failed to resolve conflict for '{key}'"))?;
+    if !resolved {
+        bail!(
+            "no pending conflict for key '{key}' in {}",
+            team_dir.display()
+        );
+    }
+    println!("resolved team-memory conflict {key}");
+    Ok(())
+}
+
+fn default_team_memory_dir() -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    Ok(claurst_core::memdir::team_memory_path(&auto_memory_path(
+        &cwd,
+    )))
 }
 
 fn handle_ledger(args: &[String]) -> anyhow::Result<()> {
@@ -649,6 +741,8 @@ fn print_usage() {
     eprintln!(
         "  delete --scope tenant=<t>,install=<i>,repo=<r>[,domain=<d>] --reason <text> [--force]"
     );
+    eprintln!("  conflicts [--dir <team-memory-path>] [--json]");
+    eprintln!("  resolve-conflict <key> [--dir <team-memory-path>]");
     eprintln!("  ledger [--dir <path>] [--json]");
 }
 
@@ -660,6 +754,73 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, content).expect("write memory file");
         path
+    }
+
+    fn write_conflict_record(team_dir: &std::path::Path, key: &str) {
+        let conflicts_dir = team_dir.join(".conflicts");
+        std::fs::create_dir_all(&conflicts_dir).expect("create conflicts dir");
+        let record = serde_json::json!({
+            "conflict": {
+                "key": key,
+                "kind": "both_changed",
+                "local_checksum": "aaa",
+                "base_checksum": "bbb",
+                "remote_checksum": "ccc",
+                "reason": "local and remote both changed",
+            }
+        });
+        std::fs::write(
+            conflicts_dir.join(format!("{}.json", key.replace('/', "__"))),
+            record.to_string(),
+        )
+        .expect("write conflict record");
+    }
+
+    #[test]
+    fn conflicts_lists_pending_records_from_dir_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_conflict_record(dir.path(), "MEMORY.md");
+
+        handle_conflicts(&[
+            "--dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ])
+        .expect("list conflicts");
+        let pending = claurst_core::team_memory_sync::pending_conflicts(dir.path());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].key, "MEMORY.md");
+    }
+
+    #[test]
+    fn resolve_conflict_removes_record_and_rejects_unknown_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_conflict_record(dir.path(), "MEMORY.md");
+
+        handle_resolve_conflict(&[
+            "MEMORY.md".to_string(),
+            "--dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ])
+        .expect("resolve conflict");
+        assert!(claurst_core::team_memory_sync::pending_conflicts(dir.path()).is_empty());
+
+        let missing = handle_resolve_conflict(&[
+            "MEMORY.md".to_string(),
+            "--dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ]);
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn resolve_conflict_rejects_traversal_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = handle_resolve_conflict(&[
+            "../escape.md".to_string(),
+            "--dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]

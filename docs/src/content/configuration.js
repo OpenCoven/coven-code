@@ -94,7 +94,7 @@ export function render() {
 
     <h2>Memory Retention</h2>
     <p>AGENTS.md frontmatter supports lifecycle fields for hosted review memory. <code>expires_at</code> uses <code>YYYY-MM-DD</code> and always wins over retention defaults. <code>retention_class</code> can be <code>standard</code> (no automatic expiry), <code>short_lived</code> (30 days from <code>created_at</code>), <code>security</code> (90 days), or <code>legal_hold</code> (no automatic expiry and requires <code>--force</code> for operator expiry/deletion).</p>
-    <p>Operators can run <code>coven-code memory list</code>, <code>expire</code>, <code>redact</code>, <code>delete</code>, and <code>ledger --json</code>. Redaction and deletion write tombstone stubs; the audit ledger exports ids, timestamps, reasons, and provenance without original removed content.</p>
+    <p>Operators can run <code>coven-code memory list</code>, <code>expire</code>, <code>redact</code>, <code>delete</code>, <code>conflicts</code>, <code>resolve-conflict</code>, and <code>ledger --json</code>. Redaction and deletion write tombstone stubs; the audit ledger exports ids, timestamps, reasons, and provenance without original removed content.</p>
 
     <h2>Environment Variables</h2>
 

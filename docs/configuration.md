@@ -425,6 +425,8 @@ without exposing redacted or deleted content to the model.
 | `coven-code memory redact <id-or-path> --reason <text>` | Replace the file with a redaction tombstone stub via `redact_memory_file`; the original body is removed. |
 | `coven-code memory delete <id-or-path> --reason <text> [--force]` | Replace the file with a deletion tombstone stub. `legal_hold` entries require `--force`. |
 | `coven-code memory delete --scope tenant=<t>,install=<i>,repo=<r>[,domain=<d>] --reason <text> [--force]` | Remove the hosted memory directory for a scoped tenant/installation/repo/domain. Scope deletion refuses legal-hold files unless forced. |
+| `coven-code memory conflicts [--dir <team-memory-path>] [--json]` | List unresolved team-memory pull conflicts (key, kind, reason). With no `--dir`, uses the project's team-memory directory. Team memory with pending conflicts is treated as unavailable by hosted review until they are resolved. |
+| `coven-code memory resolve-conflict <key> [--dir <team-memory-path>]` | Remove the persisted conflict record for `<key>`, unblocking it for the next pull. Keys are validated against path traversal. |
 | `coven-code memory ledger [--dir <path>] [--json]` | Export tombstoned entries only: id, path, redacted/deleted timestamp, retention class, tombstone reason line, and provenance source. The ledger reads tombstone stubs and never includes original memory body content. |
 
 ### @include directives
