@@ -445,7 +445,7 @@ mod tests {
             SelectItem {
                 id: "codex".into(),
                 title: "Codex".into(),
-                description: "gpt-5.2-codex via ChatGPT".into(),
+                description: "gpt-5.5 via ChatGPT".into(),
                 category: "Recommended".into(),
                 badge: None,
             },
