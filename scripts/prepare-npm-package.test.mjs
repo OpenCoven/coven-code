@@ -41,7 +41,6 @@ function readJson(file) {
   assert.equal(pkg.version, '1.2.3');
   assert.deepEqual(pkg.bin, {
     'coven-code': 'bin/coven-code',
-    coven: 'bin/coven-code',
     'coven-cave': 'bin/coven-code',
   });
   assert.match(readme, /^# coven-code$/m);
