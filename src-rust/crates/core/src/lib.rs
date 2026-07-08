@@ -832,17 +832,17 @@ pub mod config {
             ManagedAgentPreset {
                 name: "codex-tiered",
                 label: "Codex Tiered",
-                description: "gpt-5.2-codex manages, gpt-5.1-codex-mini executes",
-                manager_model: "codex/gpt-5.2-codex",
-                executor_model: "codex/gpt-5.1-codex-mini",
+                description: "gpt-5.5 manages, gpt-5.4-mini executes",
+                manager_model: "codex/gpt-5.5",
+                executor_model: "codex/gpt-5.4-mini",
                 executor_max_turns: 10,
                 max_concurrent_executors: 4,
             },
             ManagedAgentPreset {
                 name: "cross-codex-anthropic",
                 label: "Cross: Codex + Claude",
-                description: "gpt-5.2-codex manages, Sonnet 4.6 executes",
-                manager_model: "codex/gpt-5.2-codex",
+                description: "gpt-5.5 manages, Sonnet 4.6 executes",
+                manager_model: "codex/gpt-5.5",
                 executor_model: "anthropic/claude-sonnet-4-6",
                 executor_max_turns: 10,
                 max_concurrent_executors: 4,
@@ -1322,7 +1322,9 @@ pub mod config {
                 return m;
             }
             match self.provider.as_deref() {
-                Some("openai") | Some("codex") | Some("openai-codex") => "gpt-5.2-codex",
+                Some("openai") | Some("codex") | Some("openai-codex") => {
+                    crate::codex_oauth::DEFAULT_CODEX_MODEL
+                }
                 _ => crate::constants::DEFAULT_MODEL, // Anthropic default
             }
         }

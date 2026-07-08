@@ -76,7 +76,22 @@ Runs Claude-style coding sessions against OpenAI's Codex using your ChatGPT/Code
 
 **Authentication:** Sign in with `coven-code codex login` (ChatGPT/Codex OAuth). Tokens are stored per profile under `~/.coven-code/accounts/codex/<id>/`. See [auth.md](auth.md) for the multi-account flow.
 
-**Default model:** `gpt-5.2-codex`
+**Default model:** `gpt-5.5`
+
+**Bundled Codex model list:**
+
+| Model ID | Notes |
+|---|---|
+| `gpt-5.5` | Default; recommended for most Codex tasks |
+| `gpt-5.4` | Frontier Codex model |
+| `gpt-5.4-mini` | Fast/lower-cost model for lighter coding tasks and subagents |
+| `gpt-5.3-codex-spark` | Research preview for ChatGPT Pro users |
+| `gpt-5.3-codex` | Deprecated for ChatGPT sign-in; retained for explicit selection |
+| `gpt-5.2-codex` | Deprecated for ChatGPT sign-in; retained for explicit selection |
+| `gpt-5.1-codex` | Legacy Codex model |
+| `gpt-5.1-codex-mini` | Legacy mini model |
+| `gpt-5.1-codex-max` | Legacy max model |
+| `gpt-5.2` | Deprecated for ChatGPT sign-in; retained for explicit selection |
 
 **Configuration:**
 

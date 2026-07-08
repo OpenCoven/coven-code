@@ -1001,7 +1001,7 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
         ],
         "zai" => &["glm-5.1", "glm-5", "glm-4.7"],
         "minimax" => &["minimax-m2"],
-        "codex" | "openai-codex" => &["gpt-5.2-codex", "gpt-5.1-codex"],
+        "codex" | "openai-codex" => &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
         "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" => &[
             "qwen3-coder",
             "qwen2.5-coder",
@@ -1049,7 +1049,7 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
 fn small_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" => &["claude-haiku-4", "claude-haiku-3-5", "claude-haiku"],
-        "codex" | "openai" | "openai-codex" => &["gpt-5.1-codex-mini", "gpt-5-mini"],
+        "codex" | "openai" | "openai-codex" => &["gpt-5.4-mini", "gpt-5-mini"],
         _ => &["mini", "haiku", "flash", "lite", "small", "nano"],
     }
 }
@@ -1189,15 +1189,19 @@ mod tests {
             .best_model_for_provider("codex")
             .expect("codex best model must fall back to CODEX_MODELS default");
         assert!(
-            best.contains("codex"),
-            "best codex model should look like a codex id, got {best:?}"
+            claurst_core::codex_oauth::CODEX_MODELS
+                .iter()
+                .any(|(id, _)| *id == best),
+            "best codex model should come from CODEX_MODELS, got {best:?}"
         );
         let small = reg
             .best_small_model_for_provider("codex")
             .expect("codex small model must fall back to a mini/default id");
         assert!(
-            small.contains("codex"),
-            "small codex model should look like a codex id, got {small:?}"
+            claurst_core::codex_oauth::CODEX_MODELS
+                .iter()
+                .any(|(id, _)| *id == small),
+            "small codex model should come from CODEX_MODELS, got {small:?}"
         );
         // The alias `openai-codex` must take the same path.
         assert!(reg.best_model_for_provider("openai-codex").is_some());
