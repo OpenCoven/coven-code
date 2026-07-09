@@ -100,8 +100,12 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${specific_version}/
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
-  cp "$local_binary" "${INSTALL_DIR}/${APP}"
-  chmod +x "${INSTALL_DIR}/${APP}"
+  # Stage then mv: overwriting an existing binary in place reuses its inode,
+  # and macOS caches signature validation per inode — the upgraded binary
+  # would be SIGKILLed (Code Signature Invalid) on launch.
+  cp "$local_binary" "${INSTALL_DIR}/${APP}.new"
+  chmod +x "${INSTALL_DIR}/${APP}.new"
+  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
 else
   tmp_dir=$(mktemp -d -t coven-code-install-XXXXXX)
   trap 'rm -rf "$tmp_dir"' EXIT
@@ -109,8 +113,9 @@ else
   print_message info "Downloading ${ARCHIVE_NAME}..."
   curl -fsSL --progress-bar "$DOWNLOAD_URL" -o "${tmp_dir}/${ARCHIVE_NAME}"
   tar -xzf "${tmp_dir}/${ARCHIVE_NAME}" -C "$tmp_dir"
-  cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}"
-  chmod +x "${INSTALL_DIR}/${APP}"
+  cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}.new"
+  chmod +x "${INSTALL_DIR}/${APP}.new"
+  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
 fi
 
 ln -sf "${APP}" "${INSTALL_DIR}/${ALIAS}" || cp "${INSTALL_DIR}/${APP}" "${INSTALL_DIR}/${ALIAS}"
