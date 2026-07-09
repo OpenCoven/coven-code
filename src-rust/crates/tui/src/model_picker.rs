@@ -361,7 +361,9 @@ fn codex_provider_models() -> Vec<ModelEntry> {
         .iter()
         .map(|(id, name)| {
             let ctx = match *id {
-                "gpt-5.5" | "gpt-5.4" => "1M ctx",
+                "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4" => {
+                    "1M ctx"
+                }
                 "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2" | "gpt-5.2-codex"
                 | "gpt-5.1-codex" | "gpt-5.1-codex-mini" | "gpt-5.1-codex-max" => "400K ctx",
                 "gpt-5.3-codex-spark" => "128K ctx",

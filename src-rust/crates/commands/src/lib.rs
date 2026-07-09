@@ -773,7 +773,7 @@ impl SlashCommand for ModelCommand {
            /model                       — open the model picker\n\
            /model claude-sonnet-4-6     — switch to Claude Sonnet 4.6\n\
            /model claude-haiku-4-5      — switch to Claude Haiku 4.5\n\
-           /model codex/gpt-5.5         — switch to Codex (requires codex login)"
+           /model codex/gpt-5.6-sol     — switch to Codex (requires codex login)"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {

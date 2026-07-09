@@ -970,6 +970,11 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
             "claude-sonnet-3",
         ],
         "openai" => &[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+            "gpt-5.5",
             "gpt-5.2-pro",
             "gpt-5.2",
             "gpt-5.1",
@@ -1001,7 +1006,16 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
         ],
         "zai" => &["glm-5.1", "glm-5", "glm-4.7"],
         "minimax" => &["minimax-m2"],
-        "codex" | "openai-codex" => &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
+        "codex" | "openai-codex" => &[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+        ],
         "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" => &[
             "qwen3-coder",
             "qwen2.5-coder",
@@ -1034,11 +1048,17 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
         return None;
     }
     if small {
-        // Prefer the documented "mini" entry; fall through to the default
-        // model id if the constant is ever pruned.
+        // Prefer the latest documented cost-efficient Codex entry; fall
+        // through to older mini models or the default if the constant is ever
+        // pruned.
         claurst_core::codex_oauth::CODEX_MODELS
             .iter()
-            .find(|(id, _)| id.contains("mini"))
+            .find(|(id, _)| *id == "gpt-5.6-luna")
+            .or_else(|| {
+                claurst_core::codex_oauth::CODEX_MODELS
+                    .iter()
+                    .find(|(id, _)| id.contains("mini"))
+            })
             .map(|(id, _)| (*id).to_string())
             .or_else(|| Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL.to_string()))
     } else {
@@ -1049,7 +1069,7 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
 fn small_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" => &["claude-haiku-4", "claude-haiku-3-5", "claude-haiku"],
-        "codex" | "openai" | "openai-codex" => &["gpt-5.4-mini", "gpt-5-mini"],
+        "codex" | "openai" | "openai-codex" => &["gpt-5.6-luna", "gpt-5.4-mini", "gpt-5-mini"],
         _ => &["mini", "haiku", "flash", "lite", "small", "nano"],
     }
 }
@@ -1188,6 +1208,7 @@ mod tests {
         let best = reg
             .best_model_for_provider("codex")
             .expect("codex best model must fall back to CODEX_MODELS default");
+        assert_eq!(best, claurst_core::codex_oauth::DEFAULT_CODEX_MODEL);
         assert!(
             claurst_core::codex_oauth::CODEX_MODELS
                 .iter()
@@ -1197,6 +1218,7 @@ mod tests {
         let small = reg
             .best_small_model_for_provider("codex")
             .expect("codex small model must fall back to a mini/default id");
+        assert_eq!(small, "gpt-5.6-luna");
         assert!(
             claurst_core::codex_oauth::CODEX_MODELS
                 .iter()

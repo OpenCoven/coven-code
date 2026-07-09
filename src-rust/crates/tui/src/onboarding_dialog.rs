@@ -165,7 +165,7 @@ const PROVIDER_ENTRIES: &[ProviderEntry] = &[
     },
     ProviderEntry {
         name: "Codex",
-        tagline: "  gpt-5.5 via Codex CLI login",
+        tagline: "  gpt-5.6-sol via Codex CLI login",
         setup: "Codex CLI",
         setup_suffix: "",
     },
