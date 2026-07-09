@@ -7,11 +7,6 @@ on:
         description: 'Version to publish (e.g., v0.1.1). Must already exist as a GitHub Release.'
         required: true
         type: string
-      publish_unscoped:
-        description: 'Also publish the unscoped coven-code mirror. Requires npm auth or trusted publishing.'
-        required: false
-        default: false
-        type: boolean
   workflow_run:
     workflows: ['Release']
     types: [completed]
@@ -216,7 +211,7 @@ jobs:
 
           const packageName = process.argv[2];
           const version = process.argv[3];
-          const supportedPackageNames = new Set(['@opencoven/coven-code', 'coven-code']);
+          const supportedPackageNames = new Set(['@opencoven/coven-code']);
 
           if (!supportedPackageNames.has(packageName)) {
             console.error(`::error::Unsupported npm package name: ${packageName}`);
@@ -257,9 +252,6 @@ jobs:
           }
 
           packages=("@opencoven/coven-code")
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.publish_unscoped }}" == "true" ]]; then
-            packages+=("coven-code")
-          fi
           for package_name in "${packages[@]}"; do
             if npm view "${package_name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${package_name}@${VERSION} is already published; skipping."
@@ -268,10 +260,7 @@ jobs:
 
             echo "${package_name}@${VERSION} is not published yet; publishing."
             prepare_package "$package_name"
-            publish_args=(--provenance --ignore-scripts)
-            if [[ "$package_name" == @*/* ]]; then
-              publish_args=(--access public --provenance --ignore-scripts)
-            fi
+            publish_args=(--access public --provenance --ignore-scripts)
 
             # The pre-publish `npm view` guard above can race npm's
             # read-after-write propagation when this workflow's two triggers
