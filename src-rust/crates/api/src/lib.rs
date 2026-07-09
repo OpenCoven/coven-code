@@ -674,7 +674,7 @@ pub mod client {
                 .header("anthropic-version", &self.config.api_version)
                 .header("content-type", "application/json");
             if self.config.use_bearer_auth {
-                req = req.header("Authorization", format!("Bearer {}", &self.config.api_key));
+                req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
             } else {
                 req = req.header("x-api-key", &self.config.api_key);
             }
@@ -727,7 +727,7 @@ pub mod client {
                     .header("accept", "text/event-stream");
 
                 if use_oauth {
-                    req = req.header("Authorization", format!("Bearer {}", &self.config.api_key));
+                    req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
                 } else {
                     // Compute CCH billing hash and attach on the API-key path
                     // only — this is the codepath the official client uses
