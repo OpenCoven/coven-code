@@ -13,7 +13,7 @@ use claurst_core::ProviderId;
 use crate::client::ClientConfig;
 use crate::provider::LlmProvider;
 use crate::provider_types::ProviderStatus;
-use crate::providers::{AnthropicProvider, CodexProvider};
+use crate::providers::{AnthropicProvider, ClaudeCliProvider, CodexProvider};
 
 /// Resolve the configured API base override for a provider, if any.
 pub fn resolve_provider_api_base(
@@ -81,11 +81,15 @@ pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
     }
 
     let auth_store = claurst_core::AuthStore::load();
-    let key = auth_store.api_key_for(provider_id)?;
-    if key.is_empty() {
-        return None;
+    match auth_store.api_key_for(provider_id) {
+        Some(key) if !key.is_empty() => provider_from_key(provider_id, key),
+        // Claude without an API key runs through the local `claude` CLI —
+        // never through an imported OAuth token, which gets rate limited.
+        _ if provider_id == "anthropic" => {
+            Some(Arc::new(ClaudeCliProvider::new()) as Arc<dyn LlmProvider>)
+        }
+        _ => None,
     }
-    provider_from_key(provider_id, key)
 }
 
 impl ProviderRegistry {

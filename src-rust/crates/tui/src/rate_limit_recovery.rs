@@ -3,8 +3,8 @@
 // Replaces the dead-end "API error 429" modal with an actionable flow: the
 // diagnostic explains what happened, a live countdown auto-retries when the
 // provider supplied a reset delay, and one-key actions let the user continue
-// immediately on a lower model tier, retry now, or clean up duplicate account
-// profiles — all without quitting the session or retyping the prompt.
+// immediately on a lower model tier or retry now — all without quitting the
+// session or retyping the prompt.
 //
 // The state machine lives here; key handling is in `app.rs` and the retry
 // itself is executed by the interactive main loop in the CLI crate, which
@@ -59,9 +59,6 @@ pub struct RateLimitRecoveryState {
     pub auto_retry_deadline: Option<Instant>,
     /// Automatic retries already spent in this episode.
     pub auto_retries_used: u32,
-    /// Redundant duplicate profiles detected in the account registry
-    /// (same underlying account imported more than once).
-    pub duplicate_profiles: usize,
     /// Whether the one-key Anthropic tier-switch actions (`s`/`h`) apply.
     /// False when the active provider is not Anthropic — switching a Codex
     /// session to Sonnet/Haiku would persist a broken provider config.
@@ -72,22 +69,17 @@ pub struct RateLimitRecoveryState {
 
 impl RateLimitRecoveryState {
     /// Open the recovery modal for a fresh rate-limit error.
-    ///
-    /// `duplicate_profiles` is precomputed by the caller (it requires disk
-    /// I/O, which must not happen during rendering).
     pub fn open(
         &mut self,
         message: String,
         model: String,
         retry_after_secs: Option<u64>,
-        duplicate_profiles: usize,
         tier_switch_available: bool,
     ) {
         self.visible = true;
         self.message = message;
         self.model = model;
         self.retry_after_secs = retry_after_secs;
-        self.duplicate_profiles = duplicate_profiles;
         self.tier_switch_available = tier_switch_available;
         self.pending_retry = None;
         self.auto_retry_deadline = retry_after_secs
@@ -300,20 +292,6 @@ fn action_lines(state: &RateLimitRecoveryState) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(keys));
 
-    if state.duplicate_profiles > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("[d]", key_style),
-            Span::styled(
-                format!(
-                    " clean {} duplicate account profile{} (all the same account — switching between them cannot help)",
-                    state.duplicate_profiles,
-                    if state.duplicate_profiles == 1 { "" } else { "s" }
-                ),
-                text_style,
-            ),
-        ]));
-    }
-
     lines.push(Line::from(vec![
         Span::styled("[Esc]", key_style),
         Span::styled(" dismiss — keep typing; nothing is lost", dim),
@@ -333,13 +311,7 @@ mod tests {
     #[test]
     fn open_arms_countdown_for_short_delays() {
         let mut s = RateLimitRecoveryState::default();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(30),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(30), true);
         assert!(s.visible);
         assert!(s.auto_retry_deadline.is_some());
         assert!(s.countdown_secs().unwrap() <= 30);
@@ -348,13 +320,7 @@ mod tests {
     #[test]
     fn open_does_not_arm_countdown_for_long_delays() {
         let mut s = RateLimitRecoveryState::default();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(3600),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(3600), true);
         assert!(s.visible);
         assert!(s.auto_retry_deadline.is_none());
     }
@@ -362,7 +328,7 @@ mod tests {
     #[test]
     fn open_does_not_arm_countdown_without_retry_after() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 0, true);
+        s.open("limited".into(), "claude-opus-4-8".into(), None, true);
         assert!(s.auto_retry_deadline.is_none());
     }
 
@@ -372,38 +338,20 @@ mod tests {
             auto_retries_used: MAX_AUTO_RETRIES,
             ..Default::default()
         };
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(10),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), true);
         assert!(
             s.auto_retry_deadline.is_none(),
             "budget exhausted — no more auto-retries"
         );
         s.reset_episode();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(10),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), true);
         assert!(s.auto_retry_deadline.is_some());
     }
 
     #[test]
     fn tick_fires_retry_at_deadline() {
         let mut s = RateLimitRecoveryState::default();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(10),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), true);
         // Force the deadline into the past.
         s.auto_retry_deadline = Some(Instant::now() - Duration::from_secs(1));
         s.tick();
@@ -417,13 +365,7 @@ mod tests {
     #[test]
     fn manual_retry_with_model_switch() {
         let mut s = RateLimitRecoveryState::default();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(3600),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(3600), true);
         s.request_retry(Some(HAIKU_MODEL.to_string()));
         assert!(!s.visible);
         let directive = s.take_retry_directive().expect("retry queued");
@@ -433,13 +375,7 @@ mod tests {
     #[test]
     fn dismiss_cancels_everything() {
         let mut s = RateLimitRecoveryState::default();
-        s.open(
-            "limited".into(),
-            "claude-opus-4-8".into(),
-            Some(10),
-            0,
-            true,
-        );
+        s.open("limited".into(), "claude-opus-4-8".into(), Some(10), true);
         s.dismiss();
         assert!(!s.visible);
         s.tick();
@@ -449,7 +385,7 @@ mod tests {
     #[test]
     fn tier_actions_reflect_current_model() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 0, true);
+        s.open("limited".into(), "claude-opus-4-8".into(), None, true);
         let text = lines_text(&action_lines(&s));
         assert!(text.contains("[s]"));
         assert!(text.contains("[h]"));
@@ -468,24 +404,11 @@ mod tests {
     #[test]
     fn tier_actions_hidden_for_non_anthropic_provider() {
         let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "gpt-5-codex".into(), None, 0, false);
+        s.open("limited".into(), "gpt-5-codex".into(), None, false);
         let text = lines_text(&action_lines(&s));
         assert!(!text.contains("[s]"));
         assert!(!text.contains("[h]"));
         assert!(text.contains("[r]"));
-    }
-
-    #[test]
-    fn duplicate_cleanup_action_appears_when_duplicates_exist() {
-        let mut s = RateLimitRecoveryState::default();
-        s.open("limited".into(), "claude-opus-4-8".into(), None, 18, true);
-        let text = lines_text(&action_lines(&s));
-        assert!(text.contains("[d]"));
-        assert!(text.contains("18 duplicate account profiles"));
-
-        s.duplicate_profiles = 0;
-        let text = lines_text(&action_lines(&s));
-        assert!(!text.contains("[d]"));
     }
 
     #[test]
@@ -495,7 +418,6 @@ mod tests {
             "Claude rate limit for model `claude-opus-4-8`.".into(),
             "claude-opus-4-8".into(),
             Some(30),
-            2,
             true,
         );
         let area = Rect {
@@ -520,7 +442,6 @@ mod tests {
             .join("");
         assert!(rendered.contains("Rate limited"));
         assert!(rendered.contains("retry now"));
-        assert!(rendered.contains("duplicate account profile"));
     }
 
     fn lines_text(lines: &[Line<'_>]) -> String {

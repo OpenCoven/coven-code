@@ -155,7 +155,6 @@ pub async fn run_oauth_login_flow_with_label(
         organization_uuid,
         subscription_type: None,
         oauth_client_id: Some(client_id.clone()),
-        external_cli_source: None,
         api_key: api_key.clone(),
     };
     tokens

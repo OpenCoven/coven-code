@@ -4082,9 +4082,6 @@ pub mod oauth {
         /// First-party OAuth client ID that minted this token.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub oauth_client_id: Option<String>,
-        /// External first-party CLI that this token was explicitly imported from.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub external_cli_source: Option<String>,
         /// API key created for Console-flow users (exchanged from access token).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub api_key: Option<String>,
@@ -4111,15 +4108,15 @@ pub mod oauth {
         }
 
         /// True when the stored bearer token is allowed for Anthropic requests.
+        /// Only tokens minted by the configured Coven Code OAuth client
+        /// qualify — tokens imported from other CLIs are never used (that
+        /// pattern gets rate limited; the `claude` CLI runtime covers
+        /// subscription access instead).
         pub fn bearer_auth_is_usable(&self) -> bool {
             if !self.uses_bearer_auth() {
                 return true;
             }
             self.uses_configured_oauth_client()
-                || self
-                    .external_cli_source
-                    .as_deref()
-                    .is_some_and(|source| !source.trim().is_empty())
         }
 
         /// The credential to present to the Anthropic API:
@@ -4290,36 +4287,7 @@ pub mod oauth {
             let id = if let Some(id) = existing_id {
                 id
             } else if let Some(label) = label {
-                let label_id = slugify_profile_id(label);
-                let imported_cli = self
-                    .external_cli_source
-                    .as_deref()
-                    .is_some_and(|source| !source.trim().is_empty());
-                let active_cli_profile = imported_cli
-                    .then(|| registry.active_profile(PROVIDER_ANTHROPIC).cloned())
-                    .flatten()
-                    .filter(|profile| {
-                        profile.label.as_deref() == Some(label_id.as_str())
-                            || profile.id == label_id
-                    })
-                    .map(|profile| profile.id);
-                let existing_cli_profile = imported_cli
-                    .then(|| {
-                        registry
-                            .list(PROVIDER_ANTHROPIC)
-                            .into_iter()
-                            .find(|profile| {
-                                profile.label.as_deref() == Some(label_id.as_str())
-                                    || profile.id == label_id
-                            })
-                            .map(|profile| profile.id)
-                    })
-                    .flatten();
-                active_cli_profile
-                    .or(existing_cli_profile)
-                    .unwrap_or_else(|| {
-                        ensure_unique_profile_id(&registry, PROVIDER_ANTHROPIC, label)
-                    })
+                ensure_unique_profile_id(&registry, PROVIDER_ANTHROPIC, label)
             } else {
                 let base = self
                     .email
@@ -4496,7 +4464,6 @@ pub use oauth::OAuthTokens;
 // ---------------------------------------------------------------------------
 pub mod accounts;
 pub mod analytics;
-pub mod anthropic_cli_import;
 pub mod bash_classifier;
 pub mod codex_oauth;
 pub mod context_collapse;
@@ -4973,103 +4940,6 @@ mod tests {
     }
 
     #[test]
-    fn test_imported_anthropic_cli_token_resolves_without_coven_oauth_client() {
-        struct EnvRestore {
-            home: Option<String>,
-            test_home: Option<String>,
-            userprofile: Option<String>,
-            api_key: Option<String>,
-            client_id: Option<String>,
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match self.home.take() {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match self.test_home.take() {
-                    Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
-                    None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
-                }
-                match self.userprofile.take() {
-                    Some(value) => std::env::set_var("USERPROFILE", value),
-                    None => std::env::remove_var("USERPROFILE"),
-                }
-                match self.api_key.take() {
-                    Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
-                    None => std::env::remove_var("ANTHROPIC_API_KEY"),
-                }
-                match self.client_id.take() {
-                    Some(value) => std::env::set_var(crate::oauth::CLIENT_ID_ENV, value),
-                    None => std::env::remove_var(crate::oauth::CLIENT_ID_ENV),
-                }
-            }
-        }
-
-        let _home_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _env_lock = ANTHROPIC_API_KEY_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let temp_home = tempfile::tempdir().expect("temp home");
-        let _restore = EnvRestore {
-            home: std::env::var("HOME").ok(),
-            test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
-            userprofile: std::env::var("USERPROFILE").ok(),
-            api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            client_id: std::env::var(crate::oauth::CLIENT_ID_ENV).ok(),
-        };
-        std::env::set_var("HOME", temp_home.path());
-        std::env::set_var("COVEN_CODE_TEST_HOME", temp_home.path());
-        std::env::set_var("USERPROFILE", temp_home.path());
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var(crate::oauth::CLIENT_ID_ENV);
-
-        let cli_credentials_dir = temp_home.path().join(".claude");
-        std::fs::create_dir_all(&cli_credentials_dir).expect("create claude dir");
-        std::fs::write(
-            cli_credentials_dir.join(".credentials.json"),
-            r#"{
-                "claudeAiOauth": {
-                    "accessToken": "sk-ant-oat01-cli-token",
-                    "scopes": ["user:inference"]
-                }
-            }"#,
-        )
-        .expect("write claude credentials");
-
-        rt.block_on(async {
-            let import_result = crate::anthropic_cli_import::import()
-                .await
-                .expect("import cli credentials");
-            assert_eq!(import_result.1, "claude-code");
-
-            let repeated_import = crate::anthropic_cli_import::import()
-                .await
-                .expect("repeat cli credentials import");
-            assert_eq!(repeated_import.1, "claude-code");
-            let profiles =
-                crate::accounts::AccountRegistry::load().list(crate::accounts::PROVIDER_ANTHROPIC);
-            assert_eq!(profiles.len(), 1);
-
-            let config = crate::config::Config {
-                provider: Some("anthropic".to_string()),
-                ..Default::default()
-            };
-            assert_eq!(
-                config.resolve_anthropic_auth_async().await,
-                Some(("sk-ant-oat01-cli-token".to_string(), true))
-            );
-        });
-    }
-
-    #[test]
     fn test_oauth_uses_bearer_auth_without_inference_scope() {
         let tokens = crate::oauth::OAuthTokens {
             scopes: vec!["org:create_api_key".to_string()],
@@ -5091,11 +4961,6 @@ mod tests {
 
         assert!(!tokens.uses_configured_oauth_client());
         assert!(!tokens.bearer_auth_is_usable());
-        let imported_tokens = crate::oauth::OAuthTokens {
-            external_cli_source: Some("Claude Code".to_string()),
-            ..tokens.clone()
-        };
-        assert!(imported_tokens.bearer_auth_is_usable());
 
         std::env::set_var(crate::oauth::CLIENT_ID_ENV, "other-client");
         assert!(!tokens.uses_configured_oauth_client());

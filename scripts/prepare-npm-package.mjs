@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const PACKAGE_NAMES = Object.freeze(['@opencoven/coven-code', 'coven-code']);
+export const PACKAGE_NAMES = Object.freeze(['@opencoven/coven-code']);
 
 function assertSupportedPackageName(packageName) {
   if (!PACKAGE_NAMES.includes(packageName)) {
@@ -62,10 +62,7 @@ function updateReadme(readme, packageName) {
 
 export function publishArgsForPackage(packageName) {
   assertSupportedPackageName(packageName);
-  if (packageName.startsWith('@')) {
-    return ['publish', '--access', 'public', '--provenance'];
-  }
-  return ['publish', '--provenance'];
+  return ['publish', '--access', 'public', '--provenance'];
 }
 
 export function prepareNpmPackage({ rootDir, packageName, version }) {

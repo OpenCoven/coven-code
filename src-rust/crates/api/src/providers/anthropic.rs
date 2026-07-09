@@ -26,6 +26,49 @@ use crate::types::{ApiMessage, ApiToolDefinition, CreateMessageRequest, Thinking
 
 use super::message_normalization::normalize_anthropic_messages;
 
+/// The static Claude model catalog, shared by the HTTP provider and the
+/// claude-CLI provider (the Anthropic API exposes no /models route here).
+pub(crate) fn claude_model_catalog() -> Vec<ModelInfo> {
+    let anthropic_id = ProviderId::new(ProviderId::ANTHROPIC);
+    vec![
+        ModelInfo {
+            id: ModelId::new("claude-fable-5"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Fable 5".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-opus-4-8"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Opus 4.8".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-opus-4-6"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Opus 4.6".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 32_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-sonnet-4-6"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Sonnet 4.6".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 16_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-haiku-4-5-20251001"),
+            provider_id: anthropic_id,
+            name: "Claude Haiku 4.5".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_096,
+        },
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // AnthropicProvider
 // ---------------------------------------------------------------------------
@@ -349,44 +392,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let anthropic_id = ProviderId::new(ProviderId::ANTHROPIC);
-        Ok(vec![
-            ModelInfo {
-                id: ModelId::new("claude-fable-5"),
-                provider_id: anthropic_id.clone(),
-                name: "Claude Fable 5".to_string(),
-                context_window: 1_000_000,
-                max_output_tokens: 128_000,
-            },
-            ModelInfo {
-                id: ModelId::new("claude-opus-4-8"),
-                provider_id: anthropic_id.clone(),
-                name: "Claude Opus 4.8".to_string(),
-                context_window: 1_000_000,
-                max_output_tokens: 128_000,
-            },
-            ModelInfo {
-                id: ModelId::new("claude-opus-4-6"),
-                provider_id: anthropic_id.clone(),
-                name: "Claude Opus 4.6".to_string(),
-                context_window: 200_000,
-                max_output_tokens: 32_000,
-            },
-            ModelInfo {
-                id: ModelId::new("claude-sonnet-4-6"),
-                provider_id: anthropic_id.clone(),
-                name: "Claude Sonnet 4.6".to_string(),
-                context_window: 200_000,
-                max_output_tokens: 16_000,
-            },
-            ModelInfo {
-                id: ModelId::new("claude-haiku-4-5-20251001"),
-                provider_id: anthropic_id.clone(),
-                name: "Claude Haiku 4.5".to_string(),
-                context_window: 200_000,
-                max_output_tokens: 8_096,
-            },
-        ])
+        Ok(claude_model_catalog())
     }
 
     async fn health_check(&self) -> Result<ProviderStatus, ProviderError> {
