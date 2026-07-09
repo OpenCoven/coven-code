@@ -638,27 +638,17 @@ async fn main() -> anyhow::Result<()> {
     let is_headless = cli.headless || cli.print || cli.prompt.is_some() || github_context.is_some();
 
     // Initialize API client.
-    // Try config/env first; fall back to saved OAuth tokens.
-    // If no Anthropic credentials are found and Codex is the active provider,
-    // proceed without requiring Anthropic auth. Only launch the OAuth flow when
-    // Anthropic is explicitly the intended provider and no key exists at all.
+    // Try config/env first; fall back to configured-client OAuth tokens.
+    // With no Anthropic credential at all, the client is built with an empty
+    // key and the query loop dispatches Claude turns through the local
+    // `claude` CLI runtime instead (headless included) — imported tokens are
+    // never used.
     let active_provider = config.selected_provider_id();
     let (api_key, use_bearer_auth) = if active_provider == "anthropic" {
-        match config.resolve_anthropic_auth_async().await {
-            Some(auth) => auth,
-            None => {
-                if is_headless {
-                    anyhow::bail!(
-                        "No API key found. Options:\n\
-                         - Set ANTHROPIC_API_KEY for Claude\n\
-                         - Configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, then run `coven-code auth login` to sign in to Claude\n\
-                         - Run `coven-code auth login --provider codex` to sign in to Codex with ChatGPT"
-                    );
-                } else {
-                    (String::new(), false)
-                }
-            }
-        }
+        config
+            .resolve_anthropic_auth_async()
+            .await
+            .unwrap_or((String::new(), false))
     } else {
         (String::new(), false)
     };
@@ -1008,6 +998,8 @@ async fn main() -> anyhow::Result<()> {
         || claurst_core::oauth_config::get_codex_tokens().is_some();
     let has_credentials = !api_key.is_empty()
         || has_saved_credentials
+        // Keyless Claude runs through the local `claude` CLI runtime.
+        || claurst_api::providers::claude_cli::resolve_claude_binary().is_some()
         || config.provider.as_deref().is_some_and(|p| p != "anthropic");
     let result = run_interactive(
         config,
@@ -3986,8 +3978,8 @@ async fn run_interactive(
                         if !client_id_configured {
                             let _ = tx2.send(DeviceAuthEvent::Error(
                                 "Claude subscription login is not configured.\n\
-                                 Set COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, choose \"Anthropic CLI\" to import an existing\n\
-                                 `claude`/`ant` login, or use ANTHROPIC_API_KEY from console.anthropic.com/settings/keys.".to_string()
+                                 Choose \"Claude CLI\" to run through the local claude binary,\n\
+                                 or use ANTHROPIC_API_KEY from console.anthropic.com/settings/keys.".to_string()
                             )).await;
                             return;
                         }
@@ -4090,35 +4082,9 @@ async fn run_interactive(
             }
         }
 
-        // ---- Anthropic CLI credential import (from /connect → "Anthropic CLI") ----
-        if std::mem::take(&mut app.pending_anthropic_cli_import) {
-            match claurst_core::anthropic_cli_import::import().await {
-                Ok((source, profile_id)) => {
-                    app.notifications.push(
-                        claurst_tui::NotificationKind::Info,
-                        format!(
-                            "Imported Anthropic login from {} (profile {}).",
-                            source.label(),
-                            profile_id
-                        ),
-                        Some(5),
-                    );
-                    // Rebuild the runtime so the imported credential is live now.
-                    app.pending_provider_refresh = true;
-                }
-                Err(e) => {
-                    app.notifications.push(
-                        claurst_tui::NotificationKind::Error,
-                        format!("Anthropic CLI import failed: {}", e),
-                        None,
-                    );
-                }
-            }
-        }
-
         // ---- Apply newly-established Anthropic credentials without a restart ----
-        // Set after an in-session OAuth login or CLI import; rebuilds the client
-        // and provider registry from disk (non-destructively).
+        // Set after an in-session OAuth login; rebuilds the client and
+        // provider registry from disk (non-destructively).
         if std::mem::take(&mut app.pending_provider_refresh) {
             match reload_anthropic_runtime_state(&cmd_ctx.config).await {
                 Ok(refreshed) => {
@@ -4636,20 +4602,13 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
         }
 
         Some("import") => {
-            // Import an existing Anthropic OAuth credential from another
-            // first-party CLI (Claude Code or `ant`) into a Coven Code profile.
-            println!("Importing Anthropic credentials from local CLI...");
-            match claurst_core::anthropic_cli_import::import().await {
-                Ok((source, profile_id)) => {
-                    println!("Imported credentials from {}.", source.label());
-                    println!("  Profile: {}", profile_id);
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Import failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            eprintln!(
+                "`auth import` was removed: importing Claude Code's OAuth token gets rate limited."
+            );
+            eprintln!(
+                "Claude subscription access now runs through the local `claude` CLI automatically — no import needed."
+            );
+            std::process::exit(1);
         }
 
         Some("logout") => {
@@ -4698,7 +4657,6 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
     eprintln!("  login [--console] [--label <name>]   Authenticate with a configured Coven Code OAuth client");
-    eprintln!("  import                                Import Anthropic OAuth creds from Claude Code / ant CLI");
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
     eprintln!("  list                                  List all stored Anthropic accounts");
@@ -5110,9 +5068,9 @@ async fn auth_status(json_output: bool) {
         if !logged_in {
             let hint = if active_provider == "anthropic" {
                 if disabled_bearer_token {
-                    "Stored claude.ai OAuth tokens were minted by an unsupported client; configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`, or set ANTHROPIC_API_KEY for now.".to_string()
+                    "Stored claude.ai OAuth tokens were minted by an unsupported client and are ignored; Claude runs through the local `claude` CLI instead (or set ANTHROPIC_API_KEY).".to_string()
                 } else {
-                    "Set ANTHROPIC_API_KEY, or configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`.".to_string()
+                    "Claude runs through the local `claude` CLI when no key is set — install it with `npm install -g @anthropic-ai/claude-code` and run `claude` to sign in (or set ANTHROPIC_API_KEY).".to_string()
                 }
             } else if let Some(env_var) =
                 claurst_core::config::primary_api_key_env_var_for_provider(active_provider)

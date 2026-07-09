@@ -8,3 +8,6 @@ pub mod responses_input;
 
 pub mod codex;
 pub use codex::CodexProvider;
+
+pub mod claude_cli;
+pub use claude_cli::ClaudeCliProvider;

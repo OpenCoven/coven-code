@@ -398,14 +398,15 @@ fn import_config_picker_items() -> Vec<SelectItem> {
 }
 
 fn provider_picker_items() -> Vec<SelectItem> {
-    let has_cli_login = local_anthropic_cli_login_available();
+    let has_claude_cli = claurst_api::providers::claude_cli::resolve_claude_binary().is_some();
     vec![
         SelectItem {
             id: "anthropic-cli".into(),
-            title: "Claude CLI import".into(),
-            description: "Import Claude Code/ant credentials; Coven Code sends requests".into(),
+            title: "Claude CLI".into(),
+            description: "Run turns through the local claude binary; auth stays in Claude Code"
+                .into(),
             category: "Claude".into(),
-            badge: has_cli_login.then(|| "LOCAL".into()),
+            badge: has_claude_cli.then(|| "LOCAL".into()),
         },
         SelectItem {
             id: "openai-codex".into(),
@@ -415,42 +416,6 @@ fn provider_picker_items() -> Vec<SelectItem> {
             badge: None,
         },
     ]
-}
-
-fn local_anthropic_cli_login_available() -> bool {
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".claude").join(".credentials.json");
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if claurst_core::anthropic_cli_import::parse_claude_code(&text)
-                .is_some_and(|tokens| !tokens.access_token.is_empty())
-            {
-                return true;
-            }
-        }
-    }
-
-    let ant_credentials_dir = std::env::var("ANTHROPIC_CONFIG_DIR")
-        .ok()
-        .filter(|dir| !dir.trim().is_empty())
-        .map(|dir| std::path::PathBuf::from(dir).join("credentials"))
-        .or_else(|| dirs::config_dir().map(|dir| dir.join("anthropic").join("credentials")));
-
-    let Some(dir) = ant_credentials_dir else {
-        return false;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.filter_map(Result::ok).any(|entry| {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return false;
-        }
-        std::fs::read_to_string(path).ok().is_some_and(|text| {
-            claurst_core::anthropic_cli_import::parse_ant(&text)
-                .is_some_and(|tokens| !tokens.access_token.is_empty())
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -981,9 +946,6 @@ pub struct App {
     pub device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState,
     /// When set, the main loop should spawn the async auth task for this provider.
     pub device_auth_pending: Option<String>,
-    /// When true, the main loop should import Anthropic OAuth credentials from a
-    /// local CLI (Claude Code / `ant`) and, on success, activate Anthropic.
-    pub pending_anthropic_cli_import: bool,
     /// When true, the main loop should rebuild the provider runtime from disk
     /// (same as `/refresh`) so newly-established credentials take effect live.
     pub pending_provider_refresh: bool,
@@ -1475,7 +1437,6 @@ impl App {
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
             device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState::new(),
             device_auth_pending: None,
-            pending_anthropic_cli_import: false,
             pending_provider_refresh: false,
             provider_registry: None,
             model_registry: {
@@ -1781,7 +1742,8 @@ impl App {
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
                 self.context_used_tokens = 0;
-                self.has_credentials = self.config.resolve_api_key().is_some();
+                self.has_credentials = self.config.resolve_api_key().is_some()
+                    || claurst_api::providers::claude_cli::resolve_claude_binary().is_some();
                 self.auth_store = claurst_core::AuthStore::load();
                 self.plan_mode = matches!(
                     self.config.permission_mode,
@@ -1993,8 +1955,17 @@ impl App {
                 self.device_auth_pending = Some("anthropic-oauth".to_string());
             }
             "anthropic-cli" => {
-                self.pending_anthropic_cli_import = true;
-                self.status_message = Some("Importing Claude credentials from local CLI...".into());
+                if claurst_api::providers::claude_cli::resolve_claude_binary().is_none() {
+                    self.status_message = Some(
+                        "claude CLI not found — npm install -g @anthropic-ai/claude-code, then run `claude` to sign in".into(),
+                    );
+                    return;
+                }
+                self.activate_provider(
+                    "anthropic".to_string(),
+                    "Claude CLI".to_string(),
+                    "Connected to",
+                );
             }
             "codex" | "openai-codex" => {
                 self.device_auth_dialog
@@ -3004,21 +2975,11 @@ impl App {
     // -------------------------------------------------------------------
 
     /// Open the interactive rate-limit recovery modal for a structured 429.
-    ///
-    /// Performs a one-shot duplicate-profile scan (disk I/O — this runs in
-    /// event handling, never in a render path) so the modal can tell the user
-    /// when "switch accounts" would be a no-op and offer a one-key cleanup.
     pub fn open_rate_limit_recovery(&mut self, message: String, retry_after_secs: Option<u64>) {
         let is_anthropic = self.config.provider.as_deref().unwrap_or("anthropic") == "anthropic";
-        let duplicates = if is_anthropic {
-            let registry = claurst_core::accounts::AccountRegistry::load();
-            claurst_core::accounts::count_duplicate_anthropic_profiles(&registry)
-        } else {
-            0
-        };
         let model = self.model_name.clone();
         self.rate_limit_recovery
-            .open(message, model, retry_after_secs, duplicates, is_anthropic);
+            .open(message, model, retry_after_secs, is_anthropic);
     }
 
     /// Handle a key press while the recovery modal is open.
@@ -3054,38 +3015,6 @@ impl App {
                 self.rate_limit_recovery
                     .request_retry(Some(HAIKU_MODEL.to_string()));
                 self.status_message = Some(format!("Retrying on {}…", HAIKU_MODEL));
-            }
-            KeyCode::Char('d') if self.rate_limit_recovery.duplicate_profiles > 0 => {
-                let mut registry = claurst_core::accounts::AccountRegistry::load();
-                match claurst_core::accounts::dedupe_anthropic_profiles(&mut registry) {
-                    Ok(summary) => {
-                        self.rate_limit_recovery.duplicate_profiles = 0;
-                        // The modal stays open (the user may still want to
-                        // retry), so surface the result inside it as well as
-                        // via a toast for after it closes.
-                        self.rate_limit_recovery.message.push_str(&format!(
-                            "\n\n✓ Cleaned {} duplicate profile{} — kept {}.",
-                            summary.removed.len(),
-                            if summary.removed.len() == 1 { "" } else { "s" },
-                            summary.kept.join(", ")
-                        ));
-                        self.push_notification(
-                            NotificationKind::Success,
-                            format!(
-                                "Cleaned {} duplicate profile{} — kept {}.",
-                                summary.removed.len(),
-                                if summary.removed.len() == 1 { "" } else { "s" },
-                                summary.kept.join(", ")
-                            ),
-                            Some(8),
-                        );
-                    }
-                    Err(err) => {
-                        self.rate_limit_recovery
-                            .message
-                            .push_str(&format!("\n\n✗ Profile cleanup failed: {err}"));
-                    }
-                }
             }
             _ => {}
         }
@@ -8059,13 +7988,21 @@ role = "Research"
     }
 
     #[test]
-    fn provider_setup_one_starts_claude_cli_import() {
+    fn provider_setup_one_activates_claude_cli_runtime() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
         std::fs::create_dir_all(&home).expect("home");
         std::fs::create_dir_all(&coven_home).expect("coven home");
         let _guard = EnvGuard::set(&home, &coven_home);
+        // Force claude-binary discovery so the test is deterministic on
+        // machines without the CLI installed.
+        let fake_claude = temp.path().join("claude");
+        std::fs::write(&fake_claude, "").expect("fake claude");
+        std::env::set_var(
+            claurst_api::providers::claude_cli::CLAUDE_BIN_ENV,
+            &fake_claude,
+        );
 
         let mut app = make_app();
         app.has_credentials = false;
@@ -8073,10 +8010,12 @@ role = "Research"
 
         app.handle_key_event(press_key(KeyCode::Char('1'), KeyModifiers::empty()));
 
+        std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV);
+
         assert!(!app.onboarding_dialog.visible);
         assert!(!app.connect_dialog.visible);
         assert!(!app.key_input_dialog.visible);
-        assert!(app.pending_anthropic_cli_import);
+        assert!(app.has_credentials);
     }
 
     #[test]

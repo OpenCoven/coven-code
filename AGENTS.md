@@ -103,14 +103,22 @@ For parallel-agent or batch work:
 
 Coven Code supports exactly two providers: **Claude** (Anthropic) and **Codex**
 (OpenAI Codex via ChatGPT OAuth). The provider layer lives in
-`crates/api/src/providers/` (`anthropic.rs`, `codex.rs`) and is registered in
-`crates/api/src/registry.rs`. Auth config/storage lives in
-`crates/core/src/oauth_config.rs` and `codex_oauth.rs` (Codex) plus
-`anthropic_cli_import.rs` (importing Claude Code / `ant` CLI credentials); the
-interactive OAuth handshakes are in `crates/cli/src/oauth_flow.rs` (Anthropic)
-and `codex_oauth_flow.rs` (Codex). (`crates/core/src/device_code.rs` implements
-an RFC 8628 device-code flow but is **not wired to any provider** — both
-providers use browser-redirect OAuth.) Adding other providers is out of scope.
+`crates/api/src/providers/` (`anthropic.rs`, `claude_cli.rs`, `codex.rs`) and
+is registered in `crates/api/src/registry.rs`.
+
+Claude has two transports: with an API key (`ANTHROPIC_API_KEY` or stored
+key), requests go direct via `anthropic.rs`; without one, turns run through
+the local `claude` binary via `claude_cli.rs` (stream-json, same adapter
+contract coven/cave use). **Never import or replay OAuth tokens from Claude
+Code or other CLIs** — that pattern gets rate limited and the import path was
+deliberately removed; auth stays inside the CLI that owns it.
+
+Auth config/storage lives in `crates/core/src/oauth_config.rs` and
+`codex_oauth.rs` (Codex); the interactive OAuth handshakes are in
+`crates/cli/src/oauth_flow.rs` (Anthropic, requires a configured
+`COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`) and `codex_oauth_flow.rs` (Codex).
+(`crates/core/src/device_code.rs` implements an RFC 8628 device-code flow but
+is **not wired to any provider**.) Adding other providers is out of scope.
 
 ## Releasing
 
