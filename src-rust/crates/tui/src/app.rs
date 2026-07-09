@@ -272,6 +272,7 @@ pub(crate) mod test_env {
     pub(crate) struct EnvGuard {
         old_home: Option<String>,
         old_coven_home: Option<String>,
+        old_test_home: Option<String>,
         old_anthropic_config_dir: Option<String>,
         old_anthropic_api_key: Option<String>,
         old_oauth_client_id: Option<String>,
@@ -290,6 +291,7 @@ pub(crate) mod test_env {
             let guard = Self {
                 old_home: std::env::var("HOME").ok(),
                 old_coven_home: std::env::var("COVEN_HOME").ok(),
+                old_test_home: std::env::var("COVEN_CODE_TEST_HOME").ok(),
                 old_anthropic_config_dir: std::env::var("ANTHROPIC_CONFIG_DIR").ok(),
                 old_anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
                 old_oauth_client_id: std::env::var(claurst_core::oauth::CLIENT_ID_ENV).ok(),
@@ -299,6 +301,7 @@ pub(crate) mod test_env {
             };
             std::env::set_var("HOME", PathBuf::from(home));
             std::env::set_var("COVEN_HOME", PathBuf::from(coven_home));
+            std::env::set_var("COVEN_CODE_TEST_HOME", PathBuf::from(home));
             std::env::remove_var("ANTHROPIC_CONFIG_DIR");
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV);
@@ -322,6 +325,10 @@ pub(crate) mod test_env {
             match &self.old_coven_home {
                 Some(value) => std::env::set_var("COVEN_HOME", value),
                 None => std::env::remove_var("COVEN_HOME"),
+            }
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
             }
             match &self.old_anthropic_config_dir {
                 Some(value) => std::env::set_var("ANTHROPIC_CONFIG_DIR", value),
@@ -418,7 +425,13 @@ fn provider_picker_items() -> Vec<SelectItem> {
 }
 
 fn local_anthropic_cli_login_available() -> bool {
-    if let Some(home) = dirs::home_dir() {
+    let home_dir = std::env::var("COVEN_CODE_TEST_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir);
+
+    if let Some(home) = home_dir {
         let path = home.join(".claude").join(".credentials.json");
         if let Ok(text) = std::fs::read_to_string(path) {
             if claurst_core::anthropic_cli_import::parse_claude_code(&text)
