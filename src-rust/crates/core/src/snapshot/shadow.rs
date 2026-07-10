@@ -567,13 +567,17 @@ impl ShadowSnapshot {
         }
 
         // Skip large untracked files (exclude them from shadow).
+        // HashSet lookup, not Vec::contains — `all` and `untracked` are both
+        // large when a big unignored tree is present, and a linear scan per
+        // file makes this loop quadratic (issue #146).
+        let untracked_set: HashSet<&str> = untracked.iter().map(String::as_str).collect();
         let mut large: Vec<String> = Vec::new();
         let mut stageable: Vec<String> = Vec::new();
         for f in &all {
             if ignored.contains(f.as_str()) {
                 continue;
             }
-            if untracked.contains(f) {
+            if untracked_set.contains(f.as_str()) {
                 if let Ok(meta) = tokio::fs::metadata(self.worktree.join(f)).await {
                     if meta.len() > SIZE_LIMIT {
                         large.push(f.clone());
@@ -684,7 +688,10 @@ impl ShadowSnapshot {
         if r.code != 0 && r.code != 1 {
             return HashSet::new();
         }
-        let raw: Vec<&str> = r.text.split('\0').filter(|s| !s.is_empty()).collect();
+        // HashSet, not Vec: `files` and the check-ignore output can both be
+        // huge (e.g. a fully-enumerated target/ tree), and a Vec::contains
+        // per file makes this intersection quadratic (issue #146).
+        let raw: HashSet<&str> = r.text.split('\0').filter(|s| !s.is_empty()).collect();
         files.iter().copied().filter(|f| raw.contains(f)).collect()
     }
 
