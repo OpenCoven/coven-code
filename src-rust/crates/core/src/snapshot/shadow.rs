@@ -490,8 +490,42 @@ impl ShadowSnapshot {
         true
     }
 
+    /// Ask the enclosing real repository which paths under the worktree it
+    /// ignores. `--directory` makes git report whole ignored directories as
+    /// single entries without descending into them, so this stays cheap even
+    /// when the worktree contains something like a 200 GB `target/`. The
+    /// result seeds the shadow repo's excludes so its own untracked-file
+    /// enumeration never walks those trees (issue #146). Empty when the
+    /// worktree is not inside a repository or git fails — the shadow then
+    /// falls back to the per-file `check_ignore_user` filter.
+    async fn real_repo_ignored_entries(&self) -> Vec<String> {
+        let worktree_s = self.worktree.to_string_lossy().into_owned();
+        let r = self
+            .raw_git(
+                &[
+                    "-C",
+                    &worktree_s,
+                    "-c",
+                    "core.quotepath=false",
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "-z",
+                ],
+                None,
+            )
+            .await;
+        if r.code != 0 {
+            return Vec::new();
+        }
+        split_nul(&r.text)
+    }
+
     async fn stage(&self) {
-        self.sync_excludes(&[]).await;
+        let ignored_seed = self.real_repo_ignored_entries().await;
+        self.sync_excludes(&ignored_seed, &[]).await;
 
         let diff_r = self
             .shadow(vec![
@@ -588,7 +622,7 @@ impl ShadowSnapshot {
             stageable.push(f.clone());
         }
         if !large.is_empty() {
-            self.sync_excludes(&large).await;
+            self.sync_excludes(&ignored_seed, &large).await;
         }
         if !stageable.is_empty() {
             let stdin = nul_list(&stageable);
@@ -610,7 +644,7 @@ impl ShadowSnapshot {
         }
     }
 
-    async fn sync_excludes(&self, extra: &[String]) {
+    async fn sync_excludes(&self, ignored_seed: &[String], extra: &[String]) {
         let user_content = self.read_user_exclude().await;
         let info_dir = self.gitdir.join("info");
         let _ = tokio::fs::create_dir_all(&info_dir).await;
@@ -621,8 +655,8 @@ impl ShadowSnapshot {
                 parts.push(t);
             }
         }
-        for p in extra {
-            parts.push(format!("/{}", p.replace('\\', "/")));
+        for p in ignored_seed.iter().chain(extra) {
+            parts.push(format!("/{}", escape_exclude_pattern(p)));
         }
         let content = if parts.is_empty() {
             String::new()
@@ -666,17 +700,19 @@ impl ShadowSnapshot {
                 b
             })
             .collect();
-        let dot_git = self.worktree.join(".git").to_string_lossy().into_owned();
+        // Discover the enclosing repository via -C instead of assuming
+        // `<worktree>/.git` exists: the session cwd can sit below the repo
+        // root, where that path is absent and where the ignore rules that
+        // matter (e.g. `src-rust/target/`) live in a parent .gitignore that
+        // only repo discovery applies (issue #146).
         let worktree_s = self.worktree.to_string_lossy().into_owned();
         let r = self
             .raw_git(
                 &[
+                    "-C",
+                    &worktree_s,
                     "-c",
                     "core.quotepath=false",
-                    "--git-dir",
-                    &dot_git,
-                    "--work-tree",
-                    &worktree_s,
                     "check-ignore",
                     "--no-index",
                     "--stdin",
@@ -823,6 +859,23 @@ fn split_nul(s: &str) -> Vec<String> {
         .filter(|p| !p.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Escape a literal path for use as a gitignore pattern: backslash
+/// separators are normalised to `/` (matching the previous behaviour for
+/// large-file excludes) and glob metachars are escaped. A trailing `/` is
+/// kept so directory entries stay directory patterns. Callers prepend `/` to
+/// anchor at the worktree root, which also neutralises leading `!`/`#`.
+fn escape_exclude_pattern(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut out = String::with_capacity(normalized.len());
+    for c in normalized.chars() {
+        if matches!(c, '*' | '?' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn nul_list(files: &[String]) -> Vec<u8> {

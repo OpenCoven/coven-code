@@ -311,6 +311,53 @@ async fn gitignore_respected() {
 }
 
 #[tokio::test]
+async fn parent_gitignore_respected_in_subdirectory_worktree() {
+    // Regression test for issue #146: when the session cwd sits below the
+    // repo root, ignore rules from the root .gitignore must still apply —
+    // both to what lands in patches and to what the shadow repo stages.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path();
+    git(p, &["init", "-b", "main"]).await;
+    git(p, &["config", "user.email", "test@test"]).await;
+    git(p, &["config", "user.name", "Test"]).await;
+    fs::write(p.join(".gitignore"), "sub/build/\n*.ignored\n").unwrap();
+    fs::create_dir_all(p.join("sub")).unwrap();
+    fs::write(p.join("sub/tracked.txt"), "tracked").unwrap();
+    git(p, &["add", "."]).await;
+    git(p, &["commit", "-m", "init"]).await;
+
+    // Ignored build tree exists before the first snapshot.
+    fs::create_dir_all(p.join("sub/build")).unwrap();
+    fs::write(p.join("sub/build/artifact.bin"), "ignored").unwrap();
+
+    let sub = p.join("sub");
+    let snap = snap_or_skip(&sub);
+    let before = snap.track().await.expect("track");
+
+    // Changes only inside the ignored tree must not change the snapshot.
+    fs::write(p.join("sub/build/more.bin"), "still ignored").unwrap();
+    let unchanged = snap.track().await.expect("track ignored-only change");
+    assert_eq!(
+        before, unchanged,
+        "ignored-tree changes must not be staged into the shadow"
+    );
+
+    // Real changes are tracked; ignored ones stay out of the patch.
+    fs::write(p.join("sub/new.txt"), "yes").unwrap();
+    fs::write(p.join("sub/note.ignored"), "no").unwrap();
+    let patch = snap.patch(&before).await;
+    assert!(patch.files.contains(&fwd(&sub, "new.txt")));
+    assert!(!patch
+        .files
+        .iter()
+        .any(|f| f.to_string_lossy().contains("build/")));
+    assert!(!patch
+        .files
+        .iter()
+        .any(|f| f.to_string_lossy().contains(".ignored")));
+}
+
+#[tokio::test]
 async fn revert_with_empty_patches_noop() {
     let (dir, a_content, _) = bootstrap().await;
     let p = dir.path();
