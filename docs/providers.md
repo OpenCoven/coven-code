@@ -90,7 +90,7 @@ Runs Claude-style coding sessions against OpenAI's Codex using your ChatGPT/Code
 | `gpt-5.4-mini` | Fast/lower-cost model for lighter coding tasks and subagents |
 | `gpt-5.3-codex-spark` | Research preview for ChatGPT Pro users |
 | `gpt-5.3-codex` | Deprecated for ChatGPT sign-in; retained for explicit selection |
-| `gpt-5.2-codex` | Deprecated for ChatGPT sign-in; retained for explicit selection |
+| `gpt-5.2-codex` | Legacy Codex/API-key compatibility model |
 | `gpt-5.1-codex` | Legacy Codex model |
 | `gpt-5.1-codex-mini` | Legacy mini model |
 | `gpt-5.1-codex-max` | Legacy max model |

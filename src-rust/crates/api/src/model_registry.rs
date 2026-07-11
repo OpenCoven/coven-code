@@ -970,6 +970,11 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
             "claude-sonnet-3",
         ],
         "openai" => &[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+            "gpt-5.5",
             "gpt-5.2-pro",
             "gpt-5.2",
             "gpt-5.1",
@@ -1196,6 +1201,7 @@ mod tests {
         let best = reg
             .best_model_for_provider("codex")
             .expect("codex best model must fall back to CODEX_MODELS default");
+        assert_eq!(best, claurst_core::codex_oauth::DEFAULT_CODEX_MODEL);
         assert!(
             claurst_core::codex_oauth::CODEX_MODELS
                 .iter()
@@ -1205,6 +1211,7 @@ mod tests {
         let small = reg
             .best_small_model_for_provider("codex")
             .expect("codex small model must fall back to a mini/default id");
+        assert_eq!(small, "gpt-5.6-luna");
         assert!(
             claurst_core::codex_oauth::CODEX_MODELS
                 .iter()

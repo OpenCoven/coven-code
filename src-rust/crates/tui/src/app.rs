@@ -275,6 +275,7 @@ pub(crate) mod test_env {
         old_anthropic_config_dir: Option<String>,
         old_anthropic_api_key: Option<String>,
         old_oauth_client_id: Option<String>,
+        old_claude_bin: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
         _lock: MutexGuard<'static, ()>,
@@ -293,6 +294,8 @@ pub(crate) mod test_env {
                 old_anthropic_config_dir: std::env::var("ANTHROPIC_CONFIG_DIR").ok(),
                 old_anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
                 old_oauth_client_id: std::env::var(claurst_core::oauth::CLIENT_ID_ENV).ok(),
+                old_claude_bin: std::env::var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV)
+                    .ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
                 _lock: lock,
@@ -302,6 +305,7 @@ pub(crate) mod test_env {
             std::env::remove_var("ANTHROPIC_CONFIG_DIR");
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV);
+            std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV);
             match user {
                 Some(value) => std::env::set_var("USER", value),
                 None => std::env::remove_var("USER"),
@@ -334,6 +338,12 @@ pub(crate) mod test_env {
             match &self.old_oauth_client_id {
                 Some(value) => std::env::set_var(claurst_core::oauth::CLIENT_ID_ENV, value),
                 None => std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV),
+            }
+            match &self.old_claude_bin {
+                Some(value) => {
+                    std::env::set_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV, value)
+                }
+                None => std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV),
             }
             match &self.old_user {
                 Some(value) => std::env::set_var("USER", value),
@@ -7941,18 +7951,23 @@ role = "Research"
     }
 
     #[test]
-    fn provider_picker_prioritizes_import_when_claude_credentials_exist() {
+    fn provider_picker_marks_claude_cli_local_when_binary_exists() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
-        std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+        let claude_bin = temp.path().join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        std::fs::create_dir_all(&home).expect("home");
         std::fs::create_dir_all(&coven_home).expect("coven home");
-        std::fs::write(
-            home.join(".claude").join(".credentials.json"),
-            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-test"}}"#,
-        )
-        .expect("credentials");
+        std::fs::write(&claude_bin, "").expect("claude binary");
         let _guard = EnvGuard::set(&home, &coven_home);
+        std::env::set_var(
+            claurst_api::providers::claude_cli::CLAUDE_BIN_ENV,
+            &claude_bin,
+        );
 
         let items = provider_picker_items();
 
