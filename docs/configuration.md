@@ -467,7 +467,7 @@ active provider via the `provider` key in settings or the `--provider` CLI flag.
 | Provider ID | Default model |
 |-------------|--------------|
 | `anthropic` | `claude-sonnet-4-6` (or latest) |
-| `codex` | `gpt-5-codex` (ChatGPT/Codex OAuth login) |
+| `codex` | `gpt-5.6-sol` (ChatGPT/Codex OAuth login) |
 
 ### Per-provider configuration
 
