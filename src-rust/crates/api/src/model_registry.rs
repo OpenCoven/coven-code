@@ -1010,7 +1010,6 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "gpt-5.6",
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
@@ -1048,17 +1047,11 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
         return None;
     }
     if small {
-        // Prefer the latest documented cost-efficient Codex entry; fall
-        // through to older mini models or the default if the constant is ever
-        // pruned.
+        // Prefer the efficient tier ("luna" since GPT-5.6, "mini" before it);
+        // fall through to the default model id if the constant is ever pruned.
         claurst_core::codex_oauth::CODEX_MODELS
             .iter()
-            .find(|(id, _)| *id == "gpt-5.6-luna")
-            .or_else(|| {
-                claurst_core::codex_oauth::CODEX_MODELS
-                    .iter()
-                    .find(|(id, _)| id.contains("mini"))
-            })
+            .find(|(id, _)| id.contains("luna") || id.contains("mini"))
             .map(|(id, _)| (*id).to_string())
             .or_else(|| Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL.to_string()))
     } else {

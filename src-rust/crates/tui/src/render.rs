@@ -2530,7 +2530,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
         if app.prompt_input.text.is_empty() && !app.is_streaming {
             spans.push(Span::styled(
-                "F2 familiar  Alt+H help  Ctrl+B branch  Tab mode",
+                "F2 familiar  Ctrl+B branch  Tab mode",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -3683,7 +3683,7 @@ mod welcome_tests {
             .map(|cell| cell.symbol())
             .collect();
 
-        for expected in ["F2", "Alt+H", "Ctrl+B", "Tab"] {
+        for expected in ["F2", "Ctrl+B", "Tab"] {
             assert!(
                 content.contains(expected),
                 "footer should mention {expected}, got {content:?}"

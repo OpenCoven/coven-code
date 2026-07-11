@@ -82,10 +82,10 @@ Runs Claude-style coding sessions against OpenAI's Codex using your ChatGPT/Code
 
 | Model ID | Notes |
 |---|---|
-| `gpt-5.6-sol` | Default; flagship GPT-5.6 model for complex coding, computer use, research, and cybersecurity |
-| `gpt-5.6-terra` | Balanced GPT-5.6 model for everyday work at lower cost than Sol |
-| `gpt-5.6-luna` | Fast, lower-cost GPT-5.6 model for clear, repeatable tasks |
-| `gpt-5.5` | Previous-generation frontier model for complex Codex tasks |
+| `gpt-5.6-sol` | Default; latest frontier agentic coding model |
+| `gpt-5.6-terra` | Balanced agentic coding model for everyday work |
+| `gpt-5.6-luna` | Fast, affordable model for lighter tasks and subagents |
+| `gpt-5.5` | Previous default |
 | `gpt-5.4` | Frontier Codex model |
 | `gpt-5.4-mini` | Fast/lower-cost model for lighter coding tasks and subagents |
 | `gpt-5.3-codex-spark` | Research preview for ChatGPT Pro users |

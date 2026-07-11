@@ -15,10 +15,10 @@ This document is the reference for the visible slash commands available in Coven
 7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/status`
 8. [Agents & Tasks](#agents--tasks) — `/familiar`, `/tasks`, `/coven goal`
 9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
-10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
+10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/learn`, `/plugin`, `/chrome`
 11. [Authentication](#authentication) — `/login`, `/logout`
 12. [Display & Terminal](#display--terminal) — `/incant`, `/config color`
-13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/update`, `/status doctor`
+13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/release-notes`, `/update`, `/status doctor`
 14. [Export & Sharing](#export--sharing) — `/export`
 15. [Advanced & Internal](#advanced--internal) — `/whisper`, `/sandbox`
 16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`
@@ -141,7 +141,7 @@ Single entry point for going back in time. Without arguments, opens an interacti
 /rewind <uuid>     — revert the turn whose message id starts with <uuid>
 ```
 
-`/undo` and `/revert` remain hidden compatibility aliases for one release.
+The former `/undo` and `/revert` names no longer resolve; their functionality lives on as the argument forms above.
 
 ---
 
@@ -785,6 +785,21 @@ List and manage skills. Skills are bundled prompt-commands that extend Coven Cod
 
 ---
 
+### /learn
+**Aliases:** `scribe`
+
+Codify a script or workflow you just built into a reusable skill. Summons Hermes — the coven's scribe — to look back over the session, pin down the exact entrypoint (command, path, arguments), and author a `.coven-code/skills/<name>/SKILL.md` that future sessions can invoke as `/<name>` or via the Skill tool.
+
+```
+/learn                               — infer the target from this conversation
+/learn deploy-staging                — suggest the skill name explicitly
+/learn deploy scripts/deploy.sh      — name plus the exact script to wrap
+```
+
+Hermes only authors the skill — it does not re-run the wrapped script. Manage the result (toggle it, inspect its token cost) with [`/skills`](#skills).
+
+---
+
 ### /plugin
 **Aliases:** `plugins`
 
@@ -986,6 +1001,19 @@ Display the current Coven Code version string and build metadata.
 ```
 /version
 /v
+```
+
+---
+
+### /release-notes
+**Aliases:** `whats-new`, `changelog`
+
+Show the "What's new" highlights for the current Coven Code release — the same list the welcome panel previews (truncated), in full. Useful for catching up on new commands and features without leaving the session.
+
+```
+/release-notes
+/whats-new
+/changelog
 ```
 
 ---

@@ -918,9 +918,10 @@ impl LlmProvider for CodexProvider {
                 provider_id: self.id.clone(),
                 name: name.to_string(),
                 context_window: match *id {
-                    "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4" => {
-                        1_050_000
-                    }
+                    // Codex backend window for the GPT-5.6 family, per the
+                    // upstream models.json catalog (openai/codex models-manager).
+                    "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => 372_000,
+                    "gpt-5.5" | "gpt-5.4" => 1_050_000,
                     "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2-codex" | "gpt-5.1-codex"
                     | "gpt-5.1-codex-mini" | "gpt-5.1-codex-max" | "gpt-5.2" | "gpt-5-codex"
                     | "gpt-5-mini" => 400_000,
@@ -930,10 +931,10 @@ impl LlmProvider for CodexProvider {
                     _ => 128_000,
                 },
                 max_output_tokens: match *id {
-                    "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4"
-                    | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2-codex" | "gpt-5.1-codex"
-                    | "gpt-5.1-codex-mini" | "gpt-5.1-codex-max" | "gpt-5.2" | "gpt-5-codex"
-                    | "gpt-5-mini" => 128_000,
+                    "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => 128_000,
+                    "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2-codex"
+                    | "gpt-5.1-codex" | "gpt-5.1-codex-mini" | "gpt-5.1-codex-max" | "gpt-5.2"
+                    | "gpt-5-codex" | "gpt-5-mini" => 128_000,
                     _ => 32_768,
                 },
             })
