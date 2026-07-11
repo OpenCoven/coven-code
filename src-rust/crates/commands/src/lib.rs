@@ -275,7 +275,6 @@ pub struct IncantCommand;
 pub struct SandboxToggleCommand;
 pub struct UltrareviewCommand;
 pub struct AdvisorCommand;
-pub struct UndoCommand;
 pub struct RevertCommand;
 pub struct CheckpointsCommand;
 pub struct SnapshotDiffCommand;
@@ -5686,9 +5685,7 @@ impl SlashCommand for RewindCommand {
            /rewind diff [n] — preview a turn's diff without reverting\n\
            /rewind last     — revert the most recent assistant turn\n\
            /rewind <n>      — revert the n-th most recent assistant turn\n\
-           /rewind <uuid>   — revert the turn whose message id starts with <uuid>\n\n\
-         The legacy /undo and /revert commands remain hidden one-release\n\
-         compatibility aliases for the argument forms."
+           /rewind <uuid>   — revert the turn whose message id starts with <uuid>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -8146,32 +8143,6 @@ impl SlashCommand for NamedCommandAdapter {
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         execute_named_command_from_slash(self.target_name, args, ctx)
-    }
-}
-
-// ---- /undo (alias for /revert targeting the most recent assistant turn) ----
-
-#[async_trait]
-impl SlashCommand for UndoCommand {
-    fn name(&self) -> &str {
-        "undo"
-    }
-    fn hidden(&self) -> bool {
-        true
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec![]
-    }
-    fn description(&self) -> &str {
-        "Revert all file changes from the last assistant turn (alias: /revert)"
-    }
-    fn help(&self) -> &str {
-        "Usage: /undo\n\nReverts all file changes made during the most recent assistant turn.\n\
-         For finer control use /revert. To list what changed, use /checkpoints."
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        RevertCommand.execute("", ctx).await
     }
 }
 
