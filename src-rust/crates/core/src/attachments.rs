@@ -93,7 +93,7 @@ pub fn get_attachments(ctx: &AttachmentContext<'_>) -> Vec<Attachment> {
 /// Returns a formatted string like:
 /// `IDE: VS Code, workspace: /path/to/project, selection: L10-L20 in foo.rs`
 pub fn get_ide_context() -> Option<String> {
-    let lockfile_dir = dirs::home_dir()?.join(".coven-code").join("ide");
+    let lockfile_dir = crate::config::config_home().join("ide");
     let entries = std::fs::read_dir(&lockfile_dir).ok()?;
 
     for entry in entries.flatten() {

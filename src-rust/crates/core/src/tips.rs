@@ -190,18 +190,15 @@ pub struct TipHistory {
 
 impl TipHistory {
     /// Path to the persisted history file: `~/.coven-code/tip_history.json`.
-    fn history_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|h| h.join(".coven-code").join("tip_history.json"))
+    fn history_path() -> std::path::PathBuf {
+        crate::config::config_home().join("tip_history.json")
     }
 
     /// Load history from `~/.coven-code/tip_history.json`.
     /// Returns an empty `TipHistory` if the file does not exist or cannot be
     /// parsed.
     pub fn load() -> Self {
-        let path = match Self::history_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
+        let path = Self::history_path();
         match std::fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
@@ -211,10 +208,7 @@ impl TipHistory {
     /// Persist history to `~/.coven-code/tip_history.json`.
     /// Silently ignores I/O errors (tips are non-critical).
     pub fn save(&self) {
-        let path = match Self::history_path() {
-            Some(p) => p,
-            None => return,
-        };
+        let path = Self::history_path();
         // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);

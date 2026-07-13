@@ -80,14 +80,10 @@ pub async fn prefetch_skills(project_root: &Path, index: SharedSkillIndex) {
         .unwrap_or_default();
 
     // 1. User-defined skills: ~/.coven-code/skills/*.md + {project_root}/.coven-code/skills/*.md
-    let search_dirs: Vec<std::path::PathBuf> = {
-        let mut dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            dirs.push(home.join(".coven-code").join("skills"));
-        }
-        dirs.push(project_root.join(".coven-code").join("skills"));
-        dirs
-    };
+    let search_dirs: Vec<std::path::PathBuf> = vec![
+        claurst_core::config::config_home().join("skills"),
+        project_root.join(".coven-code").join("skills"),
+    ];
 
     for dir in &search_dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {

@@ -636,10 +636,7 @@ impl HistoryEntry {
 // ---------------------------------------------------------------------------
 
 fn pins_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".coven-code")
-        .join("history_pins.json")
+    claurst_core::config::config_home().join("history_pins.json")
 }
 
 /// Load the set of pinned entry texts from `~/.coven-code/history_pins.json`.

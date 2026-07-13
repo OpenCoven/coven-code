@@ -57,8 +57,8 @@ static CRON_STORE: Lazy<Arc<RwLock<HashMap<String, CronTask>>>> =
 // ---------------------------------------------------------------------------
 
 /// Path to `~/.coven-code/scheduled_tasks.json`.
-fn scheduled_tasks_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".coven-code").join("scheduled_tasks.json"))
+fn scheduled_tasks_path() -> PathBuf {
+    claurst_core::config::config_home().join("scheduled_tasks.json")
 }
 
 /// Ensure the store has been loaded from disk (once per process).
@@ -70,10 +70,7 @@ async fn ensure_store_loaded() {
     *init = true;
 
     // Load from ~/.coven-code/scheduled_tasks.json if it exists.
-    let path = match scheduled_tasks_path() {
-        Some(p) => p,
-        None => return,
-    };
+    let path = scheduled_tasks_path();
 
     let data = match tokio::fs::read_to_string(&path).await {
         Ok(d) => d,
@@ -510,8 +507,7 @@ async fn persist_tasks_to_disk(store: &HashMap<String, CronTask>) -> Result<(), 
     let durable: Vec<&CronTask> = store.values().filter(|t| t.durable).collect();
     let json = serde_json::to_string_pretty(&durable).map_err(|e| e.to_string())?;
 
-    let path =
-        scheduled_tasks_path().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let path = scheduled_tasks_path();
     let dir = path.parent().ok_or("No parent directory")?;
 
     tokio::fs::create_dir_all(dir)

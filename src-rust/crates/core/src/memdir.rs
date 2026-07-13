@@ -351,11 +351,7 @@ pub fn auto_memory_path(project_root: &Path) -> PathBuf {
     // 2. Determine the memory base directory.
     let memory_base = std::env::var("COVEN_CODE_REMOTE_MEMORY_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".coven-code")
-        });
+        .unwrap_or_else(|_| crate::config::config_home());
 
     // 3. Sanitize the project root into a safe directory name.
     let sanitized = sanitize_path_component(&project_root.to_string_lossy());
@@ -1389,5 +1385,29 @@ mod tests {
         assert!(content.contains("redacted_at:"));
         assert!(content.contains("[REDACTED: operator request]"));
         assert!(!content.contains("secret incident detail"));
+    }
+
+    #[test]
+    fn auto_memory_path_derives_from_config_home_when_no_env_override() {
+        // Ensure the env override is not set.
+        let prev = std::env::var("COVEN_CODE_REMOTE_MEMORY_DIR").ok();
+        std::env::remove_var("COVEN_CODE_REMOTE_MEMORY_DIR");
+        // Also clear the other override so we don't short-circuit.
+        let prev2 = std::env::var("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE").ok();
+        std::env::remove_var("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE");
+
+        let path = auto_memory_path(std::path::Path::new("/some/project"));
+        assert!(
+            path.starts_with(crate::config::config_home()),
+            "auto_memory_path {path:?} should start with config_home() when no env override is set"
+        );
+
+        // Restore env vars.
+        if let Some(v) = prev {
+            std::env::set_var("COVEN_CODE_REMOTE_MEMORY_DIR", v);
+        }
+        if let Some(v) = prev2 {
+            std::env::set_var("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", v);
+        }
     }
 }

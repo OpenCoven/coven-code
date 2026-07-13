@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 /// Return the default user-level plugins directory: `~/.coven-code/plugins`.
-pub fn default_user_plugins_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".coven-code").join("plugins"))
+pub fn default_user_plugins_dir() -> PathBuf {
+    claurst_core::config::config_home().join("plugins")
 }
 
 /// Return the project-level plugins directory: `<project>/.coven-code/plugins`.
@@ -344,4 +344,19 @@ fn extract_description_from_markdown_file(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_user_plugins_dir_derives_from_config_home() {
+        let dir = default_user_plugins_dir();
+        assert!(
+            dir.starts_with(claurst_core::config::config_home()),
+            "default_user_plugins_dir {dir:?} should start with config_home()"
+        );
+        assert_eq!(dir.file_name().unwrap(), "plugins");
+    }
 }

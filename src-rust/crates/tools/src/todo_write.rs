@@ -13,9 +13,7 @@ use tracing::debug;
 
 /// Returns the path to the persisted todo list for `session_id`.
 pub fn todos_path(session_id: &str) -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".coven-code")
+    claurst_core::config::config_home()
         .join("todos")
         .join(format!("{}.json", session_id))
 }

@@ -308,8 +308,8 @@ pub struct CodexTokens {
 
 /// Legacy single-file path: `~/.coven-code/codex_tokens.json`. Kept for
 /// backward-compat reads when no account registry exists.
-fn codex_tokens_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".coven-code").join("codex_tokens.json"))
+fn codex_tokens_path() -> std::path::PathBuf {
+    crate::config::config_home().join("codex_tokens.json")
 }
 
 /// Save Codex OAuth tokens for a named profile under
@@ -412,7 +412,7 @@ pub fn get_codex_tokens() -> Option<CodexTokens> {
         }
     }
     // Legacy fallback + migration.
-    let legacy = codex_tokens_path()?;
+    let legacy = codex_tokens_path();
     if !legacy.exists() {
         return None;
     }
@@ -434,7 +434,8 @@ pub fn clear_codex_tokens() -> anyhow::Result<()> {
     {
         registry.remove(crate::accounts::PROVIDER_CODEX, &active)?;
     }
-    if let Some(legacy) = codex_tokens_path() {
+    {
+        let legacy = codex_tokens_path();
         if legacy.exists() {
             std::fs::remove_file(&legacy)?;
         }
@@ -516,5 +517,15 @@ mod tests {
         assert!(url.contains("state456"));
         assert!(url.contains("S256"));
         assert!(url.contains("localhost"));
+    }
+
+    #[test]
+    fn codex_tokens_path_derives_from_config_home() {
+        let path = codex_tokens_path();
+        assert!(
+            path.starts_with(crate::config::config_home()),
+            "codex_tokens_path {path:?} should start with config_home()"
+        );
+        assert_eq!(path.file_name().unwrap(), "codex_tokens.json");
     }
 }

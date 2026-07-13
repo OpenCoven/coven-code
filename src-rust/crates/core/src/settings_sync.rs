@@ -510,9 +510,7 @@ async fn write_file_for_sync(path: &PathBuf, content: &str) -> Result<()> {
 
 /// Return the ~/.coven-code directory.
 fn claude_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".coven-code"))
-        .unwrap_or_else(|| PathBuf::from(".coven-code"))
+    crate::config::config_home()
 }
 
 /// Exponential backoff delay for retry attempt `n` (1-indexed), capped at 30 s.
