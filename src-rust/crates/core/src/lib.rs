@@ -2311,6 +2311,12 @@ pub mod config {
         /// accessors added in Phase 4.1; those are noted in the report.
         #[test]
         fn all_engine_paths_derive_from_config_home() {
+            // config_home() is env-sensitive; hold the lock so a concurrent
+            // env-mutating test can't change it between our two calls (which
+            // would make config_dir() and `home` disagree).
+            let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
             let home = config_home();
 
             // Site 1 / Settings::config_dir() is a thin shim — same value.
