@@ -3515,6 +3515,25 @@ mod welcome_tests {
         app
     }
 
+    /// Build a test app whose familiar roster is isolated to an EMPTY temp
+    /// `COVEN_HOME`, so `streaming_status_label` and friends never pick up a
+    /// warning from the developer's real `~/.coven/familiars.toml`.
+    ///
+    /// Returns the guard/tempdir alongside the app; the caller must keep them
+    /// alive for the duration of the test (the guard restores env on drop).
+    fn make_isolated_status_app() -> (App, EnvGuard, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        // No familiars.toml is written → the roster is empty → no roster
+        // warning can leak into the status label.
+        let guard = EnvGuard::set(&home, &coven_home);
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        (app, guard, temp)
+    }
+
     #[test]
     fn welcome_model_label_prefers_config_override() {
         let app = make_test_app_with_model_and_familiar(
@@ -3578,7 +3597,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_prefers_running_tool_over_default() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
             name: "Bash".to_string(),
@@ -3592,7 +3611,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_falls_back_through_text_then_thinking() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.is_streaming = true;
         assert_eq!(streaming_status_label(&app), "Waiting on network");
         assert!(should_render_status_row(&app));
@@ -3605,7 +3624,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_adapter_message_overrides_everything() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
             name: "Bash".to_string(),
@@ -3621,7 +3640,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_ignores_placeholder_thinking_message() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         // "thinking" / "thinking…" are placeholders — they should NOT win
         // over more informative state.
         app.status_message = Some("thinking".to_string());
@@ -3631,7 +3650,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_skips_completed_tools() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         // A done tool from a previous turn must not hijack the label.
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
@@ -3646,7 +3665,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_explains_stalled_streams() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.is_streaming = true;
         app.stall_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
 
