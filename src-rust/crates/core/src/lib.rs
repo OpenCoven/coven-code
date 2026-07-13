@@ -2398,10 +2398,6 @@ pub mod config {
             let _lock = CONFIG_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            // Also need COVEN_HOME_ENV_LOCK since we mutate COVEN_HOME.
-            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
 
             let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
             std::env::remove_var("COVEN_CODE_TEST_HOME");
@@ -2444,9 +2440,6 @@ pub mod config {
         #[test]
         fn config_home_coven_parent_gives_dot_coven_code() {
             let _lock = CONFIG_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
 
@@ -2495,9 +2488,6 @@ pub mod config {
             let _lock = CONFIG_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
 
             let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
             std::env::remove_var("COVEN_CODE_TEST_HOME");
@@ -2543,9 +2533,6 @@ pub mod config {
         #[test]
         fn config_home_empty_coven_home_is_treated_as_unset() {
             let _lock = CONFIG_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
 
@@ -2602,7 +2589,6 @@ pub mod config {
             _coven_tmp: tempfile::TempDir,
             _code_tmp: tempfile::TempDir,
             _lock: std::sync::MutexGuard<'static, ()>,
-            _coven_lock: std::sync::MutexGuard<'static, ()>,
         }
 
         impl Drop for SharedLayerGuard {
@@ -2636,9 +2622,6 @@ pub mod config {
             let lock = CONFIG_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
 
             let coven_tmp = tempfile::TempDir::new().unwrap();
             let code_tmp = tempfile::TempDir::new().unwrap();
@@ -2661,7 +2644,6 @@ pub mod config {
                 _coven_tmp: coven_tmp,
                 _code_tmp: code_tmp,
                 _lock: lock,
-                _coven_lock: coven_lock,
             }
         }
 
@@ -2827,9 +2809,6 @@ pub mod config {
             // Use COVEN_CODE_HOME for engine isolation but keep COVEN_HOME unset
             // (no coven home → SharedSettings::load() returns Default).
             let lock = CONFIG_HOME_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
 

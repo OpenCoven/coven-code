@@ -700,6 +700,9 @@ mod tests {
 
     #[test]
     fn default_path_derives_from_config_home() {
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let path = GoalStore::default_path();
         assert!(
             path.starts_with(crate::config::config_home()),

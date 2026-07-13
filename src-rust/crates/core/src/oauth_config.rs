@@ -521,6 +521,9 @@ mod tests {
 
     #[test]
     fn codex_tokens_path_derives_from_config_home() {
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let path = codex_tokens_path();
         assert!(
             path.starts_with(crate::config::config_home()),

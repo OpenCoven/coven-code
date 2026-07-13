@@ -1389,6 +1389,9 @@ mod tests {
 
     #[test]
     fn auto_memory_path_derives_from_config_home_when_no_env_override() {
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         // Ensure the env override is not set.
         let prev = std::env::var("COVEN_CODE_REMOTE_MEMORY_DIR").ok();
         std::env::remove_var("COVEN_CODE_REMOTE_MEMORY_DIR");

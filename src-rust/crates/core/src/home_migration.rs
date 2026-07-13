@@ -263,19 +263,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Helper: acquire the two env-var locks in a consistent order to avoid
-    /// deadlock when tests run concurrently.
+    /// Helper: acquire the unified env-var lock.
     ///
-    /// Returns the two `MutexGuard`s, which must be kept alive for the
-    /// duration of the test.
-    fn acquire_env_locks<'a>() -> (std::sync::MutexGuard<'a, ()>, std::sync::MutexGuard<'a, ()>) {
-        let g1 = crate::config::CONFIG_HOME_ENV_LOCK
+    /// `CONFIG_HOME_ENV_LOCK` and `COVEN_HOME_ENV_LOCK` are the same
+    /// `Mutex` (one is a re-export of the other), so only one acquisition
+    /// is needed.  Returns the `MutexGuard`, which must be kept alive for
+    /// the duration of the test.
+    fn acquire_env_locks<'a>() -> std::sync::MutexGuard<'a, ()> {
+        crate::config::CONFIG_HOME_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let g2 = crate::coven_shared::COVEN_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        (g1, g2)
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Save and clear all env vars touched by `config_home()`.
@@ -440,7 +437,7 @@ mod tests {
     /// cleared env proves the guard at the top of `migrate_if_needed` fires.
     #[test]
     fn standalone_no_op() {
-        let (_g1, _g2) = acquire_env_locks();
+        let _g = acquire_env_locks();
         let saved = save_and_clear_config_env();
 
         let target = crate::config::config_home();
