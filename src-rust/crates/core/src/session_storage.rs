@@ -790,9 +790,19 @@ mod tests {
 
     #[test]
     fn list_sessions_returns_sorted() {
+        // `transcript_dir` routes through `config_home()`, so the engine home
+        // MUST be isolated to a temp dir — otherwise this test writes
+        // transcripts into the developer's real `~/.coven-code/projects/`.
+        // `COVEN_CODE_TEST_HOME` is honored by `config_home()` in test builds
+        // and resolves to `<val>/.coven-code`. Hold the env lock while it is set.
         let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+
+        let home_tmp = tempdir().unwrap();
+        let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home_tmp.path());
+
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -802,7 +812,14 @@ mod tests {
             let project_root = tmp.path().join("myproject");
             tokio::fs::create_dir_all(&project_root).await.unwrap();
 
+            // Assert isolation: the resolved transcript dir lives under the
+            // temp home, never under the real `~/.coven-code`.
             let tdir = transcript_dir(&project_root);
+            assert!(
+                tdir.starts_with(home_tmp.path()),
+                "transcript_dir must be isolated to the temp home; got {:?}",
+                tdir
+            );
             tokio::fs::create_dir_all(&tdir).await.unwrap();
 
             for id in ["aaaa", "bbbb"] {
@@ -821,6 +838,11 @@ mod tests {
             assert_eq!(sessions[0].session_id, "bbbb");
             assert_eq!(sessions[1].session_id, "aaaa");
         });
+
+        match saved_test_home {
+            Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
     }
 
     #[test]

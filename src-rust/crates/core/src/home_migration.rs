@@ -337,57 +337,55 @@ mod tests {
     // Test 2: idempotent
     // -----------------------------------------------------------------------
 
-    /// After a successful migration, a second call to `migrate_if_needed` with
-    /// COVEN_HOME pointing to the same base directory is a no-op (target is
-    /// non-empty → early return).
+    /// After a successful migration, the no-clobber guard reports the target as
+    /// "skip", and a second `migrate_between` against a fresh legacy does NOT
+    /// overwrite the already-migrated data.
+    ///
+    /// This test NEVER calls `migrate_if_needed()` — that function reads the
+    /// real environment and operates on the real `~/.coven-code`, so exercising
+    /// it here would pollute the developer's home directory. We test the pure
+    /// guard (`should_skip_existing_target`) and `migrate_between` directly.
     #[test]
     fn idempotent() {
-        let (_g1, _g2) = acquire_env_locks();
-        let saved = save_and_clear_config_env();
-
         let base = tempfile::tempdir().unwrap();
-
-        // Set COVEN_HOME so config_home() resolves to <base>/code.
-        std::env::set_var("COVEN_HOME", base.path());
         let target = base.path().join("code");
 
-        // Create a legacy dir and populate it.
-        let home_dir = dirs::home_dir().expect("home_dir must be available");
-        let legacy = home_dir.join(".coven-code");
+        // First migration from a populated legacy dir.
+        let legacy1 = base.path().join("legacy1");
+        std::fs::create_dir_all(&legacy1).unwrap();
+        std::fs::write(legacy1.join("settings.json"), b"{}").unwrap();
 
-        // We avoid touching the real ~/.coven-code by calling migrate_between
-        // directly for the first migration.
-        let fake_legacy = base.path().join("fake-legacy");
-        std::fs::create_dir_all(&fake_legacy).unwrap();
-        std::fs::write(fake_legacy.join("settings.json"), b"{}").unwrap();
-
-        migrate_between(&fake_legacy, &target);
+        migrate_between(&legacy1, &target);
         assert!(target.exists(), "target must exist after first migration");
         assert!(
             target.join(".migrated-from-coven-code").exists(),
             "marker must exist after first migration"
         );
 
-        // Sentinel file to detect if target is touched.
+        // The production no-clobber guard must now report "skip" for the target.
+        assert!(
+            should_skip_existing_target(&target),
+            "populated target must be skipped by the no-clobber guard"
+        );
+
+        // Sentinel to detect any clobber.
         let sentinel = target.join("sentinel.txt");
         std::fs::write(&sentinel, b"do not touch").unwrap();
 
-        // Now call migrate_if_needed — target is non-empty, so it should early-return.
-        // The real ~/.coven-code may or may not exist; migrate_if_needed guards on
-        // both target non-empty AND legacy existence, so we don't need to worry about
-        // it touching the real ~/.coven-code as long as target is non-empty.
-        migrate_if_needed();
+        // A second migrate_between from a DIFFERENT legacy must not clobber the
+        // sentinel: rename onto a non-empty existing dir fails, and the failure
+        // path leaves the existing target intact (it does not delete populated
+        // data it did not create).
+        let legacy2 = base.path().join("legacy2");
+        std::fs::create_dir_all(&legacy2).unwrap();
+        std::fs::write(legacy2.join("other.json"), b"{}").unwrap();
+        migrate_between(&legacy2, &target);
 
-        // Sentinel must be untouched.
         let contents = std::fs::read(&sentinel).unwrap_or_default();
         assert_eq!(
             contents, b"do not touch",
-            "sentinel must be untouched after idempotent call"
+            "sentinel must survive a second migration attempt"
         );
-
-        restore_config_env(saved);
-        // Suppress "unused variable" for the legacy binding.
-        let _ = legacy;
     }
 
     // -----------------------------------------------------------------------
@@ -415,21 +413,30 @@ mod tests {
     // Test 4: standalone_no_op
     // -----------------------------------------------------------------------
 
-    /// With no COVEN_HOME / COVEN_PARENT set, `migrate_if_needed` returns early
-    /// because `config_home()` resolves to the `.coven-code` path.
+    /// With no COVEN_HOME / COVEN_PARENT set, `migrate_if_needed` must return
+    /// early because `config_home()` resolves to a `.coven-code` path.
+    ///
+    /// We assert the *precondition* that drives that early return rather than
+    /// calling `migrate_if_needed()` itself: that function operates on the real
+    /// `~/.coven-code`, so invoking it from a test could pollute the developer's
+    /// home directory. Verifying `config_home()` ends in `.coven-code` under
+    /// cleared env proves the guard at the top of `migrate_if_needed` fires.
     #[test]
     fn standalone_no_op() {
         let (_g1, _g2) = acquire_env_locks();
         let saved = save_and_clear_config_env();
 
-        // In standalone mode config_home() ends in .coven-code → early return.
-        // We verify by checking that no mutation happened in a temp dir.
-        // (There's nothing to assert about disk state; we just confirm it
-        // doesn't panic and returns immediately.)
-        migrate_if_needed();
+        let target = crate::config::config_home();
+        let ends_in_legacy = target.file_name().and_then(|n| n.to_str()) == Some(".coven-code");
 
-        // If we get here without panic, the no-op path succeeded.
         restore_config_env(saved);
+
+        assert!(
+            ends_in_legacy,
+            "with no coven env, config_home() must end in .coven-code so \
+             migrate_if_needed early-returns (was {:?})",
+            target
+        );
     }
 
     // -----------------------------------------------------------------------

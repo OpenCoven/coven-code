@@ -374,6 +374,17 @@ mod tests {
 
     #[test]
     fn select_tip_respects_cooldown() {
+        // `TipHistory::save()` writes to `config_home()/tip_history.json`, so the
+        // engine home MUST be isolated to a temp dir — otherwise this test writes
+        // into the developer's real `~/.coven-code/`. `COVEN_CODE_TEST_HOME` is
+        // honored by `config_home()` in test builds. Hold the env lock while set.
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home_tmp = tempfile::tempdir().unwrap();
+        let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home_tmp.path());
+
         // Record all tips as shown in session 1000, then ask for session 1001.
         // Tips with cooldown > 1 should not be returned.
         let mut history = TipHistory::default();
@@ -381,6 +392,11 @@ mod tests {
             history.record_shown(tip.id, 1000);
         }
         history.save();
+
+        match saved_test_home {
+            Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
 
         // Session 1001 — only tips with cooldown ≤ 1 are eligible.
         // Since all our built-in tips have cooldown ≥ 3, nothing should be
