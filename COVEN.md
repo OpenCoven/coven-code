@@ -29,6 +29,7 @@ are rebranded. This boundary is explicit and documented below.
 | Data/cache dirs | `src-rust/crates/core/src/snapshot/`, `skill_discovery.rs`, `update_check.rs`, `app.rs` | `coven-code/` |
 | Engine home (standalone) | `src-rust/crates/core/src/lib.rs` (`config_home`) | `~/.coven-code/` |
 | Engine home (under coven CLI) | `src-rust/crates/core/src/lib.rs` (`config_home`) | `~/.coven/code/` — migrated in-place from `~/.coven-code/` on first launch; legacy path is symlinked to new location |
+| Shared config layer | `src-rust/crates/core/src/lib.rs` (`SharedSettings`, `load_hierarchical`) | `~/.coven/settings.json` — cross-tool defaults layered UNDER the engine and project settings |
 | Env var prefix | throughout `src-rust/` | `COVEN_CODE_*` |
 | User-Agent | `src-rust/crates/tools/src/web_search.rs`, `update_check.rs` | `CovenCode/x.y` |
 | System prompt identity | `src-rust/crates/core/src/system_prompt.rs` | "You are Coven Code…" |
@@ -99,6 +100,57 @@ Hook Coven's memory layer here to sync agent sessions with OpenCoven's session/m
 
 All built-in tools live here (file ops, bash, web fetch/search, git, etc.).  
 Add Coven-specific tools (e.g. `coven_session_tool.rs`) and register in `tools/src/lib.rs`.
+
+---
+
+## Shared settings (`~/.coven/settings.json`)
+
+When running under the unified `coven` CLI, a small whitelist of
+cross-tool defaults can be placed at `~/.coven/settings.json`.
+This is the **lowest-precedence** layer: values are used only when the
+engine-global settings (`~/.coven/code/settings.json`) and project
+settings (`.coven-code/settings.json`) do not override them.
+
+### Load order (lowest → highest)
+
+1. `~/.coven/settings.json` — shared, whitelisted keys only
+2. `~/.coven/code/settings.json` — engine-global
+3. `<project>/.coven-code/settings.json` — project
+
+When there is no `~/.coven/` directory (standalone mode, no coven CLI),
+the shared layer is absent and coven-code behaves exactly as before
+(engine + project only).
+
+### Whitelisted keys
+
+| Key | Type | Description |
+|---|---|---|
+| `model` | string | Default model (e.g. `"claude-opus-4-8"`) |
+| `theme` | string | UI theme: `"default"`, `"dark"`, `"light"`, `"deuteranopia"`, or a custom string |
+| `permission_mode` | string | Permission posture: `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"` |
+
+Any other keys in `~/.coven/settings.json` are silently ignored by
+coven-code, so future Coven tools can extend the schema without breaking
+older engine versions.
+
+### Example
+
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "theme": "dark",
+  "permission_mode": "acceptEdits"
+}
+```
+
+### Implementation
+
+`SharedSettings` struct in `src-rust/crates/core/src/lib.rs` (inside
+`pub mod config`).  `SharedSettings::load()` reads the file via
+`coven_shared::coven_home()`.  `SharedSettings::apply_to(&mut Settings)`
+fills whitelisted fields only when the engine-global still has the
+built-in default value (for `Option` fields: `None`; for enum fields:
+the `Default` variant).
 
 ---
 
