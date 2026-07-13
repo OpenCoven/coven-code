@@ -401,6 +401,11 @@ fn handle_exit_key(
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Perform a best-effort, non-fatal relocation of the engine home from the
+    // legacy ~/.coven-code/ to ~/.coven/code/ when running under the unified
+    // coven CLI.  Must run before any Settings::load() or auth/config access.
+    claurst_core::home_migration::migrate_if_needed();
+
     let raw_args: Vec<String> = std::env::args().collect();
 
     // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.

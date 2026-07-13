@@ -27,6 +27,8 @@ are rebranded. This boundary is explicit and documented below.
 | Binary name | `src-rust/crates/cli/src/main.rs`, `src-rust/crates/cli/src/bin/coven-cave.rs` | `coven-code`; `coven-cave` alias |
 | npm package | `npm/package.json` | `@opencoven/coven-code` |
 | Data/cache dirs | `src-rust/crates/core/src/snapshot/`, `skill_discovery.rs`, `update_check.rs`, `app.rs` | `coven-code/` |
+| Engine home (standalone) | `src-rust/crates/core/src/lib.rs` (`config_home`) | `~/.coven-code/` |
+| Engine home (under coven CLI) | `src-rust/crates/core/src/lib.rs` (`config_home`) | `~/.coven/code/` — migrated in-place from `~/.coven-code/` on first launch; legacy path is symlinked to new location |
 | Env var prefix | throughout `src-rust/` | `COVEN_CODE_*` |
 | User-Agent | `src-rust/crates/tools/src/web_search.rs`, `update_check.rs` | `CovenCode/x.y` |
 | System prompt identity | `src-rust/crates/core/src/system_prompt.rs` | "You are Coven Code…" |

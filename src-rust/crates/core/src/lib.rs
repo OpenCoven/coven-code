@@ -114,6 +114,10 @@ pub mod coven_shared;
 // Tier B IPC — blocking HTTP-over-Unix-socket client for the live daemon.
 pub mod coven_daemon;
 pub mod roster_reset;
+
+// One-time, best-effort relocation of the engine home from legacy
+// ~/.coven-code/ to ~/.coven/code/ when running under the unified coven CLI.
+pub mod home_migration;
 pub use cost::CostTracker;
 pub use feature_flags::FeatureFlagManager;
 pub use history::ConversationSession;
@@ -1486,19 +1490,27 @@ pub mod config {
     /// is an absolute path under the user's home directory).
     pub const PROJECT_CONFIG_DIRNAME: &str = ".coven-code";
 
-    /// Mutex that must be held when mutating `COVEN_CODE_TEST_HOME` in tests.
+    /// Mutex that must be held when mutating `COVEN_CODE_TEST_HOME`,
+    /// `COVEN_CODE_HOME`, `COVEN_PARENT`, or any env var read by
+    /// `config_home()` in tests.
     ///
-    /// `config_home()` reads this env var under `#[cfg(test)]`; without
-    /// serialisation concurrent tests would race on process-wide env state.
+    /// `config_home()` reads these env vars; without serialisation concurrent
+    /// tests would race on process-wide env state.
     #[cfg(test)]
     pub(crate) static CONFIG_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The engine's home/config directory.  **Single source of truth** for all
     /// engine state (settings, auth, projects, caches, skills).
     ///
-    /// Currently always resolves to `~/.coven-code`.  Phase 4.1 keeps this
-    /// behaviour identical to the historical scattered constructions; a later
-    /// task adds env-override precedence and relocation here.
+    /// Precedence (highest wins):
+    ///
+    /// 1. `COVEN_CODE_TEST_HOME` (test builds only) — resolves to
+    ///    `$COVEN_CODE_TEST_HOME/.coven-code` so test suites can isolate
+    ///    without touching the real home directory.
+    /// 2. `COVEN_CODE_HOME` — explicit engine-home override; returned as-is.
+    /// 3. Under the unified coven CLI (`COVEN_HOME` set or `COVEN_PARENT=coven`)
+    ///    — resolves to `$COVEN_HOME/code` (or `~/.coven/code`).
+    /// 4. Legacy standalone default — `~/.coven-code`.
     pub fn config_home() -> PathBuf {
         #[cfg(test)]
         if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
@@ -1507,6 +1519,28 @@ pub mod config {
             }
         }
 
+        // 1. Explicit engine-home override.
+        if let Ok(p) = std::env::var("COVEN_CODE_HOME") {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+
+        // 2. Under the unified coven CLI, live at <coven_home>/code.
+        //    coven_home = COVEN_HOME or ~/.coven.  Triggered when COVEN_HOME is
+        //    set OR the parent is coven (COVEN_PARENT=coven).
+        let under_coven = std::env::var_os("COVEN_HOME").is_some()
+            || std::env::var("COVEN_PARENT").ok().as_deref() == Some("coven");
+        if under_coven {
+            let coven_home = std::env::var_os("COVEN_HOME")
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|h| h.join(".coven")));
+            if let Some(ch) = coven_home {
+                return ch.join("code");
+            }
+        }
+
+        // 3. Legacy standalone default.
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".coven-code")
@@ -2206,6 +2240,180 @@ pub mod config {
 
             // Restore env state.
             match original {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        // -- Phase 4.2: config_home() env-override precedence tests ----------
+
+        /// COVEN_CODE_HOME wins over all other signals.
+        #[test]
+        fn config_home_explicit_override_wins() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            // Ensure COVEN_CODE_TEST_HOME is clear so the test-override branch
+            // does not fire (this test targets the COVEN_CODE_HOME branch).
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+
+            let saved = std::env::var("COVEN_CODE_HOME").ok();
+            let expected = PathBuf::from("/tmp/my-custom-coven-engine");
+            std::env::set_var("COVEN_CODE_HOME", &expected);
+
+            let got = config_home();
+            assert_eq!(got, expected, "COVEN_CODE_HOME should be returned as-is");
+
+            match saved {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// COVEN_HOME set → `<COVEN_HOME>/code`.
+        #[test]
+        fn config_home_coven_home_gives_code_subdir() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            // Also need COVEN_HOME_ENV_LOCK since we mutate COVEN_HOME.
+            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            let tmp = tempfile::tempdir().unwrap();
+            std::env::set_var("COVEN_HOME", tmp.path());
+
+            let got = config_home();
+            let expected = tmp.path().join("code");
+            assert_eq!(
+                got, expected,
+                "COVEN_HOME set should yield <COVEN_HOME>/code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// COVEN_PARENT=coven (no COVEN_HOME) → `~/.coven/code`.
+        #[test]
+        fn config_home_coven_parent_gives_dot_coven_code() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::remove_var("COVEN_HOME");
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::set_var("COVEN_PARENT", "coven");
+
+            let got = config_home();
+            // Should be ~/.coven/code
+            let expected = dirs::home_dir()
+                .expect("home_dir must be available in test environment")
+                .join(".coven")
+                .join("code");
+            assert_eq!(
+                got, expected,
+                "COVEN_PARENT=coven should yield ~/.coven/code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// No coven signals → `~/.coven-code` (legacy standalone default).
+        #[test]
+        fn config_home_neither_gives_legacy_path() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::remove_var("COVEN_HOME");
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            let got = config_home();
+            let expected = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "with no coven signals, should be ~/.coven-code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
                 Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
                 None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
             }
