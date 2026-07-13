@@ -911,9 +911,10 @@ pub fn load_all_memory_files_with_options(
     let mut files = Vec::new();
 
     // 1. Managed: ~/.coven-code/rules/*.md
-    if let Some(home) = memory_home_dir() {
+    {
+        let config_home = crate::config::config_home();
         if options.allow_managed_rules {
-            let rules_dir = home.join(".coven-code/rules");
+            let rules_dir = config_home.join("rules");
             if let Ok(entries) = std::fs::read_dir(&rules_dir) {
                 let mut paths: Vec<PathBuf> = entries
                     .flatten()
@@ -937,7 +938,7 @@ pub fn load_all_memory_files_with_options(
 
         // 2. User: ~/.coven-code/AGENTS.md then ~/.coven-code/CLAUDE.md
         if options.allow_user_memory {
-            load_scope_files(&home.join(".coven-code"), MemoryScope::User, &mut files);
+            load_scope_files(&config_home, MemoryScope::User, &mut files);
         }
     }
 
@@ -973,16 +974,12 @@ pub fn enumerate_context_memory_files(
     let mut files: Vec<MemoryFileInfo> = Vec::new();
 
     if options.allow_user_memory {
-        if let Some(home) = dirs::home_dir() {
-            let global = home
-                .join(".coven-code")
-                .join(crate::constants::CLAUDE_MD_FILENAME);
-            if global.exists() {
-                if let Some(file) = load_memory_file(&global, MemoryScope::User)
-                    .filter(|file| memory_file_allowed_for_options(file, options))
-                {
-                    files.push(file);
-                }
+        let global = crate::config::config_home().join(crate::constants::CLAUDE_MD_FILENAME);
+        if global.exists() {
+            if let Some(file) = load_memory_file(&global, MemoryScope::User)
+                .filter(|file| memory_file_allowed_for_options(file, options))
+            {
+                files.push(file);
             }
         }
     }

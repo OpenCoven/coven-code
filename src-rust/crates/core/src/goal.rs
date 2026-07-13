@@ -161,13 +161,13 @@ impl GoalStore {
     }
 
     /// Default path: `~/.coven-code/goals.sqlite`.
-    pub fn default_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".coven-code").join("goals.sqlite"))
+    pub fn default_path() -> PathBuf {
+        crate::config::config_home().join("goals.sqlite")
     }
 
     /// Open using the default path (best-effort; returns None on failure).
     pub fn open_default() -> Option<Self> {
-        Self::default_path().and_then(|p| Self::open(&p).ok())
+        Self::open(&Self::default_path()).ok()
     }
 
     fn now_ms() -> u64 {
@@ -696,5 +696,18 @@ mod tests {
         } else {
             std::env::remove_var("COVEN_CODE_GOALS");
         }
+    }
+
+    #[test]
+    fn default_path_derives_from_config_home() {
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let path = GoalStore::default_path();
+        assert!(
+            path.starts_with(crate::config::config_home()),
+            "default_path {path:?} should start with config_home()"
+        );
+        assert_eq!(path.file_name().unwrap(), "goals.sqlite");
     }
 }

@@ -74,11 +74,11 @@ pub struct ModelBreakdown {
 // Data loading
 // ---------------------------------------------------------------------------
 
-/// Load and aggregate stats from ~/.coven-code/stats.jsonl
+/// Load and aggregate stats from `config_home()/stats.jsonl` (legacy
+/// `~/.coven-code/stats.jsonl`, or `~/.coven/code/stats.jsonl` under the
+/// unified coven CLI).
 pub fn load_stats() -> AggregatedStats {
-    let path = dirs::home_dir()
-        .map(|h| h.join(".coven-code").join("stats.jsonl"))
-        .unwrap_or_default();
+    let path = claurst_core::config::config_home().join("stats.jsonl");
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,

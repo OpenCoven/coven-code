@@ -116,6 +116,10 @@ pub mod coven_daemon;
 // Best-effort session lifecycle notifications to the Coven daemon ledger.
 pub mod coven_ledger;
 pub mod roster_reset;
+
+// One-time, best-effort relocation of the engine home from legacy
+// ~/.coven-code/ to ~/.coven/code/ when running under the unified coven CLI.
+pub mod home_migration;
 pub use cost::CostTracker;
 pub use feature_flags::FeatureFlagManager;
 pub use history::ConversationSession;
@@ -1065,6 +1069,92 @@ pub mod config {
         pub urls: Vec<String>,
     }
 
+    // ---- SharedSettings --------------------------------------------------
+
+    /// A restricted subset of settings that can live at `~/.coven/settings.json`
+    /// and apply as the lowest-precedence layer across all Coven tools.
+    ///
+    /// Only genuinely cross-tool keys belong here.  Engine-specific keys
+    /// (MCP servers, hooks, plugins, credentials, provider routing, etc.) are
+    /// intentionally absent.  Unknown JSON keys in the shared file are silently
+    /// ignored so future tools can extend the schema without breaking older
+    /// versions of coven-code.
+    ///
+    /// Load order (lowest → highest): shared → engine-global → project.
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(default)]
+    pub struct SharedSettings {
+        /// Default model to use across all Coven tools.
+        pub model: Option<String>,
+        /// UI theme preference (`"default"`, `"dark"`, `"light"`, etc.).
+        /// Stored as a raw string so the shared file does not depend on the
+        /// engine's internal `Theme` enum variants.
+        pub theme: Option<String>,
+        /// Permission mode (`"default"`, `"acceptEdits"`, `"bypassPermissions"`,
+        /// `"plan"`).  Stored as a raw string for the same reason as `theme`.
+        pub permission_mode: Option<String>,
+    }
+
+    impl SharedSettings {
+        /// Load the shared settings file at `~/.coven/settings.json`.
+        ///
+        /// Returns `SharedSettings::default()` (all `None`) when:
+        /// - there is no `~/.coven/` directory (standalone / no coven home), or
+        /// - the file does not exist, or
+        /// - the file cannot be read or parsed.
+        ///
+        /// All failures are non-fatal so coven-code keeps working standalone.
+        pub fn load() -> Self {
+            let Some(home) = crate::coven_shared::coven_home() else {
+                return Self::default();
+            };
+            let path = home.join("settings.json");
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(_) => return Self::default(),
+            };
+            serde_json::from_str::<Self>(&raw).unwrap_or_default()
+        }
+
+        /// Apply whitelisted fields from the shared file to `target` (the
+        /// engine-global `Settings`) only when the engine-global left those
+        /// fields at their built-in default value.
+        ///
+        /// Semantics per field:
+        /// - `model` — `Option<String>`: applied when engine has `None`.
+        /// - `theme` — non-optional enum: applied when engine still has
+        ///   `Theme::Default` (i.e. the user did not pick a theme in the
+        ///   engine settings).
+        /// - `permission_mode` — non-optional enum: applied when engine still
+        ///   has `PermissionMode::Default`.
+        pub fn apply_to(self, target: &mut Settings) {
+            // model: Option — shared fills the gap when engine left it None.
+            if target.config.model.is_none() {
+                if let Some(m) = self.model {
+                    target.config.model = Some(m);
+                }
+            }
+            // theme: enum with Default variant — shared fills only when engine
+            // is still at the built-in default.
+            if matches!(target.config.theme, Theme::Default) {
+                if let Some(raw) = self.theme {
+                    let parsed = serde_json::from_value::<Theme>(serde_json::Value::String(raw))
+                        .unwrap_or(Theme::Default);
+                    target.config.theme = parsed;
+                }
+            }
+            // permission_mode: same pattern as theme.
+            if matches!(target.config.permission_mode, PermissionMode::Default) {
+                if let Some(raw) = self.permission_mode {
+                    let parsed =
+                        serde_json::from_value::<PermissionMode>(serde_json::Value::String(raw))
+                            .unwrap_or(PermissionMode::Default);
+                    target.config.permission_mode = parsed;
+                }
+            }
+        }
+    }
+
     // ---- Settings --------------------------------------------------------
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1485,19 +1575,86 @@ pub mod config {
         }
     }
 
+    /// The directory name used for per-project engine config directories.
+    ///
+    /// Project discovery walks up from cwd and joins this name onto each
+    /// ancestor — it is intentionally NOT the same as `config_home()` (which
+    /// is an absolute path under the user's home directory).
+    pub const PROJECT_CONFIG_DIRNAME: &str = ".coven-code";
+
+    /// Mutex that must be held when mutating `COVEN_CODE_TEST_HOME`,
+    /// `COVEN_CODE_HOME`, `COVEN_PARENT`, or any env var read by
+    /// `config_home()` in tests.
+    ///
+    /// `config_home()` reads these env vars; without serialisation concurrent
+    /// tests would race on process-wide env state.
+    ///
+    /// This is a RE-EXPORT of [`crate::coven_shared::COVEN_HOME_ENV_LOCK`], not a
+    /// separate mutex. Both names guard the exact same set of env vars, so they
+    /// MUST resolve to the same lock — otherwise a test holding one lock could
+    /// mutate `COVEN_HOME`/`COVEN_CODE_HOME` while a test holding the other reads
+    /// them, producing flaky failures (observed in `test_cache_path`).
+    #[cfg(test)]
+    pub(crate) use crate::coven_shared::COVEN_HOME_ENV_LOCK as CONFIG_HOME_ENV_LOCK;
+
+    /// The engine's home/config directory.  **Single source of truth** for all
+    /// engine state (settings, auth, projects, caches, skills).
+    ///
+    /// Precedence (highest wins):
+    ///
+    /// 1. `COVEN_CODE_TEST_HOME` (test builds only) — resolves to
+    ///    `$COVEN_CODE_TEST_HOME/.coven-code` so test suites can isolate
+    ///    without touching the real home directory.
+    /// 2. `COVEN_CODE_HOME` — explicit engine-home override; returned as-is.
+    /// 3. Under the unified coven CLI (`COVEN_HOME` set or `COVEN_PARENT=coven`)
+    ///    — resolves to `$COVEN_HOME/code` (or `~/.coven/code`).
+    /// 4. Legacy standalone default — `~/.coven-code`.
+    pub fn config_home() -> PathBuf {
+        #[cfg(test)]
+        if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home).join(".coven-code");
+            }
+        }
+
+        // 1. Explicit engine-home override.
+        if let Ok(p) = std::env::var("COVEN_CODE_HOME") {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+
+        // 2. Under the unified coven CLI, live at <coven_home>/code.
+        //    coven_home = COVEN_HOME or ~/.coven.  Triggered when COVEN_HOME is
+        //    set to a NON-EMPTY value OR the parent is coven (COVEN_PARENT=coven).
+        //    An empty COVEN_HOME is treated as unset — otherwise PathBuf::from("")
+        //    would resolve to a relative "code" directory in the cwd, which could
+        //    also mis-trigger the home migration.
+        let coven_home_env = std::env::var("COVEN_HOME").ok().filter(|v| !v.is_empty());
+        let under_coven = coven_home_env.is_some()
+            || std::env::var("COVEN_PARENT").ok().as_deref() == Some("coven");
+        if under_coven {
+            let coven_home = coven_home_env
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|h| h.join(".coven")));
+            if let Some(ch) = coven_home {
+                return ch.join("code");
+            }
+        }
+
+        // 3. Legacy standalone default.
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".coven-code")
+    }
+
     impl Settings {
         /// The per-user configuration directory (`~/.coven-code`).
+        ///
+        /// Thin shim over [`config_home()`] — kept for callers that reach it
+        /// through `Settings::`.
         pub fn config_dir() -> PathBuf {
-            #[cfg(test)]
-            if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
-                if !home.is_empty() {
-                    return PathBuf::from(home).join(".coven-code");
-                }
-            }
-
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".coven-code")
+            config_home()
         }
 
         /// Full path to the global settings JSON file.
@@ -1616,13 +1773,27 @@ pub mod config {
         }
 
         /// Load settings from all config levels and merge them.
-        /// Priority: project > global, except project-local executable MCP
-        /// server definitions and provider-routing fields are ignored before
-        /// merging.
+        /// Priority: project > engine-global > shared, except project-local
+        /// executable MCP server definitions and provider-routing fields are
+        /// ignored before merging.
+        ///
+        /// Three-layer load order (lowest → highest precedence):
+        ///   1. Shared  — `~/.coven/settings.json`  (whitelisted keys only)
+        ///   2. Global  — `~/.coven/code/settings.json`
+        ///   3. Project — `<project>/.coven-code/settings.json`
+        ///
+        /// When there is no `~/.coven/` directory (standalone mode, no coven
+        /// CLI), the shared layer is absent and behaviour is identical to the
+        /// pre-4.3 two-layer load.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
-            // 1. Load global settings.
+            // 1. Load engine-global settings.
             let mut merged = Self::load().await.unwrap_or_default();
-            // 2. Find and merge project settings (safe project fields win).
+            // 2. Apply shared ~/.coven/settings.json as the lowest layer: fill
+            //    in whitelisted keys only when the engine-global left them at
+            //    their default value (i.e. the user did not explicitly set
+            //    them in the engine settings).
+            SharedSettings::load().apply_to(&mut merged);
+            // 3. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
                 merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
             }
@@ -1637,7 +1808,7 @@ pub mod config {
             loop {
                 // Try .json first, then .jsonc.
                 for name in &["settings.json", "settings.jsonc"] {
-                    let candidate = dir.join(".coven-code").join(name);
+                    let candidate = dir.join(PROJECT_CONFIG_DIRNAME).join(name);
                     if candidate.exists() && candidate != global_path {
                         if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
                             let stripped = strip_jsonc_comments(&content);
@@ -2129,6 +2300,571 @@ pub mod config {
             match original {
                 Some(value) => std::env::set_var("COVEN_CODE_HOSTED_REVIEW", value),
                 None => std::env::remove_var("COVEN_CODE_HOSTED_REVIEW"),
+            }
+        }
+
+        // -- Phase 4.1: config_home() consolidation tests -------------------
+
+        /// Verify that every engine-global path derives from `config_home()`.
+        ///
+        /// Private path functions are exposed via `#[cfg(test)] pub(crate)`
+        /// accessors added in Phase 4.1; those are noted in the report.
+        #[test]
+        fn all_engine_paths_derive_from_config_home() {
+            // config_home() is env-sensitive; hold the lock so a concurrent
+            // env-mutating test can't change it between our two calls (which
+            // would make config_dir() and `home` disagree).
+            let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let home = config_home();
+
+            // Site 1 / Settings::config_dir() is a thin shim — same value.
+            assert_eq!(Settings::config_dir(), home);
+
+            // Site 2 — AuthStore::path().
+            assert!(crate::auth_store::AuthStore::path().starts_with(&home));
+
+            // Site 3 — FeatureFlagManager::get_cache_path() (via test accessor).
+            assert!(crate::feature_flags::feature_flags_cache_path_for_test().starts_with(&home));
+
+            // Site 4 — claude_home() in prompt_history (via test accessor).
+            assert!(crate::prompt_history::history_base_path_for_test().starts_with(&home));
+
+            // Site 5 — claude_config_dir() in remote_settings (via test accessor).
+            assert!(crate::remote_settings::remote_settings_dir_for_test().starts_with(&home));
+
+            // Site 6 — OAuthTokens::token_file_path().
+            assert!(crate::oauth::OAuthTokens::token_file_path().starts_with(&home));
+
+            // Site 7 — global skills dir derives from config_home().
+            assert!(home.join("skills").starts_with(&home));
+        }
+
+        /// Verify that `config_home()` honours `COVEN_CODE_TEST_HOME` in
+        /// `#[cfg(test)]` builds, preserving the existing test-override
+        /// behaviour from `Settings::config_dir()`.
+        #[test]
+        fn config_home_test_override_still_works() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let tmp = tempfile::tempdir().unwrap();
+            let original = std::env::var("COVEN_CODE_TEST_HOME").ok();
+
+            std::env::set_var("COVEN_CODE_TEST_HOME", tmp.path());
+            let got = config_home();
+            let expected = tmp.path().join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "config_home() should honour COVEN_CODE_TEST_HOME"
+            );
+
+            // Restore env state.
+            match original {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        // -- Phase 4.2: config_home() env-override precedence tests ----------
+
+        /// COVEN_CODE_HOME wins over all other signals.
+        #[test]
+        fn config_home_explicit_override_wins() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            // Ensure COVEN_CODE_TEST_HOME is clear so the test-override branch
+            // does not fire (this test targets the COVEN_CODE_HOME branch).
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+
+            let saved = std::env::var("COVEN_CODE_HOME").ok();
+            let expected = PathBuf::from("/tmp/my-custom-coven-engine");
+            std::env::set_var("COVEN_CODE_HOME", &expected);
+
+            let got = config_home();
+            assert_eq!(got, expected, "COVEN_CODE_HOME should be returned as-is");
+
+            match saved {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// COVEN_HOME set → `<COVEN_HOME>/code`.
+        #[test]
+        fn config_home_coven_home_gives_code_subdir() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            let tmp = tempfile::tempdir().unwrap();
+            std::env::set_var("COVEN_HOME", tmp.path());
+
+            let got = config_home();
+            let expected = tmp.path().join("code");
+            assert_eq!(
+                got, expected,
+                "COVEN_HOME set should yield <COVEN_HOME>/code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// COVEN_PARENT=coven (no COVEN_HOME) → `~/.coven/code`.
+        #[test]
+        fn config_home_coven_parent_gives_dot_coven_code() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::remove_var("COVEN_HOME");
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::set_var("COVEN_PARENT", "coven");
+
+            let got = config_home();
+            // Should be ~/.coven/code
+            let expected = dirs::home_dir()
+                .expect("home_dir must be available in test environment")
+                .join(".coven")
+                .join("code");
+            assert_eq!(
+                got, expected,
+                "COVEN_PARENT=coven should yield ~/.coven/code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// No coven signals → `~/.coven-code` (legacy standalone default).
+        #[test]
+        fn config_home_neither_gives_legacy_path() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            std::env::remove_var("COVEN_HOME");
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            let got = config_home();
+            let expected = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "with no coven signals, should be ~/.coven-code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// An EMPTY `COVEN_HOME` must be treated as unset — NOT as a coven
+        /// signal that yields a relative `code` directory. Regression guard for
+        /// the empty-string edge case: with only `COVEN_HOME=""`, `config_home()`
+        /// must fall back to the legacy `~/.coven-code`, not `PathBuf::from("")`.
+        #[test]
+        fn config_home_empty_coven_home_is_treated_as_unset() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            std::env::set_var("COVEN_HOME", "");
+
+            let got = config_home();
+            let expected = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "empty COVEN_HOME must fall back to ~/.coven-code, not a relative path"
+            );
+            assert!(
+                got.is_absolute() || got.starts_with("."),
+                "config_home() must not become a bare relative \"code\" dir"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        // -- Phase 4.3: shared ~/.coven/settings.json layer tests ------------
+
+        /// Helper: hold both env locks and set COVEN_HOME + COVEN_CODE_HOME to
+        /// dedicated temp dirs, then run `f`.  Restores env on drop.
+        struct SharedLayerGuard {
+            saved_coven_home: Option<String>,
+            saved_coven_code_home: Option<String>,
+            saved_test_home: Option<String>,
+            _coven_tmp: tempfile::TempDir,
+            _code_tmp: tempfile::TempDir,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl Drop for SharedLayerGuard {
+            fn drop(&mut self) {
+                match self.saved_coven_home.take() {
+                    Some(v) => std::env::set_var("COVEN_HOME", v),
+                    None => std::env::remove_var("COVEN_HOME"),
+                }
+                match self.saved_coven_code_home.take() {
+                    Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                    None => std::env::remove_var("COVEN_CODE_HOME"),
+                }
+                match self.saved_test_home.take() {
+                    Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                    None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+                }
+            }
+        }
+
+        /// Set up isolated temp dirs for both COVEN_HOME and COVEN_CODE_HOME and
+        /// return a guard that restores env on drop.
+        ///
+        /// `setup_coven(dir)` is called with the coven-home path so callers can
+        /// write shared files. `setup_code(dir)` is called with the engine-home
+        /// path so callers can write engine settings.
+        fn with_shared_layer<FC, FE>(setup_coven: FC, setup_engine: FE) -> SharedLayerGuard
+        where
+            FC: FnOnce(&std::path::Path),
+            FE: FnOnce(&std::path::Path),
+        {
+            let lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let coven_tmp = tempfile::TempDir::new().unwrap();
+            let code_tmp = tempfile::TempDir::new().unwrap();
+
+            setup_coven(coven_tmp.path());
+            setup_engine(code_tmp.path());
+
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            let saved_coven_code_home = std::env::var("COVEN_CODE_HOME").ok();
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+
+            std::env::set_var("COVEN_HOME", coven_tmp.path());
+            std::env::set_var("COVEN_CODE_HOME", code_tmp.path());
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+
+            SharedLayerGuard {
+                saved_coven_home,
+                saved_coven_code_home,
+                saved_test_home,
+                _coven_tmp: coven_tmp,
+                _code_tmp: code_tmp,
+                _lock: lock,
+            }
+        }
+
+        /// 3-layer precedence: engine-global overrides shared; project overrides both.
+        ///
+        /// shared: model="shared-model"
+        /// engine: model="engine-model"  → effective: "engine-model"
+        ///
+        /// Adding a project layer with model="proj-model" → effective: "proj-model".
+        #[test]
+        fn shared_layer_model_engine_wins_over_shared() {
+            let _g = with_shared_layer(
+                |coven_home| {
+                    std::fs::write(
+                        coven_home.join("settings.json"),
+                        r#"{"model":"shared-model"}"#,
+                    )
+                    .unwrap();
+                },
+                |code_home| {
+                    std::fs::write(
+                        code_home.join("settings.json"),
+                        r#"{"config":{"model":"engine-model"}}"#,
+                    )
+                    .unwrap();
+                },
+            );
+
+            let shared = SharedSettings::load();
+            assert_eq!(shared.model.as_deref(), Some("shared-model"));
+
+            let mut engine = Settings::default();
+            engine.config.model = Some("engine-model".to_string());
+            shared.apply_to(&mut engine);
+            // Engine value must not be overwritten.
+            assert_eq!(engine.config.model.as_deref(), Some("engine-model"));
+        }
+
+        /// Shared fills a gap: shared sets theme; engine-global does NOT set theme.
+        /// Effective theme should come from the shared layer.
+        #[test]
+        fn shared_layer_theme_fills_engine_default() {
+            let _g = with_shared_layer(
+                |coven_home| {
+                    std::fs::write(coven_home.join("settings.json"), r#"{"theme":"dark"}"#)
+                        .unwrap();
+                },
+                |_code_home| {
+                    // engine settings.json absent → engine stays at Theme::Default
+                },
+            );
+
+            let shared = SharedSettings::load();
+            assert_eq!(shared.theme.as_deref(), Some("dark"));
+
+            let mut engine = Settings::default();
+            // Engine theme is Default — shared should fill it in.
+            assert!(matches!(engine.config.theme, Theme::Default));
+            shared.apply_to(&mut engine);
+            assert!(matches!(engine.config.theme, Theme::Dark));
+        }
+
+        /// Shared `permission_mode` fills the engine default and is parsed
+        /// through the camelCase enum representation.
+        #[test]
+        fn shared_layer_permission_mode_fills_engine_default() {
+            let _g = with_shared_layer(
+                |coven_home| {
+                    std::fs::write(
+                        coven_home.join("settings.json"),
+                        r#"{"permission_mode":"acceptEdits"}"#,
+                    )
+                    .unwrap();
+                },
+                |_code_home| {},
+            );
+
+            let shared = SharedSettings::load();
+            assert_eq!(shared.permission_mode.as_deref(), Some("acceptEdits"));
+
+            let mut engine = Settings::default();
+            assert!(matches!(
+                engine.config.permission_mode,
+                PermissionMode::Default
+            ));
+            shared.apply_to(&mut engine);
+            assert!(matches!(
+                engine.config.permission_mode,
+                PermissionMode::AcceptEdits
+            ));
+        }
+
+        /// A malformed / non-JSON shared file is non-fatal: `load()` returns
+        /// all-`None` and leaves the engine settings untouched.
+        #[test]
+        fn shared_layer_malformed_file_is_non_fatal() {
+            let _g = with_shared_layer(
+                |coven_home| {
+                    std::fs::write(coven_home.join("settings.json"), "this is not json {{{")
+                        .unwrap();
+                },
+                |_code_home| {},
+            );
+
+            // Must not panic; must degrade to defaults.
+            let shared = SharedSettings::load();
+            assert!(shared.model.is_none());
+            assert!(shared.theme.is_none());
+            assert!(shared.permission_mode.is_none());
+
+            let mut engine = Settings::default();
+            engine.config.model = Some("engine-model".to_string());
+            shared.apply_to(&mut engine);
+            // Engine model preserved; malformed shared file changed nothing.
+            assert_eq!(engine.config.model.as_deref(), Some("engine-model"));
+        }
+
+        /// Non-whitelisted keys in the shared file are silently ignored.
+        ///
+        /// We put an engine-only key (`mcp_servers` shaped as an object) in the
+        /// shared JSON.  SharedSettings must parse successfully (unknown keys are
+        /// tolerated) and the engine Settings must not acquire any MCP servers.
+        #[test]
+        fn shared_layer_nonwhitelisted_key_is_ignored() {
+            let _g = with_shared_layer(
+                |coven_home| {
+                    std::fs::write(
+                        coven_home.join("settings.json"),
+                        r#"{
+                            "model": "shared-model",
+                            "mcp_servers": [{"name":"evil","command":"rm","args":["-rf","/"]}],
+                            "hooks": {"PreToolUse": [{"command":"stolen"}]}
+                        }"#,
+                    )
+                    .unwrap();
+                },
+                |_code_home| {},
+            );
+
+            let shared = SharedSettings::load();
+            // Whitelisted key is present.
+            assert_eq!(shared.model.as_deref(), Some("shared-model"));
+
+            let mut engine = Settings::default();
+            shared.apply_to(&mut engine);
+            // Engine model was filled from shared.
+            assert_eq!(engine.config.model.as_deref(), Some("shared-model"));
+            // Non-whitelisted keys were NOT applied.
+            assert!(
+                engine.config.mcp_servers.is_empty(),
+                "mcp_servers must not leak from shared layer"
+            );
+            assert!(
+                engine.config.hooks.is_empty(),
+                "hooks must not leak from shared layer"
+            );
+        }
+
+        /// No coven home → shared layer is absent → load_hierarchical behaves
+        /// as before (engine settings are used as-is; project can still override).
+        #[test]
+        fn shared_layer_absent_when_no_coven_home() {
+            // Use COVEN_CODE_HOME for engine isolation but keep COVEN_HOME unset
+            // (no coven home → SharedSettings::load() returns Default).
+            let lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let saved_coven = std::env::var("COVEN_HOME").ok();
+            let saved_code = std::env::var("COVEN_CODE_HOME").ok();
+            let saved_test = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_HOME");
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+
+            let code_tmp = tempfile::TempDir::new().unwrap();
+            std::env::set_var("COVEN_CODE_HOME", code_tmp.path());
+            std::fs::write(
+                code_tmp.path().join("settings.json"),
+                r#"{"config":{"model":"engine-only-model"}}"#,
+            )
+            .unwrap();
+
+            // SharedSettings::load() must return all-None when there is no
+            // directory at the COVEN_HOME path.
+            let shared = SharedSettings::load();
+            assert!(shared.model.is_none(), "no coven home → no shared model");
+            assert!(shared.theme.is_none(), "no coven home → no shared theme");
+            assert!(
+                shared.permission_mode.is_none(),
+                "no coven home → no shared permission_mode"
+            );
+
+            // apply_to on a settings with engine model must be a no-op.
+            let mut engine = Settings::default();
+            engine.config.model = Some("engine-only-model".to_string());
+            shared.apply_to(&mut engine);
+            assert_eq!(
+                engine.config.model.as_deref(),
+                Some("engine-only-model"),
+                "engine model must be unchanged when shared layer is absent"
+            );
+
+            // Restore.
+            drop(lock);
+            match saved_coven {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_code {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
             }
         }
     }
@@ -4240,10 +4976,7 @@ pub mod oauth {
         /// Legacy token file path — kept for backward-compat reads when no
         /// account registry exists yet. New writes go to per-account dirs.
         pub fn token_file_path() -> std::path::PathBuf {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".coven-code")
-                .join("oauth_tokens.json")
+            crate::config::config_home().join("oauth_tokens.json")
         }
 
         /// Save tokens for a specific account profile under

@@ -13,9 +13,7 @@ use tracing::debug;
 
 /// Returns the path to the persisted todo list for `session_id`.
 pub fn todos_path(session_id: &str) -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".coven-code")
+    claurst_core::config::config_home()
         .join("todos")
         .join(format!("{}.json", session_id))
 }
@@ -30,7 +28,8 @@ pub fn load_todos(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// Persist `todos` to `~/.coven-code/todos/<session_id>.json`.
+/// Persist `todos` to `config_home()/todos/<session_id>.json` (legacy
+/// `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
 pub fn save_todos(session_id: &str, todos: &[Value]) {
     let path = todos_path(session_id);
     if let Some(parent) = path.parent() {
@@ -339,17 +338,61 @@ impl Tool for TodoWriteTool {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate `COVEN_CODE_HOME` (which steers
+    /// `config_home()`), so the todo-persistence tests never write into the
+    /// developer's real `~/.coven-code/` and never race each other's env.
+    ///
+    /// NOTE: we use `COVEN_CODE_HOME`, not `COVEN_CODE_TEST_HOME`. The latter is
+    /// `#[cfg(test)]`-gated inside `claurst_core`, so it is compiled OUT when
+    /// `claurst_core` is built as a normal dependency of this crate's test
+    /// binary. `COVEN_CODE_HOME` is honored in all builds.
+    static TEST_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard: point `config_home()` at a fresh temp dir for the duration
+    /// of a test, restoring the previous `COVEN_CODE_HOME` on drop.
+    struct TodoHomeGuard {
+        _tmp: tempfile::TempDir,
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TodoHomeGuard {
+        fn new() -> Self {
+            let lock = TEST_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let prev = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::set_var("COVEN_CODE_HOME", tmp.path());
+            Self {
+                _tmp: tmp,
+                prev,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TodoHomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn test_todos_path_contains_session_id() {
+        let _g = TodoHomeGuard::new();
         let path = todos_path("my-session-123");
         let path_str = path.to_string_lossy();
         assert!(
             path_str.contains("my-session-123"),
             "todos_path should embed the session id"
         );
+        // Derive the base from config_home() so the assertion holds under any
+        // home layout (legacy .coven-code OR unified ~/.coven/code).
         assert!(
-            path_str.contains(".coven-code"),
-            "todos_path should be under ~/.coven-code"
+            path.starts_with(claurst_core::config::config_home().join("todos")),
+            "todos_path should live under config_home()/todos; got {path_str}"
         );
         assert!(
             path_str.ends_with(".json"),
@@ -359,12 +402,14 @@ mod tests {
 
     #[test]
     fn test_load_todos_missing_file_returns_empty() {
+        let _g = TodoHomeGuard::new();
         let todos = load_todos("nonexistent-session-zzzzzz-99999");
         assert!(todos.is_empty(), "Missing file should yield empty vec");
     }
 
     #[test]
     fn test_save_and_load_roundtrip() {
+        let _g = TodoHomeGuard::new();
         let session_id = format!(
             "test-session-{}",
             std::time::SystemTime::now()
@@ -381,8 +426,7 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0]["id"].as_str(), Some("1"));
         assert_eq!(loaded[1]["status"].as_str(), Some("completed"));
-        // Clean up.
-        let _ = std::fs::remove_file(todos_path(&session_id));
+        // Temp home is cleaned up when the guard drops.
     }
 
     // --- Status parsing ------------------------------------------------------

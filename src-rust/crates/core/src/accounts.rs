@@ -255,9 +255,7 @@ pub fn ensure_unique_profile_id(registry: &AccountRegistry, provider: &str, base
 
 /// `~/.coven-code/`.
 pub fn claurst_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coven-code")
+    crate::config::config_home()
 }
 
 /// `~/.coven-code/accounts/<provider>/<id>/`.

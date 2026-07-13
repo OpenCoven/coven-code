@@ -2155,11 +2155,12 @@ pub async fn run_query_loop(
                 // the spawn doesn't call run_query_loop recursively from within
                 // its own future (which would make the future !Send).
                 {
-                    let memory_dir = dirs::home_dir().map(|h| h.join(".coven-code").join("memory"));
+                    let memory_dir = claurst_core::config::config_home().join("memory");
                     let conversations_dir =
-                        dirs::home_dir().map(|h| h.join(".coven-code").join("conversations"));
-                    if let (Some(mem), Some(conv)) = (memory_dir, conversations_dir) {
-                        let dreamer = crate::auto_dream::AutoDream::new(mem, conv);
+                        claurst_core::config::config_home().join("conversations");
+                    {
+                        let dreamer =
+                            crate::auto_dream::AutoDream::new(memory_dir, conversations_dir);
                         if let Ok(Some(task)) = dreamer.maybe_trigger().await {
                             // Run the consolidation subagent in a background Tokio
                             // task. We use the AgentTool execute path (via

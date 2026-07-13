@@ -9,7 +9,8 @@
 // a `cooldown_sessions` field — the tip won't be shown again until that many
 // sessions have passed since the last display.
 //
-// History is persisted to `~/.coven-code/tip_history.json`.
+// History is persisted to `config_home()/tip_history.json` (legacy
+// `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
 
 use std::collections::HashMap;
 
@@ -189,19 +190,17 @@ pub struct TipHistory {
 }
 
 impl TipHistory {
-    /// Path to the persisted history file: `~/.coven-code/tip_history.json`.
-    fn history_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|h| h.join(".coven-code").join("tip_history.json"))
+    /// Path to the persisted history file: `config_home()/tip_history.json`
+    /// (legacy `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
+    fn history_path() -> std::path::PathBuf {
+        crate::config::config_home().join("tip_history.json")
     }
 
-    /// Load history from `~/.coven-code/tip_history.json`.
+    /// Load history from `config_home()/tip_history.json`.
     /// Returns an empty `TipHistory` if the file does not exist or cannot be
     /// parsed.
     pub fn load() -> Self {
-        let path = match Self::history_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
+        let path = Self::history_path();
         match std::fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
@@ -211,10 +210,7 @@ impl TipHistory {
     /// Persist history to `~/.coven-code/tip_history.json`.
     /// Silently ignores I/O errors (tips are non-critical).
     pub fn save(&self) {
-        let path = match Self::history_path() {
-            Some(p) => p,
-            None => return,
-        };
+        let path = Self::history_path();
         // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -380,6 +376,17 @@ mod tests {
 
     #[test]
     fn select_tip_respects_cooldown() {
+        // `TipHistory::save()` writes to `config_home()/tip_history.json`, so the
+        // engine home MUST be isolated to a temp dir — otherwise this test writes
+        // into the developer's real `~/.coven-code/`. `COVEN_CODE_TEST_HOME` is
+        // honored by `config_home()` in test builds. Hold the env lock while set.
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home_tmp = tempfile::tempdir().unwrap();
+        let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home_tmp.path());
+
         // Record all tips as shown in session 1000, then ask for session 1001.
         // Tips with cooldown > 1 should not be returned.
         let mut history = TipHistory::default();
@@ -387,6 +394,11 @@ mod tests {
             history.record_shown(tip.id, 1000);
         }
         history.save();
+
+        match saved_test_home {
+            Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
 
         // Session 1001 — only tips with cooldown ≤ 1 are eligible.
         // Since all our built-in tips have cooldown ≥ 3, nothing should be
