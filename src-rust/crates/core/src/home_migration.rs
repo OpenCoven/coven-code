@@ -1,8 +1,11 @@
 //! One-time, best-effort relocation of the engine home from the legacy
 //! `~/.coven-code/` to `~/.coven/code/` when running under the unified coven CLI.
 //!
-//! Every failure is non-fatal — a failed migration must NEVER brick the engine;
-//! it falls back to whichever directory has the data.
+//! Every failure is non-fatal — a failed migration must NEVER brick the engine.
+//! On failure the user's data is preserved in the legacy directory (see the
+//! "Degraded behaviour" note below); the engine does not automatically redirect
+//! reads back to legacy, so a failed migration means it starts fresh at the new
+//! (empty) target while the data remains recoverable in legacy.
 //!
 //! # Safety invariant
 //!
@@ -66,13 +69,27 @@ pub fn migrate_if_needed() {
 }
 
 /// Returns `true` when the migration should be skipped because the target
-/// already exists and is non-empty.
+/// already exists and we must not clobber it.
 ///
 /// This is the production no-clobber guard.  It is extracted as a pure
 /// predicate so it can be unit-tested directly: if it is removed or its
 /// logic changes, `target_exists_no_clobber` will catch the regression.
+///
+/// Fails SAFE: the migration is skipped if the target exists and is
+/// non-empty, OR if it exists but cannot be inspected (e.g. `read_dir`
+/// fails due to permissions, or the path is not a directory). Proceeding in
+/// those cases would let the copy fallback merge into / overwrite an existing
+/// target, violating the no-clobber guarantee.
 fn should_skip_existing_target(target: &Path) -> bool {
-    target.exists() && target.read_dir().ok().and_then(|mut d| d.next()).is_some()
+    if !target.exists() {
+        return false;
+    }
+    match target.read_dir() {
+        // Readable directory: skip only if it already holds something.
+        Ok(mut entries) => entries.next().is_some(),
+        // Exists but not inspectable (permissions, not-a-dir, …): skip to be safe.
+        Err(_) => true,
+    }
 }
 
 /// Inner migration function — moves `legacy` to `target`.

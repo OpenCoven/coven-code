@@ -632,14 +632,15 @@ impl HistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned-entry persistence  (~/.coven-code/history_pins.json)
+// Pinned-entry persistence  (config_home()/history_pins.json)
 // ---------------------------------------------------------------------------
 
 fn pins_path() -> std::path::PathBuf {
     claurst_core::config::config_home().join("history_pins.json")
 }
 
-/// Load the set of pinned entry texts from `~/.coven-code/history_pins.json`.
+/// Load the set of pinned entry texts from `config_home()/history_pins.json`
+/// (legacy `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
 /// Returns an empty set if the file does not exist or cannot be parsed.
 pub fn load_pinned_texts() -> std::collections::HashSet<String> {
     let path = pins_path();

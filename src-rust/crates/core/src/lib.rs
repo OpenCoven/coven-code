@@ -1582,8 +1582,14 @@ pub mod config {
     ///
     /// `config_home()` reads these env vars; without serialisation concurrent
     /// tests would race on process-wide env state.
+    ///
+    /// This is a RE-EXPORT of [`crate::coven_shared::COVEN_HOME_ENV_LOCK`], not a
+    /// separate mutex. Both names guard the exact same set of env vars, so they
+    /// MUST resolve to the same lock — otherwise a test holding one lock could
+    /// mutate `COVEN_HOME`/`COVEN_CODE_HOME` while a test holding the other reads
+    /// them, producing flaky failures (observed in `test_cache_path`).
     #[cfg(test)]
-    pub(crate) static CONFIG_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) use crate::coven_shared::COVEN_HOME_ENV_LOCK as CONFIG_HOME_ENV_LOCK;
 
     /// The engine's home/config directory.  **Single source of truth** for all
     /// engine state (settings, auth, projects, caches, skills).
@@ -1614,11 +1620,15 @@ pub mod config {
 
         // 2. Under the unified coven CLI, live at <coven_home>/code.
         //    coven_home = COVEN_HOME or ~/.coven.  Triggered when COVEN_HOME is
-        //    set OR the parent is coven (COVEN_PARENT=coven).
-        let under_coven = std::env::var_os("COVEN_HOME").is_some()
+        //    set to a NON-EMPTY value OR the parent is coven (COVEN_PARENT=coven).
+        //    An empty COVEN_HOME is treated as unset — otherwise PathBuf::from("")
+        //    would resolve to a relative "code" directory in the cwd, which could
+        //    also mis-trigger the home migration.
+        let coven_home_env = std::env::var("COVEN_HOME").ok().filter(|v| !v.is_empty());
+        let under_coven = coven_home_env.is_some()
             || std::env::var("COVEN_PARENT").ok().as_deref() == Some("coven");
         if under_coven {
-            let coven_home = std::env::var_os("COVEN_HOME")
+            let coven_home = coven_home_env
                 .map(PathBuf::from)
                 .or_else(|| dirs::home_dir().map(|h| h.join(".coven")));
             if let Some(ch) = coven_home {
@@ -2498,6 +2508,61 @@ pub mod config {
             assert_eq!(
                 got, expected,
                 "with no coven signals, should be ~/.coven-code"
+            );
+
+            // Restore.
+            match saved_coven_home {
+                Some(v) => std::env::set_var("COVEN_HOME", v),
+                None => std::env::remove_var("COVEN_HOME"),
+            }
+            match saved_parent {
+                Some(v) => std::env::set_var("COVEN_PARENT", v),
+                None => std::env::remove_var("COVEN_PARENT"),
+            }
+            match saved_cc_home {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+            match saved_test_home {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+
+        /// An EMPTY `COVEN_HOME` must be treated as unset — NOT as a coven
+        /// signal that yields a relative `code` directory. Regression guard for
+        /// the empty-string edge case: with only `COVEN_HOME=""`, `config_home()`
+        /// must fall back to the legacy `~/.coven-code`, not `PathBuf::from("")`.
+        #[test]
+        fn config_home_empty_coven_home_is_treated_as_unset() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let _coven_lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let saved_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+            std::env::remove_var("COVEN_CODE_TEST_HOME");
+            let saved_cc_home = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::remove_var("COVEN_CODE_HOME");
+            let saved_coven_home = std::env::var("COVEN_HOME").ok();
+            let saved_parent = std::env::var("COVEN_PARENT").ok();
+            std::env::remove_var("COVEN_PARENT");
+
+            std::env::set_var("COVEN_HOME", "");
+
+            let got = config_home();
+            let expected = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "empty COVEN_HOME must fall back to ~/.coven-code, not a relative path"
+            );
+            assert!(
+                got.is_absolute() || got.starts_with("."),
+                "config_home() must not become a bare relative \"code\" dir"
             );
 
             // Restore.

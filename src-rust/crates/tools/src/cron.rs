@@ -56,7 +56,8 @@ static CRON_STORE: Lazy<Arc<RwLock<HashMap<String, CronTask>>>> =
 // Disk path helpers
 // ---------------------------------------------------------------------------
 
-/// Path to `~/.coven-code/scheduled_tasks.json`.
+/// Path to `config_home()/scheduled_tasks.json` (legacy `~/.coven-code/`, or
+/// `~/.coven/code/` under the unified coven CLI).
 fn scheduled_tasks_path() -> PathBuf {
     claurst_core::config::config_home().join("scheduled_tasks.json")
 }

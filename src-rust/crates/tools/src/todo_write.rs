@@ -28,7 +28,8 @@ pub fn load_todos(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// Persist `todos` to `~/.coven-code/todos/<session_id>.json`.
+/// Persist `todos` to `config_home()/todos/<session_id>.json` (legacy
+/// `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
 pub fn save_todos(session_id: &str, todos: &[Value]) {
     let path = todos_path(session_id);
     if let Some(parent) = path.parent() {

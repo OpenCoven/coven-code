@@ -9,7 +9,8 @@
 // a `cooldown_sessions` field — the tip won't be shown again until that many
 // sessions have passed since the last display.
 //
-// History is persisted to `~/.coven-code/tip_history.json`.
+// History is persisted to `config_home()/tip_history.json` (legacy
+// `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
 
 use std::collections::HashMap;
 
@@ -189,12 +190,13 @@ pub struct TipHistory {
 }
 
 impl TipHistory {
-    /// Path to the persisted history file: `~/.coven-code/tip_history.json`.
+    /// Path to the persisted history file: `config_home()/tip_history.json`
+    /// (legacy `~/.coven-code/`, or `~/.coven/code/` under the unified coven CLI).
     fn history_path() -> std::path::PathBuf {
         crate::config::config_home().join("tip_history.json")
     }
 
-    /// Load history from `~/.coven-code/tip_history.json`.
+    /// Load history from `config_home()/tip_history.json`.
     /// Returns an empty `TipHistory` if the file does not exist or cannot be
     /// parsed.
     pub fn load() -> Self {

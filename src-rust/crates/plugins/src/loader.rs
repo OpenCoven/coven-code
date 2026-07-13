@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 // Public helpers
 // ---------------------------------------------------------------------------
 
-/// Return the default user-level plugins directory: `~/.coven-code/plugins`.
+/// Return the default user-level plugins directory: `config_home()/plugins`
+/// (legacy `~/.coven-code/plugins`, or `~/.coven/code/plugins` under the
+/// unified coven CLI).
 pub fn default_user_plugins_dir() -> PathBuf {
     claurst_core::config::config_home().join("plugins")
 }
