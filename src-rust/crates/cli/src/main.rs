@@ -2068,6 +2068,23 @@ async fn run_interactive(
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
 
+    // Register this session in the Coven daemon ledger (best-effort, opt-in).
+    // The id is captured here so that a mid-run /resume (which rebinds session.id)
+    // does not leave this registration uncompleted — the exit hook uses this local
+    // rather than session.id, which may have changed to a different session by then.
+    let ledger_session_id: Option<String> = if settings.daemon_ledger {
+        let id = session.id.clone();
+        let root = tool_ctx.working_dir.clone();
+        let title = session.title.clone().unwrap_or_default();
+        let id_for_task = id.clone();
+        tokio::task::spawn_blocking(move || {
+            claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title);
+        });
+        Some(id)
+    } else {
+        None
+    };
+
     // Background: refresh the model registry from models.dev.
     // The fetched JSON is saved as a cache file; the App will reload it from
     // disk whenever the /model picker opens.
@@ -4553,6 +4570,14 @@ async fn run_interactive(
     if let Some(runtime) = bridge_runtime.take() {
         runtime.cancel.cancel();
     }
+
+    // Mark the session complete in the Coven daemon ledger (best-effort, opt-in).
+    // Use the id captured at registration time, not session.id, which may have been
+    // rebound by a mid-run /resume to a completely different session.
+    if let Some(id) = &ledger_session_id {
+        claurst_core::coven_ledger::notify_session_complete(id, Some(0));
+    }
+
     restore_terminal(&mut terminal)?;
     Ok(())
 }
