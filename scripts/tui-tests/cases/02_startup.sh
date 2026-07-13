@@ -25,9 +25,11 @@ tc_startup() {
   # Input affordance.
   assert_contains "$s" "❯" "input prompt glyph present"
 
-  # Footer hint bar exposes the core keybindings.
-  assert_contains "$s" "help"     "footer advertises help binding"
+  # Footer hint bar exposes the core keybindings. The help hint moved out of
+  # the footer (9e64bbc dropped Alt+H); /help coverage lives in 04_help_overlay.
   assert_contains "$s" "familiar" "footer advertises familiar binding"
+  assert_contains "$s" "branch"   "footer advertises branch binding"
+  assert_contains "$s" "mode"     "footer advertises mode binding"
 
   # No panic / error banner on a clean boot.
   assert_absent "$s" "panicked at"          "no rust panic on startup"
