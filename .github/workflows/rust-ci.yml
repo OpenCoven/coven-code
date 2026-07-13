@@ -62,3 +62,44 @@ jobs:
       - name: Run tests
         working-directory: src-rust
         run: cargo test --workspace --locked --quiet
+
+  coven-contract:
+    name: Coven engine contract (non-blocking until coven#346 lands)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Non-blocking during bootstrap: coven `main` gains the engine contract
+    # tests only when OpenCoven/coven#346 + the engine-lock PR merge. Until then
+    # `cargo test contract` on coven matches zero tests and passes. Once coven
+    # main carries the suite and this job is proven stable, remove
+    # `continue-on-error` to make engine contract breaks a hard gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (engine + coven)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config libopenblas-dev
+
+      - name: Build the engine
+        working-directory: src-rust
+        run: cargo build --release -p claurst --locked
+
+      - name: Check out OpenCoven/coven
+        uses: actions/checkout@v5
+        with:
+          repository: OpenCoven/coven
+          path: coven-main
+          persist-credentials: false
+
+      - name: Run coven's engine contract tests against this engine
+        working-directory: coven-main
+        run: |
+          ENGINE="$GITHUB_WORKSPACE/src-rust/target/release/coven-code"
+          echo "engine: $ENGINE"; "$ENGINE" --version
+          COVEN_ENGINE_BIN="$ENGINE" cargo test -p coven-cli --locked contract -- --nocapture

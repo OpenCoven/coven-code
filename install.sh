@@ -63,6 +63,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+print_message info "Tip: the unified Coven CLI installs and manages this engine for you — 'npm install -g @opencoven/cli', then run 'coven'. This standalone installer still works."
+
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)

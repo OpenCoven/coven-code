@@ -227,6 +227,8 @@ function GithubPathHint {
 }
 
 # ----- Main flow -----
+Write-Info "Tip: the unified Coven CLI installs and manages this engine for you -- 'npm install -g @opencoven/cli', then run 'coven'. This standalone installer still works."
+
 if (-not [string]::IsNullOrEmpty($Binary)) {
     Install-FromBinary
 } else {
