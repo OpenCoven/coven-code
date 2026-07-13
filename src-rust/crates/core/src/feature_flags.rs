@@ -240,9 +240,19 @@ mod tests {
 
     #[test]
     fn test_cache_path() {
+        // Hold the env lock so this test is serialized against any concurrent
+        // test that mutates COVEN_HOME / COVEN_PARENT / COVEN_CODE_HOME and
+        // would otherwise cause config_home() to return an unexpected path.
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let path = FeatureFlagManager::get_cache_path();
-        assert!(path.to_string_lossy().contains(".coven-code"));
-        assert!(path.to_string_lossy().contains("feature_flags.json"));
+        // Derive the expectation from config_home() so the assertion is correct
+        // under any home layout (legacy ~/.coven-code OR unified ~/.coven/code).
+        assert_eq!(
+            path,
+            crate::config::config_home().join("feature_flags.json")
+        );
     }
 
     #[test]
