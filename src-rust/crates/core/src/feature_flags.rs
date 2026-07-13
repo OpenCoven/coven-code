@@ -70,8 +70,7 @@ impl FeatureFlagManager {
 
     /// Get the cache file path (~/.coven-code/feature_flags.json)
     fn get_cache_path() -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".coven-code").join("feature_flags.json")
+        crate::config::config_home().join("feature_flags.json")
     }
 
     /// Check if a feature flag is enabled
@@ -226,6 +225,13 @@ impl Default for FeatureFlagManager {
 struct GrowthBookApiResponse {
     /// Map of feature flag keys to flag objects
     pub features: Vec<FeatureFlag>,
+}
+
+/// Test accessor — exposes the private cache path for cross-module
+/// consolidation tests (Phase 4.1).
+#[cfg(test)]
+pub(crate) fn feature_flags_cache_path_for_test() -> PathBuf {
+    FeatureFlagManager::get_cache_path()
 }
 
 #[cfg(test)]

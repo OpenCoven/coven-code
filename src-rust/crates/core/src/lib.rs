@@ -1479,19 +1479,46 @@ pub mod config {
         }
     }
 
+    /// The directory name used for per-project engine config directories.
+    ///
+    /// Project discovery walks up from cwd and joins this name onto each
+    /// ancestor — it is intentionally NOT the same as `config_home()` (which
+    /// is an absolute path under the user's home directory).
+    pub const PROJECT_CONFIG_DIRNAME: &str = ".coven-code";
+
+    /// Mutex that must be held when mutating `COVEN_CODE_TEST_HOME` in tests.
+    ///
+    /// `config_home()` reads this env var under `#[cfg(test)]`; without
+    /// serialisation concurrent tests would race on process-wide env state.
+    #[cfg(test)]
+    pub(crate) static CONFIG_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The engine's home/config directory.  **Single source of truth** for all
+    /// engine state (settings, auth, projects, caches, skills).
+    ///
+    /// Currently always resolves to `~/.coven-code`.  Phase 4.1 keeps this
+    /// behaviour identical to the historical scattered constructions; a later
+    /// task adds env-override precedence and relocation here.
+    pub fn config_home() -> PathBuf {
+        #[cfg(test)]
+        if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home).join(".coven-code");
+            }
+        }
+
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".coven-code")
+    }
+
     impl Settings {
         /// The per-user configuration directory (`~/.coven-code`).
+        ///
+        /// Thin shim over [`config_home()`] — kept for callers that reach it
+        /// through `Settings::`.
         pub fn config_dir() -> PathBuf {
-            #[cfg(test)]
-            if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
-                if !home.is_empty() {
-                    return PathBuf::from(home).join(".coven-code");
-                }
-            }
-
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".coven-code")
+            config_home()
         }
 
         /// Full path to the global settings JSON file.
@@ -1631,7 +1658,7 @@ pub mod config {
             loop {
                 // Try .json first, then .jsonc.
                 for name in &["settings.json", "settings.jsonc"] {
-                    let candidate = dir.join(".coven-code").join(name);
+                    let candidate = dir.join(PROJECT_CONFIG_DIRNAME).join(name);
                     if candidate.exists() && candidate != global_path {
                         if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
                             let stripped = strip_jsonc_comments(&content);
@@ -2122,6 +2149,65 @@ pub mod config {
             match original {
                 Some(value) => std::env::set_var("COVEN_CODE_HOSTED_REVIEW", value),
                 None => std::env::remove_var("COVEN_CODE_HOSTED_REVIEW"),
+            }
+        }
+
+        // -- Phase 4.1: config_home() consolidation tests -------------------
+
+        /// Verify that every engine-global path derives from `config_home()`.
+        ///
+        /// Private path functions are exposed via `#[cfg(test)] pub(crate)`
+        /// accessors added in Phase 4.1; those are noted in the report.
+        #[test]
+        fn all_engine_paths_derive_from_config_home() {
+            let home = config_home();
+
+            // Site 1 / Settings::config_dir() is a thin shim — same value.
+            assert_eq!(Settings::config_dir(), home);
+
+            // Site 2 — AuthStore::path().
+            assert!(crate::auth_store::AuthStore::path().starts_with(&home));
+
+            // Site 3 — FeatureFlagManager::get_cache_path() (via test accessor).
+            assert!(crate::feature_flags::feature_flags_cache_path_for_test().starts_with(&home));
+
+            // Site 4 — claude_home() in prompt_history (via test accessor).
+            assert!(crate::prompt_history::history_base_path_for_test().starts_with(&home));
+
+            // Site 5 — claude_config_dir() in remote_settings (via test accessor).
+            assert!(crate::remote_settings::remote_settings_dir_for_test().starts_with(&home));
+
+            // Site 6 — OAuthTokens::token_file_path().
+            assert!(crate::oauth::OAuthTokens::token_file_path().starts_with(&home));
+
+            // Site 7 — global skills dir derives from config_home().
+            assert!(home.join("skills").starts_with(&home));
+        }
+
+        /// Verify that `config_home()` honours `COVEN_CODE_TEST_HOME` in
+        /// `#[cfg(test)]` builds, preserving the existing test-override
+        /// behaviour from `Settings::config_dir()`.
+        #[test]
+        fn config_home_test_override_still_works() {
+            let _lock = CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+
+            let tmp = tempfile::tempdir().unwrap();
+            let original = std::env::var("COVEN_CODE_TEST_HOME").ok();
+
+            std::env::set_var("COVEN_CODE_TEST_HOME", tmp.path());
+            let got = config_home();
+            let expected = tmp.path().join(".coven-code");
+            assert_eq!(
+                got, expected,
+                "config_home() should honour COVEN_CODE_TEST_HOME"
+            );
+
+            // Restore env state.
+            match original {
+                Some(v) => std::env::set_var("COVEN_CODE_TEST_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
             }
         }
     }
@@ -4233,10 +4319,7 @@ pub mod oauth {
         /// Legacy token file path — kept for backward-compat reads when no
         /// account registry exists yet. New writes go to per-account dirs.
         pub fn token_file_path() -> std::path::PathBuf {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".coven-code")
-                .join("oauth_tokens.json")
+            crate::config::config_home().join("oauth_tokens.json")
         }
 
         /// Save tokens for a specific account profile under
