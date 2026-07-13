@@ -100,6 +100,17 @@ Add Coven-specific tools (e.g. `coven_session_tool.rs`) and register in `tools/s
 
 ---
 
+## Engine contract
+
+coven-code is the engine behind the unified `coven` CLI. The exact CLI/env/
+stream surfaces coven depends on are specified in
+[coven/docs/ENGINE-CONTRACT.md](https://github.com/OpenCoven/coven/blob/main/docs/ENGINE-CONTRACT.md)
+(`contract_version: 1`). Do not change flags, output formats, or exit codes
+listed there without bumping the contract version and coordinating a coven
+`engine.lock` update.
+
+---
+
 ## Release checklist
 
 When cutting a `coven-code` release:
