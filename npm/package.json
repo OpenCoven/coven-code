@@ -1,7 +1,7 @@
 {
   "name": "@opencoven/coven-code",
   "version": "0.6.1",
-  "description": "Open-source agentic coding TUI for the terminal \u2014 OpenCoven fork of Claurst",
+  "description": "Coven engine (agentic coding TUI). The unified CLI is @opencoven/cli \u2014 'npm i -g @opencoven/cli'. This package installs the engine binary directly.",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
