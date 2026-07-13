@@ -113,6 +113,8 @@ pub use skill_discovery::{
 pub mod coven_shared;
 // Tier B IPC — blocking HTTP-over-Unix-socket client for the live daemon.
 pub mod coven_daemon;
+// Best-effort session lifecycle notifications to the Coven daemon ledger.
+pub mod coven_ledger;
 pub mod roster_reset;
 pub use cost::CostTracker;
 pub use feature_flags::FeatureFlagManager;
@@ -1180,6 +1182,10 @@ pub mod config {
         /// Ring the terminal bell (\x07) when a background bash task or assistant turn finishes. Defaults to false.
         #[serde(default, rename = "bellOnComplete")]
         pub bell_on_complete: bool,
+        /// Register interactive sessions in the Coven daemon ledger (best-effort).
+        /// Opt-in for now; only acts when a Coven daemon socket is present.
+        #[serde(default, rename = "daemonLedger")]
+        pub daemon_ledger: bool,
     }
 
     impl Settings {
@@ -1898,6 +1904,7 @@ pub mod config {
                 },
                 completion_toast: over.completion_toast.or(base.completion_toast),
                 bell_on_complete: over.bell_on_complete || base.bell_on_complete,
+                daemon_ledger: over.daemon_ledger || base.daemon_ledger,
             }
         }
     }
