@@ -143,7 +143,7 @@ pub fn render_feedback_survey(state: &FeedbackSurveyState, area: Rect, buf: &mut
             vec![
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "  How is Coven Code doing this session? (optional)",
+                    "  How is Coven doing this session? (optional)",
                     Style::default().fg(Color::White),
                 )]),
                 Line::from(""),

@@ -301,7 +301,7 @@ fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: R
     let lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled(
-                " Welcome to Coven Code",
+                " Welcome to Coven",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -317,7 +317,7 @@ fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: R
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  Coven Code is an AI-powered coding assistant in your terminal.",
+            "  Coven is an AI-powered coding assistant in your terminal.",
             Style::default().fg(text),
         )),
         Line::from(""),
@@ -330,11 +330,11 @@ fn render_welcome_page(frame: &mut Frame, state: &OnboardingDialogState, area: R
             Style::default().fg(text),
         )),
         Line::from(Span::styled(
-            "  Coven Code can read, edit, and create files in your project.",
+            "  Coven can read, edit, and create files in your project.",
             Style::default().fg(text),
         )),
         Line::from(Span::styled(
-            "  Coven Code can run bash commands, search the web, and more.",
+            "  Coven can run bash commands, search the web, and more.",
             Style::default().fg(text),
         )),
         Line::from(""),
@@ -620,7 +620,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains("Welcome") || content.contains("Coven Code"));
+        assert!(content.contains("Welcome") || content.contains("Coven"));
     }
 
     #[test]

@@ -64,7 +64,7 @@ pub async fn check_for_updates() -> Option<UpdateInfo> {
     // --- Network fetch -------------------------------------------------------
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .user_agent(format!("CovenCode/{}", current))
+        .user_agent(format!("Coven/{}", current))
         .build()
         .ok()?;
 
