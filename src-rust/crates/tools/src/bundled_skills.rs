@@ -420,13 +420,13 @@ $ARGUMENTS"#,
     // -----------------------------------------------------------------------
     BundledSkill {
         name: "update-config",
-        description: "Configure Coven Code settings (hooks, permissions, env vars, behaviours) via settings.json.",
+        description: "Configure Coven settings (hooks, permissions, env vars, behaviours) via settings.json.",
         aliases: &["config-update", "settings"],
         when_to_use: Some("When the user wants to configure automated behaviours, permissions, or settings."),
         argument_hint: Some("<what to configure>"),
         prompt_template: r#"# Update Config Skill
 
-Modify Coven Code configuration by updating settings.json files.
+Modify Coven configuration by updating settings.json files.
 
 ## Settings File Locations
 
