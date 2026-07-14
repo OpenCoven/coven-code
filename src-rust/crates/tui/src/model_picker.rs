@@ -280,8 +280,9 @@ pub fn models_for_provider_from_registry(
     registry: &claurst_api::ModelRegistry,
 ) -> Vec<ModelEntry> {
     // Codex (ChatGPT-authenticated OpenAI) is not in the models.dev catalog —
-    // serve the curated CODEX_MODELS list so the picker isn't empty.
-    if provider_id == "codex" {
+    // serve the curated CODEX_MODELS list so the picker isn't empty. Accepts
+    // the legacy "openai-codex" alias as well as the canonical id.
+    if claurst_api::registry::canonical_provider_id(provider_id) == "codex" {
         return codex_provider_models();
     }
 
@@ -1249,6 +1250,21 @@ mod tests {
         assert!(
             models.iter().any(|m| m.id.starts_with("gpt-")),
             "codex should expose at least one gpt-* model"
+        );
+    }
+
+    #[test]
+    fn models_for_provider_codex_alias_yields_same_curated_list() {
+        // "openai-codex" (device-auth flow, older persisted configs) must
+        // resolve to the same curated list as the canonical "codex" id —
+        // a connected provider must never present an empty /model picker.
+        let registry = claurst_api::ModelRegistry::new();
+        let models = models_for_provider_from_registry("openai-codex", &registry);
+        assert!(!models.is_empty());
+        assert!(
+            models.iter().any(|m| m.id == "gpt-5.6-sol"),
+            "alias must expose the curated Codex list, got: {:?}",
+            models.iter().map(|m| &m.id).collect::<Vec<_>>()
         );
     }
 

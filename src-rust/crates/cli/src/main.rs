@@ -3893,6 +3893,12 @@ async fn run_interactive(
         // Drain background model-fetch results (non-blocking).
         if let Some(ref mut rx) = app.model_fetch_rx {
             match rx.try_recv() {
+                // An empty listing must not blank out the options the picker
+                // was seeded with (curated/registry list) — keep them shown.
+                Ok(Ok(entries)) if entries.is_empty() => {
+                    app.model_picker.loading_models = false;
+                    app.model_fetch_rx = None;
+                }
                 Ok(Ok(entries)) => {
                     let provider = app
                         .model_picker_provider_id
@@ -3945,6 +3951,11 @@ async fn run_interactive(
                 .clone()
                 .or_else(|| app.config.provider.clone())
                 .unwrap_or_else(|| "anthropic".to_string());
+            // Older persisted configs may still carry the "openai-codex"
+            // alias; registry lookups are exact-match on "codex".
+            let provider_id_str =
+                claurst_api::registry::canonical_provider_id(&provider_id_str).to_string();
+            let mut fetch_spawned = false;
             if let Some(ref registry) = app.provider_registry {
                 let pid = claurst_core::ProviderId::new(&provider_id_str);
                 if let Some(provider) = registry.get(&pid) {
@@ -3974,7 +3985,13 @@ async fn run_interactive(
                             }
                         }
                     });
+                    fetch_spawned = true;
                 }
+            }
+            // No fetch is running (provider missing from the registry) —
+            // stop the spinner so the seeded model list stays usable.
+            if !fetch_spawned {
+                app.model_picker.loading_models = false;
             }
         }
 
