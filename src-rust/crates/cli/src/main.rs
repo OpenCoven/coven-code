@@ -330,6 +330,17 @@ impl From<CliPermissionMode> for PermissionMode {
     }
 }
 
+fn permission_mode_for_invocation(
+    cli_mode: CliPermissionMode,
+    has_github_context: bool,
+) -> PermissionMode {
+    if has_github_context {
+        PermissionMode::BypassPermissions
+    } else {
+        cli_mode.into()
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum CliOutputFormat {
     Text,
@@ -600,7 +611,8 @@ async fn main() -> anyhow::Result<()> {
         }
         config.permission_mode = PermissionMode::BypassPermissions;
     } else {
-        config.permission_mode = cli.permission_mode.into();
+        config.permission_mode =
+            permission_mode_for_invocation(cli.permission_mode, github_context.is_some());
     }
     config.additional_dirs = cli.add_dir.clone();
     if cli.no_auto_compact {
@@ -985,6 +997,7 @@ async fn main() -> anyhow::Result<()> {
                     &r.final_text,
                     Some(&r.review_trace),
                     review_memory.clone().unwrap_or_default(),
+                    cli.hosted_repair,
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),
@@ -1692,7 +1705,11 @@ async fn run_headless(
         let prompt = if let Some(ref p) = cli.prompt {
             p.clone()
         } else if let Some(brief) = github_context {
-            brief.to_prompt()
+            if cli.hosted_repair {
+                brief.to_hosted_repair_prompt()
+            } else {
+                brief.to_prompt()
+            }
         } else {
             use tokio::io::{self, AsyncReadExt};
             let mut stdin = io::stdin();
@@ -5597,6 +5614,22 @@ mod tests {
             "result.json",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn github_context_forces_noninteractive_permission_bypass() {
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Default, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Plan, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::AcceptEdits, false),
+            PermissionMode::AcceptEdits
+        );
     }
 
     // NOTE: the coven-github headless-contract types + behavior moved to the
