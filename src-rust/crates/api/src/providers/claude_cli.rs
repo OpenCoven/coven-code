@@ -9,8 +9,9 @@
 //
 // Delegation model: the CLI runs its own agent loop (tools, permissions,
 // context) in the current working directory. This provider forwards the
-// user's prompt, streams Claude's text back, and renders the CLI's tool
-// activity as one-line notices. It never emits `ToolUse` blocks, so the
+// user's prompt (with any pasted images as standard Anthropic image blocks),
+// streams Claude's text back, and renders the CLI's tool activity as
+// one-line notices. It never emits `ToolUse` blocks, so the
 // query loop treats every turn as self-contained (`end_turn`).
 //
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
@@ -105,6 +106,27 @@ fn last_user_text(request: &ProviderRequest) -> String {
         .unwrap_or_default()
 }
 
+/// Image blocks from the latest user message, forwarded to the CLI alongside
+/// the text prompt. Images from earlier turns are not re-sent: on a resumed
+/// session the CLI already has them, and on a flattened restart they are gone
+/// with the rest of the non-text content.
+fn last_user_images(request: &ProviderRequest) -> Vec<ContentBlock> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, Role::User))
+        .map(|message| match &message.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .cloned()
+                .collect(),
+            MessageContent::Text(_) => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
 /// Flatten the whole transcript into one prompt for sessions that cannot be
 /// resumed (the CLI has no matching session to `--resume`).
 fn flattened_transcript(request: &ProviderRequest) -> String {
@@ -167,13 +189,22 @@ fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
     args
 }
 
-/// The single stream-json stdin line carrying the user prompt.
-fn stdin_line(prompt: &str) -> String {
+/// The single stream-json stdin line carrying the user prompt. Image blocks
+/// ride along in the same Anthropic wire shape the API takes, placed before
+/// the text to match the direct `anthropic.rs` path.
+fn stdin_line(prompt: &str, images: &[ContentBlock]) -> String {
+    let mut content: Vec<Value> = images
+        .iter()
+        .filter_map(|block| serde_json::to_value(block).ok())
+        .collect();
+    if !prompt.is_empty() || content.is_empty() {
+        content.push(json!({"type": "text", "text": prompt}));
+    }
     let envelope = json!({
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": prompt}],
+            "content": content,
         },
     });
     format!("{}\n", envelope)
@@ -481,6 +512,7 @@ impl ClaudeCliProvider {
         &self,
         model: &str,
         prompt: &str,
+        images: &[ContentBlock],
         resume: Option<&str>,
     ) -> Result<SpawnOutcome, ProviderError> {
         let mut command = Command::new(self.binary_or_default());
@@ -498,7 +530,7 @@ impl ClaudeCliProvider {
             status: None,
             body: None,
         })?;
-        let payload = stdin_line(prompt);
+        let payload = stdin_line(prompt, images);
         if let Err(e) = stdin.write_all(payload.as_bytes()).await {
             warn!(error = %e, "failed writing prompt to claude CLI stdin");
         }
@@ -565,9 +597,15 @@ impl ClaudeCliProvider {
             None
         };
 
+        let images = last_user_images(request);
         if let Some(session_id) = resume_session {
             match self
-                .spawn_turn(&request.model, &last_user_text(request), Some(&session_id))
+                .spawn_turn(
+                    &request.model,
+                    &last_user_text(request),
+                    &images,
+                    Some(&session_id),
+                )
                 .await?
             {
                 SpawnOutcome::Turn(turn) => return Ok(*turn),
@@ -584,7 +622,10 @@ impl ClaudeCliProvider {
         } else {
             last_user_text(request)
         };
-        match self.spawn_turn(&request.model, &prompt, None).await? {
+        match self
+            .spawn_turn(&request.model, &prompt, &images, None)
+            .await?
+        {
             SpawnOutcome::Turn(turn) => Ok(*turn),
             SpawnOutcome::ExitedEarly { stderr } => {
                 let detail = collect_stderr(&stderr).await;
@@ -762,7 +803,9 @@ impl LlmProvider for ClaudeCliProvider {
             // The CLI runs its own tools; Coven Code's tool loop stays out.
             tool_calling: false,
             thinking: false,
-            image_input: false,
+            // Pasted images are forwarded on stdin as standard Anthropic
+            // image blocks; the CLI accepts them like the API does.
+            image_input: true,
             pdf_input: false,
             audio_input: false,
             video_input: false,
@@ -820,11 +863,83 @@ mod tests {
 
     #[test]
     fn stdin_line_is_a_stream_json_user_envelope() {
-        let line = stdin_line("hello");
+        let line = stdin_line("hello", &[]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         assert_eq!(parsed["type"], "user");
         assert_eq!(parsed["message"]["content"][0]["text"], "hello");
         assert!(line.ends_with('\n'));
+    }
+
+    fn png_block(data: &str) -> ContentBlock {
+        ContentBlock::Image {
+            source: claurst_core::types::ImageSource {
+                source_type: "base64".to_string(),
+                media_type: Some("image/png".to_string()),
+                data: Some(data.to_string()),
+                url: None,
+            },
+        }
+    }
+
+    #[test]
+    fn stdin_line_places_image_blocks_before_the_text() {
+        let line = stdin_line("what is this?", &[png_block("aGk=")]);
+        let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
+        let content = parsed["message"]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "aGk=");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "what is this?");
+    }
+
+    #[test]
+    fn stdin_line_omits_the_text_block_for_image_only_prompts() {
+        let line = stdin_line("", &[png_block("aGk=")]);
+        let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
+        let content = parsed["message"]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn last_user_images_reads_only_the_latest_user_message() {
+        let request = request_with(vec![
+            Message::user_blocks(vec![
+                png_block("b2xk"),
+                ContentBlock::Text {
+                    text: "earlier".to_string(),
+                },
+            ]),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("reply".to_string()),
+                uuid: None,
+                cost: None,
+                snapshot_patch: None,
+            },
+            Message::user_blocks(vec![
+                png_block("bmV3"),
+                ContentBlock::Text {
+                    text: "latest".to_string(),
+                },
+            ]),
+        ]);
+        let images = last_user_images(&request);
+        assert_eq!(images.len(), 1);
+        assert!(matches!(
+            &images[0],
+            ContentBlock::Image { source } if source.data.as_deref() == Some("bmV3")
+        ));
+
+        let text_only = request_with(vec![Message::user("no images")]);
+        assert!(last_user_images(&text_only).is_empty());
     }
 
     #[test]
