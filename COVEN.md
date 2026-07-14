@@ -161,7 +161,8 @@ stream surfaces coven depends on are specified in
 [coven/docs/ENGINE-CONTRACT.md](https://github.com/OpenCoven/coven/blob/main/docs/ENGINE-CONTRACT.md)
 (`contract_version: 1`). Do not change flags, output formats, or exit codes
 listed there without bumping the contract version and coordinating a coven
-`engine.lock` update.
+`engine.lock` update. The merge overview, user migration steps, and Cave
+integration plan live in [docs/unification.md](docs/unification.md).
 
 ---
 
