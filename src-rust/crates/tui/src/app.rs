@@ -5469,6 +5469,26 @@ impl App {
                 }
                 false
             }
+            "moveRight" => {
+                // Right arrow: accept the typeahead suggestion when the
+                // cursor sits at the end of the input (fish-style);
+                // otherwise move the cursor. Acceptance works while
+                // streaming so the popup stays interactive when a turn is
+                // in flight — Enter then queues the completed command.
+                if !self.prompt_input.suggestions.is_empty()
+                    && self.prompt_input.cursor == self.prompt_input.text.len()
+                {
+                    if self.prompt_input.suggestion_index.is_none() {
+                        self.prompt_input.suggestion_index = Some(0);
+                    }
+                    self.prompt_input.accept_suggestion();
+                    self.refresh_prompt_input();
+                } else {
+                    self.prompt_input.move_right();
+                    self.sync_legacy_prompt_fields();
+                }
+                false
+            }
             "killToStart" => {
                 if !self.is_streaming {
                     self.prompt_input.kill_line_backward();
@@ -5644,19 +5664,19 @@ impl App {
                 false
             }
             "indent" => {
-                // Tab: cycle agent mode when prompt is empty, accept
-                // slash-command suggestion otherwise.
-                if !self.is_streaming {
-                    if !self.prompt_input.suggestions.is_empty() {
-                        if self.prompt_input.suggestion_index.is_none() {
-                            self.prompt_input.suggestion_index = Some(0);
-                        }
-                        self.prompt_input.accept_suggestion();
-                        self.refresh_prompt_input();
-                    } else if self.prompt_input.is_empty() {
-                        self.cycle_agent_mode();
-                        self.companion_look_down();
+                // Tab: accept the typeahead suggestion, or cycle agent mode
+                // when the prompt is empty. Acceptance is allowed while
+                // streaming so the popup stays interactive when a turn is
+                // in flight — Enter then queues the completed command.
+                if !self.prompt_input.suggestions.is_empty() {
+                    if self.prompt_input.suggestion_index.is_none() {
+                        self.prompt_input.suggestion_index = Some(0);
                     }
+                    self.prompt_input.accept_suggestion();
+                    self.refresh_prompt_input();
+                } else if !self.is_streaming && self.prompt_input.is_empty() {
+                    self.cycle_agent_mode();
+                    self.companion_look_down();
                 }
                 false
             }
@@ -8031,6 +8051,57 @@ role = "Research"
         assert!(!app.connect_dialog.visible);
         assert!(!app.key_input_dialog.visible);
         assert!(app.has_credentials);
+    }
+
+    #[test]
+    fn right_arrow_at_end_accepts_typeahead_suggestion() {
+        let mut app = make_app();
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+        assert!(
+            !app.prompt_input.suggestions.is_empty(),
+            "typing /mode must surface the /model suggestion"
+        );
+
+        app.handle_keybinding_action("moveRight");
+
+        assert_eq!(app.prompt_input.text, "/model");
+        assert_eq!(app.prompt_input.cursor, app.prompt_input.text.len());
+    }
+
+    #[test]
+    fn right_arrow_mid_text_moves_cursor_without_accepting() {
+        let mut app = make_app();
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = 1;
+        app.refresh_prompt_input();
+        assert!(!app.prompt_input.suggestions.is_empty());
+
+        app.handle_keybinding_action("moveRight");
+
+        assert_eq!(
+            app.prompt_input.text, "/mode",
+            "right arrow mid-text must move the cursor, not accept"
+        );
+        assert_eq!(app.prompt_input.cursor, 2);
+    }
+
+    #[test]
+    fn tab_accepts_typeahead_suggestion_while_streaming() {
+        let mut app = make_app();
+        app.is_streaming = true;
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+        assert!(!app.prompt_input.suggestions.is_empty());
+
+        app.handle_keybinding_action("indent");
+
+        assert_eq!(
+            app.prompt_input.text, "/model",
+            "Tab must accept the suggestion even while a turn is streaming"
+        );
     }
 
     #[test]
