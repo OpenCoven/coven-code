@@ -156,16 +156,16 @@ pub fn render_invalid_config_dialog(
         InvalidConfigKind::Settings => vec![
             "  1. Open ~/.coven-code/settings.json in a text editor.",
             "  2. Fix the JSON syntax error shown above.",
-            "  3. Restart Coven Code.",
+            "  3. Restart Coven.",
         ],
         InvalidConfigKind::ClaudeMd => vec![
             "  1. Open the AGENTS.md file shown above in a text editor.",
             "  2. Fix the syntax error.",
-            "  3. Restart Coven Code.",
+            "  3. Restart Coven.",
         ],
         InvalidConfigKind::Generic => vec![
             "  1. Fix the configuration file shown above.",
-            "  2. Restart Coven Code.",
+            "  2. Restart Coven.",
         ],
     };
     for instr in instructions {
