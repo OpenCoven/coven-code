@@ -36,7 +36,7 @@
   }
 
   var title = meta.title || ('Session ' + (meta.session_id || ''));
-  document.title = title + ' — Coven Code Session';
+  document.title = title + ' — Coven Session';
 
   var msgsEl = document.getElementById('messages');
 
