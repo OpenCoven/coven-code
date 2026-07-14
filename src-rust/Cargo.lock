@@ -602,7 +602,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claurst"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-acp"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-api"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-bridge"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-buddy"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-commands"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-mcp"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-plugins"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "claurst-core",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-query"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-tools"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "claurst-tui"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",

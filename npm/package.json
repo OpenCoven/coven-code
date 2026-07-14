@@ -1,6 +1,6 @@
 {
   "name": "@opencoven/coven-code",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Coven engine (agentic coding TUI). The unified CLI is @opencoven/cli \u2014 'npm i -g @opencoven/cli'. This package installs the engine binary directly.",
   "license": "GPL-3.0-only",
   "repository": {
