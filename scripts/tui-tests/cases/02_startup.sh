@@ -15,7 +15,7 @@ tc_startup() {
   wait_for "What's new" 5
   local s; s="$(tui_capture)"
 
-  assert_contains "$s" "Coven Code v" "title banner renders with version"
+  assert_contains "$s" "Coven v" "title banner renders with version"
 
   # Right-hand welcome column. Wording is stable; the username is not, so we
   # assert on the static labels only.
