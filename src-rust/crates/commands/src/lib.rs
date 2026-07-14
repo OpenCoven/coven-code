@@ -577,7 +577,7 @@ impl SlashCommand for HelpCommand {
             ));
         }
 
-        let mut output = String::from("Coven Code — Slash Commands\n");
+        let mut output = String::from("Coven — Slash Commands\n");
         output.push_str("════════════════════════════\n");
 
         for cat in &category_order {
@@ -743,7 +743,7 @@ impl SlashCommand for ExitCommand {
         vec!["quit", "q"]
     }
     fn description(&self) -> &str {
-        "Exit Coven Code"
+        "Exit Coven"
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -766,7 +766,7 @@ impl SlashCommand for ModelCommand {
          Without arguments, opens the model picker for the active provider.\n\n\
          With a model ID, switches to that model. Accepts a bare Claude model\n\
          name (e.g. claude-sonnet-4-6) or, for Codex, the provider-prefixed\n\
-         form codex/<model>. Coven Code dispatches to two providers: Anthropic\n\
+         form codex/<model>. Coven dispatches to two providers: Anthropic\n\
          (Claude) and Codex.\n\n\
          Examples:\n\
            /model                       — open the model picker\n\
@@ -1381,10 +1381,7 @@ impl SlashCommand for VersionCommand {
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        CommandResult::Message(format!(
-            "Coven Code v{}",
-            claurst_core::constants::APP_VERSION
-        ))
+        CommandResult::Message(format!("Coven v{}", claurst_core::constants::APP_VERSION))
     }
 }
 
@@ -1399,7 +1396,7 @@ impl SlashCommand for ReleaseNotesCommand {
         vec!["whats-new", "changelog"]
     }
     fn description(&self) -> &str {
-        "Show recent Coven Code highlights"
+        "Show recent Coven highlights"
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -1409,7 +1406,7 @@ impl SlashCommand for ReleaseNotesCommand {
             .collect::<Vec<_>>()
             .join("\n");
         CommandResult::Message(format!(
-            "What's new in Coven Code v{}\n{}\n{}",
+            "What's new in Coven v{}\n{}\n{}",
             claurst_core::constants::APP_VERSION,
             "─".repeat(40),
             body
@@ -1520,7 +1517,7 @@ impl SlashCommand for StatusCommand {
             .unwrap_or_else(|_| "n/a".to_string());
 
         CommandResult::Message(format!(
-            "Coven Code Status\n\
+            "Coven Status\n\
              ══════════════════\n\
              Auth:           {auth_status}\n\
              Model:          {model}\n\
@@ -1674,8 +1671,8 @@ impl SlashCommand for GoalCommand {
          /goal resume                   — resume a paused goal\n\
          /goal clear                    — delete the current goal\n\
          /goal complete                 — request a completion audit\n\n\
-         Goals let Coven Code work autonomously across turns toward a single\n\
-         verifiable objective. Coven Code will keep iterating until the goal is\n\
+         Goals let Coven work autonomously across turns toward a single\n\
+         verifiable objective. Coven will keep iterating until the goal is\n\
          complete, you pause it, or the 200-turn runaway guard fires.\n\n\
          Examples:\n\
          /goal Migrate the project from Express to Fastify, keeping all routes passing\n\
@@ -1741,7 +1738,7 @@ impl SlashCommand for GoalCommand {
                     return CommandResult::Error(format!("Failed to resume goal: {}", e));
                 }
                 return CommandResult::Message(
-                    "Goal resumed. Coven Code will continue on the next message.".to_string(),
+                    "Goal resumed. Coven will continue on the next message.".to_string(),
                 );
             }
             "clear" => {
@@ -1872,8 +1869,8 @@ impl SlashCommand for MemoryCommand {
     }
     fn help(&self) -> &str {
         "Usage: /memory [edit|clear] [global]\n\n\
-         Shows the content of AGENTS.md files that provide project context to Coven Code.\n\
-         Coven Code reads these files automatically at session start.\n\n\
+         Shows the content of AGENTS.md files that provide project context to Coven.\n\
+         Coven reads these files automatically at session start.\n\n\
          Subcommands:\n\
            /memory              — show all AGENTS.md files\n\
            /memory edit         — open project AGENTS.md in your editor\n\
@@ -2000,7 +1997,7 @@ impl SlashCommand for MemoryCommand {
             return match tokio::fs::write(&target, "").await {
                 Ok(_) => CommandResult::Message(format!(
                     "Cleared {} memory file at {}.\n\
-                     Coven Code will no longer see this content at session start.",
+                     Coven will no longer see this content at session start.",
                     label,
                     target.display()
                 )),
@@ -2081,7 +2078,7 @@ impl SlashCommand for BugCommand {
         vec!["bug"]
     }
     fn description(&self) -> &str {
-        "Submit feedback about Coven Code"
+        "Submit feedback about Coven"
     }
     fn help(&self) -> &str {
         "Usage: /feedback [report]"
@@ -2235,7 +2232,7 @@ impl SlashCommand for PluginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /plugin [list|info <name>|enable <name>|disable <name>|install <path>|reload]\n\
-         Manage Coven Code plugins.\n\n\
+         Manage Coven plugins.\n\n\
          Subcommands:\n\
            /plugin              — list all installed plugins\n\
            /plugin list         — list all installed plugins\n\
@@ -2491,7 +2488,7 @@ impl SlashCommand for DoctorCommand {
          - Tool permission summary\n\
          - Session lock state\n\
          - Coven Substrate (daemon health, api version, sessions, familiars)\n\
-         - Coven Code version"
+         - Coven version"
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2499,7 +2496,7 @@ impl SlashCommand for DoctorCommand {
 
         // ── Header ─────────────────────────────────────────────────────────
         lines.push(format!(
-            "Coven Code v{}  |  {}",
+            "Coven v{}  |  {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
         ));
@@ -2909,7 +2906,7 @@ impl SlashCommand for LoginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /login [--console] [--codex] [--label <name>]\n\n\
-         Start an OAuth login. Anthropic OAuth requires a configured Coven Code\n\
+         Start an OAuth login. Anthropic OAuth requires a configured Coven\n\
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
          add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
@@ -3734,7 +3731,7 @@ impl SlashCommand for ReviewCommand {
                 // Determine owner/repo from git remote
                 if let Some((owner, repo)) = detect_github_owner_repo(&repo_root) {
                     let comment_body = format!(
-                        "## Coven Code Code Review\n\n{}\n\n---\n*Generated by [Coven Code](https://claude.ai/claude-code)*",
+                        "## Coven Code Review\n\n{}\n\n---\n*Generated by [Coven](https://claude.ai/claude-code)*",
                         review_text
                     );
 
@@ -3966,7 +3963,7 @@ impl SlashCommand for McpCommand {
     fn help(&self) -> &str {
         "Usage: /mcp [list|status|auth <server>|connect <server>|logs <server>|resources|prompts|get-prompt ...]\n\n\
          Manages Model Context Protocol (MCP) servers.\n\
-         MCP servers extend Coven Code with external tools, resources, and prompt templates.\n\n\
+         MCP servers extend Coven with external tools, resources, and prompt templates.\n\n\
          Subcommands:\n\
            /mcp                        — list configured servers with live status\n\
            /mcp list                   — same as above\n\
@@ -4087,7 +4084,7 @@ impl SlashCommand for McpCommand {
             if ctx.mcp_manager.is_none() {
                 output.push_str(
                     "\nNote: MCP manager is not active in this session.\n\
-                     Restart Coven Code to connect to MCP servers.\n\
+                     Restart Coven to connect to MCP servers.\n\
                      Use /mcp connect <server> to retry a single server.",
                 );
             }
@@ -4189,7 +4186,7 @@ impl McpCommand {
                  {}\n\n\
                  stdio servers authenticate via environment variables (API keys etc.).\n\
                  Add required variables to the 'env' block in ~/.coven-code/settings.json,\n\
-                 then restart Coven Code or run /mcp connect {} to reconnect.",
+                 then restart Coven or run /mcp connect {} to reconnect.",
                 server_name, token_note, env_note, server_name
             ));
         }
@@ -4270,7 +4267,7 @@ impl McpCommand {
              To authenticate:\n\
              1. Open the server URL in your browser and complete OAuth\n\
              2. The token is saved to ~/.coven-code/mcp-tokens/{}.json\n\
-             3. Restart Coven Code — the token will be used automatically\n\n\
+             3. Restart Coven — the token will be used automatically\n\n\
              Token storage: ~/.coven-code/mcp-tokens/{}.json",
             server_name, token_note, server_url, server_name, server_name
         ))
@@ -4283,7 +4280,7 @@ impl McpCommand {
             None => {
                 return CommandResult::Message(
                     "MCP manager is not active. No tool information available.\n\
-                 Restart Coven Code to connect to MCP servers."
+                 Restart Coven to connect to MCP servers."
                         .to_string(),
                 )
             }
@@ -4365,7 +4362,7 @@ impl McpCommand {
                 // No live manager — give useful instructions.
                 CommandResult::Message(format!(
                     "The MCP manager is not running in this session.\n\
-                     To connect '{}', restart Coven Code — servers connect automatically\n\
+                     To connect '{}', restart Coven — servers connect automatically\n\
                      on startup using the configuration in ~/.coven-code/settings.json.\n\
                      \n\
                      If the server requires authentication, run /mcp auth {} first.",
@@ -4398,7 +4395,7 @@ impl McpCommand {
                              If the server stays disconnected:\n\
                              1. Check authentication: /mcp auth {}\n\
                              2. Verify the command/URL in ~/.coven-code/settings.json\n\
-                             3. Restart Coven Code to force a full reconnect",
+                             3. Restart Coven to force a full reconnect",
                             server_name,
                             manager.server_status(server_name).display(),
                             server_name
@@ -4509,7 +4506,7 @@ impl McpCommand {
             }
         } else {
             lines.push("MCP manager is not active in this session.".to_string());
-            lines.push("Restart Coven Code to start the MCP runtime.".to_string());
+            lines.push("Restart Coven to start the MCP runtime.".to_string());
         }
 
         // Hint about log files.
@@ -5088,7 +5085,7 @@ impl SlashCommand for ThinkingCommand {
         } else {
             CommandResult::Message(format!(
                 "Extended thinking is available with {}.\n\
-                 You can request thinking by asking Coven Code to 'think step by step' or \
+                 You can request thinking by asking Coven to 'think step by step' or \
                  'think carefully before answering'.",
                 model
             ))
@@ -5982,7 +5979,7 @@ impl SlashCommand for CommitCommand {
         "commit"
     }
     fn description(&self) -> &str {
-        "Ask Coven Code to commit staged changes"
+        "Ask Coven to commit staged changes"
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -7111,7 +7108,7 @@ impl SlashCommand for UpgradeCommand {
     }
     fn help(&self) -> &str {
         "Usage: /update\n\n\
-         Checks GitHub releases for the latest version of Coven Code.\n\
+         Checks GitHub releases for the latest version of Coven.\n\
          If a newer version is available, shows where to download it."
     }
 
@@ -7122,7 +7119,7 @@ impl SlashCommand for UpgradeCommand {
             Ok(latest) => {
                 if latest.version == current {
                     CommandResult::Message(format!(
-                        "Coven Code v{current} - you are up to date.\n\
+                        "Coven v{current} - you are up to date.\n\
                          Release page: {}",
                         latest.url
                     ))
@@ -7269,7 +7266,7 @@ impl SlashCommand for SecurityReviewCommand {
     }
     fn help(&self) -> &str {
         "Usage: /security-review [path]\n\n\
-         Asks Coven Code to perform a security review of the codebase.\n\
+         Asks Coven to perform a security review of the codebase.\n\
          Analyzes for common vulnerabilities: injection attacks, auth issues,\n\
          secrets exposure, unsafe deserialization, path traversal, etc."
     }
@@ -7317,12 +7314,12 @@ impl SlashCommand for TerminalSetupCommand {
         true
     }
     fn description(&self) -> &str {
-        "Help configure your terminal for optimal Coven Code use"
+        "Help configure your terminal for optimal Coven use"
     }
     fn help(&self) -> &str {
         "Usage: /terminal-setup\n\n\
          Diagnoses your terminal environment and gives recommendations for\n\
-         optimal Coven Code display (font, color support, Unicode, etc.)."
+         optimal Coven display (font, color support, Unicode, etc.)."
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -7395,7 +7392,7 @@ impl SlashCommand for TerminalSetupCommand {
             "Terminal Setup Diagnostic\n\
              ─────────────────────────\n\
              {checks}\n\n\
-             Recommendations for optimal Coven Code experience:\n\
+             Recommendations for optimal Coven experience:\n\
              ─────────────────────────────────────────────────\n\
              1. Font: Use a Nerd Font for box-drawing characters and icons\n\
                 {nerd_hint}\n\
@@ -7633,7 +7630,7 @@ impl SlashCommand for ThinkBackCommand {
             return CommandResult::Message(
                 "No thinking traces found in this session.\n\
                  Thinking traces appear when the model uses extended thinking mode.\n\
-                 Try asking Coven Code to 'think step by step' or 'think carefully'."
+                 Try asking Coven to 'think step by step' or 'think carefully'."
                     .to_string(),
             );
         }
@@ -10940,7 +10937,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_name: "add-dir",
             target_name: "add-dir",
             slash_aliases: &[],
-            slash_description: "Add a directory to Coven Code's allowed workspace paths",
+            slash_description: "Add a directory to Coven's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
             slash_hidden: true,
         }),
@@ -12117,7 +12114,7 @@ mod tests {
         assert!(matches!(result, CommandResult::Message(_)));
         if let CommandResult::Message(msg) = result {
             assert!(
-                msg.contains("claude") || msg.contains("Coven Code") || msg.contains('.'),
+                msg.contains("claude") || msg.contains("Coven") || msg.contains('.'),
                 "Version message should contain version number, got: {}",
                 msg
             );

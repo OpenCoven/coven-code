@@ -1117,7 +1117,7 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
         ),
         AgentsRoute::ResetConfirm => (
             "Reset familiars and agents".to_string(),
-            " This removes saved user roster state from Coven Code and Coven.".to_string(),
+            " This removes saved user roster state from Coven.".to_string(),
             " enter/y reset  ·  n/esc cancel".to_string(),
         ),
     };

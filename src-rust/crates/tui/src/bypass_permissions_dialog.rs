@@ -92,14 +92,14 @@ pub fn render_bypass_permissions_dialog(
     // Body text (matches TS dialog copy)
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(vec![Span::styled(
-            "Coven Code running in Bypass Permissions mode",
+            "Coven running in Bypass Permissions mode",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "In Bypass Permissions mode, Coven Code will NOT ask for your",
+            "In Bypass Permissions mode, Coven will NOT ask for your",
             Style::default().fg(Color::White),
         )]),
         Line::from(vec![Span::styled(

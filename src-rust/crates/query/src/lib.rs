@@ -897,7 +897,7 @@ fn rate_limit_notice(
         .unwrap_or(false)
     {
         message.push_str(
-            "\n\nThis is an imported Claude Code credential. Coven Code is using the imported token for direct Anthropic requests; it is not running the `claude` CLI for this turn.",
+            "\n\nThis is an imported Claude Code credential. Coven is using the imported token for direct Anthropic requests; it is not running the `claude` CLI for this turn.",
         );
     }
 

@@ -328,7 +328,7 @@ impl NamedCommand for AddDirCommand {
         "add-dir"
     }
     fn description(&self) -> &str {
-        "Add a directory to Coven Code's allowed workspace paths"
+        "Add a directory to Coven's allowed workspace paths"
     }
     fn usage(&self) -> &str {
         "coven-code add-dir <path>"

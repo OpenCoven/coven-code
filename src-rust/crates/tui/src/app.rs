@@ -81,7 +81,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "effort",
         "Set effort level (low/normal/high) or toggle fast mode",
     ),
-    ("exit", "Quit Coven Code"),
+    ("exit", "Quit Coven"),
     ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
@@ -105,7 +105,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("link", "Save and manage links in the structured stash"),
     ("login", "Log in, switch accounts, or refresh provider auth"),
-    ("logout", "Log out of Coven Code"),
+    ("logout", "Log out of Coven"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
@@ -116,7 +116,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Manage plugins (list/info/enable/disable/install/reload)",
     ),
     ("providers", "List available AI providers and their status"),
-    ("quit", "Exit Coven Code"),
+    ("quit", "Exit Coven"),
     ("resume", "Resume a previous session"),
     (
         "review",
@@ -157,9 +157,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "update",
         "Check for updates and upgrade to the latest version",
     ),
-    ("release-notes", "Show recent Coven Code highlights"),
+    ("release-notes", "Show recent Coven highlights"),
     ("usage", "Detailed per-call token usage breakdown"),
-    ("version", "Display the current Coven Code version"),
+    ("version", "Display the current Coven version"),
     (
         "whisper",
         "Whisper a side question to your familiar (not kept in history)",
@@ -2477,7 +2477,7 @@ impl App {
                     PermissionMode::Default
                 };
                 self.status_message = Some(if self.plan_mode {
-                    "Plan mode ON — Coven Code will plan before acting.".to_string()
+                    "Plan mode ON — Coven will plan before acting.".to_string()
                 } else {
                     "Plan mode OFF.".to_string()
                 });

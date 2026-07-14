@@ -184,7 +184,7 @@ fn configured_anthropic_oauth_client_id() -> anyhow::Result<String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Anthropic OAuth requires a Coven Code OAuth client ID. Set {} after registering a first-party OAuth client, or use ANTHROPIC_API_KEY for now.",
+                "Anthropic OAuth requires a Coven OAuth client ID. Set {} after registering a first-party OAuth client, or use ANTHROPIC_API_KEY for now.",
                 oauth::CLIENT_ID_ENV
             )
         })

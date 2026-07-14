@@ -620,7 +620,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains("Welcome") || content.contains("Coven Code"));
+        assert!(content.contains("Welcome") || content.contains("Coven"));
     }
 
     #[test]

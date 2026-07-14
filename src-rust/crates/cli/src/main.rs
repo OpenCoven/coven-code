@@ -199,7 +199,7 @@ struct Cli {
     #[arg(long = "auto-commits", action = ArgAction::SetTrue)]
     auto_commits: bool,
 
-    /// Grant Coven Code access to an additional directory (can be repeated)
+    /// Grant Coven access to an additional directory (can be repeated)
     #[arg(long = "add-dir", value_name = "DIR", action = ArgAction::Append)]
     add_dir: Vec<PathBuf>,
 

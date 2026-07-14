@@ -2891,7 +2891,7 @@ pub mod constants {
     /// sync with the GitHub release notes when cutting a version.
     pub const WHATS_NEW: &[&str] = &[
         "/skills opens an interactive picker that inherits skills from Claude and Codex",
-        "Run Coven Code as `coven` — shorter command, with the `coven-cave` alias",
+        "Run Coven as `coven` — shorter command, with the `coven-cave` alias",
         "Crisper input badge — the mode and model labels now read clearly on every accent color",
         "Team memory sync now blocks files containing secrets before they upload",
         "8-bit pixel-art familiar avatars now front the welcome panel, recolored per familiar",
@@ -2901,7 +2901,7 @@ pub mod constants {
         "Steadier daemon status — a busy daemon no longer flickers to offline",
         "Leaner build — pruned unused workspace dependencies across crates",
         "Sub-agents and parallel teams via /agents and the Team tool",
-        "Run /init to generate an AGENTS.md with instructions for Coven Code",
+        "Run /init to generate an AGENTS.md with instructions for Coven",
     ];
 
     // Token limits
