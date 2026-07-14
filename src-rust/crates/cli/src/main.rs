@@ -120,7 +120,7 @@ impl Tool for McpToolWrapper {
 #[command(
     name = "coven-code",
     version = APP_VERSION,
-    about = "Coven Code - AI-powered coding assistant",
+    about = "Coven - AI-powered coding assistant",
     long_about = None,
 )]
 struct Cli {
@@ -199,7 +199,7 @@ struct Cli {
     #[arg(long = "auto-commits", action = ArgAction::SetTrue)]
     auto_commits: bool,
 
-    /// Grant Coven Code access to an additional directory (can be repeated)
+    /// Grant Coven access to an additional directory (can be repeated)
     #[arg(long = "add-dir", value_name = "DIR", action = ArgAction::Append)]
     add_dir: Vec<PathBuf>,
 
@@ -998,6 +998,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Interactive REPL mode
+    if should_show_engine_notice(
+        !is_headless,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        std::env::var_os("COVEN_PARENT").is_some(),
+    ) {
+        eprintln!(
+            "\x1b[2mcoven-code is the Coven engine \u{2014} the supported CLI is 'coven' (npm i -g @opencoven/cli)\x1b[0m"
+        );
+    }
+
     let auth_store = claurst_core::AuthStore::load();
     let has_saved_credentials = !auth_store.credentials.is_empty()
         || claurst_core::oauth_config::get_codex_tokens().is_some();
@@ -1356,10 +1366,7 @@ fn spawn_models_cache_refresh() {
         let url = models_source_url();
         let resp = match client
             .get(&url)
-            .header(
-                "User-Agent",
-                concat!("CovenCode/", env!("CARGO_PKG_VERSION")),
-            )
+            .header("User-Agent", concat!("Coven/", env!("CARGO_PKG_VERSION")))
             .send()
             .await
         {
@@ -3886,6 +3893,12 @@ async fn run_interactive(
         // Drain background model-fetch results (non-blocking).
         if let Some(ref mut rx) = app.model_fetch_rx {
             match rx.try_recv() {
+                // An empty listing must not blank out the options the picker
+                // was seeded with (curated/registry list) — keep them shown.
+                Ok(Ok(entries)) if entries.is_empty() => {
+                    app.model_picker.loading_models = false;
+                    app.model_fetch_rx = None;
+                }
                 Ok(Ok(entries)) => {
                     let provider = app
                         .model_picker_provider_id
@@ -3938,6 +3951,11 @@ async fn run_interactive(
                 .clone()
                 .or_else(|| app.config.provider.clone())
                 .unwrap_or_else(|| "anthropic".to_string());
+            // Older persisted configs may still carry the "openai-codex"
+            // alias; registry lookups are exact-match on "codex".
+            let provider_id_str =
+                claurst_api::registry::canonical_provider_id(&provider_id_str).to_string();
+            let mut fetch_spawned = false;
             if let Some(ref registry) = app.provider_registry {
                 let pid = claurst_core::ProviderId::new(&provider_id_str);
                 if let Some(provider) = registry.get(&pid) {
@@ -3967,7 +3985,13 @@ async fn run_interactive(
                             }
                         }
                     });
+                    fetch_spawned = true;
                 }
+            }
+            // No fetch is running (provider missing from the registry) —
+            // stop the spinner so the seeded model list stays usable.
+            if !fetch_spawned {
+                app.model_picker.loading_models = false;
             }
         }
 
@@ -4686,7 +4710,9 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
-    eprintln!("  login [--console] [--label <name>]   Authenticate with a configured Coven Code OAuth client");
+    eprintln!(
+        "  login [--console] [--label <name>]   Authenticate with a configured Coven OAuth client"
+    );
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
     eprintln!("  list                                  List all stored Anthropic accounts");
@@ -5028,7 +5054,7 @@ async fn auth_status(json_output: bool) {
         .or_else(|| {
             usable_oauth_tokens.map(|tokens| {
                 if tokens.uses_bearer_auth() {
-                    "Coven Code Account".to_string()
+                    "Coven Account".to_string()
                 } else {
                     "Console Account".to_string()
                 }
@@ -5206,6 +5232,12 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         Some(s) => serde_json::Value::String(s.clone()),
         None => serde_json::Value::Null,
     }
+}
+
+/// Show the "use coven" hint only for a direct interactive run that is NOT
+/// driven by the unified coven CLI.
+fn should_show_engine_notice(is_interactive: bool, is_tty: bool, coven_parent_set: bool) -> bool {
+    is_interactive && is_tty && !coven_parent_set
 }
 
 #[cfg(test)]
@@ -5578,5 +5610,31 @@ mod tests {
         let cli = Cli::try_parse_from(&argv).expect("one-shot argv parses");
         assert!(cli.print);
         assert_eq!(cli.prompt.as_deref(), Some("hello"));
+    }
+
+    // --- should_show_engine_notice truth table ---
+
+    #[test]
+    fn engine_notice_shown_for_direct_interactive_tty() {
+        // All three conditions met: interactive + TTY + no COVEN_PARENT
+        assert!(should_show_engine_notice(true, true, false));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_coven_parent_set() {
+        // Driven by the unified coven CLI
+        assert!(!should_show_engine_notice(true, true, true));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_non_interactive() {
+        // Headless/print/prompt mode
+        assert!(!should_show_engine_notice(false, true, false));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_not_a_tty() {
+        // Piped stdout/stderr (e.g. CI, script)
+        assert!(!should_show_engine_notice(true, false, false));
     }
 }

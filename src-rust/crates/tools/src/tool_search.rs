@@ -196,7 +196,7 @@ static TOOL_CATALOG: &[ToolEntry] = &[
     },
     ToolEntry {
         name: "Config",
-        description: "Get or set Coven Code configuration",
+        description: "Get or set Coven configuration",
         keywords: &[
             "config",
             "settings",

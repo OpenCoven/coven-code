@@ -28,7 +28,7 @@ impl Tool for RemoteTriggerTool {
     }
 
     fn description(&self) -> &str {
-        "Send a named event to another active Coven Code session. \
+        "Send a named event to another active Coven session. \
          Use this to coordinate across parallel sessions or notify a parent session of results."
     }
 

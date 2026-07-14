@@ -39,7 +39,7 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
     vec![
         Tip {
             id: "new-user-warmup",
-            content: "Start with small features or bug fixes, tell Coven Code to propose a plan, and verify its suggested edits",
+            content: "Start with small features or bug fixes, tell Coven to propose a plan, and verify its suggested edits",
             cooldown_sessions: 3,
         },
         Tip {
@@ -54,12 +54,12 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "git-worktrees",
-            content: "Use git worktrees to run multiple Coven Code sessions in parallel.",
+            content: "Use git worktrees to run multiple Coven sessions in parallel.",
             cooldown_sessions: 10,
         },
         Tip {
             id: "color-when-multi-clauding",
-            content: "Running multiple Coven Code sessions? Use /color and /rename to tell them apart at a glance.",
+            content: "Running multiple Coven sessions? Use /color and /rename to tell them apart at a glance.",
             cooldown_sessions: 10,
         },
         Tip {
@@ -69,7 +69,7 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "memory-command",
-            content: "Use /memory to view and manage Coven Code memory",
+            content: "Use /memory to view and manage Coven memory",
             cooldown_sessions: 15,
         },
         Tip {
@@ -79,17 +79,17 @@ static ALL_TIPS: Lazy<Vec<Tip>> = Lazy::new(|| {
         },
         Tip {
             id: "prompt-queue",
-            content: "Hit Enter to queue up additional messages while Coven Code is working.",
+            content: "Hit Enter to queue up additional messages while Coven is working.",
             cooldown_sessions: 5,
         },
         Tip {
             id: "enter-to-steer-in-realtime",
-            content: "Send messages to Coven Code while it works to steer Coven Code in real-time",
+            content: "Send messages to Coven while it works to steer Coven in real-time",
             cooldown_sessions: 20,
         },
         Tip {
             id: "todo-list",
-            content: "Ask Coven Code to create a todo list when working on complex tasks to track progress and remain on track",
+            content: "Ask Coven to create a todo list when working on complex tasks to track progress and remain on track",
             cooldown_sessions: 20,
         },
         Tip {

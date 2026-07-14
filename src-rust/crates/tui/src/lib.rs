@@ -342,7 +342,7 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         }
     }
 
-    set_terminal_title("\u{2728} Coven Code");
+    set_terminal_title("\u{2728} Coven");
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -364,11 +364,11 @@ pub fn set_terminal_title(title: &str) {
 }
 
 /// Update the terminal title to reflect the current session context.
-/// Format: "✨ | <topic>" or just "✨ Coven Code" when no topic is set.
+/// Format: "✨ | <topic>" or just "✨ Coven" when no topic is set.
 pub fn update_terminal_title(topic: Option<&str>) {
     match topic {
         Some(t) if !t.is_empty() => set_terminal_title(&format!("\u{2728} | {}", t)),
-        _ => set_terminal_title("\u{2728} Coven Code"),
+        _ => set_terminal_title("\u{2728} Coven"),
     }
 }
 
@@ -918,8 +918,8 @@ mod tests {
             .join("");
         // Header.
         assert!(
-            rendered.contains("Coven Code"),
-            "welcome box is missing the Coven Code header.\n--- rendered buffer ---\n{rendered}"
+            rendered.contains("Coven"),
+            "welcome box is missing the Coven header.\n--- rendered buffer ---\n{rendered}"
         );
         // Provider (a fresh app defaults to Claude / Anthropic).
         assert!(
@@ -961,8 +961,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
         assert!(
-            rendered.contains("Coven Code"),
-            "fallback should include Coven Code header. buffer: {rendered}"
+            rendered.contains("Coven"),
+            "fallback should include Coven header. buffer: {rendered}"
         );
         assert!(
             rendered.contains("Daemon"),
@@ -994,7 +994,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
 
-        assert!(rendered.contains("Coven Code"));
+        assert!(rendered.contains("Coven"));
         assert!(rendered.contains("hello"));
     }
 

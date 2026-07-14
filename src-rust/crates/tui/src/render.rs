@@ -1736,7 +1736,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         let familiar = welcome_familiar_label(app);
         let line = Line::from(vec![
             Span::styled(
-                "Coven Code ",
+                "Coven ",
                 Style::default()
                     .fg(COVEN_VIOLET)
                     .add_modifier(Modifier::BOLD),
@@ -1762,7 +1762,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         height: box_height,
     };
 
-    // Outer border with title "Coven Code vX.Y"
+    // Outer border with title "Coven vX.Y"
     let accent = app.accent_color;
     let outer_block = Block::default()
         .borders(Borders::ALL)
@@ -1770,7 +1770,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(accent))
         .title(Line::from(vec![
             Span::styled(
-                " Coven Code ",
+                " Coven ",
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1890,7 +1890,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     let tip_text = WELCOME_TIP.get_or_init(|| {
         claurst_core::tips::select_tip(0)
             .map(|t| t.content.to_string())
-            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string())
+            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven".to_string())
     });
 
     let mut right_lines: Vec<Line> = Vec::new();

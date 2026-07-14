@@ -81,7 +81,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "effort",
         "Set effort level (low/normal/high) or toggle fast mode",
     ),
-    ("exit", "Quit Coven Code"),
+    ("exit", "Quit Coven"),
     ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
@@ -105,7 +105,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("link", "Save and manage links in the structured stash"),
     ("login", "Log in, switch accounts, or refresh provider auth"),
-    ("logout", "Log out of Coven Code"),
+    ("logout", "Log out of Coven"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
@@ -116,7 +116,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Manage plugins (list/info/enable/disable/install/reload)",
     ),
     ("providers", "List available AI providers and their status"),
-    ("quit", "Exit Coven Code"),
+    ("quit", "Exit Coven"),
     ("resume", "Resume a previous session"),
     (
         "review",
@@ -157,9 +157,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "update",
         "Check for updates and upgrade to the latest version",
     ),
-    ("release-notes", "Show recent Coven Code highlights"),
+    ("release-notes", "Show recent Coven highlights"),
     ("usage", "Detailed per-call token usage breakdown"),
-    ("version", "Display the current Coven Code version"),
+    ("version", "Display the current Coven version"),
     (
         "whisper",
         "Whisper a side question to your familiar (not kept in history)",
@@ -1894,6 +1894,11 @@ impl App {
     }
 
     fn open_model_picker_for_provider(&mut self, provider_id: &str, title: Option<String>) {
+        // The device-auth flow and older persisted configs use the
+        // "openai-codex" alias; the provider registry and model catalog
+        // register it as "codex". Canonicalize so the picker seed, the
+        // async fetch, and the current-model prefix all agree.
+        let provider_id = claurst_api::registry::canonical_provider_id(provider_id);
         self.dismiss_error_notifications();
 
         let cache_path = dirs::cache_dir()
@@ -1941,6 +1946,9 @@ impl App {
         provider_name: String,
         status_prefix: &str,
     ) {
+        // Persist the canonical id ("codex", not the "openai-codex" alias)
+        // so later /model opens resolve the provider in the registry.
+        let provider_id = claurst_api::registry::canonical_provider_id(&provider_id).to_string();
         let picker_title = provider_name.clone();
         self.fast_mode = false;
         self.set_provider_default(provider_id.clone());
@@ -2477,7 +2485,7 @@ impl App {
                     PermissionMode::Default
                 };
                 self.status_message = Some(if self.plan_mode {
-                    "Plan mode ON — Coven Code will plan before acting.".to_string()
+                    "Plan mode ON — Coven will plan before acting.".to_string()
                 } else {
                     "Plan mode OFF.".to_string()
                 });
@@ -8101,6 +8109,32 @@ role = "Research"
         assert_eq!(
             app.prompt_input.text, "/model",
             "Tab must accept the suggestion even while a turn is streaming"
+        );
+    }
+
+    #[test]
+    fn model_picker_accepts_openai_codex_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.open_model_picker_for_provider("openai-codex", None);
+
+        assert_eq!(
+            app.model_picker_provider_id.as_deref(),
+            Some("codex"),
+            "picker provider id must be canonicalized"
+        );
+        assert!(
+            app.model_picker
+                .models
+                .iter()
+                .any(|m| m.id == "gpt-5.6-sol"),
+            "alias-opened picker must show the curated Codex models"
         );
     }
 

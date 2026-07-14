@@ -1544,7 +1544,7 @@ pub fn write_result(path: &Path, envelope: &ResultEnvelope) -> anyhow::Result<()
 fn familiar_name(brief: Option<&SessionBrief>) -> String {
     brief
         .map(|b| b.familiar.display_name.clone())
-        .unwrap_or_else(|| "Coven Code".to_string())
+        .unwrap_or_else(|| "Coven".to_string())
 }
 
 /// One-line, familiar-voice summary (Check Run + PR title). Prefers the first

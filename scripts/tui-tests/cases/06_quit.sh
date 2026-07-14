@@ -16,7 +16,7 @@ tc_quit() {
 
   # Prove the process actually exited by dropping a marker on the shell that
   # is revealed once the TUI tears down.
-  if wait_for "Coven Code v" 2; then
+  if wait_for "Coven v" 2; then
     : # still showing — fall through to explicit check below
   fi
   tui_type "echo __TUI_EXITED__"; tui_keys Enter

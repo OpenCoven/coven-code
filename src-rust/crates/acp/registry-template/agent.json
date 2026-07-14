@@ -1,8 +1,8 @@
 {
   "id": "coven-code",
-  "name": "Coven Code",
+  "name": "Coven",
   "version": "0.6.1",
-  "description": "Open-source, multi-provider agentic coding TUI built in Rust (OpenCoven fork of Coven Code). Multi-provider routing (Anthropic, OpenAI, Google, Groq, Ollama, OpenAI-compatible, \u2026), full MCP support, plugin system, companion mascot, chat forking, memory consolidation. No telemetry.",
+  "description": "Open-source, multi-provider agentic coding TUI built in Rust (OpenCoven fork of Claurst). Multi-provider routing (Anthropic, OpenAI, Google, Groq, Ollama, OpenAI-compatible, \u2026), full MCP support, plugin system, companion mascot, chat forking, memory consolidation. No telemetry.",
   "repository": "https://github.com/OpenCoven/coven-code",
   "website": "https://opencoven.ai",
   "authors": [
