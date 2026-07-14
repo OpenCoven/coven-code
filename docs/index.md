@@ -233,3 +233,4 @@ See [Coven Familiars](familiars) for the full integration reference.
 - [Familiars](familiars) — Coven daemon familiars as agent personas
 - [Hooks](hooks) — event-driven automation
 - [Advanced Features](advanced) — extended thinking, sessions, and more
+- [The Coven Merge](unification) — the unified `coven` CLI, user migration, and Cave integration
