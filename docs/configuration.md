@@ -153,6 +153,14 @@ shared surfaces back in:
 }
 ```
 
+The GitHub worker's `--hosted-repair` mode is narrower than
+`allowWriteTools`: it enables only `Read`, `Grep`, `Glob`, `Edit`, `Write`,
+`ApplyPatch`, `BatchEdit`, and `NotebookEdit`. It requires the complete
+`--headless --context ... --output ...` invocation and still disables command,
+network-tool, sub-agent, plugin, MCP, user-memory, and automatic-memory access.
+Use this worker-controlled mode for automated branch repair; do not enable the
+broader `allowWriteTools` setting for contributor-controlled reviews.
+
 `allowUserMemory` also exists for explicitly trusted deployments, but hosted
 review jobs should prefer tenant-approved managed rules over operator-global
 user memory.

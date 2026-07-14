@@ -571,6 +571,9 @@ policy settings such as `hostedReview.allowManagedRules`,
 `hostedReview.allowWriteTools`, `hostedReview.allowMcpServers`, and
 `hostedReview.allowPlugins` can opt specific surfaces back in for controlled
 deployments. Prefer tenant-approved managed rules over `allowUserMemory`.
+Automated GitHub repair should use the dedicated `--hosted-repair` headless
+flag, which exposes only repository file tools and never shell, web, plugin,
+MCP, task, or sub-agent tools.
 
 Session memory extraction is also approval-gated in hosted review mode.
 Untrusted fork or contributor sessions cannot automatically append learned

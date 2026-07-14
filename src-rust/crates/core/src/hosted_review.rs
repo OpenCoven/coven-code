@@ -30,6 +30,10 @@ pub struct HostedReviewConfig {
     pub allow_managed_rules: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_write_tools: bool,
+    /// Allow only repository file read/write tools. Unlike `allow_write_tools`,
+    /// this never admits command execution, network, task, plugin, or MCP tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_file_write_tools: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_mcp_servers: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -52,6 +56,7 @@ impl Default for HostedReviewConfig {
             allow_user_memory: false,
             allow_managed_rules: false,
             allow_write_tools: false,
+            allow_file_write_tools: false,
             allow_mcp_servers: false,
             allow_plugins: false,
             allow_auto_memory_persistence: false,
@@ -67,6 +72,7 @@ impl HostedReviewConfig {
             && !self.allow_user_memory
             && !self.allow_managed_rules
             && !self.allow_write_tools
+            && !self.allow_file_write_tools
             && !self.allow_mcp_servers
             && !self.allow_plugins
             && !self.allow_auto_memory_persistence

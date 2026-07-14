@@ -255,6 +255,17 @@ struct Cli {
     #[arg(long = "hosted-review", env = "COVEN_CODE_HOSTED_REVIEW", action = ArgAction::SetTrue)]
     hosted_review: bool,
 
+    /// Hosted repair mode: allow repository file edits but no command execution,
+    /// plugins, MCP servers, sub-agents, or network tools.
+    #[arg(
+        long = "hosted-repair",
+        env = "COVEN_CODE_HOSTED_REPAIR",
+        action = ArgAction::SetTrue,
+        requires_all = ["headless", "context", "output"],
+        conflicts_with = "hosted_review"
+    )]
+    hosted_repair: bool,
+
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
     workload: Option<String>,
@@ -569,6 +580,15 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(brief) = github_context.as_ref() {
         headless::apply_to_config(&mut config, brief);
+    }
+    if cli.hosted_repair {
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_file_write_tools = true;
+        config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_user_memory = false;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
     }
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
@@ -1580,6 +1600,24 @@ fn filter_tools_for_hosted_review(
 ) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
     if !config.hosted_review_enabled() || config.hosted_review.allow_write_tools {
         return tools;
+    }
+
+    if config.hosted_review.allow_file_write_tools {
+        const FILE_TOOLS: &[&str] = &[
+            "Read",
+            "Grep",
+            "Glob",
+            "Edit",
+            "Write",
+            "ApplyPatch",
+            "BatchEdit",
+            "NotebookEdit",
+        ];
+        let filtered = claurst_tools::all_tools()
+            .into_iter()
+            .filter(|tool| FILE_TOOLS.contains(&tool.name()))
+            .collect();
+        return Arc::new(filtered);
     }
 
     filter_read_only_tools(&tools)
@@ -5480,6 +5518,85 @@ mod tests {
             tool_names(&filter_tools_for_hosted_review(all, &config)),
             before
         );
+    }
+
+    #[test]
+    fn hosted_repair_allows_only_repository_file_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let config = Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                enabled: true,
+                allow_file_write_tools: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let names = tool_names(&filter_tools_for_hosted_review(all, &config));
+        for required in ["Read", "Grep", "Glob", "Edit", "Write", "ApplyPatch"] {
+            assert!(
+                names.contains(&required.to_string()),
+                "hosted repair missing {required}: {names:?}"
+            );
+        }
+        for forbidden in [
+            "Bash",
+            "PtyBash",
+            "PowerShell",
+            "WebSearch",
+            "WebFetch",
+            "Agent",
+            "TeamCreate",
+            "Skill",
+            "ToolSearch",
+            "ListMcpResources",
+            "ReadMcpResource",
+        ] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "hosted repair must not include {forbidden}: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().all(|name| [
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit",
+                "Write",
+                "ApplyPatch",
+                "BatchEdit",
+                "NotebookEdit",
+            ]
+            .contains(&name.as_str())),
+            "hosted repair exposed an unexpected tool: {names:?}"
+        );
+    }
+
+    #[test]
+    fn hosted_repair_cli_requires_the_structured_headless_contract() {
+        assert!(Cli::try_parse_from(["coven-code", "--hosted-repair"]).is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-review",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
     }
 
     // NOTE: the coven-github headless-contract types + behavior moved to the

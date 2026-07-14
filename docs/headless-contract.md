@@ -2,6 +2,10 @@
 
 **Contract version: `3`** - Status: **Locked** (V3 / memory provenance in review artifacts)
 
+The runtime also accepts version `2` briefs during the coven-github migration
+and echoes `"2"` in their result envelopes. Version `3` remains the normative
+schema; all other major versions are rejected.
+
 This document is the single source of truth for the interface between
 `coven-github` (the GitHub ingress adapter) and `coven-code` (the execution
 runtime) when the runtime is invoked in headless mode.
@@ -30,6 +34,10 @@ The adapter spawns the runtime as a child process:
 ```
 coven-code --headless --context <session-brief.json> --output <result.json>
 ```
+
+Trusted branch-repair workers add `--hosted-repair`. That flag requires all
+three structured headless arguments and exposes only repository file tools;
+the control plane, not the runtime model, performs validation, commit, and push.
 
 | Flag | Meaning |
 |---|---|

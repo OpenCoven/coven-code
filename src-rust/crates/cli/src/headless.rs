@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
 pub const CONTRACT_VERSION: &str = "3";
+pub const COMPATIBLE_CONTRACT_VERSIONS: &[&str] = &["2", "3"];
 
 /// Environment variable carrying the GitHub App **installation access token**
 /// used to authenticate `git push`. This is the ONLY git credential channel; it
@@ -150,11 +151,11 @@ impl SessionBrief {
     /// "Consumers MUST reject a payload whose major version they do not
     /// implement, rather than silently mis-parsing it."
     pub fn ensure_supported_version(&self) -> anyhow::Result<()> {
-        if self.contract_version != CONTRACT_VERSION {
+        if !COMPATIBLE_CONTRACT_VERSIONS.contains(&self.contract_version.as_str()) {
             bail!(
                 "unsupported headless contract version {:?}; this build implements {:?}",
                 self.contract_version,
-                CONTRACT_VERSION
+                COMPATIBLE_CONTRACT_VERSIONS
             );
         }
         Ok(())
@@ -331,6 +332,7 @@ pub fn apply_to_config(config: &mut claurst_core::config::Config, brief: &Sessio
         config.hosted_review.enabled = true;
         config.hosted_review.allow_user_memory = false;
         config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_file_write_tools = false;
         config.hosted_review.allow_mcp_servers = false;
         config.hosted_review.allow_plugins = false;
         config.hosted_review.allow_auto_memory_persistence = false;
@@ -1496,7 +1498,9 @@ pub fn build_result_with_memory(
     let pr_body = compose_pr_body(brief, final_text, git, status);
 
     let envelope = ResultEnvelope {
-        contract_version: CONTRACT_VERSION.to_string(),
+        contract_version: brief
+            .map(|value| value.contract_version.clone())
+            .unwrap_or_else(|| CONTRACT_VERSION.to_string()),
         status,
         branch: git.branch.clone(),
         commits: git.commits.clone(),
@@ -1518,7 +1522,9 @@ pub fn infra_error_result(
 ) -> (ResultEnvelope, i32) {
     let name = familiar_name(brief);
     let envelope = ResultEnvelope {
-        contract_version: CONTRACT_VERSION.to_string(),
+        contract_version: brief
+            .map(|value| value.contract_version.clone())
+            .unwrap_or_else(|| CONTRACT_VERSION.to_string()),
         status: Status::Failure,
         branch: git.branch.clone(),
         commits: git.commits.clone(),
@@ -1917,6 +1923,33 @@ mod tests {
     }
 
     #[test]
+    fn contract_v2_pull_request_review_remains_supported_end_to_end() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "pull_request_autoreview",
+            "repo": { "owner": "OpenCoven", "name": "example", "clone_url": "https://github.com/OpenCoven/example.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 73, "comment_body": "Review pull request #73 at the captured head." },
+            "familiar": { "id": "covencat", "display_name": "Covencat", "skills": [] },
+            "workspace": { "root": "/workspace" },
+            "review_context": { "kind": "pull_request", "files": [{ "filename": "src/app.ts" }] }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("v2 review brief parses");
+        brief
+            .ensure_supported_version()
+            .expect("v2 remains supported");
+        assert_eq!(brief.review_mode(), ReviewMode::PullRequest);
+        assert!(brief.to_prompt().contains("Review pull request #73"));
+        let (envelope, _) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "### Files inspected\n- `src/app.ts`\n### Supporting context used\n- `src/app.ts` - reviewed source\n### Findings\nNone\n### No-findings justification\nNo defect was found in `src/app.ts`.\n### Tests/commands considered\n- `npm test` - not run: host validates\n### Confidence/limitations\nHost validation is pending.",
+            None,
+        );
+        assert_eq!(envelope.contract_version, "2");
+    }
+
+    #[test]
     fn prompt_is_derived_from_task_and_never_leaks_a_token() {
         let brief = sample_brief();
         let prompt = brief.to_prompt();
@@ -1953,6 +1986,7 @@ mod tests {
         let mut config = claurst_core::config::Config {
             hosted_review: claurst_core::hosted_review::HostedReviewConfig {
                 allow_write_tools: true,
+                allow_file_write_tools: true,
                 allow_mcp_servers: true,
                 allow_plugins: true,
                 allow_user_memory: true,
@@ -1966,6 +2000,7 @@ mod tests {
 
         assert!(config.hosted_review.enabled);
         assert!(!config.hosted_review.allow_write_tools);
+        assert!(!config.hosted_review.allow_file_write_tools);
         assert!(!config.hosted_review.allow_mcp_servers);
         assert!(!config.hosted_review.allow_plugins);
         assert!(!config.hosted_review.allow_user_memory);
