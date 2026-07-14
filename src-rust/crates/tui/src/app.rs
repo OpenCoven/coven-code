@@ -1894,6 +1894,11 @@ impl App {
     }
 
     fn open_model_picker_for_provider(&mut self, provider_id: &str, title: Option<String>) {
+        // The device-auth flow and older persisted configs use the
+        // "openai-codex" alias; the provider registry and model catalog
+        // register it as "codex". Canonicalize so the picker seed, the
+        // async fetch, and the current-model prefix all agree.
+        let provider_id = claurst_api::registry::canonical_provider_id(provider_id);
         self.dismiss_error_notifications();
 
         let cache_path = dirs::cache_dir()
@@ -1941,6 +1946,9 @@ impl App {
         provider_name: String,
         status_prefix: &str,
     ) {
+        // Persist the canonical id ("codex", not the "openai-codex" alias)
+        // so later /model opens resolve the provider in the registry.
+        let provider_id = claurst_api::registry::canonical_provider_id(&provider_id).to_string();
         let picker_title = provider_name.clone();
         self.fast_mode = false;
         self.set_provider_default(provider_id.clone());
@@ -8031,6 +8039,32 @@ role = "Research"
         assert!(!app.connect_dialog.visible);
         assert!(!app.key_input_dialog.visible);
         assert!(app.has_credentials);
+    }
+
+    #[test]
+    fn model_picker_accepts_openai_codex_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+
+        let mut app = make_app();
+        app.open_model_picker_for_provider("openai-codex", None);
+
+        assert_eq!(
+            app.model_picker_provider_id.as_deref(),
+            Some("codex"),
+            "picker provider id must be canonicalized"
+        );
+        assert!(
+            app.model_picker
+                .models
+                .iter()
+                .any(|m| m.id == "gpt-5.6-sol"),
+            "alias-opened picker must show the curated Codex models"
+        );
     }
 
     #[test]
