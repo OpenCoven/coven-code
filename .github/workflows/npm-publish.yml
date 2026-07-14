@@ -7,32 +7,24 @@ on:
         description: 'Version to publish (e.g., v0.1.1). Must already exist as a GitHub Release.'
         required: true
         type: string
-  workflow_run:
-    workflows: ['Release']
-    types: [completed]
 
 permissions:
   contents: read
   id-token: write
 
-# Belt-and-suspenders: release.yml dispatches us explicitly because
-# `workflow_run` is unreliable when the upstream `Release` run was itself
-# triggered by a GITHUB_TOKEN workflow_dispatch. If both paths happen to
-# fire for the same release, this static concurrency group serializes them
-# and the second run exits cleanly when the version is already on npm.
-# Releases are version-monotonic so blanket serialisation is safe; there
-# isn't a scenario where two concurrent publishes should both succeed.
+# Manual-only. `@opencoven/coven-code` is deprecated — the engine ships as a
+# GitHub Release binary that `coven` installs and pins, so npm publishing is
+# never automatic. release.yml dispatches this workflow explicitly only when
+# its `publish_npm` input is set to true; the version must already exist as a
+# GitHub Release. The static concurrency group still serializes any overlapping
+# manual runs, and a second run exits cleanly when the version is already on npm.
 concurrency:
   group: npm-publish
   cancel-in-progress: false
 
 jobs:
   npm-publish:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     name: Publish coven-code to npm
 
@@ -55,15 +47,8 @@ jobs:
           echo "tag_ref=refs/tags/v$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
-        if: github.event_name == 'workflow_dispatch'
         with:
           ref: ${{ steps.requested_version.outputs.tag_ref }}
-          fetch-depth: 0
-
-      - uses: actions/checkout@v5
-        if: github.event_name == 'workflow_run'
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Resolve version
