@@ -2,6 +2,14 @@
 
 [![TUI Tests](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml/badge.svg)](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml)
 
+> 🎉 **The unified Coven CLI is here.** The supported way to use this engine is now the single `coven` CLI, which installs, pins, and manages it for you:
+>
+> ```bash
+> npm install -g @opencoven/cli
+> ```
+>
+> This repository is the **Coven engine** — `coven-code` **v0.7.0**, which `coven` (**`@opencoven/cli` v0.1.1**) auto-installs and checksum-verifies on first run. You no longer install `coven-code` from npm directly. See the [release notes](https://github.com/OpenCoven/coven/blob/main/docs/release-notes-unified-cli.md) and the [merge guide](docs/unification.md).
+
 **Coven Code** is an open-source agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
 > **Attribution:** Coven Code is derived from Claurst v0.7.0 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
