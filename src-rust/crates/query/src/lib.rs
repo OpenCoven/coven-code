@@ -804,9 +804,13 @@ const STALL_RECOVERY_MSG: &str =
      final outcome without announcing further actions.";
 
 /// Stall recovery is on by default; set COVEN_CODE_DISABLE_STALL_RECOVERY=1
-/// to restore the old end-the-turn-as-announced behavior.
+/// (or true/yes/on) to restore the old end-the-turn-as-announced behavior.
 fn stall_recovery_enabled() -> bool {
-    std::env::var_os("COVEN_CODE_DISABLE_STALL_RECOVERY").is_none()
+    !claurst_core::feature_gates::is_env_truthy(
+        std::env::var("COVEN_CODE_DISABLE_STALL_RECOVERY")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Heuristic for an "announce-then-stop" stall: an assistant round that
