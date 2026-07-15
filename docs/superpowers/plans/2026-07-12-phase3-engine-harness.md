@@ -1,5 +1,9 @@
 # Phase 3 — Engine as a First-Class Daemon-Ledgered Harness
 
+> **Status: COMPLETE (sealed 2026-07-14).** Track A landed via coven #354;
+> Track B via coven #355 (daemon endpoints) + coven-code #152 (opt-in TUI
+> notifier). Historical record; see [`docs/unification.md`](../../unification.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`. This is the Phase 3 sub-plan of `2026-07-12-coven-cli-unification.md`.
 
 **Goal:** `coven run coven-code "task"` produces a normal ledgered session (detach/attach/kill/archive/search); the bare-prompt cast defaults to the engine; and interactive engine TUI sessions register themselves in the daemon ledger so `coven sessions` sees them.

@@ -1,5 +1,10 @@
 # Phase 4 — State, Config & Auth Unification under `~/.coven`
 
+> **Status: COMPLETE (sealed 2026-07-14).** Track C landed via coven-code
+> #153 (engine home `~/.coven/code/`, in-place migration, compatibility
+> symlink, config layering). Historical record; see
+> [`docs/unification.md`](../../unification.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`. Phase 4 sub-plan of `2026-07-12-coven-cli-unification.md`.
 
 **Goal:** one state root (`~/.coven`), layered config, no user-visible `~/.coven-code` on fresh installs, one auth story surfaced by one doctor, and search that spans engine TUI sessions.
