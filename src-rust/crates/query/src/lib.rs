@@ -789,7 +789,141 @@ const MAX_TOKENS_RECOVERY_MSG: &str =
      you were doing. Pick up mid-thought if that is where the cut happened. \
      Break remaining work into smaller pieces.";
 
-fn should_emit_turn_complete(stop: &str, max_tokens_recovery_count: u32) -> bool {
+/// Maximum automatic continuation nudges per user turn when the model ends
+/// the turn right after announcing an action it never executed (issue #165:
+/// "agent announces work and just stops"). Bounded like the max_tokens
+/// recovery so a model that keeps narrating can't loop forever.
+const STALL_RECOVERY_LIMIT: u32 = 2;
+
+/// Message injected when the model ends a turn with announced-but-unexecuted
+/// work (or with no output at all) and no tool calls.
+const STALL_RECOVERY_MSG: &str =
+    "You ended the turn right after announcing an action, without executing \
+     it. Do not narrate what you are about to do. If work remains, call the \
+     tools and do it now; if everything is actually complete, state the \
+     final outcome without announcing further actions.";
+
+/// Stall recovery is on by default; set COVEN_CODE_DISABLE_STALL_RECOVERY=1
+/// (or true/yes/on) to restore the old end-the-turn-as-announced behavior.
+fn stall_recovery_enabled() -> bool {
+    !claurst_core::feature_gates::is_env_truthy(
+        std::env::var("COVEN_CODE_DISABLE_STALL_RECOVERY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Heuristic for an "announce-then-stop" stall: an assistant round that
+/// ended with `end_turn`, executed no tools, and whose visible text is
+/// either empty or closes on an imminent-action announcement ("Writing the
+/// CLI uninstall module now.") rather than a completed-work statement or a
+/// deliberate handoff back to the user ("Should I…?", "Let me know…").
+///
+/// False positives are cheap by design: the recovery nudge explicitly tells
+/// the model to state the final outcome if the work is already done, and
+/// the whole mechanism is bounded by [`STALL_RECOVERY_LIMIT`].
+fn is_stalled_announcement(text: &str) -> bool {
+    let trimmed = text.trim();
+    // No visible output at all is always a stall (the #149 placeholder case).
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    // Work on the final sentence-like chunk. Chunks with fewer than two
+    // words are punctuation debris from dotted identifiers (`main.rs`.),
+    // not sentences — skip past them.
+    let last_sentence = trimmed
+        .rsplit(['.', '!', '?', '…', '\n'])
+        .find(|chunk| {
+            chunk
+                .split_whitespace()
+                .filter(|word| word.chars().any(|c| c.is_alphabetic()))
+                .count()
+                >= 2
+        })
+        .unwrap_or(trimmed)
+        .trim()
+        .to_ascii_lowercase();
+
+    // A question mark anywhere in the tail means the model handed control
+    // back to the user on purpose.
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(240)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if tail.contains('?') {
+        return false;
+    }
+
+    // Deliberate wait-for-user phrasings are handoffs, not stalls.
+    const HANDOFF_MARKERS: [&str; 10] = [
+        "let me know",
+        "should i",
+        "do you",
+        "would you",
+        "if you",
+        "wait",
+        "once you",
+        "when you",
+        "your call",
+        "your review",
+    ];
+    if HANDOFF_MARKERS
+        .iter()
+        .any(|marker| last_sentence.contains(marker))
+    {
+        return false;
+    }
+
+    // Imminent-action openers ("Writing the module now.", "Now running the
+    // tests.") and first-person intent markers ("then I'll wire it in").
+    const ANNOUNCEMENT_OPENERS: [&str; 15] = [
+        "writing ",
+        "creating ",
+        "implementing ",
+        "building ",
+        "adding ",
+        "updating ",
+        "editing ",
+        "wiring ",
+        "running ",
+        "starting ",
+        "proceeding ",
+        "next,",
+        "next up",
+        "on to ",
+        "time to ",
+    ];
+    const INTENT_MARKERS: [&str; 6] = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "going to ",
+        "about to ",
+        "now to ",
+    ];
+    let opener = last_sentence.strip_prefix("now ").unwrap_or(&last_sentence);
+    ANNOUNCEMENT_OPENERS
+        .iter()
+        .any(|pattern| opener.starts_with(pattern))
+        || INTENT_MARKERS
+            .iter()
+            .any(|marker| last_sentence.contains(marker))
+}
+
+fn should_emit_turn_complete(
+    stop: &str,
+    max_tokens_recovery_count: u32,
+    stall_recovery_pending: bool,
+) -> bool {
+    if stall_recovery_pending {
+        return false;
+    }
     match stop {
         "tool_use" => false,
         "max_tokens" => max_tokens_recovery_count >= MAX_TOKENS_RECOVERY_LIMIT,
@@ -994,6 +1128,9 @@ pub async fn run_query_loop(
     // Tracks how many consecutive max_tokens recoveries we've attempted so
     // we don't loop forever on a model that can't finish within any budget.
     let mut max_tokens_recovery_count: u32 = 0;
+    // Automatic continuation nudges used for announce-then-stop stalls this
+    // user turn (issue #165). Reset whenever a tool round actually executes.
+    let mut stall_recovery_count: u32 = 0;
     // Active model — may switch to fallback on overloaded errors.
     // Agent model override takes priority over the session model when set.
     let mut effective_model = selected_model_for_query(config);
@@ -1683,7 +1820,37 @@ pub async fn run_query_loop(
                             cost: None,
                             snapshot_patch: None,
                         });
+                        // Real tool work happened; give the next
+                        // announce-then-stop stall a fresh recovery budget.
+                        stall_recovery_count = 0;
                         continue; // loop for next turn
+                    }
+
+                    // Announce-then-stop stall detection (issue #165), before
+                    // the end-of-turn placeholder/TurnComplete below: a round
+                    // that executed no tools and whose text is empty or ends
+                    // on an imminent-action announcement gets a bounded
+                    // continuation nudge instead of ending the turn.
+                    if stall_recovery_enabled()
+                        && stall_recovery_count < STALL_RECOVERY_LIMIT
+                        && is_stalled_announcement(&combined_text)
+                    {
+                        stall_recovery_count += 1;
+                        warn!(
+                            attempt = stall_recovery_count,
+                            limit = STALL_RECOVERY_LIMIT,
+                            provider = %provider_id_str,
+                            "end_turn with announced-but-unexecuted work — injecting continuation nudge"
+                        );
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(QueryEvent::Status(format!(
+                                "Model announced work but ended the turn — nudging it to \
+                                 continue (attempt {}/{})",
+                                stall_recovery_count, STALL_RECOVERY_LIMIT
+                            )));
+                        }
+                        messages.push(Message::user(STALL_RECOVERY_MSG));
+                        continue;
                     }
 
                     // End turn — notify TUI and return.
@@ -2035,7 +2202,18 @@ pub async fn run_query_loop(
             }
         }
 
-        if should_emit_turn_complete(stop, max_tokens_recovery_count) {
+        // Announce-then-stop stall detection (issue #165): an `end_turn`
+        // round with no tool calls whose text is empty or closes on an
+        // imminent-action announcement gets a bounded continuation nudge
+        // instead of ending the turn. Decided before TurnComplete emission
+        // so recovered rounds stay invisible, like max_tokens recovery.
+        let stall_recovery_pending = stop == "end_turn"
+            && stall_recovery_enabled()
+            && stall_recovery_count < STALL_RECOVERY_LIMIT
+            && assistant_msg.get_tool_use_blocks().is_empty()
+            && is_stalled_announcement(&assistant_msg.get_all_text());
+
+        if should_emit_turn_complete(stop, max_tokens_recovery_count, stall_recovery_pending) {
             if let Some(ref tx) = event_tx {
                 let _ = tx.send(QueryEvent::TurnComplete {
                     turn,
@@ -2068,6 +2246,27 @@ pub async fn run_query_loop(
 
         match stop {
             "end_turn" => {
+                if stall_recovery_pending {
+                    stall_recovery_count += 1;
+                    warn!(
+                        attempt = stall_recovery_count,
+                        limit = STALL_RECOVERY_LIMIT,
+                        "end_turn with announced-but-unexecuted work — injecting continuation nudge"
+                    );
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(QueryEvent::Status(format!(
+                            "Model announced work but ended the turn — nudging it to continue \
+                             (attempt {}/{})",
+                            stall_recovery_count, STALL_RECOVERY_LIMIT
+                        )));
+                    }
+                    // The stalled assistant message is already in the history,
+                    // so the nudge reads in context. Stop hooks are not fired:
+                    // the turn is not over.
+                    messages.push(Message::user(STALL_RECOVERY_MSG));
+                    continue;
+                }
+
                 fire_stop_hook!(assistant_msg);
 
                 // T1-3: Fire Stop hooks in background (fire-and-forget).
@@ -2242,6 +2441,9 @@ pub async fn run_query_loop(
                 // A completed tool-use turn counts as a successful recovery
                 // boundary; reset the max_tokens retry counter.
                 max_tokens_recovery_count = 0;
+                // Real tool work happened, so any earlier announce-then-stop
+                // stall resolved itself; give the next stall a fresh budget.
+                stall_recovery_count = 0;
                 // Extract tool calls and execute them
                 let tool_blocks = assistant_msg.get_tool_use_blocks();
                 if tool_blocks.is_empty() {
@@ -3018,25 +3220,94 @@ mod tests {
 
     #[test]
     fn turn_complete_emission_skips_intermediate_tool_turns() {
-        assert!(!should_emit_turn_complete("tool_use", 0));
+        assert!(!should_emit_turn_complete("tool_use", 0, false));
     }
 
     #[test]
     fn turn_complete_emission_skips_recoverable_max_tokens_turns() {
-        assert!(!should_emit_turn_complete("max_tokens", 0));
-        assert!(!should_emit_turn_complete("max_tokens", 1));
-        assert!(!should_emit_turn_complete("max_tokens", 2));
+        assert!(!should_emit_turn_complete("max_tokens", 0, false));
+        assert!(!should_emit_turn_complete("max_tokens", 1, false));
+        assert!(!should_emit_turn_complete("max_tokens", 2, false));
         assert!(should_emit_turn_complete(
             "max_tokens",
-            MAX_TOKENS_RECOVERY_LIMIT
+            MAX_TOKENS_RECOVERY_LIMIT,
+            false
         ));
     }
 
     #[test]
     fn turn_complete_emission_keeps_terminal_stop_reasons() {
-        assert!(should_emit_turn_complete("end_turn", 0));
-        assert!(should_emit_turn_complete("stop_sequence", 0));
-        assert!(should_emit_turn_complete("content_filtered", 0));
-        assert!(should_emit_turn_complete("unknown_stop", 0));
+        assert!(should_emit_turn_complete("end_turn", 0, false));
+        assert!(should_emit_turn_complete("stop_sequence", 0, false));
+        assert!(should_emit_turn_complete("content_filtered", 0, false));
+        assert!(should_emit_turn_complete("unknown_stop", 0, false));
+    }
+
+    #[test]
+    fn turn_complete_emission_skips_stall_recovery_rounds() {
+        // While a stall nudge is pending the turn is not over, exactly like
+        // an in-budget max_tokens recovery round.
+        assert!(!should_emit_turn_complete("end_turn", 0, true));
+        assert!(should_emit_turn_complete("end_turn", 0, false));
+    }
+
+    #[test]
+    fn stalled_announcement_matches_observed_stall_transcripts() {
+        // Real assistant texts from the issue #165 session that ended with
+        // end_turn, zero tool calls, and no follow-through.
+        assert!(is_stalled_announcement(""));
+        assert!(is_stalled_announcement("   \n"));
+        assert!(is_stalled_announcement(
+            "Writing the CLI uninstall module now."
+        ));
+        assert!(is_stalled_announcement(
+            "Now writing the CLI uninstall module."
+        ));
+        assert!(is_stalled_announcement(
+            "Enough exploration — I have the wiring points. Writing the CLI \
+             command now. First the self-contained module with unit-tested \
+             pure helpers, then I'll wire it into `main.rs`."
+        ));
+        assert!(is_stalled_announcement(
+            "Implementing now. Let me confirm available deps, then write the \
+             CLI uninstall module."
+        ));
+        assert!(is_stalled_announcement(
+            "I'll start by reading the manifest, then patch the loader."
+        ));
+    }
+
+    #[test]
+    fn stalled_announcement_ignores_completed_work_statements() {
+        assert!(!is_stalled_announcement(
+            "Done — the module is wired in and all tests pass."
+        ));
+        assert!(!is_stalled_announcement(
+            "The uninstall command is implemented and tested; docs updated."
+        ));
+        // "now" inside a completion statement is not an announcement.
+        assert!(!is_stalled_announcement("All 45 tests pass now."));
+    }
+
+    #[test]
+    fn stalled_announcement_respects_deliberate_handoffs() {
+        assert!(!is_stalled_announcement("Should I also update the docs?"));
+        assert!(!is_stalled_announcement(
+            "Let me know if you want the Windows path covered too."
+        ));
+        assert!(!is_stalled_announcement("I'll wait for your review."));
+        assert!(!is_stalled_announcement(
+            "Two options: (1) uninstall module in the CLI, (2) Cave-side \
+             cleanup. Which do you want?"
+        ));
+        assert!(!is_stalled_announcement(
+            "Waiting on your decision before touching main.rs."
+        ));
+    }
+
+    #[test]
+    fn stall_recovery_disable_env_is_read() {
+        // Not set in the test environment → enabled by default.
+        assert!(stall_recovery_enabled());
     }
 }
