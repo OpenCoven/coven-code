@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 /// Major contract version this build implements (contract §6).
 pub const CONTRACT_VERSION: &str = "3";
+pub const COMPATIBLE_CONTRACT_VERSIONS: &[&str] = &["2", "3"];
 
 /// Environment variable carrying the GitHub App **installation access token**
 /// used to authenticate `git push`. This is the ONLY git credential channel; it
@@ -150,11 +151,11 @@ impl SessionBrief {
     /// "Consumers MUST reject a payload whose major version they do not
     /// implement, rather than silently mis-parsing it."
     pub fn ensure_supported_version(&self) -> anyhow::Result<()> {
-        if self.contract_version != CONTRACT_VERSION {
+        if !COMPATIBLE_CONTRACT_VERSIONS.contains(&self.contract_version.as_str()) {
             bail!(
                 "unsupported headless contract version {:?}; this build implements {:?}",
                 self.contract_version,
-                CONTRACT_VERSION
+                COMPATIBLE_CONTRACT_VERSIONS
             );
         }
         Ok(())
@@ -195,6 +196,17 @@ impl SessionBrief {
 
     /// Build the first-turn user prompt injected into the headless session.
     pub fn to_prompt(&self) -> String {
+        self.to_prompt_for_mode(false)
+    }
+
+    /// Build the first-turn prompt for a trusted hosted repair. The runtime may
+    /// edit repository files, while the worker remains responsible for trusted
+    /// validation, committing, and pushing.
+    pub fn to_hosted_repair_prompt(&self) -> String {
+        self.to_prompt_for_mode(true)
+    }
+
+    fn to_prompt_for_mode(&self, hosted_repair: bool) -> String {
         let mut lines = vec![
             format!(
                 "You are {}, the Coven coding familiar assigned to {}/{} through the coven-github App.",
@@ -268,6 +280,23 @@ impl SessionBrief {
             lines.push(instruction.trim().to_string());
         }
 
+        if hosted_repair {
+            lines.push(String::new());
+            lines.push(
+                "Hosted repair mode: inspect the cited findings and make only the repository file edits needed to fix them. Use the available file read and edit tools directly in the current workspace. Do not merely describe a patch."
+                    .to_string(),
+            );
+            lines.push(
+                "Command execution, network access, git operations, and test execution are intentionally unavailable. Do not create a branch, commit, or push. The trusted worker will validate, commit, and push the edited workspace after this runtime exits."
+                    .to_string(),
+            );
+            lines.push(
+                "If no safe source-backed edit can be made, explain the blocker. Otherwise, finish with a concise summary of the files you actually changed."
+                    .to_string(),
+            );
+            return lines.join("\n");
+        }
+
         if self.review_mode() != ReviewMode::None {
             lines.push(String::new());
             lines.push(
@@ -331,6 +360,7 @@ pub fn apply_to_config(config: &mut claurst_core::config::Config, brief: &Sessio
         config.hosted_review.enabled = true;
         config.hosted_review.allow_user_memory = false;
         config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_file_write_tools = false;
         config.hosted_review.allow_mcp_servers = false;
         config.hosted_review.allow_plugins = false;
         config.hosted_review.allow_auto_memory_persistence = false;
@@ -418,6 +448,7 @@ pub struct GitSummary {
     pub branch: Option<String>,
     pub commits: Vec<CommitSummary>,
     pub files_changed: Vec<String>,
+    pub workspace_dirty: bool,
 }
 
 /// Inspect the workspace and summarize the branch, the commits ahead of the base
@@ -448,6 +479,8 @@ pub fn collect_git_summary(workspace: &Path, default_branch: &str) -> GitSummary
         })
         .unwrap_or_default();
 
+    let workspace_dirty = git_stdout(workspace, &["diff", "--name-only", "HEAD"]).is_some()
+        || git_stdout(workspace, &["diff", "--name-only", "--cached"]).is_some();
     let files_changed = git_stdout(workspace, &["diff", "--name-only", "HEAD"])
         .into_iter()
         .chain(git_stdout(workspace, &["diff", "--name-only", "--cached"]))
@@ -470,6 +503,7 @@ pub fn collect_git_summary(workspace: &Path, default_branch: &str) -> GitSummary
         branch,
         commits,
         files_changed,
+        workspace_dirty,
     }
 }
 
@@ -1467,6 +1501,7 @@ fn build_result(
         final_text,
         review_trace,
         ReviewMemoryUse::default(),
+        false,
     )
 }
 
@@ -1479,10 +1514,11 @@ pub fn build_result_with_memory(
     final_text: &str,
     review_trace: Option<&ReviewTrace>,
     memory: ReviewMemoryUse,
+    hosted_repair: bool,
 ) -> (ResultEnvelope, i32) {
-    let comment_only = brief.map(SessionBrief::is_comment_only).unwrap_or(false);
-    let (mut status, mut exit_reason, code) =
-        classify(outcome, !git.commits.is_empty(), comment_only);
+    let comment_only = !hosted_repair && brief.map(SessionBrief::is_comment_only).unwrap_or(false);
+    let has_progress = !git.commits.is_empty() || (hosted_repair && git.workspace_dirty);
+    let (mut status, mut exit_reason, code) = classify(outcome, has_progress, comment_only);
 
     let review = ReviewResult::from_brief_with_memory(brief, review_trace, final_text, memory);
     if review.mode != ReviewMode::None
@@ -1496,7 +1532,9 @@ pub fn build_result_with_memory(
     let pr_body = compose_pr_body(brief, final_text, git, status);
 
     let envelope = ResultEnvelope {
-        contract_version: CONTRACT_VERSION.to_string(),
+        contract_version: brief
+            .map(|value| value.contract_version.clone())
+            .unwrap_or_else(|| CONTRACT_VERSION.to_string()),
         status,
         branch: git.branch.clone(),
         commits: git.commits.clone(),
@@ -1518,7 +1556,9 @@ pub fn infra_error_result(
 ) -> (ResultEnvelope, i32) {
     let name = familiar_name(brief);
     let envelope = ResultEnvelope {
-        contract_version: CONTRACT_VERSION.to_string(),
+        contract_version: brief
+            .map(|value| value.contract_version.clone())
+            .unwrap_or_else(|| CONTRACT_VERSION.to_string()),
         status: Status::Failure,
         branch: git.branch.clone(),
         commits: git.commits.clone(),
@@ -1678,6 +1718,19 @@ mod tests {
         serde_json::from_str(raw).expect("review brief parses")
     }
 
+    fn sample_repair_brief() -> SessionBrief {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "pull_request_autoreview",
+            "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "Fix the source-backed finding." },
+            "familiar": { "id": "cody", "display_name": "Cody", "skills": [] },
+            "workspace": { "root": "/tmp/ws" },
+            "audit_instruction": "Edit src/lib.rs to fix the finding."
+        }"#;
+        serde_json::from_str(raw).expect("repair brief parses")
+    }
+
     fn review_workspace() -> (tempfile::TempDir, ReviewTrace) {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().to_path_buf();
@@ -1793,6 +1846,7 @@ mod tests {
             "## Findings\n- [low] src/lib.rs:1 — fine\n\n## Supporting Context Used\n- src/support.rs: checked",
             Some(&trace),
             memory,
+            false,
         );
 
         let value = serde_json::to_value(&envelope).unwrap();
@@ -1917,6 +1971,33 @@ mod tests {
     }
 
     #[test]
+    fn contract_v2_pull_request_review_remains_supported_end_to_end() {
+        let raw = r#"{
+            "contract_version": "2",
+            "trigger": "pull_request_autoreview",
+            "repo": { "owner": "OpenCoven", "name": "example", "clone_url": "https://github.com/OpenCoven/example.git", "default_branch": "main" },
+            "task": { "kind": "respond_to_mention", "issue_number": 73, "comment_body": "Review pull request #73 at the captured head." },
+            "familiar": { "id": "covencat", "display_name": "Covencat", "skills": [] },
+            "workspace": { "root": "/workspace" },
+            "review_context": { "kind": "pull_request", "files": [{ "filename": "src/app.ts" }] }
+        }"#;
+        let brief: SessionBrief = serde_json::from_str(raw).expect("v2 review brief parses");
+        brief
+            .ensure_supported_version()
+            .expect("v2 remains supported");
+        assert_eq!(brief.review_mode(), ReviewMode::PullRequest);
+        assert!(brief.to_prompt().contains("Review pull request #73"));
+        let (envelope, _) = build_result(
+            Some(&brief),
+            &GitSummary::default(),
+            RunOutcome::Completed,
+            "### Files inspected\n- `src/app.ts`\n### Supporting context used\n- `src/app.ts` - reviewed source\n### Findings\nNone\n### No-findings justification\nNo defect was found in `src/app.ts`.\n### Tests/commands considered\n- `npm test` - not run: host validates\n### Confidence/limitations\nHost validation is pending.",
+            None,
+        );
+        assert_eq!(envelope.contract_version, "2");
+    }
+
+    #[test]
     fn prompt_is_derived_from_task_and_never_leaks_a_token() {
         let brief = sample_brief();
         let prompt = brief.to_prompt();
@@ -1926,6 +2007,16 @@ mod tests {
         assert!(prompt.contains("COVEN_GIT_TOKEN"));
         // The prompt references the env var by name but never a token value.
         assert!(!prompt.contains("x-access-token:"));
+    }
+
+    #[test]
+    fn hosted_repair_prompt_requires_real_edits_and_delegates_privileged_steps() {
+        let prompt = sample_brief().to_hosted_repair_prompt();
+
+        assert!(prompt.contains("Do not merely describe a patch"));
+        assert!(prompt.contains("current workspace"));
+        assert!(prompt.contains("trusted worker will validate, commit, and push"));
+        assert!(!prompt.contains("make the change on a new branch"));
     }
 
     #[test]
@@ -1953,6 +2044,7 @@ mod tests {
         let mut config = claurst_core::config::Config {
             hosted_review: claurst_core::hosted_review::HostedReviewConfig {
                 allow_write_tools: true,
+                allow_file_write_tools: true,
                 allow_mcp_servers: true,
                 allow_plugins: true,
                 allow_user_memory: true,
@@ -1966,6 +2058,7 @@ mod tests {
 
         assert!(config.hosted_review.enabled);
         assert!(!config.hosted_review.allow_write_tools);
+        assert!(!config.hosted_review.allow_file_write_tools);
         assert!(!config.hosted_review.allow_mcp_servers);
         assert!(!config.hosted_review.allow_plugins);
         assert!(!config.hosted_review.allow_user_memory);
@@ -2065,6 +2158,7 @@ mod tests {
                 message: "Add clock-skew buffer".to_string(),
             }],
             files_changed: vec!["src/auth/refresh.rs".to_string()],
+            workspace_dirty: false,
         };
         let (env, code) = build_result(
             Some(&sample_brief()),
@@ -2418,6 +2512,52 @@ N/A
     }
 
     #[test]
+    fn hosted_repair_requires_a_workspace_edit() {
+        let brief = sample_repair_brief();
+        let git = GitSummary {
+            files_changed: vec!["src/lib.rs".to_string()],
+            workspace_dirty: false,
+            ..Default::default()
+        };
+        let (env, code) = build_result_with_memory(
+            Some(&brief),
+            &git,
+            RunOutcome::Completed,
+            "No changes were necessary.",
+            None,
+            ReviewMemoryUse::default(),
+            true,
+        );
+
+        assert_eq!(code, 1);
+        assert_eq!(env.status, Status::Failure);
+        assert_eq!(env.exit_reason, Some(ExitReason::AmbiguousSpec));
+    }
+
+    #[test]
+    fn hosted_repair_accepts_uncommitted_workspace_edits_for_worker_validation() {
+        let brief = sample_repair_brief();
+        let git = GitSummary {
+            files_changed: vec!["src/lib.rs".to_string()],
+            workspace_dirty: true,
+            ..Default::default()
+        };
+        let (env, code) = build_result_with_memory(
+            Some(&brief),
+            &git,
+            RunOutcome::Completed,
+            "Updated `src/lib.rs` to address the finding.",
+            None,
+            ReviewMemoryUse::default(),
+            true,
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(env.status, Status::Success);
+        assert!(env.exit_reason.is_none());
+    }
+
+    #[test]
     fn address_review_comment_without_commits_is_successful_review_output() {
         let raw = r#"{
             "contract_version": "3",
@@ -2457,6 +2597,7 @@ N/A
                 message: "do the thing".to_string(),
             }],
             files_changed: vec!["a.rs".to_string()],
+            workspace_dirty: false,
         };
         let (env, _) = build_result(
             Some(&sample_brief()),
@@ -2481,6 +2622,7 @@ N/A
                 message: "m".to_string(),
             }],
             files_changed: vec!["a.rs".to_string(), "b.rs".to_string()],
+            workspace_dirty: false,
         };
         let (env, _) = build_result(
             Some(&sample_brief()),
@@ -2541,6 +2683,12 @@ N/A
         assert_eq!(summary.commits.len(), 1, "one commit ahead of main");
         assert_eq!(summary.commits[0].message, "add feature");
         assert!(summary.files_changed.iter().any(|f| f == "feature.rs"));
+        assert!(!summary.workspace_dirty);
+
+        std::fs::write(ws.join("base.txt"), "edited").unwrap();
+        let dirty = collect_git_summary(ws, "main");
+        assert!(dirty.workspace_dirty);
+        assert!(dirty.files_changed.iter().any(|f| f == "base.txt"));
     }
 
     #[test]

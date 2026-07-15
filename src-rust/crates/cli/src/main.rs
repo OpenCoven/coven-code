@@ -255,6 +255,17 @@ struct Cli {
     #[arg(long = "hosted-review", env = "COVEN_CODE_HOSTED_REVIEW", action = ArgAction::SetTrue)]
     hosted_review: bool,
 
+    /// Hosted repair mode: allow repository file edits but no command execution,
+    /// plugins, MCP servers, sub-agents, or network tools.
+    #[arg(
+        long = "hosted-repair",
+        env = "COVEN_CODE_HOSTED_REPAIR",
+        action = ArgAction::SetTrue,
+        requires_all = ["headless", "context", "output"],
+        conflicts_with_all = ["hosted_review", "dangerously_skip_permissions"]
+    )]
+    hosted_repair: bool,
+
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
     workload: Option<String>,
@@ -316,6 +327,17 @@ impl From<CliPermissionMode> for PermissionMode {
             CliPermissionMode::BypassPermissions => PermissionMode::BypassPermissions,
             CliPermissionMode::Plan => PermissionMode::Plan,
         }
+    }
+}
+
+fn permission_mode_for_invocation(
+    cli_mode: CliPermissionMode,
+    has_github_context: bool,
+) -> PermissionMode {
+    if has_github_context {
+        PermissionMode::BypassPermissions
+    } else {
+        cli_mode.into()
     }
 }
 
@@ -570,6 +592,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(brief) = github_context.as_ref() {
         headless::apply_to_config(&mut config, brief);
     }
+    if cli.hosted_repair {
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_file_write_tools = true;
+        config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_user_memory = false;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
+    }
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -580,7 +611,8 @@ async fn main() -> anyhow::Result<()> {
         }
         config.permission_mode = PermissionMode::BypassPermissions;
     } else {
-        config.permission_mode = cli.permission_mode.into();
+        config.permission_mode =
+            permission_mode_for_invocation(cli.permission_mode, github_context.is_some());
     }
     config.additional_dirs = cli.add_dir.clone();
     if cli.no_auto_compact {
@@ -965,6 +997,7 @@ async fn main() -> anyhow::Result<()> {
                     &r.final_text,
                     Some(&r.review_trace),
                     review_memory.clone().unwrap_or_default(),
+                    cli.hosted_repair,
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),
@@ -1582,6 +1615,31 @@ fn filter_tools_for_hosted_review(
         return tools;
     }
 
+    if config.hosted_review.allow_file_write_tools {
+        // SECURITY (load-bearing): github_context forces BypassPermissions, so
+        // hosted-repair mode has NO permission prompts. This allowlist is the
+        // sole containment boundary — it must expose only repository file tools
+        // and never command/network/task/sub-agent/plugin/MCP surfaces. The
+        // exhaustive test `hosted_repair_allows_only_repository_file_tools`
+        // (with its catch-all assertion) guards against a new tool silently
+        // leaking into this set. Do not widen without updating that test.
+        const FILE_TOOLS: &[&str] = &[
+            "Read",
+            "Grep",
+            "Glob",
+            "Edit",
+            "Write",
+            "ApplyPatch",
+            "BatchEdit",
+            "NotebookEdit",
+        ];
+        let filtered = claurst_tools::all_tools()
+            .into_iter()
+            .filter(|tool| FILE_TOOLS.contains(&tool.name()))
+            .collect();
+        return Arc::new(filtered);
+    }
+
     filter_read_only_tools(&tools)
 }
 
@@ -1654,7 +1712,11 @@ async fn run_headless(
         let prompt = if let Some(ref p) = cli.prompt {
             p.clone()
         } else if let Some(brief) = github_context {
-            brief.to_prompt()
+            if cli.hosted_repair {
+                brief.to_hosted_repair_prompt()
+            } else {
+                brief.to_prompt()
+            }
         } else {
             use tokio::io::{self, AsyncReadExt};
             let mut stdin = io::stdin();
@@ -5479,6 +5541,112 @@ mod tests {
         assert_eq!(
             tool_names(&filter_tools_for_hosted_review(all, &config)),
             before
+        );
+    }
+
+    #[test]
+    fn hosted_repair_allows_only_repository_file_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let config = Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                enabled: true,
+                allow_file_write_tools: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let names = tool_names(&filter_tools_for_hosted_review(all, &config));
+        for required in ["Read", "Grep", "Glob", "Edit", "Write", "ApplyPatch"] {
+            assert!(
+                names.contains(&required.to_string()),
+                "hosted repair missing {required}: {names:?}"
+            );
+        }
+        for forbidden in [
+            "Bash",
+            "PtyBash",
+            "PowerShell",
+            "WebSearch",
+            "WebFetch",
+            "Agent",
+            "TeamCreate",
+            "Skill",
+            "ToolSearch",
+            "ListMcpResources",
+            "ReadMcpResource",
+        ] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "hosted repair must not include {forbidden}: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().all(|name| [
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit",
+                "Write",
+                "ApplyPatch",
+                "BatchEdit",
+                "NotebookEdit",
+            ]
+            .contains(&name.as_str())),
+            "hosted repair exposed an unexpected tool: {names:?}"
+        );
+    }
+
+    #[test]
+    fn hosted_repair_cli_requires_the_structured_headless_contract() {
+        assert!(Cli::try_parse_from(["coven-code", "--hosted-repair"]).is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-review",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--dangerously-skip-permissions",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn github_context_forces_noninteractive_permission_bypass() {
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Default, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Plan, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::AcceptEdits, false),
+            PermissionMode::AcceptEdits
         );
     }
 
