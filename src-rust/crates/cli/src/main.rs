@@ -262,7 +262,7 @@ struct Cli {
         env = "COVEN_CODE_HOSTED_REPAIR",
         action = ArgAction::SetTrue,
         requires_all = ["headless", "context", "output"],
-        conflicts_with = "hosted_review"
+        conflicts_with_all = ["hosted_review", "dangerously_skip_permissions"]
     )]
     hosted_repair: bool,
 
@@ -1616,6 +1616,13 @@ fn filter_tools_for_hosted_review(
     }
 
     if config.hosted_review.allow_file_write_tools {
+        // SECURITY (load-bearing): github_context forces BypassPermissions, so
+        // hosted-repair mode has NO permission prompts. This allowlist is the
+        // sole containment boundary — it must expose only repository file tools
+        // and never command/network/task/sub-agent/plugin/MCP surfaces. The
+        // exhaustive test `hosted_repair_allows_only_repository_file_tools`
+        // (with its catch-all assertion) guards against a new tool silently
+        // leaking into this set. Do not widen without updating that test.
         const FILE_TOOLS: &[&str] = &[
             "Read",
             "Grep",
@@ -5608,6 +5615,17 @@ mod tests {
             "--headless",
             "--hosted-review",
             "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--dangerously-skip-permissions",
             "--context",
             "brief.json",
             "--output",
