@@ -1,5 +1,12 @@
 # Coven CLI Unification Implementation Plan
 
+> **Status: COMPLETE (sealed 2026-07-14).** Every phase landed — engine side
+> via coven-code #150–#155, #158, #160, #162; coven side via #346, #353,
+> #354, #355. Phase 6 decided **NO-GO** (keep the process boundary; ADR:
+> [`2026-07-14-phase6-source-merge-decision.md`](2026-07-14-phase6-source-merge-decision.md)).
+> This plan is a historical record; the living summary is
+> [`docs/unification.md`](../../unification.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `coven` the one CLI users install and type for everything — interactive agent work, headless runs, session management, auth, models — with coven-code absorbed as a managed, invisible engine.

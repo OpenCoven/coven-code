@@ -1,6 +1,7 @@
 # The Coven merge — unified CLI guide
 
-**Status:** in progress · **Last verified:** 2026-07-13 · **Contract:** v1
+**Status:** complete — all phases landed, Phase 6 decided (keep the process
+boundary) · **Last verified:** 2026-07-14 · **Contract:** v1
 
 This guide explains the merge of `coven-code` into the unified `coven` CLI
 ("the Coven CLI unification"), what users need to do to move over seamlessly,
@@ -85,7 +86,7 @@ one, without waiting for a coven release.
 
 ---
 
-## 2. Where the merge stands (verified 2026-07-12)
+## 2. Where the merge stands (verified 2026-07-14 — sealed)
 
 | Phase | Deliverable | Status |
 |---|---|---|
@@ -95,8 +96,8 @@ one, without waiting for a coven release.
 | 3A | Engine as first-class harness; bare prompts prefer the engine | **Landed** — coven [#354](https://github.com/OpenCoven/coven/pull/354) merged, zero engine-side changes |
 | 3B | Externally-owned sessions in the daemon ledger | **Landed** — coven [#355](https://github.com/OpenCoven/coven/pull/355) (daemon endpoints) + coven-code [#152](https://github.com/OpenCoven/coven-code/pull/152) (TUI notifier, opt-in `daemonLedger` setting) merged |
 | 4 | State/config/auth unification under `~/.coven` | **Landed** — coven-code [#153](https://github.com/OpenCoven/coven-code/pull/153) merged (engine home `~/.coven/code/` with in-place migration + shared settings layer) |
-| 5 | Brand/UX sweep, npm deprecation of the engine package | **In progress** — coven-code [#154](https://github.com/OpenCoven/coven-code/pull/154) merged (user-facing rebrand + direct-invocation notice); npm deprecation pending |
-| 6 | Decision gate: full source merge | Standing recommendation: **don't** — keep the process boundary |
+| 5 | Brand/UX sweep, npm deprecation of the engine package | **Landed** — coven-code [#154](https://github.com/OpenCoven/coven-code/pull/154) (user-facing rebrand + direct-invocation notice), [#158](https://github.com/OpenCoven/coven-code/pull/158) (LLM-facing tool descriptions), [#160](https://github.com/OpenCoven/coven-code/pull/160) (ACP display name); `@opencoven/coven-code` deprecated on npm (notice points at `@opencoven/cli`); engine npm-publish made opt-in per release, GitHub Releases stay the artifact source ([#162](https://github.com/OpenCoven/coven-code/pull/162)) |
+| 6 | Decision gate: full source merge | **Decided — NO-GO**, keep the process boundary ([#155](https://github.com/OpenCoven/coven-code/pull/155), ADR: [`2026-07-14-phase6-source-merge-decision.md`](superpowers/plans/2026-07-14-phase6-source-merge-decision.md)) |
 
 The coven-side phases landed in order (#346, #353, #354, #355; the original
 stacked PRs #347–#349 were superseded by these re-landed equivalents after
@@ -162,11 +163,14 @@ Notes:
 - Direct `coven-code …` invocation remains fully supported. Since the
   Phase 5 sweep (#154) it prints one dim notice line when run interactively
   outside coven (`COVEN_PARENT` unset); scripted/delegated runs stay silent.
-- The `@opencoven/coven-code` npm package keeps working through Phase 5, and
-  only then gets an `npm deprecate` notice. GitHub release archives remain
-  the artifact source permanently (they are what `coven engine install`
-  downloads). Note the bare `coven-code` npm name is an unrelated, already
-  deprecated package — only the scoped name is real.
+- The `@opencoven/coven-code` npm package is **deprecated** (the notice
+  points at `@opencoven/cli`). Installed copies keep working, but new engine
+  versions are no longer published to npm by default — publishing is an
+  opt-in switch per release since [#162](https://github.com/OpenCoven/coven-code/pull/162).
+  GitHub release archives remain the artifact source permanently (they are
+  what `coven engine install` downloads). Note the bare `coven-code` npm
+  name is an unrelated, already deprecated package — only the scoped name
+  is real.
 - Version drift: if your PATH engine is older than coven's pin you get a
   one-line warning; below `MIN_ENGINE_VERSION` (0.6.1) coven refuses with an
   actionable message. `coven engine install` fixes both.

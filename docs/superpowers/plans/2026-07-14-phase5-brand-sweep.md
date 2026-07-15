@@ -1,5 +1,12 @@
 # Phase 5 — Brand / UX Naming Sweep
 
+> **Status: COMPLETE (sealed 2026-07-14).** Landed via coven-code #154
+> (user-facing sweep + direct-invocation notice), #158 (LLM-facing tool
+> descriptions), #160 (ACP display name). Task 5.6 npm deprecation was
+> executed with user approval — the registry now serves the deprecation
+> notice — and #162 made engine npm-publish opt-in per release. Historical
+> record; see [`docs/unification.md`](../../unification.md).
+
 > Phase 5 sub-plan of the coven CLI unification. Curated, recon-grounded. Only USER-FACING surfaces change; the binary name (`coven-code`/`coven-cave`), `claurst-*` crates, `COVEN_CODE_*` env vars, `.coven-code` internal paths, and repo URLs STAY (per COVEN.md).
 
 **Goal:** users see the unified "Coven" brand; nobody is told to install/use "coven-code" separately; `coven --version` surfaces the whole stack.
@@ -31,11 +38,11 @@ DO NOT change: binary/crate/env/path/theme-const/test/comment/repo-URL reference
 ### 5.1 — direct-invocation notice [coven-code]
 In `crates/cli/src/main.rs` after `Cli::parse()` (~line 503) and after the `is_headless` determination (~643): if the run is INTERACTIVE (not headless/print/prompt), stdout/stderr is a TTY (`crossterm::terminal::is_terminal`), AND `COVEN_PARENT` is unset → `eprintln!` the dim notice once (before `run_interactive`). Silent when `COVEN_PARENT` is set (driven by coven) or non-interactive. The `coven-cave` alias re-execs `coven-code`, so it inherits this. Test the pure decision (`should_show_engine_notice(is_interactive, is_tty, coven_parent_set) -> bool`).
 
-## Task 5.3 — `coven --version` surfaces engine + pin [coven] — IN PROGRESS
-Custom `--version` intercept → `coven <desc> (engine coven-code <installed|not installed>, pinned <pinned>)`. (dispatched)
+## Task 5.3 — `coven --version` surfaces engine + pin [coven] — DONE
+Custom `--version` intercept landed on coven main (`version_line()` in `crates/coven-cli/src/main.rs`): `coven <desc> (engine coven-code <installed|not installed>, pinned <pinned>)`.
 
-## Task 5.6 — npm deprecation [HELD — outward-facing, needs explicit user go-ahead]
-`npm deprecate @opencoven/coven-code "Install @opencoven/cli — coven-code is now the Coven engine"`. Engine binaries keep shipping via GitHub Releases. DO NOT run autonomously; surface for confirmation.
+## Task 5.6 — npm deprecation [DONE — executed with user approval]
+`npm deprecate @opencoven/coven-code "Install @opencoven/cli — coven-code is now the Coven engine"` has been run; the registry serves the notice. Engine binaries keep shipping via GitHub Releases (npm publish is opt-in per release since #162).
 
 ## Exit check
 A new user reaches install → first session without seeing the string "coven-code" in any prose surface; running `coven-code` directly prints the "use coven" hint; `coven --version` shows coven + engine + pin.
