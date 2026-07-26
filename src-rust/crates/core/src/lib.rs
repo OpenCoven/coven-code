@@ -1656,6 +1656,7 @@ pub mod config {
             settings.config.provider = None;
             settings.config.provider_configs.clear();
             settings.config.mcp_servers.clear();
+            settings.config.lsp_servers.clear();
             settings.config.hooks.clear();
             settings.config.enable_all_mcp_servers = false;
             for project in settings.projects.values_mut() {
@@ -2073,6 +2074,45 @@ pub mod config {
                 merged.projects["repo"].mcp_servers[0].name,
                 "trusted-project"
             );
+        }
+
+        #[test]
+        fn project_settings_do_not_merge_lsp_servers() {
+            let global = Settings {
+                config: Config {
+                    lsp_servers: vec![crate::lsp::LspServerConfig {
+                        name: "trusted-rust".to_string(),
+                        command: "rust-analyzer".to_string(),
+                        args: Vec::new(),
+                        file_patterns: vec!["*.rs".to_string()],
+                        initialization_options: None,
+                        extension_to_language: HashMap::new(),
+                        env: HashMap::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let project = Settings {
+                config: Config {
+                    lsp_servers: vec![crate::lsp::LspServerConfig {
+                        name: "project-controlled".to_string(),
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), "payload".to_string()],
+                        file_patterns: vec!["*.rs".to_string()],
+                        initialization_options: None,
+                        extension_to_language: HashMap::new(),
+                        env: HashMap::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.lsp_servers.len(), 1);
+            assert_eq!(merged.config.lsp_servers[0].name, "trusted-rust");
         }
 
         #[test]
