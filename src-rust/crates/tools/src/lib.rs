@@ -10,7 +10,7 @@ use claurst_core::permissions::{PermissionDecision, PermissionHandler, Permissio
 use claurst_core::types::ToolDefinition;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -413,6 +413,28 @@ impl ToolContext {
         self.request_permission_inner(request)
     }
 
+    /// Hosted repair runs GitHub-supplied prompts with permission bypass, so
+    /// file tools must enforce the repository boundary themselves.
+    pub fn check_hosted_repair_path(
+        &self,
+        tool_name: &str,
+        path: &Path,
+    ) -> Result<(), claurst_core::error::ClaudeError> {
+        if !self.config.hosted_review.allow_file_write_tools {
+            return Ok(());
+        }
+
+        if self.path_is_within_working_dir(path) {
+            return Ok(());
+        }
+
+        Err(claurst_core::error::ClaudeError::PermissionDenied(format!(
+            "Permission denied for tool '{}': hosted repair file tools are limited to {}",
+            tool_name,
+            self.working_dir.display()
+        )))
+    }
+
     /// Like `check_permission` but also passes structured `details` text
     /// (e.g. a risk explanation) that the TUI permission dialog can display.
     pub fn check_permission_with_details(
@@ -448,6 +470,13 @@ impl ToolContext {
                 .map(|root| std::fs::canonicalize(&root).unwrap_or(root)),
         );
         roots.iter().any(|root| resolved.starts_with(root))
+    }
+
+    fn path_is_within_working_dir(&self, path: &Path) -> bool {
+        let root = std::fs::canonicalize(&self.working_dir)
+            .unwrap_or_else(|_| normalize_path(&self.working_dir));
+        let resolved = canonicalize_existing_prefix(path);
+        resolved.starts_with(root)
     }
 
     pub fn check_permission_with_details_and_path(
@@ -491,6 +520,45 @@ impl ToolContext {
             self.current_turn_index(),
             tool_name,
         );
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let normalized = normalize_path(path);
+    let mut ancestor = normalized.as_path();
+    let mut suffix = Vec::new();
+
+    loop {
+        if ancestor.exists() {
+            let mut resolved =
+                std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+            for component in suffix.iter().rev() {
+                resolved.push(component);
+            }
+            return normalize_path(&resolved);
+        }
+
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(file_name)) => {
+                suffix.push(file_name.to_os_string());
+                ancestor = parent;
+            }
+            _ => return normalized,
+        }
     }
 }
 
@@ -934,6 +1002,73 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("generic reason"));
+    }
+
+    #[test]
+    fn hosted_repair_path_check_allows_working_dir_files() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = temp.path().to_path_buf();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("src/new.rs");
+        assert!(ctx.check_hosted_repair_path("Write", &path).is_ok());
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_parent_escape() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace;
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("../outside.txt");
+        let error = ctx
+            .check_hosted_repair_path("Read", &path)
+            .expect_err("parent escape must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_symlink_escape() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::create_dir(&outside).expect("outside dir");
+        symlink(&outside, workspace.join("link")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace;
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("link/new.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink escape must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
     }
 
     // ---- PermissionLevel tests ---------------------------------------------

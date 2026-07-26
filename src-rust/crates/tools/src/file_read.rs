@@ -64,6 +64,10 @@ impl Tool for FileReadTool {
         let path = ctx.resolve_path(&params.file_path);
         debug!(path = %path.display(), "Reading file");
 
+        if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+            return ToolResult::error(e.to_string());
+        }
+
         // Permission check
         if let Err(e) = ctx.check_permission_for_path(
             self.name(),

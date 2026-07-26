@@ -109,6 +109,11 @@ impl Tool for BatchEditTool {
             let path = ctx.resolve_path(&edit.file_path);
             debug!(path = %path.display(), index = i, "BatchEdit pre-check");
 
+            if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+                pre_check_errors.push(format!("Edit {}: {}", i, e));
+                continue;
+            }
+
             let content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) => {

@@ -318,6 +318,10 @@ impl Tool for ApplyPatchTool {
             let path = ctx.resolve_path(&fp.path);
             debug!(path = %path.display(), "ApplyPatch processing file");
 
+            if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+                return ToolResult::error(e.to_string());
+            }
+
             // Read current content (or empty string for new files).
             let original_content = if path.exists() {
                 match tokio::fs::read_to_string(&path).await {
