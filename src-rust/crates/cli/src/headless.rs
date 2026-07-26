@@ -280,11 +280,31 @@ pub fn configure_git_auth(workspace: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    // Credential helper (git's protocol): on `get`, print username + password.
-    // `$COVEN_GIT_TOKEN` is expanded by the shell at push time, so the literal
-    // token never touches `.git/config`.
-    let helper = "!f() { test \"$1\" = get && \
-                  printf 'username=x-access-token\\npassword=%s\\n' \"$COVEN_GIT_TOKEN\"; }; f";
+    let Some(repo_path) = origin_github_repo_path(workspace) else {
+        return Ok(false);
+    };
+    let repo_path = shell_single_quote(&repo_path);
+
+    // Credential helper (git's protocol): only answer `get` requests for the
+    // existing GitHub origin path. `$COVEN_GIT_TOKEN` is expanded by the shell
+    // at push time, so the literal token never touches `.git/config`.
+    let helper = format!(
+        "!f() {{ \
+         test \"$1\" = get || exit 0; \
+         protocol=; host=; path=; \
+         while IFS= read -r line; do \
+             test -z \"$line\" && break; \
+             case \"$line\" in \
+                 protocol=*) protocol=${{line#protocol=}} ;; \
+                 host=*) host=${{line#host=}} ;; \
+                 path=*) path=${{line#path=}} ;; \
+             esac; \
+         done; \
+         case \"$path\" in {repo_path}|{repo_path}.git) ;; *) exit 0 ;; esac; \
+         test \"$protocol\" = https && test \"$host\" = github.com && \
+             printf 'username=x-access-token\\npassword=%s\\n' \"$COVEN_GIT_TOKEN\"; \
+         }}; f"
+    );
 
     // Reset any inherited helper chain, then install ours as the sole helper.
     run_git(
@@ -300,11 +320,37 @@ pub fn configure_git_auth(workspace: &Path) -> anyhow::Result<bool> {
     .context("failed to reset credential.helper")?;
     run_git(
         workspace,
-        &["config", "--local", "--add", "credential.helper", helper],
+        &["config", "--local", "credential.useHttpPath", "true"],
+    )
+    .context("failed to enable path-aware git credentials")?;
+    run_git(
+        workspace,
+        &["config", "--local", "--add", "credential.helper", &helper],
     )
     .context("failed to install env-backed credential.helper")?;
 
     Ok(true)
+}
+
+fn origin_github_repo_path(workspace: &Path) -> Option<String> {
+    let origin = git_stdout(workspace, &["remote", "get-url", "origin"])?;
+    github_repo_path_from_url(&origin)
+}
+
+fn github_repo_path_from_url(url: &str) -> Option<String> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn run_git(workspace: &Path, args: &[&str]) -> anyhow::Result<()> {
@@ -1036,6 +1082,17 @@ mod tests {
             .status()
             .unwrap()
             .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OpenCoven/coven-code.git"
+            ])
+            .current_dir(ws)
+            .status()
+            .unwrap()
+            .success());
 
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Distinctive token value we assert never lands in .git/config.
@@ -1055,9 +1112,74 @@ mod tests {
             "helper should reference the env var, not inline the token: {config}"
         );
         assert!(
+            config.contains("OpenCoven/coven-code"),
+            "helper should be scoped to the existing GitHub origin path: {config}"
+        );
+        assert!(
+            config.contains("useHttpPath = true"),
+            "git should pass credential paths to the helper: {config}"
+        );
+        assert!(
             !config.contains(token),
             "token value must never be written to .git/config: {config}"
         );
+    }
+
+    #[test]
+    fn configure_git_auth_helper_rejects_non_origin_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(ws)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OpenCoven/coven-code.git"
+            ])
+            .current_dir(ws)
+            .status()
+            .unwrap()
+            .success());
+
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let token = "ghs_HEADLESS_TEST_TOKEN_do_not_leak";
+        std::env::set_var(GIT_TOKEN_ENV, token);
+        configure_git_auth(ws).expect("configure ok");
+
+        let output = std::process::Command::new("git")
+            .args(["credential", "fill"])
+            .current_dir(ws)
+            .env(GIT_TOKEN_ENV, token)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env("SSH_ASKPASS", "true")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git credential fill");
+        let mut output = output;
+        {
+            use std::io::Write;
+            let stdin = output.stdin.as_mut().expect("stdin open");
+            stdin
+                .write_all(b"protocol=https\nhost=evil.example\npath=attacker/repo.git\n\n")
+                .expect("write credential request");
+        }
+        let output = output.wait_with_output().expect("credential fill exits");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains(token),
+            "helper must not return token for non-origin credentials: {stdout}"
+        );
+        std::env::remove_var(GIT_TOKEN_ENV);
     }
 
     #[test]
