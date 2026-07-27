@@ -271,7 +271,8 @@ pub fn apply_to_config(config: &mut claurst_core::config::Config, brief: &Sessio
 /// at push time. Only the helper *script* (which references the env var by name)
 /// is stored in `.git/config`; the token value stays in the process
 /// environment. Returns `Ok(true)` when a helper was installed, `Ok(false)` when
-/// there is no token or no repo.
+/// there is no token or no repo, and an error when the repo's origin cannot be
+/// safely scoped.
 pub fn configure_git_auth(workspace: &Path) -> anyhow::Result<bool> {
     if !git_token_present() {
         return Ok(false);
@@ -280,9 +281,8 @@ pub fn configure_git_auth(workspace: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    let Some(repo_path) = origin_github_repo_path(workspace) else {
-        return Ok(false);
-    };
+    let repo_path = origin_github_repo_path(workspace)
+        .context("headless git credentials require an HTTPS GitHub origin")?;
     let repo_path = shell_single_quote(&repo_path);
 
     // Credential helper (git's protocol): only answer `get` requests for the
@@ -1180,6 +1180,41 @@ mod tests {
             "helper must not return token for non-origin credentials: {stdout}"
         );
         std::env::remove_var(GIT_TOKEN_ENV);
+    }
+
+    #[test]
+    fn configure_git_auth_rejects_unscopable_origin() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let token = "ghs_HEADLESS_TEST_TOKEN_do_not_leak";
+
+        for origin in [None, Some("https://example.com/attacker/repo.git")] {
+            let dir = tempfile::tempdir().unwrap();
+            let ws = dir.path();
+            assert!(std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(ws)
+                .status()
+                .unwrap()
+                .success());
+            if let Some(origin) = origin {
+                assert!(std::process::Command::new("git")
+                    .args(["remote", "add", "origin", origin])
+                    .current_dir(ws)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+
+            std::env::set_var(GIT_TOKEN_ENV, token);
+            let result = configure_git_auth(ws);
+            std::env::remove_var(GIT_TOKEN_ENV);
+
+            let error = result.expect_err("an unscopable origin must be a configuration error");
+            assert!(
+                error.to_string().contains("HTTPS GitHub origin"),
+                "unexpected error: {error:#}"
+            );
+        }
     }
 
     #[test]
