@@ -5,6 +5,12 @@ use crate::ToolContext;
 /// Try to format a file using any configured formatter.
 /// Returns silently if no formatter is configured or the formatter fails.
 pub async fn try_format_file(path: &str, ctx: &ToolContext) {
+    // Hosted repair promises a file-only surface under BypassPermissions.
+    // Formatters are executable commands and may come from repository config.
+    if ctx.config.hosted_review_enabled() && ctx.config.hosted_review.allow_file_write_tools {
+        return;
+    }
+
     let formatters = &ctx.config.formatter;
     if formatters.is_empty() {
         return;

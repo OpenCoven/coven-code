@@ -1181,6 +1181,53 @@ mod tests {
         assert!(error.contains("hosted repair file tools are limited"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_repair_does_not_run_configured_formatter() {
+        use claurst_core::config::FormatterConfig;
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("formatter-ran");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = temp.path().to_path_buf();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+        ctx.config.formatter.insert(
+            "repo-controlled".to_string(),
+            FormatterConfig {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf formatter-ran > \"$1\"".to_string(),
+                    "formatter-test".to_string(),
+                    marker.to_string_lossy().into_owned(),
+                    "$FILE".to_string(),
+                ],
+                extensions: vec![".rs".to_string()],
+                disabled: false,
+            },
+        );
+
+        try_format_file(&temp.path().join("source.rs").to_string_lossy(), &ctx).await;
+
+        assert!(
+            !marker.exists(),
+            "hosted repair must not execute configured formatter commands"
+        );
+
+        ctx.config.hosted_review.enabled = false;
+        ctx.config.hosted_review.allow_file_write_tools = false;
+        try_format_file(&temp.path().join("source.rs").to_string_lossy(), &ctx).await;
+
+        assert!(
+            marker.exists(),
+            "local mode should retain configured formatter behavior"
+        );
+    }
+
     // ---- PermissionLevel tests ---------------------------------------------
 
     #[test]
