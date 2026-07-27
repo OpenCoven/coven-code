@@ -50,8 +50,8 @@ use claurst_core::error::ClaudeError;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
 use claurst_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
-use std::path::Path;
-use std::process::Command;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -81,14 +81,16 @@ pub enum QueryOutcome {
 fn build_session_memory_provenance(session_id: &str, working_dir: &Path) -> MemoryProvenance {
     let mut provenance = MemoryProvenance::session_memory_extraction(session_id);
 
-    if let Some(remote_url) = git_command_output(working_dir, &["remote", "get-url", "origin"]) {
-        if let Some(repo_slug) = parse_origin_repo_slug(&remote_url) {
-            provenance = provenance.with_source_repo(repo_slug);
+    if let Some(git_dir) = find_git_dir(working_dir) {
+        if let Some(remote_url) = read_origin_remote_url(&git_dir) {
+            if let Some(repo_slug) = parse_origin_repo_slug(&remote_url) {
+                provenance = provenance.with_source_repo(repo_slug);
+            }
         }
-    }
 
-    if let Some(commit) = git_command_output(working_dir, &["rev-parse", "HEAD"]) {
-        provenance = provenance.with_source_commit(commit);
+        if let Some(commit) = read_head_commit(&git_dir) {
+            provenance = provenance.with_source_commit(commit);
+        }
     }
 
     if let Ok(actor) = std::env::var("GITHUB_ACTOR") {
@@ -98,21 +100,86 @@ fn build_session_memory_provenance(session_id: &str, working_dir: &Path) -> Memo
     provenance
 }
 
-fn git_command_output(working_dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(working_dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn find_git_dir(working_dir: &Path) -> Option<PathBuf> {
+    for dir in working_dir.ancestors() {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+
+        if dot_git.is_file() {
+            let git_file = fs::read_to_string(&dot_git).ok()?;
+            let git_dir = git_file.trim().strip_prefix("gitdir:")?.trim();
+            let git_dir = Path::new(git_dir);
+            return Some(if git_dir.is_absolute() {
+                git_dir.to_path_buf()
+            } else {
+                dir.join(git_dir)
+            });
+        }
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
+    None
+}
+
+fn common_git_dir(git_dir: &Path) -> PathBuf {
+    let Some(common_dir) = fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return git_dir.to_path_buf();
+    };
+    let common_dir = Path::new(&common_dir);
+    if common_dir.is_absolute() {
+        common_dir.to_path_buf()
     } else {
-        Some(trimmed.to_string())
+        git_dir.join(common_dir)
+    }
+}
+
+fn read_origin_remote_url(git_dir: &Path) -> Option<String> {
+    let config = fs::read_to_string(common_git_dir(git_dir).join("config")).ok()?;
+    let mut in_origin_section = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_origin_section = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+
+        if in_origin_section {
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if key.trim() == "url" {
+                let url = value.trim();
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_head_commit(git_dir: &Path) -> Option<String> {
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let commit = if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        fs::read_to_string(git_dir.join(reference))
+            .or_else(|_| fs::read_to_string(common_git_dir(git_dir).join(reference)))
+            .ok()?
+    } else {
+        head.to_string()
+    };
+    let commit = commit.trim();
+    if commit.len() == 40 && commit.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(commit.to_string())
+    } else {
+        None
     }
 }
 
@@ -2936,6 +3003,83 @@ mod tests {
         assert!(parse_origin_repo_slug("").is_none());
         assert!(parse_origin_repo_slug("https://github.com/OpenCoven").is_none());
         assert!(parse_origin_repo_slug("https://github.com/token@example").is_none());
+    }
+
+    #[test]
+    fn reads_session_memory_provenance_from_git_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        std::fs::create_dir_all(workspace.join(".git").join("refs").join("heads")).unwrap();
+        std::fs::write(
+            workspace.join(".git").join("config"),
+            "[remote \"origin\"]\n    url = https://github.com/OpenCoven/coven-code.git\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".git").join("HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace
+                .join(".git")
+                .join("refs")
+                .join("heads")
+                .join("main"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let provenance = build_session_memory_provenance("session-1", &workspace);
+
+        assert_eq!(
+            provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            provenance.source_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn reads_linked_worktree_metadata_from_common_git_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let common_git_dir = temp.path().join("main.git");
+        let git_dir = common_git_dir.join("worktrees").join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(common_git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            common_git_dir.join("config"),
+            "[remote \"origin\"]\n    url = git@github.com:OpenCoven/coven-code.git\n",
+        )
+        .unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            common_git_dir.join("refs").join("heads").join("main"),
+            "abcdef0123456789abcdef0123456789abcdef01\n",
+        )
+        .unwrap();
+
+        let provenance = build_session_memory_provenance("session-1", &workspace);
+
+        assert_eq!(
+            provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            provenance.source_commit.as_deref(),
+            Some("abcdef0123456789abcdef0123456789abcdef01")
+        );
     }
 
     // ---- build_system_prompt tests ------------------------------------------
