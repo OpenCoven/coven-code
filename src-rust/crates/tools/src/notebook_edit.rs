@@ -98,6 +98,10 @@ impl Tool for NotebookEditTool {
             return ToolResult::error("File must have .ipynb extension".to_string());
         }
 
+        if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+            return ToolResult::error(e.to_string());
+        }
+
         // Permission check
         if let Err(e) = ctx.check_permission(
             self.name(),

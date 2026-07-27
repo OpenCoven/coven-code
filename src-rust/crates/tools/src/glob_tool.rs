@@ -62,6 +62,10 @@ impl Tool for GlobTool {
             .map(|p| ctx.resolve_path(p))
             .unwrap_or_else(|| ctx.working_dir.clone());
 
+        if let Err(e) = ctx.check_hosted_repair_path(self.name(), &base_dir) {
+            return ToolResult::error(e.to_string());
+        }
+
         if let Err(e) = ctx.check_permission_for_path(
             self.name(),
             &format!("Glob {} in {}", params.pattern, base_dir.display()),
@@ -88,6 +92,9 @@ impl Tool for GlobTool {
             Ok(paths) => {
                 let mut out = Vec::new();
                 for path in paths.filter_map(|p| p.ok()) {
+                    if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+                        return ToolResult::error(e.to_string());
+                    }
                     if !ctx.path_is_within_workspace(&path) {
                         if let Err(e) = ctx.check_permission_for_path(
                             self.name(),

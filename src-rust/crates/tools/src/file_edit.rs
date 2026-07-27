@@ -74,6 +74,10 @@ impl Tool for FileEditTool {
         let path = ctx.resolve_path(&params.file_path);
         debug!(path = %path.display(), "Editing file");
 
+        if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+            return ToolResult::error(e.to_string());
+        }
+
         // Permission check
         if let Err(e) =
             ctx.check_permission(self.name(), &format!("Edit {}", path.display()), false)

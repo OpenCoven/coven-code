@@ -10,7 +10,7 @@ use claurst_core::permissions::{PermissionDecision, PermissionHandler, Permissio
 use claurst_core::types::ToolDefinition;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -413,6 +413,28 @@ impl ToolContext {
         self.request_permission_inner(request)
     }
 
+    /// Hosted repair runs GitHub-supplied prompts with permission bypass, so
+    /// file tools must enforce the repository boundary themselves.
+    pub fn check_hosted_repair_path(
+        &self,
+        tool_name: &str,
+        path: &Path,
+    ) -> Result<(), claurst_core::error::ClaudeError> {
+        if !self.config.hosted_review.allow_file_write_tools {
+            return Ok(());
+        }
+
+        if self.path_is_within_working_dir(path) {
+            return Ok(());
+        }
+
+        Err(claurst_core::error::ClaudeError::PermissionDenied(format!(
+            "Permission denied for tool '{}': hosted repair file tools are limited to {}",
+            tool_name,
+            self.working_dir.display()
+        )))
+    }
+
     /// Like `check_permission` but also passes structured `details` text
     /// (e.g. a risk explanation) that the TUI permission dialog can display.
     pub fn check_permission_with_details(
@@ -448,6 +470,28 @@ impl ToolContext {
                 .map(|root| std::fs::canonicalize(&root).unwrap_or(root)),
         );
         roots.iter().any(|root| resolved.starts_with(root))
+    }
+
+    fn path_is_within_working_dir(&self, path: &Path) -> bool {
+        if let Ok(relative) = path.strip_prefix(&self.working_dir) {
+            if contains_git_metadata_component(relative) {
+                return false;
+            }
+        }
+
+        let Ok(root) = std::fs::canonicalize(&self.working_dir) else {
+            return false;
+        };
+        let Ok(resolved) = canonicalize_path_allow_missing(path) else {
+            return false;
+        };
+        let Ok(relative) = resolved.strip_prefix(&root) else {
+            return false;
+        };
+
+        // Git metadata controls later host-side `git` calls (for example via
+        // core.fsmonitor), so hosted repair must treat it as control-plane data.
+        !contains_git_metadata_component(relative)
     }
 
     pub fn check_permission_with_details_and_path(
@@ -492,6 +536,59 @@ impl ToolContext {
             tool_name,
         );
     }
+}
+
+fn contains_git_metadata_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name)
+                if name.to_str().is_some_and(|name| {
+                    // Win32 strips trailing dots/spaces and exposes directories
+                    // through alternate streams and 8.3 short names.
+                    let name = name.split_once(':').map_or(name, |(base, _)| base);
+                    let name = name.trim_end_matches(['.', ' ']);
+                    name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case("git~1")
+                })
+        )
+    })
+}
+
+/// Resolve every existing component before applying later `..` components,
+/// while retaining nonexistent suffixes for file-creation tools.
+fn canonicalize_path_allow_missing(path: &Path) -> std::io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "hosted repair paths must be absolute",
+        ));
+    }
+
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            root @ Component::RootDir => {
+                resolved.push(root.as_os_str());
+                resolved = std::fs::canonicalize(&resolved)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                let candidate = resolved.join(name);
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(_) => resolved = std::fs::canonicalize(candidate)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved.push(name);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// The trait every tool must implement.
@@ -934,6 +1031,318 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("generic reason"));
+    }
+
+    #[test]
+    fn hosted_repair_path_check_allows_working_dir_files() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = temp.path().to_path_buf();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("src/new.rs");
+        assert!(ctx.check_hosted_repair_path("Write", &path).is_ok());
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_parent_escape() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace;
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("../outside.txt");
+        let error = ctx
+            .check_hosted_repair_path("Read", &path)
+            .expect_err("parent escape must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_uncanonicalizable_working_dir() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = std::fs::canonicalize(temp.path())
+            .expect("canonical tempdir")
+            .join("missing-workspace");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("new.rs");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("uncanonicalizable working dir must fail closed")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_git_metadata() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("git metadata dir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        for path in [
+            workspace.join(".git"),
+            workspace.join(".git/config"),
+            workspace.join("nested/.GiT/config"),
+            workspace.join(".git./config"),
+            workspace.join(".git /config"),
+            workspace.join(".GIT... /config"),
+            workspace.join(".git::$INDEX_ALLOCATION/config"),
+            workspace.join(".git.::$INDEX_ALLOCATION/config"),
+            workspace.join("git~1/config"),
+            workspace.join("GIT~1. /config"),
+            workspace.join(".git/missing/../../source.rs"),
+        ] {
+            let error = ctx
+                .check_hosted_repair_path("Write", &path)
+                .expect_err("Git control metadata must be immutable in hosted repair")
+                .to_string();
+
+            assert!(error.contains("hosted repair file tools are limited"));
+        }
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_linked_worktree_gitdir_file() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::write(
+            workspace.join(".git"),
+            "gitdir: ../main.git/worktrees/workspace\n",
+        )
+        .expect("gitdir file");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let error = ctx
+            .check_hosted_repair_path("Edit", &workspace.join(".git"))
+            .expect_err("linked-worktree gitdir file must be immutable")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[test]
+    fn hosted_repair_path_resolution_does_not_pop_past_filesystem_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let filesystem_root = canonical_temp
+            .ancestors()
+            .find(|ancestor| ancestor.parent().is_none())
+            .expect("filesystem root")
+            .to_path_buf();
+        let mut path = canonical_temp.clone();
+        for _ in 0..canonical_temp.components().count() + 2 {
+            path.push("..");
+        }
+        path.push("new.txt");
+
+        let resolved = canonicalize_path_allow_missing(&path).expect("absolute path");
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(filesystem_root)
+                .expect("canonical filesystem root")
+                .join("new.txt")
+        );
+        assert!(resolved.is_absolute());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_symlink_escape() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::create_dir(&outside).expect("outside dir");
+        symlink(&outside, workspace.join("link")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace;
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = ctx.resolve_path("link/new.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink escape must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_resolves_symlink_before_parent_component() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        let nested = outside.join("nested");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&nested).expect("outside nested dir");
+        symlink(&nested, workspace.join("link")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("link").join("..").join("secret.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink must resolve before applying parent component")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_symlink_alias_to_git_metadata() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("git metadata dir");
+        symlink(".git", workspace.join("metadata")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("metadata/config");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink alias to Git metadata must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_dangling_symlink() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        symlink(
+            temp.path().join("missing-target"),
+            workspace.join("dangling"),
+        )
+        .expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("dangling").join("new.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("dangling symlink must fail closed")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_repair_does_not_run_configured_formatter() {
+        use claurst_core::config::FormatterConfig;
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("formatter-ran");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = temp.path().to_path_buf();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+        ctx.config.formatter.insert(
+            "repo-controlled".to_string(),
+            FormatterConfig {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf formatter-ran > \"$1\"".to_string(),
+                    "formatter-test".to_string(),
+                    marker.to_string_lossy().into_owned(),
+                    "$FILE".to_string(),
+                ],
+                extensions: vec![".rs".to_string()],
+                disabled: false,
+            },
+        );
+
+        try_format_file(&temp.path().join("source.rs").to_string_lossy(), &ctx).await;
+
+        assert!(
+            !marker.exists(),
+            "hosted repair must not execute configured formatter commands"
+        );
+
+        ctx.config.hosted_review.enabled = false;
+        ctx.config.hosted_review.allow_file_write_tools = false;
+        try_format_file(&temp.path().join("source.rs").to_string_lossy(), &ctx).await;
+
+        assert!(
+            marker.exists(),
+            "local mode should retain configured formatter behavior"
+        );
     }
 
     // ---- PermissionLevel tests ---------------------------------------------
