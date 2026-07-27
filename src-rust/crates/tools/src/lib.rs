@@ -543,7 +543,11 @@ fn contains_git_metadata_component(path: &Path) -> bool {
         matches!(
             component,
             Component::Normal(name)
-                if name.to_str().is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+                if name.to_str().is_some_and(|name| {
+                    // Win32 strips trailing dots and spaces when opening a path.
+                    name.trim_end_matches(['.', ' '])
+                        .eq_ignore_ascii_case(".git")
+                })
         )
     })
 }
@@ -1108,6 +1112,9 @@ mod tests {
             workspace.join(".git"),
             workspace.join(".git/config"),
             workspace.join("nested/.GiT/config"),
+            workspace.join(".git./config"),
+            workspace.join(".git /config"),
+            workspace.join(".GIT... /config"),
             workspace.join(".git/missing/../../source.rs"),
         ] {
             let error = ctx
