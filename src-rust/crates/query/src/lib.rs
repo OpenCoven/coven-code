@@ -121,8 +121,24 @@ fn find_git_dir(working_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+fn common_git_dir(git_dir: &Path) -> PathBuf {
+    let Some(common_dir) = fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return git_dir.to_path_buf();
+    };
+    let common_dir = Path::new(&common_dir);
+    if common_dir.is_absolute() {
+        common_dir.to_path_buf()
+    } else {
+        git_dir.join(common_dir)
+    }
+}
+
 fn read_origin_remote_url(git_dir: &Path) -> Option<String> {
-    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+    let config = fs::read_to_string(common_git_dir(git_dir).join("config")).ok()?;
     let mut in_origin_section = false;
 
     for line in config.lines() {
@@ -152,7 +168,10 @@ fn read_head_commit(git_dir: &Path) -> Option<String> {
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     let commit = if let Some(reference) = head.strip_prefix("ref:") {
-        fs::read_to_string(git_dir.join(reference.trim())).ok()?
+        let reference = reference.trim();
+        fs::read_to_string(git_dir.join(reference))
+            .or_else(|_| fs::read_to_string(common_git_dir(git_dir).join(reference)))
+            .ok()?
     } else {
         head.to_string()
     };
@@ -2784,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_session_memory_provenance_without_executing_git_from_path() {
+    fn reads_session_memory_provenance_from_git_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -2809,8 +2828,6 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567\n",
         )
         .unwrap();
-        std::fs::write(workspace.join("git"), "not executed").unwrap();
-
         let provenance = build_session_memory_provenance("session-1", &workspace);
 
         assert_eq!(
@@ -2824,25 +2841,28 @@ mod tests {
     }
 
     #[test]
-    fn reads_git_metadata_from_gitdir_file() {
+    fn reads_linked_worktree_metadata_from_common_git_dir() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
-        let git_dir = temp.path().join("actual-git-dir");
+        let common_git_dir = temp.path().join("main.git");
+        let git_dir = common_git_dir.join("worktrees").join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir_all(git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(common_git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::write(
             workspace.join(".git"),
             format!("gitdir: {}\n", git_dir.display()),
         )
         .unwrap();
         std::fs::write(
-            git_dir.join("config"),
+            common_git_dir.join("config"),
             "[remote \"origin\"]\n    url = git@github.com:OpenCoven/coven-code.git\n",
         )
         .unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(
-            git_dir.join("refs").join("heads").join("main"),
+            common_git_dir.join("refs").join("heads").join("main"),
             "abcdef0123456789abcdef0123456789abcdef01\n",
         )
         .unwrap();
