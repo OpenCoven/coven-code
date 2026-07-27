@@ -473,9 +473,12 @@ impl ToolContext {
     }
 
     fn path_is_within_working_dir(&self, path: &Path) -> bool {
-        let root = std::fs::canonicalize(&self.working_dir)
-            .unwrap_or_else(|_| normalize_path(&self.working_dir));
-        let resolved = canonicalize_existing_prefix(path);
+        let Ok(root) = std::fs::canonicalize(&self.working_dir) else {
+            return false;
+        };
+        let Ok(resolved) = canonicalize_path_allow_missing(path) else {
+            return false;
+        };
         resolved.starts_with(root)
     }
 
@@ -523,43 +526,41 @@ impl ToolContext {
     }
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
+/// Resolve every existing component before applying later `..` components,
+/// while retaining nonexistent suffixes for file-creation tools.
+fn canonicalize_path_allow_missing(path: &Path) -> std::io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "hosted repair paths must be absolute",
+        ));
+    }
+
+    let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            root @ Component::RootDir => {
+                resolved.push(root.as_os_str());
+                resolved = std::fs::canonicalize(&resolved)?;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                resolved.pop();
             }
-            other => normalized.push(other.as_os_str()),
+            Component::Normal(name) => {
+                let candidate = resolved.join(name);
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(_) => resolved = std::fs::canonicalize(candidate)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved.push(name);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         }
     }
-    normalized
-}
-
-fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
-    let normalized = normalize_path(path);
-    let mut ancestor = normalized.as_path();
-    let mut suffix = Vec::new();
-
-    loop {
-        if ancestor.exists() {
-            let mut resolved =
-                std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
-            for component in suffix.iter().rev() {
-                resolved.push(component);
-            }
-            return normalize_path(&resolved);
-        }
-
-        match (ancestor.parent(), ancestor.file_name()) {
-            (Some(parent), Some(file_name)) => {
-                suffix.push(file_name.to_os_string());
-                ancestor = parent;
-            }
-            _ => return normalized,
-        }
-    }
+    Ok(resolved)
 }
 
 /// The trait every tool must implement.
@@ -1043,6 +1044,56 @@ mod tests {
         assert!(error.contains("hosted repair file tools are limited"));
     }
 
+    #[test]
+    fn hosted_repair_path_check_rejects_uncanonicalizable_working_dir() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = std::fs::canonicalize(temp.path())
+            .expect("canonical tempdir")
+            .join("missing-workspace");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("new.rs");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("uncanonicalizable working dir must fail closed")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[test]
+    fn hosted_repair_path_resolution_does_not_pop_past_filesystem_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+        let filesystem_root = canonical_temp
+            .ancestors()
+            .find(|ancestor| ancestor.parent().is_none())
+            .expect("filesystem root")
+            .to_path_buf();
+        let mut path = canonical_temp.clone();
+        for _ in 0..canonical_temp.components().count() + 2 {
+            path.push("..");
+        }
+        path.push("new.txt");
+
+        let resolved = canonicalize_path_allow_missing(&path).expect("absolute path");
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(filesystem_root)
+                .expect("canonical filesystem root")
+                .join("new.txt")
+        );
+        assert!(resolved.is_absolute());
+    }
+
     #[cfg(unix)]
     #[test]
     fn hosted_repair_path_check_rejects_symlink_escape() {
@@ -1066,6 +1117,65 @@ mod tests {
         let error = ctx
             .check_hosted_repair_path("Write", &path)
             .expect_err("symlink escape must be rejected")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_resolves_symlink_before_parent_component() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        let nested = outside.join("nested");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&nested).expect("outside nested dir");
+        symlink(&nested, workspace.join("link")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("link").join("..").join("secret.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink must resolve before applying parent component")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_dangling_symlink() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        symlink(
+            temp.path().join("missing-target"),
+            workspace.join("dangling"),
+        )
+        .expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("dangling").join("new.txt");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("dangling symlink must fail closed")
             .to_string();
 
         assert!(error.contains("hosted repair file tools are limited"));
