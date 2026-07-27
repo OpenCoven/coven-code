@@ -13,7 +13,7 @@ use claurst_core::ProviderId;
 use crate::client::ClientConfig;
 use crate::provider::LlmProvider;
 use crate::provider_types::ProviderStatus;
-use crate::providers::{AnthropicProvider, CodexProvider};
+use crate::providers::{AnthropicProvider, ClaudeCliProvider, CodexProvider};
 
 /// Resolve the configured API base override for a provider, if any.
 pub fn resolve_provider_api_base(
@@ -72,6 +72,19 @@ pub fn provider_from_config(
     }
 }
 
+/// Map alias provider ids to their canonical registered form.
+///
+/// The device-auth flow and older persisted configs refer to the Codex
+/// provider as "openai-codex"; the provider registry, model catalog, and
+/// query runtime all register it as "codex". Registry lookups are exact-match
+/// on the provider's self-reported id, so callers must canonicalize first.
+pub fn canonical_provider_id(id: &str) -> &str {
+    match id {
+        "openai-codex" => "codex",
+        other => other,
+    }
+}
+
 pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
     match provider_id {
         "codex" | "openai-codex" => {
@@ -81,11 +94,15 @@ pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
     }
 
     let auth_store = claurst_core::AuthStore::load();
-    let key = auth_store.api_key_for(provider_id)?;
-    if key.is_empty() {
-        return None;
+    match auth_store.api_key_for(provider_id) {
+        Some(key) if !key.is_empty() => provider_from_key(provider_id, key),
+        // Claude without an API key runs through the local `claude` CLI —
+        // never through an imported OAuth token, which gets rate limited.
+        _ if provider_id == "anthropic" => {
+            Some(Arc::new(ClaudeCliProvider::new()) as Arc<dyn LlmProvider>)
+        }
+        _ => None,
     }
-    provider_from_key(provider_id, key)
 }
 
 impl ProviderRegistry {
@@ -259,5 +276,17 @@ impl ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_provider_id_maps_codex_alias() {
+        assert_eq!(canonical_provider_id("openai-codex"), "codex");
+        assert_eq!(canonical_provider_id("codex"), "codex");
+        assert_eq!(canonical_provider_id("anthropic"), "anthropic");
     }
 }

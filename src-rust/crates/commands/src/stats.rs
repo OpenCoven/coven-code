@@ -682,7 +682,7 @@ fn render_summary(agg: &Aggregated, ctx: &CommandContext) -> String {
         return format!(
             "{}\n\n{}\n\nNo sessions found.\n\nLooked under {}.\n\
              Try `coven-code stats --all-projects` to widen the scope.",
-            header("Coven Code Session Stats"),
+            header("Coven Session Stats"),
             render_scope_line(agg, ctx),
             projects_dir().display(),
         );
@@ -690,7 +690,7 @@ fn render_summary(agg: &Aggregated, ctx: &CommandContext) -> String {
 
     let totals = agg.totals();
     let mut out = String::new();
-    out.push_str(&header("Coven Code Session Stats"));
+    out.push_str(&header("Coven Session Stats"));
     out.push('\n');
     out.push_str(&render_scope_line(agg, ctx));
     out.push_str("\n\n");

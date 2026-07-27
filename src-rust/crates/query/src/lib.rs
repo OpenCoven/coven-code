@@ -43,12 +43,15 @@ use claurst_api::{
     AnthropicStreamEvent, ApiMessage, ApiToolDefinition, CreateMessageRequest, StreamAccumulator,
     StreamHandler, SystemPrompt, ThinkingConfig,
 };
+use claurst_core::claudemd::MemoryProvenance;
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::error::ClaudeError;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
 use claurst_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -73,6 +76,152 @@ pub enum QueryOutcome {
     Error(ClaudeError),
     /// The configured USD budget was exceeded.
     BudgetExceeded { cost_usd: f64, limit_usd: f64 },
+}
+
+fn build_session_memory_provenance(session_id: &str, working_dir: &Path) -> MemoryProvenance {
+    let mut provenance = MemoryProvenance::session_memory_extraction(session_id);
+
+    if let Some(git_dir) = find_git_dir(working_dir) {
+        if let Some(remote_url) = read_origin_remote_url(&git_dir) {
+            if let Some(repo_slug) = parse_origin_repo_slug(&remote_url) {
+                provenance = provenance.with_source_repo(repo_slug);
+            }
+        }
+
+        if let Some(commit) = read_head_commit(&git_dir) {
+            provenance = provenance.with_source_commit(commit);
+        }
+    }
+
+    if let Ok(actor) = std::env::var("GITHUB_ACTOR") {
+        provenance = provenance.with_source_actor(actor);
+    }
+
+    provenance
+}
+
+fn find_git_dir(working_dir: &Path) -> Option<PathBuf> {
+    for dir in working_dir.ancestors() {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+
+        if dot_git.is_file() {
+            let git_file = fs::read_to_string(&dot_git).ok()?;
+            let git_dir = git_file.trim().strip_prefix("gitdir:")?.trim();
+            let git_dir = Path::new(git_dir);
+            return Some(if git_dir.is_absolute() {
+                git_dir.to_path_buf()
+            } else {
+                dir.join(git_dir)
+            });
+        }
+    }
+    None
+}
+
+fn common_git_dir(git_dir: &Path) -> PathBuf {
+    let Some(common_dir) = fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return git_dir.to_path_buf();
+    };
+    let common_dir = Path::new(&common_dir);
+    if common_dir.is_absolute() {
+        common_dir.to_path_buf()
+    } else {
+        git_dir.join(common_dir)
+    }
+}
+
+fn read_origin_remote_url(git_dir: &Path) -> Option<String> {
+    let config = fs::read_to_string(common_git_dir(git_dir).join("config")).ok()?;
+    let mut in_origin_section = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_origin_section = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+
+        if in_origin_section {
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if key.trim() == "url" {
+                let url = value.trim();
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_head_commit(git_dir: &Path) -> Option<String> {
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let commit = if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        fs::read_to_string(git_dir.join(reference))
+            .or_else(|_| fs::read_to_string(common_git_dir(git_dir).join(reference)))
+            .ok()?
+    } else {
+        head.to_string()
+    };
+    let commit = commit.trim();
+    if commit.len() == 40 && commit.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(commit.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_origin_repo_slug(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim();
+    let cutoff = trimmed
+        .char_indices()
+        .find(|(_, ch)| *ch == '?' || *ch == '#')
+        .map(|(idx, _)| idx)
+        .unwrap_or(trimmed.len());
+    let trimmed = trimmed[..cutoff].trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let candidate = if let Some((_, path)) = without_git.split_once("github.com/") {
+        path
+    } else if let Some((_, path)) = without_git.split_once("github.com:") {
+        path
+    } else if let Some((_, path)) = without_git.rsplit_once(':') {
+        path
+    } else {
+        without_git
+    };
+    let components: Vec<&str> = candidate
+        .trim_matches('/')
+        .split('/')
+        .filter(|component| !component.trim().is_empty())
+        .collect();
+    if components.len() < 2 {
+        return None;
+    }
+    let owner = components[components.len() - 2];
+    let repo = components[components.len() - 1];
+    if [owner, repo].iter().any(|component| {
+        !component
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    }) {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 /// Configuration for a single query-loop invocation.
@@ -707,7 +856,141 @@ const MAX_TOKENS_RECOVERY_MSG: &str =
      you were doing. Pick up mid-thought if that is where the cut happened. \
      Break remaining work into smaller pieces.";
 
-fn should_emit_turn_complete(stop: &str, max_tokens_recovery_count: u32) -> bool {
+/// Maximum automatic continuation nudges per user turn when the model ends
+/// the turn right after announcing an action it never executed (issue #165:
+/// "agent announces work and just stops"). Bounded like the max_tokens
+/// recovery so a model that keeps narrating can't loop forever.
+const STALL_RECOVERY_LIMIT: u32 = 2;
+
+/// Message injected when the model ends a turn with announced-but-unexecuted
+/// work (or with no output at all) and no tool calls.
+const STALL_RECOVERY_MSG: &str =
+    "You ended the turn right after announcing an action, without executing \
+     it. Do not narrate what you are about to do. If work remains, call the \
+     tools and do it now; if everything is actually complete, state the \
+     final outcome without announcing further actions.";
+
+/// Stall recovery is on by default; set COVEN_CODE_DISABLE_STALL_RECOVERY=1
+/// (or true/yes/on) to restore the old end-the-turn-as-announced behavior.
+fn stall_recovery_enabled() -> bool {
+    !claurst_core::feature_gates::is_env_truthy(
+        std::env::var("COVEN_CODE_DISABLE_STALL_RECOVERY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Heuristic for an "announce-then-stop" stall: an assistant round that
+/// ended with `end_turn`, executed no tools, and whose visible text is
+/// either empty or closes on an imminent-action announcement ("Writing the
+/// CLI uninstall module now.") rather than a completed-work statement or a
+/// deliberate handoff back to the user ("Should I…?", "Let me know…").
+///
+/// False positives are cheap by design: the recovery nudge explicitly tells
+/// the model to state the final outcome if the work is already done, and
+/// the whole mechanism is bounded by [`STALL_RECOVERY_LIMIT`].
+fn is_stalled_announcement(text: &str) -> bool {
+    let trimmed = text.trim();
+    // No visible output at all is always a stall (the #149 placeholder case).
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    // Work on the final sentence-like chunk. Chunks with fewer than two
+    // words are punctuation debris from dotted identifiers (`main.rs`.),
+    // not sentences — skip past them.
+    let last_sentence = trimmed
+        .rsplit(['.', '!', '?', '…', '\n'])
+        .find(|chunk| {
+            chunk
+                .split_whitespace()
+                .filter(|word| word.chars().any(|c| c.is_alphabetic()))
+                .count()
+                >= 2
+        })
+        .unwrap_or(trimmed)
+        .trim()
+        .to_ascii_lowercase();
+
+    // A question mark anywhere in the tail means the model handed control
+    // back to the user on purpose.
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(240)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if tail.contains('?') {
+        return false;
+    }
+
+    // Deliberate wait-for-user phrasings are handoffs, not stalls.
+    const HANDOFF_MARKERS: [&str; 10] = [
+        "let me know",
+        "should i",
+        "do you",
+        "would you",
+        "if you",
+        "wait",
+        "once you",
+        "when you",
+        "your call",
+        "your review",
+    ];
+    if HANDOFF_MARKERS
+        .iter()
+        .any(|marker| last_sentence.contains(marker))
+    {
+        return false;
+    }
+
+    // Imminent-action openers ("Writing the module now.", "Now running the
+    // tests.") and first-person intent markers ("then I'll wire it in").
+    const ANNOUNCEMENT_OPENERS: [&str; 15] = [
+        "writing ",
+        "creating ",
+        "implementing ",
+        "building ",
+        "adding ",
+        "updating ",
+        "editing ",
+        "wiring ",
+        "running ",
+        "starting ",
+        "proceeding ",
+        "next,",
+        "next up",
+        "on to ",
+        "time to ",
+    ];
+    const INTENT_MARKERS: [&str; 6] = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "going to ",
+        "about to ",
+        "now to ",
+    ];
+    let opener = last_sentence.strip_prefix("now ").unwrap_or(&last_sentence);
+    ANNOUNCEMENT_OPENERS
+        .iter()
+        .any(|pattern| opener.starts_with(pattern))
+        || INTENT_MARKERS
+            .iter()
+            .any(|marker| last_sentence.contains(marker))
+}
+
+fn should_emit_turn_complete(
+    stop: &str,
+    max_tokens_recovery_count: u32,
+    stall_recovery_pending: bool,
+) -> bool {
+    if stall_recovery_pending {
+        return false;
+    }
     match stop {
         "tool_use" => false,
         "max_tokens" => max_tokens_recovery_count >= MAX_TOKENS_RECOVERY_LIMIT,
@@ -737,7 +1020,7 @@ fn selected_model_for_query(config: &QueryConfig) -> String {
 
 fn is_fallback_worthy_api_error(err: &ClaudeError) -> bool {
     match err {
-        ClaudeError::RateLimit => true,
+        ClaudeError::RateLimit { .. } => true,
         ClaudeError::ApiStatus { status, message } => {
             *status == 429 || *status == 529 || message.to_lowercase().contains("overloaded")
         }
@@ -758,16 +1041,31 @@ fn enrich_error_notice(
     account: Option<&str>,
 ) -> ClaudeError {
     match err {
-        ClaudeError::RateLimit => ClaudeError::ApiStatus {
-            status: 429,
-            message: rate_limit_notice(provider, model, account, None),
+        ClaudeError::RateLimit {
+            retry_after_secs,
+            message,
+        } => ClaudeError::RateLimit {
+            retry_after_secs,
+            message: Some(rate_limit_notice(
+                provider,
+                model,
+                account,
+                message.as_deref(),
+                retry_after_secs,
+            )),
         },
         ClaudeError::ApiStatus {
             status: 429,
             message,
-        } => ClaudeError::ApiStatus {
-            status: 429,
-            message: rate_limit_notice(provider, model, account, Some(&message)),
+        } => ClaudeError::RateLimit {
+            retry_after_secs: None,
+            message: Some(rate_limit_notice(
+                provider,
+                model,
+                account,
+                Some(&message),
+                None,
+            )),
         },
         other => other,
     }
@@ -778,6 +1076,7 @@ fn rate_limit_notice(
     model: &str,
     account: Option<&str>,
     provider_message: Option<&str>,
+    retry_after_secs: Option<u64>,
 ) -> String {
     let account_part = account
         .filter(|value| !value.trim().is_empty())
@@ -788,12 +1087,18 @@ fn rate_limit_notice(
          Anthropic/Claude Max limits are model-tier scoped: Sonnet/Opus can be limited while Haiku still works.\n\
          Try switching to Haiku, switching Anthropic accounts, or waiting before retrying."
     );
+    if let Some(secs) = retry_after_secs {
+        message.push_str(&format!(
+            "\n\nThe provider says the limit resets in {}.",
+            format_reset_delay(secs)
+        ));
+    }
     if account
         .map(|value| value.to_lowercase().contains("claude-code"))
         .unwrap_or(false)
     {
         message.push_str(
-            "\n\nThis is an imported Claude Code credential. Coven Code is using the imported token for direct Anthropic requests; it is not running the `claude` CLI for this turn.",
+            "\n\nThis is an imported Claude Code credential. Coven is using the imported token for direct Anthropic requests; it is not running the `claude` CLI for this turn.",
         );
     }
 
@@ -808,6 +1113,30 @@ fn rate_limit_notice(
     }
 
     message
+}
+
+/// Format a reset delay in seconds as a compact human duration ("45s",
+/// "3m 20s", "1h 12m").
+pub fn format_reset_delay(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn active_account_notice(provider: &str) -> Option<String> {
@@ -866,6 +1195,9 @@ pub async fn run_query_loop(
     // Tracks how many consecutive max_tokens recoveries we've attempted so
     // we don't loop forever on a model that can't finish within any budget.
     let mut max_tokens_recovery_count: u32 = 0;
+    // Automatic continuation nudges used for announce-then-stop stalls this
+    // user turn (issue #165). Reset whenever a tool round actually executes.
+    let mut stall_recovery_count: u32 = 0;
     // Active model — may switch to fallback on overloaded errors.
     // Agent model override takes priority over the session model when set.
     let mut effective_model = selected_model_for_query(config);
@@ -1555,7 +1887,37 @@ pub async fn run_query_loop(
                             cost: None,
                             snapshot_patch: None,
                         });
+                        // Real tool work happened; give the next
+                        // announce-then-stop stall a fresh recovery budget.
+                        stall_recovery_count = 0;
                         continue; // loop for next turn
+                    }
+
+                    // Announce-then-stop stall detection (issue #165), before
+                    // the end-of-turn placeholder/TurnComplete below: a round
+                    // that executed no tools and whose text is empty or ends
+                    // on an imminent-action announcement gets a bounded
+                    // continuation nudge instead of ending the turn.
+                    if stall_recovery_enabled()
+                        && stall_recovery_count < STALL_RECOVERY_LIMIT
+                        && is_stalled_announcement(&combined_text)
+                    {
+                        stall_recovery_count += 1;
+                        warn!(
+                            attempt = stall_recovery_count,
+                            limit = STALL_RECOVERY_LIMIT,
+                            provider = %provider_id_str,
+                            "end_turn with announced-but-unexecuted work — injecting continuation nudge"
+                        );
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(QueryEvent::Status(format!(
+                                "Model announced work but ended the turn — nudging it to \
+                                 continue (attempt {}/{})",
+                                stall_recovery_count, STALL_RECOVERY_LIMIT
+                            )));
+                        }
+                        messages.push(Message::user(STALL_RECOVERY_MSG));
+                        continue;
                     }
 
                     // End turn — notify TUI and return.
@@ -1907,7 +2269,18 @@ pub async fn run_query_loop(
             }
         }
 
-        if should_emit_turn_complete(stop, max_tokens_recovery_count) {
+        // Announce-then-stop stall detection (issue #165): an `end_turn`
+        // round with no tool calls whose text is empty or closes on an
+        // imminent-action announcement gets a bounded continuation nudge
+        // instead of ending the turn. Decided before TurnComplete emission
+        // so recovered rounds stay invisible, like max_tokens recovery.
+        let stall_recovery_pending = stop == "end_turn"
+            && stall_recovery_enabled()
+            && stall_recovery_count < STALL_RECOVERY_LIMIT
+            && assistant_msg.get_tool_use_blocks().is_empty()
+            && is_stalled_announcement(&assistant_msg.get_all_text());
+
+        if should_emit_turn_complete(stop, max_tokens_recovery_count, stall_recovery_pending) {
             if let Some(ref tx) = event_tx {
                 let _ = tx.send(QueryEvent::TurnComplete {
                     turn,
@@ -1940,6 +2313,27 @@ pub async fn run_query_loop(
 
         match stop {
             "end_turn" => {
+                if stall_recovery_pending {
+                    stall_recovery_count += 1;
+                    warn!(
+                        attempt = stall_recovery_count,
+                        limit = STALL_RECOVERY_LIMIT,
+                        "end_turn with announced-but-unexecuted work — injecting continuation nudge"
+                    );
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(QueryEvent::Status(format!(
+                            "Model announced work but ended the turn — nudging it to continue \
+                             (attempt {}/{})",
+                            stall_recovery_count, STALL_RECOVERY_LIMIT
+                        )));
+                    }
+                    // The stalled assistant message is already in the history,
+                    // so the nudge reads in context. Stop hooks are not fired:
+                    // the turn is not over.
+                    messages.push(Message::user(STALL_RECOVERY_MSG));
+                    continue;
+                }
+
                 fire_stop_hook!(assistant_msg);
 
                 // T1-3: Fire Stop hooks in background (fire-and-forget).
@@ -1959,10 +2353,7 @@ pub async fn run_query_loop(
                     let working_dir_clone = tool_ctx.working_dir.clone();
                     let runtime_mode = tool_ctx.config.runtime_mode();
                     let hosted_review_config = tool_ctx.config.hosted_review.clone();
-                    let memory_provenance = format!(
-                        "session:{};source:session-memory-extraction",
-                        tool_ctx.session_id
-                    );
+                    let session_id_clone = tool_ctx.session_id.clone();
 
                     // Build a fresh client using the same API key.  This avoids
                     // requiring an Arc in the existing run_query_loop signature.
@@ -1976,6 +2367,10 @@ pub async fn run_query_loop(
                             ) {
                                 let sm_client = std::sync::Arc::new(sm_client);
                                 tokio::spawn(async move {
+                                    let memory_provenance = build_session_memory_provenance(
+                                        &session_id_clone,
+                                        &working_dir_clone,
+                                    );
                                     let extractor =
                                         session_memory::SessionMemoryExtractor::new(&model_clone);
                                     match extractor
@@ -2026,11 +2421,12 @@ pub async fn run_query_loop(
                 // the spawn doesn't call run_query_loop recursively from within
                 // its own future (which would make the future !Send).
                 {
-                    let memory_dir = dirs::home_dir().map(|h| h.join(".coven-code").join("memory"));
+                    let memory_dir = claurst_core::config::config_home().join("memory");
                     let conversations_dir =
-                        dirs::home_dir().map(|h| h.join(".coven-code").join("conversations"));
-                    if let (Some(mem), Some(conv)) = (memory_dir, conversations_dir) {
-                        let dreamer = crate::auto_dream::AutoDream::new(mem, conv);
+                        claurst_core::config::config_home().join("conversations");
+                    {
+                        let dreamer =
+                            crate::auto_dream::AutoDream::new(memory_dir, conversations_dir);
                         if let Ok(Some(task)) = dreamer.maybe_trigger().await {
                             // Run the consolidation subagent in a background Tokio
                             // task. We use the AgentTool execute path (via
@@ -2112,6 +2508,9 @@ pub async fn run_query_loop(
                 // A completed tool-use turn counts as a successful recovery
                 // boundary; reset the max_tokens retry counter.
                 max_tokens_recovery_count = 0;
+                // Real tool work happened, so any earlier announce-then-stop
+                // stall resolved itself; give the next stall a fresh budget.
+                stall_recovery_count = 0;
                 // Extract tool calls and execute them
                 let tool_blocks = assistant_msg.get_tool_use_blocks();
                 if tool_blocks.is_empty() {
@@ -2572,6 +2971,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_github_origin_repo_slug_without_credentials() {
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git").as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("git@github.com:OpenCoven/coven-code.git").as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://token@example@github.com/OpenCoven/coven-code.git")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git?token=SECRET")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/OpenCoven/coven-code.git#token=SECRET")
+                .as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+    }
+
+    #[test]
+    fn ignores_origin_strings_without_repo_slug() {
+        assert!(parse_origin_repo_slug("").is_none());
+        assert!(parse_origin_repo_slug("https://github.com/OpenCoven").is_none());
+        assert!(parse_origin_repo_slug("https://github.com/token@example").is_none());
+    }
+
+    #[test]
+    fn reads_session_memory_provenance_from_git_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        std::fs::create_dir_all(workspace.join(".git").join("refs").join("heads")).unwrap();
+        std::fs::write(
+            workspace.join(".git").join("config"),
+            "[remote \"origin\"]\n    url = https://github.com/OpenCoven/coven-code.git\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".git").join("HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace
+                .join(".git")
+                .join("refs")
+                .join("heads")
+                .join("main"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let provenance = build_session_memory_provenance("session-1", &workspace);
+
+        assert_eq!(
+            provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            provenance.source_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn reads_linked_worktree_metadata_from_common_git_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let common_git_dir = temp.path().join("main.git");
+        let git_dir = common_git_dir.join("worktrees").join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(common_git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            common_git_dir.join("config"),
+            "[remote \"origin\"]\n    url = git@github.com:OpenCoven/coven-code.git\n",
+        )
+        .unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            common_git_dir.join("refs").join("heads").join("main"),
+            "abcdef0123456789abcdef0123456789abcdef01\n",
+        )
+        .unwrap();
+
+        let provenance = build_session_memory_provenance("session-1", &workspace);
+
+        assert_eq!(
+            provenance.source_repo.as_deref(),
+            Some("OpenCoven/coven-code")
+        );
+        assert_eq!(
+            provenance.source_commit.as_deref(),
+            Some("abcdef0123456789abcdef0123456789abcdef01")
+        );
+    }
+
     // ---- build_system_prompt tests ------------------------------------------
 
     #[test]
@@ -2582,7 +3092,7 @@ mod tests {
         let prompt = build_system_prompt(&cfg);
         if let SystemPrompt::Text(text) = prompt {
             assert!(
-                text.contains("Coven Code") || text.contains("Claude agent"),
+                text.contains("Coven") || text.contains("Claude agent"),
                 "Default prompt should contain attribution: {}",
                 text
             );
@@ -2607,7 +3117,7 @@ mod tests {
                 "Custom prompt text should appear in the output"
             );
             assert!(
-                text.contains("Coven Code") || text.contains("Claude agent"),
+                text.contains("Coven") || text.contains("Claude agent"),
                 "Default attribution should still be present"
             );
         } else {
@@ -2730,14 +3240,20 @@ mod tests {
         let s = format!("{:?}", outcome);
         assert!(s.contains("Cancelled"));
 
-        let err_outcome = QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit);
+        let err_outcome = QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit {
+            retry_after_secs: None,
+            message: None,
+        });
         let s2 = format!("{:?}", err_outcome);
         assert!(s2.contains("Error"));
     }
 
     #[test]
     fn test_typed_rate_limit_uses_fallback() {
-        let err = claurst_core::error::ClaudeError::RateLimit;
+        let err = claurst_core::error::ClaudeError::RateLimit {
+            retry_after_secs: Some(30),
+            message: None,
+        };
         assert!(is_fallback_worthy_api_error(&err));
     }
 
@@ -2756,7 +3272,6 @@ mod tests {
         );
 
         let text = enriched.to_string();
-        assert!(text.contains("API error 429"));
         assert!(text.contains("Claude rate limit"));
         assert!(text.contains("claude-sonnet-4-6"));
         assert!(text.contains("claude-code-10 [max]"));
@@ -2777,12 +3292,29 @@ mod tests {
 
         let enriched = enrich_error_notice(err, "anthropic", "claude-opus-4-8", None);
 
+        // Structure survives enrichment so the TUI recovery flow can use it.
+        match &enriched {
+            claurst_core::error::ClaudeError::RateLimit {
+                retry_after_secs, ..
+            } => assert_eq!(*retry_after_secs, Some(60)),
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+
         let text = enriched.to_string();
-        assert!(text.contains("API error 429"));
         assert!(text.contains("Claude rate limit"));
         assert!(text.contains("claude-opus-4-8"));
         assert!(text.contains("model-tier"));
         assert!(text.contains("Haiku"));
+        assert!(text.contains("resets in 1m"));
+    }
+
+    #[test]
+    fn test_format_reset_delay_buckets() {
+        assert_eq!(format_reset_delay(45), "45s");
+        assert_eq!(format_reset_delay(60), "1m");
+        assert_eq!(format_reset_delay(200), "3m 20s");
+        assert_eq!(format_reset_delay(3600), "1h");
+        assert_eq!(format_reset_delay(4320), "1h 12m");
     }
 
     #[test]
@@ -2832,25 +3364,94 @@ mod tests {
 
     #[test]
     fn turn_complete_emission_skips_intermediate_tool_turns() {
-        assert!(!should_emit_turn_complete("tool_use", 0));
+        assert!(!should_emit_turn_complete("tool_use", 0, false));
     }
 
     #[test]
     fn turn_complete_emission_skips_recoverable_max_tokens_turns() {
-        assert!(!should_emit_turn_complete("max_tokens", 0));
-        assert!(!should_emit_turn_complete("max_tokens", 1));
-        assert!(!should_emit_turn_complete("max_tokens", 2));
+        assert!(!should_emit_turn_complete("max_tokens", 0, false));
+        assert!(!should_emit_turn_complete("max_tokens", 1, false));
+        assert!(!should_emit_turn_complete("max_tokens", 2, false));
         assert!(should_emit_turn_complete(
             "max_tokens",
-            MAX_TOKENS_RECOVERY_LIMIT
+            MAX_TOKENS_RECOVERY_LIMIT,
+            false
         ));
     }
 
     #[test]
     fn turn_complete_emission_keeps_terminal_stop_reasons() {
-        assert!(should_emit_turn_complete("end_turn", 0));
-        assert!(should_emit_turn_complete("stop_sequence", 0));
-        assert!(should_emit_turn_complete("content_filtered", 0));
-        assert!(should_emit_turn_complete("unknown_stop", 0));
+        assert!(should_emit_turn_complete("end_turn", 0, false));
+        assert!(should_emit_turn_complete("stop_sequence", 0, false));
+        assert!(should_emit_turn_complete("content_filtered", 0, false));
+        assert!(should_emit_turn_complete("unknown_stop", 0, false));
+    }
+
+    #[test]
+    fn turn_complete_emission_skips_stall_recovery_rounds() {
+        // While a stall nudge is pending the turn is not over, exactly like
+        // an in-budget max_tokens recovery round.
+        assert!(!should_emit_turn_complete("end_turn", 0, true));
+        assert!(should_emit_turn_complete("end_turn", 0, false));
+    }
+
+    #[test]
+    fn stalled_announcement_matches_observed_stall_transcripts() {
+        // Real assistant texts from the issue #165 session that ended with
+        // end_turn, zero tool calls, and no follow-through.
+        assert!(is_stalled_announcement(""));
+        assert!(is_stalled_announcement("   \n"));
+        assert!(is_stalled_announcement(
+            "Writing the CLI uninstall module now."
+        ));
+        assert!(is_stalled_announcement(
+            "Now writing the CLI uninstall module."
+        ));
+        assert!(is_stalled_announcement(
+            "Enough exploration — I have the wiring points. Writing the CLI \
+             command now. First the self-contained module with unit-tested \
+             pure helpers, then I'll wire it into `main.rs`."
+        ));
+        assert!(is_stalled_announcement(
+            "Implementing now. Let me confirm available deps, then write the \
+             CLI uninstall module."
+        ));
+        assert!(is_stalled_announcement(
+            "I'll start by reading the manifest, then patch the loader."
+        ));
+    }
+
+    #[test]
+    fn stalled_announcement_ignores_completed_work_statements() {
+        assert!(!is_stalled_announcement(
+            "Done — the module is wired in and all tests pass."
+        ));
+        assert!(!is_stalled_announcement(
+            "The uninstall command is implemented and tested; docs updated."
+        ));
+        // "now" inside a completion statement is not an announcement.
+        assert!(!is_stalled_announcement("All 45 tests pass now."));
+    }
+
+    #[test]
+    fn stalled_announcement_respects_deliberate_handoffs() {
+        assert!(!is_stalled_announcement("Should I also update the docs?"));
+        assert!(!is_stalled_announcement(
+            "Let me know if you want the Windows path covered too."
+        ));
+        assert!(!is_stalled_announcement("I'll wait for your review."));
+        assert!(!is_stalled_announcement(
+            "Two options: (1) uninstall module in the CLI, (2) Cave-side \
+             cleanup. Which do you want?"
+        ));
+        assert!(!is_stalled_announcement(
+            "Waiting on your decision before touching main.rs."
+        ));
+    }
+
+    #[test]
+    fn stall_recovery_disable_env_is_read() {
+        // Not set in the test environment → enabled by default.
+        assert!(stall_recovery_enabled());
     }
 }

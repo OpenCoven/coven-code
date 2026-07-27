@@ -205,9 +205,7 @@ pub async fn load_plugins(
     let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
 
     // 1. User-global plugins directory.
-    if let Some(user_dir) = default_user_plugins_dir() {
-        search_dirs.push(user_dir);
-    }
+    search_dirs.push(default_user_plugins_dir());
 
     // 2. Project-local plugins directory.
     search_dirs.push(project_plugins_dir(project_dir));
@@ -216,7 +214,8 @@ pub async fn load_plugins(
     search_dirs.extend_from_slice(extra_paths);
 
     // User plugins.
-    if let Some(user_dir) = default_user_plugins_dir() {
+    {
+        let user_dir = default_user_plugins_dir();
         let (plugins, errors) = discover_plugins(&[user_dir], PluginSource::User).await;
         registry.extend(plugins, errors);
     }
@@ -499,15 +498,7 @@ pub fn install_plugin_from_path(source_path: &Path) -> Result<String, PluginErro
     let plugin_name = manifest.name.clone();
 
     // Determine install destination.
-    let dest = match default_user_plugins_dir() {
-        Some(d) => d.join(&plugin_name),
-        None => {
-            return Err(PluginError::Io {
-                path: String::new(),
-                message: "Cannot determine home directory for plugin installation".to_string(),
-            })
-        }
-    };
+    let dest = default_user_plugins_dir().join(&plugin_name);
 
     // Copy source to dest.
     copy_dir_all(source_path, &dest).map_err(|e| PluginError::Io {

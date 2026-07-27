@@ -1491,7 +1491,7 @@ mod tests {
         // ordinary tip text never breaks mid-word on a narrow (~40 col) right
         // column. Re-joining the wrapped lines with spaces must reproduce the
         // original whitespace-separated words in order.
-        let tip = "Edit AGENTS.md to add instructions for Coven Code";
+        let tip = "Edit AGENTS.md to add instructions for Coven";
         let wrapped = word_wrap(tip, 40);
         assert!(wrapped.len() >= 2, "expected a wrap, got: {wrapped:?}");
         assert_eq!(

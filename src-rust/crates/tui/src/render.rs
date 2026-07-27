@@ -757,6 +757,27 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_mcp_approval_dialog(&app.mcp_approval, size, frame.buffer_mut());
     }
 
+    // Rate-limit recovery modal takes precedence over the generic error modal:
+    // it is the actionable form of the same failure. Permission dialogs still
+    // render on top for the input they own.
+    if app.rate_limit_recovery.visible {
+        let is_welcome_screen = app.messages.is_empty()
+            && app.streaming_text.is_empty()
+            && app.streaming_thinking.is_empty()
+            && app.tool_use_blocks.is_empty();
+        crate::rate_limit_recovery::render_rate_limit_recovery(
+            frame,
+            size,
+            &app.rate_limit_recovery,
+            app.footer_right_column_area.get(),
+            is_welcome_screen,
+        );
+        if let Some(ref pr) = app.permission_request {
+            render_permission_dialog(frame, pr, size);
+        }
+        return;
+    }
+
     // Error modals sit above non-security overlays. If a permission request is
     // also pending, render the permission dialog after the error modal so the
     // security-sensitive prompt remains visible for the input it owns.
@@ -1715,7 +1736,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         let familiar = welcome_familiar_label(app);
         let line = Line::from(vec![
             Span::styled(
-                "Coven Code ",
+                "Coven ",
                 Style::default()
                     .fg(COVEN_VIOLET)
                     .add_modifier(Modifier::BOLD),
@@ -1741,7 +1762,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         height: box_height,
     };
 
-    // Outer border with title "Coven Code vX.Y"
+    // Outer border with title "Coven vX.Y"
     let accent = app.accent_color;
     let outer_block = Block::default()
         .borders(Borders::ALL)
@@ -1749,7 +1770,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(accent))
         .title(Line::from(vec![
             Span::styled(
-                " Coven Code ",
+                " Coven ",
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1869,7 +1890,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     let tip_text = WELCOME_TIP.get_or_init(|| {
         claurst_core::tips::select_tip(0)
             .map(|t| t.content.to_string())
-            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven Code".to_string())
+            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven".to_string())
     });
 
     let mut right_lines: Vec<Line> = Vec::new();
@@ -2509,7 +2530,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
         if app.prompt_input.text.is_empty() && !app.is_streaming {
             spans.push(Span::styled(
-                "F2 familiar  Alt+H help  Ctrl+B branch  Tab mode",
+                "F2 familiar  Ctrl+B branch  Tab mode",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -3494,6 +3515,25 @@ mod welcome_tests {
         app
     }
 
+    /// Build a test app whose familiar roster is isolated to an EMPTY temp
+    /// `COVEN_HOME`, so `streaming_status_label` and friends never pick up a
+    /// warning from the developer's real `~/.coven/familiars.toml`.
+    ///
+    /// Returns the guard/tempdir alongside the app; the caller must keep them
+    /// alive for the duration of the test (the guard restores env on drop).
+    fn make_isolated_status_app() -> (App, EnvGuard, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        // No familiars.toml is written → the roster is empty → no roster
+        // warning can leak into the status label.
+        let guard = EnvGuard::set(&home, &coven_home);
+        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        (app, guard, temp)
+    }
+
     #[test]
     fn welcome_model_label_prefers_config_override() {
         let app = make_test_app_with_model_and_familiar(
@@ -3557,7 +3597,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_prefers_running_tool_over_default() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
             name: "Bash".to_string(),
@@ -3571,7 +3611,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_falls_back_through_text_then_thinking() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.is_streaming = true;
         assert_eq!(streaming_status_label(&app), "Waiting on network");
         assert!(should_render_status_row(&app));
@@ -3584,7 +3624,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_adapter_message_overrides_everything() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
             name: "Bash".to_string(),
@@ -3600,7 +3640,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_ignores_placeholder_thinking_message() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         // "thinking" / "thinking…" are placeholders — they should NOT win
         // over more informative state.
         app.status_message = Some("thinking".to_string());
@@ -3610,7 +3650,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_skips_completed_tools() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         // A done tool from a previous turn must not hijack the label.
         app.tool_use_blocks.push(crate::app::ToolUseBlock {
             id: "tu_1".to_string(),
@@ -3625,7 +3665,7 @@ mod welcome_tests {
 
     #[test]
     fn streaming_status_label_explains_stalled_streams() {
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.is_streaming = true;
         app.stall_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
 
@@ -3662,7 +3702,7 @@ mod welcome_tests {
             .map(|cell| cell.symbol())
             .collect();
 
-        for expected in ["F2", "Alt+H", "Ctrl+B", "Tab"] {
+        for expected in ["F2", "Ctrl+B", "Tab"] {
             assert!(
                 content.contains(expected),
                 "footer should mention {expected}, got {content:?}"

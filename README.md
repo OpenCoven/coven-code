@@ -2,9 +2,17 @@
 
 [![TUI Tests](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml/badge.svg)](https://github.com/OpenCoven/coven-code/actions/workflows/tui-tests.yml)
 
+> 🎉 **The unified Coven CLI is here.** The supported way to use this engine is now the single `coven` CLI, which installs, pins, and manages it for you:
+>
+> ```bash
+> npm install -g @opencoven/cli
+> ```
+>
+> This repository is the **Coven engine** — `coven-code` **v0.7.0**, which `coven` (**`@opencoven/cli` v0.1.1**) auto-installs and checksum-verifies on first run. You no longer install `coven-code` from npm directly. See the [release notes](https://github.com/OpenCoven/coven/blob/main/docs/release-notes-unified-cli.md) and the [merge guide](docs/unification.md).
+
 **Coven Code** is an open-source agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
-> **Attribution:** Coven Code is derived from Claurst v0.3.0 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
+> **Attribution:** Coven Code is derived from Claurst v0.7.0 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
 
 ---
 
@@ -18,12 +26,13 @@ Terminal coding agent with a rich ratatui TUI: chat forking, memory consolidatio
 
 ## Status
 
-> **Beta (v0.3.0).** Core agent, provider routing, and TUI are stable for daily use. Experimental features are flagged below.
+> **Beta (v0.7.0).** Core agent, provider routing, and TUI are stable for daily use. Experimental features are flagged below.
 
 Recent highlights:
 - **/share** — share sessions via unlisted GitHub Gists `[EXPERIMENTAL]`
 - **/goal** — `/goal <objective>` keeps the agent working across multiple turns `[EXPERIMENTAL]`
 - **/coven** — drive the local [Coven daemon](https://github.com/OpenCoven/coven) (sessions, harness runs, rituals) without leaving the TUI. `/coven` is the unified replacement for `coven-cli`'s interactive menu and the legacy `coven-tui` slash shell; when `coven-code` is on `PATH`, `coven` and `coven tui` exec into it automatically (opt out with `COVEN_LEGACY_TUI=1`). Run `/coven help` for the subcommand list.
+- **Coven runtime** — `coven-code` is a registered runtime in the [coven-runtimes](https://github.com/OpenCoven/coven-runtimes) canonical registry, with a long-lived stream-json mode the daemon can drive (`--print --input-format stream-json --output-format stream-json`). `/coven runtimes` lists the accepted runtimes and their local install status. See [docs/coven-runtimes.md](docs/coven-runtimes.md).
 
 ---
 
@@ -41,15 +50,15 @@ Recent highlights:
 ### Install
 
 ```bash
-npm install -g @opencoven/coven
+npm install -g @opencoven/coven-code
 ```
 
-Then open a new terminal and run `coven` or `coven tui`. The lower-level `coven-code` binary and `coven-cave` alias are also installed for compatibility.
+Then open a new terminal and run `coven-code`. The `coven-cave` alias is also installed. (The bare `coven` command belongs to the [Coven daemon CLI](https://github.com/OpenCoven/coven) — `@opencoven/cli` — which execs into `coven-code` for the TUI.)
 
 ### Upgrade
 
 ```bash
-npm install -g @opencoven/coven@latest
+npm install -g @opencoven/coven-code@latest
 ```
 
 ---

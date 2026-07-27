@@ -215,7 +215,10 @@ impl From<ProviderError> for ClaudeError {
     fn from(err: ProviderError) -> Self {
         match &err {
             ProviderError::ContextOverflow { .. } => ClaudeError::ContextWindowExceeded,
-            ProviderError::RateLimited { .. } => ClaudeError::RateLimit,
+            ProviderError::RateLimited { retry_after, .. } => ClaudeError::RateLimit {
+                retry_after_secs: *retry_after,
+                message: None,
+            },
             ProviderError::AuthFailed { message, .. } => ClaudeError::Auth(message.clone()),
             ProviderError::ServerError {
                 status: Some(s),

@@ -35,5 +35,8 @@ portable-pty = "0.9"
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 computer-use = ["dep:enigo", "dep:xcap", "dep:image"]

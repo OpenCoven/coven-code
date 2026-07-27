@@ -15,7 +15,7 @@ tc_startup() {
   wait_for "What's new" 5
   local s; s="$(tui_capture)"
 
-  assert_contains "$s" "Coven Code v" "title banner renders with version"
+  assert_contains "$s" "Coven v" "title banner renders with version"
 
   # Right-hand welcome column. Wording is stable; the username is not, so we
   # assert on the static labels only.
@@ -25,9 +25,11 @@ tc_startup() {
   # Input affordance.
   assert_contains "$s" "❯" "input prompt glyph present"
 
-  # Footer hint bar exposes the core keybindings.
-  assert_contains "$s" "help"     "footer advertises help binding"
+  # Footer hint bar exposes the core keybindings. The help hint moved out of
+  # the footer (9e64bbc dropped Alt+H); /help coverage lives in 04_help_overlay.
   assert_contains "$s" "familiar" "footer advertises familiar binding"
+  assert_contains "$s" "branch"   "footer advertises branch binding"
+  assert_contains "$s" "mode"     "footer advertises mode binding"
 
   # No panic / error banner on a clean boot.
   assert_absent "$s" "panicked at"          "no rust panic on startup"

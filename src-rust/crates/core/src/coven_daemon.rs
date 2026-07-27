@@ -97,6 +97,17 @@ pub struct CreateSessionRequest {
     pub initial_message: String,
 }
 
+/// Payload for registering an externally-owned running session in the daemon.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterExternalSession {
+    pub id: String,
+    pub project_root: String,
+    pub harness: String,
+    pub title: String,
+    pub transcript_path: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Raw JSON shapes (private — only used for deserialization)
 // ---------------------------------------------------------------------------
@@ -744,6 +755,29 @@ impl DaemonClient {
             .map(|id| id.to_string())
             .ok_or(DaemonError::MissingField("id"))
     }
+
+    /// Register an already-running session in the daemon ledger. Best-effort.
+    pub fn register_external_session(
+        &self,
+        req: &RegisterExternalSession,
+    ) -> Result<(), DaemonError> {
+        let body = serde_json::to_string(req)
+            .map_err(|e| DaemonError::MalformedResponse(format!("encode request: {e}")))?;
+        self.request("POST", "/api/v1/sessions/external", Some(&body))
+            .map(|_| ())
+    }
+
+    /// Mark an externally-owned session finished. Best-effort.
+    pub fn complete_session(
+        &self,
+        session_id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), DaemonError> {
+        let body = serde_json::to_string(&serde_json::json!({ "exitCode": exit_code }))
+            .map_err(|e| DaemonError::MalformedResponse(format!("encode request: {e}")))?;
+        let path = format!("/api/v1/sessions/{}/complete", url_quote(session_id));
+        self.request("POST", &path, Some(&body)).map(|_| ())
+    }
 }
 
 /// Minimal percent-encoder for path segments — escapes anything outside the
@@ -1096,5 +1130,44 @@ mod tests {
         let client = DaemonClient { sock_path: sock };
         let result = client.check_reachability(std::time::Duration::from_secs(2));
         assert_eq!(result, DaemonReachability::Online);
+    }
+
+    #[test]
+    fn register_external_session_serializes_camel_case() {
+        let req = RegisterExternalSession {
+            id: "sess-1".to_string(),
+            project_root: "/home/user/repo".to_string(),
+            harness: "coven-code".to_string(),
+            title: "My session".to_string(),
+            transcript_path: Some("/home/user/.coven-code/sessions/sess-1.jsonl".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains("\"projectRoot\""),
+            "expected camelCase projectRoot, got: {json}"
+        );
+        assert!(
+            json.contains("\"transcriptPath\""),
+            "expected camelCase transcriptPath, got: {json}"
+        );
+        assert!(
+            !json.contains("\"project_root\""),
+            "snake_case leaked: {json}"
+        );
+        assert!(
+            !json.contains("\"transcript_path\""),
+            "snake_case leaked: {json}"
+        );
+    }
+
+    #[test]
+    fn complete_session_body_serializes_exit_code() {
+        // Verify the exitCode key (camelCase) is what the daemon expects.
+        let body = serde_json::to_string(&serde_json::json!({ "exitCode": 0i32 })).unwrap();
+        assert!(
+            body.contains("\"exitCode\""),
+            "expected camelCase exitCode, got: {body}"
+        );
+        assert!(!body.contains("\"exit_code\""), "snake_case leaked: {body}");
     }
 }

@@ -6,7 +6,7 @@
 
 Coven Code is a high-performance Rust reimplementation of Claude Code — a terminal-native AI coding agent with streaming responses, 40+ built-in tools, 15+ LLM provider integrations, a full ratatui TUI, and an extensible plugin system.
 
-**Version:** 0.3.0 (Beta) · **License:** GPL-3.0 · [GitHub](https://github.com/OpenCoven/coven-code)
+**Version:** 0.7.0 (Beta) · **License:** GPL-3.0 · [GitHub](https://github.com/OpenCoven/coven-code)
 
 </div>
 
@@ -73,11 +73,13 @@ Cast `/incant caveman` or `/incant rocky` to compress model responses by 40–85
 
 ```bash
 # Linux / macOS
-npm install -g @opencoven/coven
+npm install -g @opencoven/coven-code
 ```
 
-The package installs the `coven` CLI. Run `coven` with no arguments, or
-`coven tui` explicitly, for the interactive UI. See [Installation](installation)
+The package installs the `coven-code` CLI (with a `coven-cave` alias). Run
+`coven-code` with no arguments for the interactive UI. The bare `coven`
+command belongs to the Coven daemon CLI (`@opencoven/cli`). See
+[Installation](installation)
 for npm, bun, standalone binary, and source install options.
 
 **2. Set your API key**
@@ -89,7 +91,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 **3. Run interactively**
 
 ```bash
-coven
+coven-code
 ```
 
 Or launch a direct harness session:
@@ -158,7 +160,7 @@ When you launch the interactive UI with `coven` or `coven tui`, the home screen 
 |-------|---------------|---------------|
 | `Model` | Active model id, or the effective default if unset | `model` in [settings.json](configuration), `/model` |
 | `Provider` | Active provider id (`anthropic` when unset) | `provider` in [settings.json](configuration), see [Providers](providers) |
-| `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/coven` to bring it online |
+| `Daemon` | `online` / `offline` from a cheap socket check — no RPC | Install `@opencoven/cli` to bring it online |
 | `Familiar` | Current familiar id, with an `(F2 to switch)` hint | `familiar` in settings, `/familiar`, or **F2** |
 | `Goal` | Active autonomous goal (only shown when one is set) | `/coven goal <objective>` |
 
@@ -210,7 +212,7 @@ Coven Code connects natively to the [Coven daemon](https://opencoven.ai/docs) wh
 Coven Code is fully standalone without the daemon — install it separately to unlock the Coven ecosystem features.
 
 ```
-npm install -g @opencoven/coven
+npm install -g @opencoven/cli
 ```
 
 See [Coven Familiars](familiars) for the full integration reference.
@@ -231,3 +233,4 @@ See [Coven Familiars](familiars) for the full integration reference.
 - [Familiars](familiars) — Coven daemon familiars as agent personas
 - [Hooks](hooks) — event-driven automation
 - [Advanced Features](advanced) — extended thinking, sessions, and more
+- [The Coven Merge](unification) — the unified `coven` CLI, user migration, and Cave integration

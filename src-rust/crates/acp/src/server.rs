@@ -136,7 +136,7 @@ impl AgentServer {
         *self.client_capabilities.write() = req.client_capabilities.clone();
 
         let agent_info = acp::Implementation::new("coven-code", env!("CARGO_PKG_VERSION"))
-            .title(Some("Coven Code".to_string()));
+            .title(Some("Coven".to_string()));
 
         let mut response = acp::InitializeResponse::new(acp::ProtocolVersion::V1)
             .agent_capabilities(

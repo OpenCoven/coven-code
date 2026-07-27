@@ -70,8 +70,7 @@ impl FeatureFlagManager {
 
     /// Get the cache file path (~/.coven-code/feature_flags.json)
     fn get_cache_path() -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".coven-code").join("feature_flags.json")
+        crate::config::config_home().join("feature_flags.json")
     }
 
     /// Check if a feature flag is enabled
@@ -228,15 +227,32 @@ struct GrowthBookApiResponse {
     pub features: Vec<FeatureFlag>,
 }
 
+/// Test accessor — exposes the private cache path for cross-module
+/// consolidation tests (Phase 4.1).
+#[cfg(test)]
+pub(crate) fn feature_flags_cache_path_for_test() -> PathBuf {
+    FeatureFlagManager::get_cache_path()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_cache_path() {
+        // Hold the env lock so this test is serialized against any concurrent
+        // test that mutates COVEN_HOME / COVEN_PARENT / COVEN_CODE_HOME and
+        // would otherwise cause config_home() to return an unexpected path.
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let path = FeatureFlagManager::get_cache_path();
-        assert!(path.to_string_lossy().contains(".coven-code"));
-        assert!(path.to_string_lossy().contains("feature_flags.json"));
+        // Derive the expectation from config_home() so the assertion is correct
+        // under any home layout (legacy ~/.coven-code OR unified ~/.coven/code).
+        assert_eq!(
+            path,
+            crate::config::config_home().join("feature_flags.json")
+        );
     }
 
     #[test]

@@ -719,11 +719,11 @@ impl ModelRegistry {
             models = self.list_by_provider(provider_id);
         }
         if models.is_empty() {
-            // Codex models are not on models.dev (OAuth-only), so the bundled
-            // snapshot has no entries for them. Fall back to the canonical
-            // constant in claurst_core::codex_oauth so `/model` and the
-            // effective-model resolver still pick a real id for Codex users.
-            return codex_models_fallback(provider_id, /* small = */ false);
+            // Codex and GitHub Copilot models may be absent from models.dev
+            // (OAuth/subscription-backed providers). Fall back to the curated
+            // GPT agent model list so `/model` and the effective-model resolver
+            // still pick real ids offline.
+            return gpt_agent_models_fallback(provider_id, /* small = */ false);
         }
 
         let priority_patterns = flagship_patterns_for(provider_id);
@@ -769,8 +769,8 @@ impl ModelRegistry {
             models = self.list_by_provider(provider_id);
         }
         if models.is_empty() {
-            // See best_model_for_provider for the Codex rationale.
-            return codex_models_fallback(provider_id, /* small = */ true);
+            // See best_model_for_provider for the GPT-agent fallback rationale.
+            return gpt_agent_models_fallback(provider_id, /* small = */ true);
         }
 
         let small_priority = small_patterns_for(provider_id);
@@ -963,13 +963,18 @@ impl Default for ModelRegistry {
 /// Earlier entries score higher.
 fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
-        "anthropic" | "amazon-bedrock" | "github-copilot" | "azure" | "google-vertex" => &[
+        "anthropic" | "amazon-bedrock" | "azure" | "google-vertex" => &[
             "claude-opus-4",
             "claude-sonnet-4",
             "claude-3-5-sonnet",
             "claude-sonnet-3",
         ],
         "openai" => &[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+            "gpt-5.5",
             "gpt-5.2-pro",
             "gpt-5.2",
             "gpt-5.1",
@@ -1001,7 +1006,15 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
         ],
         "zai" => &["glm-5.1", "glm-5", "glm-4.7"],
         "minimax" => &["minimax-m2"],
-        "codex" | "openai-codex" => &["gpt-5.2-codex", "gpt-5.1-codex"],
+        "codex" | "openai-codex" | "github-copilot" => &[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+        ],
         "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" => &[
             "qwen3-coder",
             "qwen2.5-coder",
@@ -1024,21 +1037,21 @@ fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
 }
 
 /// Substring patterns marking a model as the lightweight/cheap default.
-/// Codex is OAuth-only and absent from the models.dev bundled snapshot, so
-/// `list_by_provider("codex")` always returns empty. This fallback returns
-/// the canonical default / small ids from
+/// Codex and GitHub Copilot can be absent from the models.dev bundled snapshot,
+/// so `list_by_provider(...)` may return empty. This fallback returns the
+/// canonical GPT agent default / small ids from
 /// `claurst_core::codex_oauth::CODEX_MODELS` so `/model` and `/fast` keep
-/// working for Codex users.
-fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
-    if !matches!(provider_id, "codex" | "openai-codex") {
+/// working for subscription-backed GPT providers.
+fn gpt_agent_models_fallback(provider_id: &str, small: bool) -> Option<String> {
+    if !matches!(provider_id, "codex" | "openai-codex" | "github-copilot") {
         return None;
     }
     if small {
-        // Prefer the documented "mini" entry; fall through to the default
-        // model id if the constant is ever pruned.
+        // Prefer the efficient tier ("luna" since GPT-5.6, "mini" before it);
+        // fall through to the default model id if the constant is ever pruned.
         claurst_core::codex_oauth::CODEX_MODELS
             .iter()
-            .find(|(id, _)| id.contains("mini"))
+            .find(|(id, _)| id.contains("luna") || id.contains("mini"))
             .map(|(id, _)| (*id).to_string())
             .or_else(|| Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL.to_string()))
     } else {
@@ -1049,7 +1062,9 @@ fn codex_models_fallback(provider_id: &str, small: bool) -> Option<String> {
 fn small_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" => &["claude-haiku-4", "claude-haiku-3-5", "claude-haiku"],
-        "codex" | "openai" | "openai-codex" => &["gpt-5.1-codex-mini", "gpt-5-mini"],
+        "codex" | "openai" | "openai-codex" | "github-copilot" => {
+            &["gpt-5.6-luna", "gpt-5.4-mini", "gpt-5-mini"]
+        }
         _ => &["mini", "haiku", "flash", "lite", "small", "nano"],
     }
 }
@@ -1188,20 +1203,34 @@ mod tests {
         let best = reg
             .best_model_for_provider("codex")
             .expect("codex best model must fall back to CODEX_MODELS default");
+        assert_eq!(best, claurst_core::codex_oauth::DEFAULT_CODEX_MODEL);
         assert!(
-            best.contains("codex"),
-            "best codex model should look like a codex id, got {best:?}"
+            claurst_core::codex_oauth::CODEX_MODELS
+                .iter()
+                .any(|(id, _)| *id == best),
+            "best codex model should come from CODEX_MODELS, got {best:?}"
         );
         let small = reg
             .best_small_model_for_provider("codex")
             .expect("codex small model must fall back to a mini/default id");
+        assert_eq!(small, "gpt-5.6-luna");
         assert!(
-            small.contains("codex"),
-            "small codex model should look like a codex id, got {small:?}"
+            claurst_core::codex_oauth::CODEX_MODELS
+                .iter()
+                .any(|(id, _)| *id == small),
+            "small codex model should come from CODEX_MODELS, got {small:?}"
         );
         // The alias `openai-codex` must take the same path.
         assert!(reg.best_model_for_provider("openai-codex").is_some());
         assert!(reg.best_small_model_for_provider("openai-codex").is_some());
+        let copilot_best = reg
+            .best_model_for_provider("github-copilot")
+            .expect("github-copilot best model must fall back to GPT agent default");
+        assert_eq!(copilot_best, claurst_core::codex_oauth::DEFAULT_CODEX_MODEL);
+        let copilot_small = reg
+            .best_small_model_for_provider("github-copilot")
+            .expect("github-copilot small model must fall back to a GPT agent small id");
+        assert_eq!(copilot_small, "gpt-5.6-luna");
         // Unrelated providers continue to return None when absent.
         assert!(reg
             .best_model_for_provider("definitely-not-a-provider")

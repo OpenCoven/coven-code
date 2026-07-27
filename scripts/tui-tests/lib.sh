@@ -20,7 +20,7 @@ set -uo pipefail
 : "${TUI_SOCKET:=coven-tui-test}"        # dedicated tmux server socket (-L)
 : "${TUI_WIDTH:=120}"                    # terminal columns
 : "${TUI_HEIGHT:=40}"                    # terminal rows
-: "${TUI_BOOT_STRING:=Coven Code v}"     # string proving the TUI has drawn
+: "${TUI_BOOT_STRING:=Coven v}"          # string proving the TUI has drawn
 : "${TUI_WAIT_TIMEOUT:=20}"              # seconds to wait for a string
 : "${TUI_POLL_INTERVAL:=0.4}"            # seconds between capture polls
 : "${TUI_SETTLE:=0.6}"                   # seconds to let a keypress redraw

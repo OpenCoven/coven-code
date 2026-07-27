@@ -37,7 +37,7 @@ impl Tool for ConfigTool {
     }
 
     fn description(&self) -> &str {
-        "Get or set Coven Code configuration settings. Omit 'value' to read the current value. \
+        "Get or set Coven configuration settings. Omit 'value' to read the current value. \
          Supported settings: model, max_tokens, verbose, permission_mode, auto_compact. \
          Changes persist to ~/.coven-code/settings.json."
     }

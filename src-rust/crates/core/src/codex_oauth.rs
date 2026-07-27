@@ -27,16 +27,29 @@ pub const CODEX_SCOPES: &str = "openid profile email offline_access";
 
 /// Available Codex models
 pub const CODEX_MODELS: &[(&str, &str)] = &[
-    ("gpt-5.2-codex", "GPT-5.2 Codex (default)"),
+    ("gpt-5.6-sol", "GPT-5.6 Sol (default)"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ("gpt-5.5", "GPT-5.5"),
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.4-mini", "GPT-5.4 Mini"),
+    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark (Pro preview)"),
+    (
+        "gpt-5.3-codex",
+        "GPT-5.3 Codex (deprecated for ChatGPT sign-in)",
+    ),
+    (
+        "gpt-5.2-codex",
+        "GPT-5.2 Codex (deprecated for ChatGPT sign-in)",
+    ),
     ("gpt-5.1-codex", "GPT-5.1 Codex"),
     ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
     ("gpt-5.1-codex-max", "GPT-5.1 Codex Max"),
-    ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.2", "GPT-5.2"),
 ];
 
 /// Default Codex model to use
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 
 #[cfg(test)]
 mod tests {

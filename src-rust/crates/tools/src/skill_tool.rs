@@ -147,9 +147,7 @@ impl Tool for SkillTool {
 
 fn skill_search_dirs(ctx: &ToolContext) -> Vec<PathBuf> {
     let mut dirs = vec![ctx.working_dir.join(".coven-code").join("commands")];
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".coven-code").join("commands"));
-    }
+    dirs.push(claurst_core::config::config_home().join("commands"));
     dirs
 }
 

@@ -137,9 +137,7 @@ static STATE: once_cell::sync::Lazy<Mutex<HistoryState>> =
 // ---------------------------------------------------------------------------
 
 fn claude_home() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coven-code")
+    crate::config::config_home()
 }
 
 fn history_path() -> PathBuf {
@@ -702,6 +700,17 @@ pub fn format_pasted_text_ref(id: u32, num_lines: usize) -> String {
 /// Format an image reference placeholder.
 pub fn format_image_ref(id: u32) -> String {
     format!("[Image #{}]", id)
+}
+
+// ---------------------------------------------------------------------------
+// Test accessors
+// ---------------------------------------------------------------------------
+
+/// Expose the history base path for cross-module consolidation tests
+/// (Phase 4.1).
+#[cfg(test)]
+pub(crate) fn history_base_path_for_test() -> std::path::PathBuf {
+    claude_home()
 }
 
 // ---------------------------------------------------------------------------

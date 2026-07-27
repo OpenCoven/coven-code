@@ -171,10 +171,10 @@ impl SystemPromptPrefix {
     pub fn attribution_text(self) -> &'static str {
         match self {
             Self::Cli | Self::Remote => {
-                "You are Coven Code, an open-source agentic coding assistant by OpenCoven (based on Claurst/GPL-3.0)."
+                "You are Coven, an open-source agentic coding assistant by OpenCoven (based on Claurst/GPL-3.0)."
             }
             Self::SdkPreset => {
-                "You are Coven Code, an open-source agentic coding assistant by OpenCoven, \
+                "You are Coven, an open-source agentic coding assistant by OpenCoven, \
                 running within the agent SDK."
             }
             Self::Sdk => {
@@ -566,7 +566,7 @@ mod tests {
     fn test_default_prompt_contains_attribution() {
         let prompt = build_system_prompt(&default_opts());
         assert!(
-            prompt.contains("Coven Code"),
+            prompt.contains("Coven"),
             "Default prompt must contain attribution"
         );
     }

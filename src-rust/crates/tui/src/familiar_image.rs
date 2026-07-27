@@ -32,7 +32,11 @@ pub fn familiar_image_path(familiar_id: &str) -> Option<std::path::PathBuf> {
     let extensions = ["png", "jpg", "jpeg", "webp"];
     let search_dirs: Vec<std::path::PathBuf> = [
         dirs::home_dir().map(|h| h.join(".coven").join("assets").join("familiars")),
-        dirs::home_dir().map(|h| h.join(".coven-code").join("assets").join("familiars")),
+        Some(
+            claurst_core::config::config_home()
+                .join("assets")
+                .join("familiars"),
+        ),
     ]
     .into_iter()
     .flatten()

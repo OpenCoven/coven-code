@@ -14,7 +14,6 @@ set -euo pipefail
 
 APP=coven-code
 ALIAS=coven-cave
-SHORT=coven
 REPO=OpenCoven/coven-code
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -64,6 +63,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+print_message info "Tip: the unified Coven CLI installs and manages this engine for you — 'npm install -g @opencoven/cli', then run 'coven'. This standalone installer still works."
+
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -101,8 +102,12 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${specific_version}/
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
-  cp "$local_binary" "${INSTALL_DIR}/${APP}"
-  chmod +x "${INSTALL_DIR}/${APP}"
+  # Stage then mv: overwriting an existing binary in place reuses its inode,
+  # and macOS caches signature validation per inode — the upgraded binary
+  # would be SIGKILLed (Code Signature Invalid) on launch.
+  cp "$local_binary" "${INSTALL_DIR}/${APP}.new"
+  chmod +x "${INSTALL_DIR}/${APP}.new"
+  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
 else
   tmp_dir=$(mktemp -d -t coven-code-install-XXXXXX)
   trap 'rm -rf "$tmp_dir"' EXIT
@@ -110,14 +115,18 @@ else
   print_message info "Downloading ${ARCHIVE_NAME}..."
   curl -fsSL --progress-bar "$DOWNLOAD_URL" -o "${tmp_dir}/${ARCHIVE_NAME}"
   tar -xzf "${tmp_dir}/${ARCHIVE_NAME}" -C "$tmp_dir"
-  cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}"
-  chmod +x "${INSTALL_DIR}/${APP}"
+  cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}.new"
+  chmod +x "${INSTALL_DIR}/${APP}.new"
+  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
 fi
 
 ln -sf "${APP}" "${INSTALL_DIR}/${ALIAS}" || cp "${INSTALL_DIR}/${APP}" "${INSTALL_DIR}/${ALIAS}"
 chmod +x "${INSTALL_DIR}/${ALIAS}"
-ln -sf "${APP}" "${INSTALL_DIR}/${SHORT}" || cp "${INSTALL_DIR}/${APP}" "${INSTALL_DIR}/${SHORT}"
-chmod +x "${INSTALL_DIR}/${SHORT}"
+# Remove any `coven` symlink left by older installers — that name belongs to
+# the Coven daemon CLI (@opencoven/cli).
+if [[ -L "${INSTALL_DIR}/coven" ]]; then
+  rm -f "${INSTALL_DIR}/coven"
+fi
 
 # PATH setup
 shell_rc=""
@@ -135,11 +144,10 @@ if [[ -n "$shell_rc" ]] && ! grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; th
 fi
 
 print_message success "${APP} v${specific_version} installed to ${INSTALL_DIR}/${APP}"
-print_message success "${SHORT} + ${ALIAS} aliases installed to ${INSTALL_DIR}"
+print_message success "${ALIAS} alias installed to ${INSTALL_DIR}"
 echo ""
-echo -e "  ${GREEN}${SHORT}${NC}                   ${MUTED}# Interactive TUI (short command)${NC}"
-echo -e "  ${GREEN}${APP}${NC}              ${MUTED}# Same thing, full name${NC}"
+echo -e "  ${GREEN}${APP}${NC}              ${MUTED}# Interactive TUI${NC}"
 echo -e "  ${GREEN}${ALIAS}${NC}              ${MUTED}# Alias for ${APP}${NC}"
-echo -e "  ${GREEN}${SHORT} -p \"...\"${NC}            ${MUTED}# Headless one-shot${NC}"
+echo -e "  ${GREEN}${APP} -p \"...\"${NC}       ${MUTED}# Headless one-shot${NC}"
 echo ""
 echo -e "  ${MUTED}Restart your shell or run: source ${shell_rc:-~/.bashrc}${NC}"

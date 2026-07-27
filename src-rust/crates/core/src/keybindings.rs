@@ -212,6 +212,7 @@ pub const NON_REBINDABLE: &[&str] = &["ctrl+c", "ctrl+d", "ctrl+m"];
 /// - **Ctrl+K**: Open the command palette
 /// - **Ctrl+U**: Kill input from cursor to start of line (Emacs-style)
 /// - **Alt+←/Alt+→**: Navigate to previous/next message in transcript
+/// - **→ (Right)**: Accept typeahead suggestion when the cursor is at the end of the input
 /// - **Ctrl+. (Ctrl+>)**: Jump to next error/issue in messages
 /// - **Ctrl+Shift+.**: Jump to previous error/issue
 /// - **Shift+Tab**: Reverse indent/unindent in input (cycle permission mode)
@@ -255,6 +256,9 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         // Word navigation
         ("ctrl+left", "moveWordBackward", KeyContext::Chat),
         ("ctrl+right", "moveWordForward", KeyContext::Chat),
+        // Cursor movement / typeahead acceptance (fish-style: right arrow at
+        // the end of the input accepts the current suggestion)
+        ("right", "moveRight", KeyContext::Chat),
         // Word deletion
         ("ctrl+w", "killWord", KeyContext::Chat),
         ("alt+backspace", "killWord", KeyContext::Chat),
@@ -994,6 +998,28 @@ mod tests {
                 assert_eq!(action, "goLineStart", "CMD+Left should map to goLineStart");
             }
             other => panic!("Expected Action(\"goLineStart\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_right_resolves_to_move_right_in_chat() {
+        let user = UserKeybindings::default();
+        let mut resolver = KeybindingResolver::new(&user);
+
+        let keystroke = ParsedKeystroke {
+            key: "right".to_string(),
+            ctrl: false,
+            alt: false,
+            shift: false,
+            meta: false,
+        };
+
+        let result = resolver.process(keystroke, &KeyContext::Chat);
+        match result {
+            KeybindingResult::Action(action) => {
+                assert_eq!(action, "moveRight", "Right should map to moveRight");
+            }
+            other => panic!("Expected Action(\"moveRight\"), got {:?}", other),
         }
     }
 }

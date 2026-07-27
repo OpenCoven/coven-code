@@ -11,14 +11,14 @@ This document is the reference for the visible slash commands available in Coven
 3. [Model & Provider](#model--provider) — `/model`, `/providers`, `/connect`, `/thinking`, `/effort`
 4. [Configuration & Settings](#configuration--settings) — `/config`, `/permissions`, `/hooks`, `/mcp`
 5. [Code & Git](#code--git) — `/commit`, `/diff`, `/review`, `/init`, `/search`
-6. [Search & Files](#search--files)
+6. [Search & Files](#search--files) — `/link`, `/attach`
 7. [Memory & Context](#memory--context) — `/memory`, `/usage`, `/status`
 8. [Agents & Tasks](#agents--tasks) — `/familiar`, `/tasks`, `/coven goal`
 9. [Planning & Review](#planning--review) — `/plan`, `ultraplan` (CLI)
-10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/plugin`, `/chrome`
+10. [MCP & Integrations](#mcp--integrations) — `/mcp`, `/skills`, `/learn`, `/plugin`, `/chrome`
 11. [Authentication](#authentication) — `/login`, `/logout`
 12. [Display & Terminal](#display--terminal) — `/incant`, `/config color`
-13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/update`, `/status doctor`
+13. [Diagnostics & Info](#diagnostics--info) — `/version`, `/release-notes`, `/update`, `/status doctor`
 14. [Export & Sharing](#export--sharing) — `/export`
 15. [Advanced & Internal](#advanced--internal) — `/whisper`, `/sandbox`
 16. [Coven Substrate](#coven-substrate) — `/coven`, `/handoff`
@@ -141,7 +141,7 @@ Single entry point for going back in time. Without arguments, opens an interacti
 /rewind <uuid>     — revert the turn whose message id starts with <uuid>
 ```
 
-`/undo` and `/revert` remain hidden compatibility aliases for one release.
+The former `/undo` and `/revert` names no longer resolve; their functionality lives on as the argument forms above.
 
 ---
 
@@ -533,6 +533,51 @@ Analyze context window usage. Shows a breakdown of tokens consumed by system pro
 
 ---
 
+### /link
+
+Save and manage links in the structured stash. Links are stored in `~/.coven-code/stash.sqlite` with title, note, tags, project, and session metadata.
+
+```
+/link <url> [--title ...] [--note ...] [--tags a,b]   — save a link
+/link add <url> [flags]                               — same as above
+/link list [--tag <tag>] [--project]                  — list saved links
+/link search <term>                                   — search links
+/link remove <id>                                     — delete a link
+```
+
+`/link list` shows each entry's short id, save date, title, URL, and tags. `--project` limits the listing to links saved from the current repository. The stash is a personal local store and is disabled in [hosted review mode](./configuration.md#hosted-review-mode).
+
+```
+/link https://docs.rs/tokio --title Tokio docs --tags rust,async
+/link list --tag rust
+/link remove 1a2b3c4d
+```
+
+---
+
+### /attach
+
+Save and manage file attachments in the structured stash. Files are copied into `~/.coven-code/attachments/<id>/`, so the stored copy survives even if the original file moves or is deleted. Metadata lives in `~/.coven-code/stash.sqlite` alongside saved links.
+
+```
+/attach <path> [--title ...] [--note ...] [--tags a,b]  — save a file
+/attach add <path> [flags]                              — same as above
+/attach list [--tag <tag>] [--project]                  — list attachments
+/attach search <term>                                   — search attachments
+/attach show <id>                                       — show stored/original paths
+/attach remove <id>                                     — delete an attachment and its stored copy
+```
+
+Relative paths resolve against the current working directory; `~` expands to the home directory. Paths and flag values containing spaces can be quoted (`/attach "My File.pdf" --title "API spec"`); unquoted attach paths with spaces also work as long as no flags follow mid-path. Like `/link`, the stash is disabled in hosted review mode.
+
+```
+/attach ./design/spec.pdf --title API spec --tags design
+/attach list --tag design
+/attach show 1a2b3c4d
+```
+
+---
+
 ## Memory & Context
 
 ### /memory
@@ -740,6 +785,21 @@ List and manage skills. Skills are bundled prompt-commands that extend Coven Cod
 
 ---
 
+### /learn
+**Aliases:** `scribe`
+
+Codify a script or workflow you just built into a reusable skill. Summons Hermes — the coven's scribe — to look back over the session, pin down the exact entrypoint (command, path, arguments), and author a `.coven-code/skills/<name>/SKILL.md` that future sessions can invoke as `/<name>` or via the Skill tool.
+
+```
+/learn                               — infer the target from this conversation
+/learn deploy-staging                — suggest the skill name explicitly
+/learn deploy scripts/deploy.sh      — name plus the exact script to wrap
+```
+
+Hermes only authors the skill — it does not re-run the wrapped script. Manage the result (toggle it, inspect its token cost) with [`/skills`](#skills).
+
+---
+
 ### /plugin
 **Aliases:** `plugins`
 
@@ -844,6 +904,24 @@ Codex:
 
 ---
 
+### /accounts
+
+List every stored account across providers (same listing as `/login switch`
+with no arguments). When several Anthropic profiles point at the same
+underlying account — the usual cause is importing the same Claude Code
+credential more than once — the listing flags the duplicates.
+
+```
+/accounts          — list stored accounts, flagging duplicates
+/accounts dedupe   — collapse duplicate profiles, keeping the active/freshest
+```
+
+Duplicate profiles all bill the same subscription, so switching between them
+never escapes a rate limit. The rate-limit recovery dialog offers the same
+cleanup with a single key when it detects this situation.
+
+---
+
 ### /login refresh
 
 Refresh the provider authentication state. Forces a token refresh without full re-authentication. Useful when a session token has expired mid-session. Replaces the former `/refresh` command.
@@ -923,6 +1001,19 @@ Display the current Coven Code version string and build metadata.
 ```
 /version
 /v
+```
+
+---
+
+### /release-notes
+**Aliases:** `whats-new`, `changelog`
+
+Show the "What's new" highlights for the current Coven Code release — the same list the welcome panel previews (truncated), in full. Useful for catching up on new commands and features without leaving the session.
+
+```
+/release-notes
+/whats-new
+/changelog
 ```
 
 ---
@@ -1177,6 +1268,7 @@ are CLI-only.
 | `pr-comments` | Get comments from a GitHub PR. |
 | `ultraplan` | Launch the Ultraplan agentic code planner with extended thinking. |
 | `stats` | Aggregate token / cost / tool stats across saved sessions (in the TUI, `/usage stats` opens the stats dialog). |
+| `memory` | Operator controls for hosted/local memory lifecycle: list, expire, redact, delete, and export the tombstone audit ledger. |
 
 ---
 

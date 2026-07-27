@@ -7,6 +7,11 @@ on:
         description: 'Version tag (e.g., v0.1.0)'
         required: true
         type: string
+      publish_npm:
+        description: 'Also publish @opencoven/coven-code to npm. The package is deprecated (engine ships as a GitHub Release binary) — leave false unless intentionally re-publishing.'
+        required: false
+        type: boolean
+        default: false
 
 # Only one release at a time — prevent races on the same tag.
 concurrency:
@@ -393,6 +398,7 @@ jobs:
       # deterministic — the workflow_run trigger stays as a manual-release
       # fallback.
       - name: Dispatch npm-publish.yml
+        if: ${{ inputs.publish_npm }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

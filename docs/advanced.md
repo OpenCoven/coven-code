@@ -414,6 +414,35 @@ These flags are intended for automated use where runaway sessions would be costl
 
 ---
 
+## Rate-limit recovery
+
+When a provider returns HTTP 429 mid-session, Coven Code opens an interactive
+recovery dialog instead of a dead-end error. The failed turn's conversation is
+preserved — retrying re-dispatches it as-is, with nothing to retype and no
+duplicated messages.
+
+The dialog offers:
+
+- **Auto-retry countdown** — when the provider supplies a `Retry-After` delay
+  of 15 minutes or less, the session retries automatically when it elapses
+  (up to 3 automatic attempts per episode; the budget refreshes after any
+  successful turn). Longer waits only offer manual actions.
+- **`r` / `Enter`** — retry immediately.
+- **`s` / `h`** — switch to Sonnet or Haiku and retry at once. Anthropic
+  Max limits are model-tier scoped, so a lower tier usually still works.
+  Offered only when the active provider is Anthropic — switching a Codex
+  session to an Anthropic model would persist a broken provider config.
+- **`d`** — clean duplicate account profiles. If multiple stored profiles
+  point at the same underlying account (repeated Claude Code credential
+  imports), switching between them cannot escape the limit; this collapses
+  them to one (same as `/accounts dedupe`).
+- **`Esc`** — dismiss. The prompt is immediately usable; nothing is lost.
+
+Short waits (20 seconds or less) are absorbed silently by the client's
+built-in retry with backoff and never surface the dialog.
+
+---
+
 ## The Buddy companion system
 
 Every Coven Code user gets a persistent companion derived deterministically from their user ID. The companion appears as a small sprite in the terminal UI and occasionally comments on activity.
@@ -542,6 +571,9 @@ policy settings such as `hostedReview.allowManagedRules`,
 `hostedReview.allowWriteTools`, `hostedReview.allowMcpServers`, and
 `hostedReview.allowPlugins` can opt specific surfaces back in for controlled
 deployments. Prefer tenant-approved managed rules over `allowUserMemory`.
+Automated GitHub repair should use the dedicated `--hosted-repair` headless
+flag, which exposes only repository file tools and never shell, web, plugin,
+MCP, task, or sub-agent tools.
 
 Session memory extraction is also approval-gated in hosted review mode.
 Untrusted fork or contributor sessions cannot automatically append learned
@@ -556,6 +588,36 @@ Direct hosted auto-persistence requires an explicit trusted policy:
 `hostedReview.allowAutoMemoryPersistence` must be true and
 `hostedReview.memorySourceTrust` must meet or exceed
 `hostedReview.memoryTrustThreshold`.
+
+Additional hosted invariants:
+
+- Every hosted scope component (tenant, installation, repo id, canonical repo
+  identity) is validated non-empty before any hosted namespace, transcript
+  path, or team-sync key is derived; an empty component fails closed instead
+  of collapsing isolation.
+- Hosted loads floor the trust of memory entries that carry no `source`
+  provenance, so an unattributed entry cannot self-attest a trusted level.
+  Durable auto-extracted entries record their session/source provenance next
+  to the trust label.
+- Memory deletion and redaction write frontmatter tombstones
+  (`deleted_at`/`redacted_at`) that propagate through team-memory sync: a
+  remote tombstone always applies over local content, a local tombstone is
+  never resurrected by a pull, and a file deleted locally after a sync is not
+  silently re-created.
+- `coven-code memory` exposes operator controls for hosted memory lifecycle
+  administration: list entries by directory or hosted tenant/repo/domain,
+  expire entries, redact/delete by id or path, delete hosted scopes, and export
+  a tombstone-only audit ledger. The ledger includes timestamps and reason
+  stubs but not original redacted or deleted content.
+- A key with an unresolved team-memory pull conflict is blocked from further
+  sync until the persisted conflict record under `.conflicts/` is resolved.
+- `/review` injects the ids and trust labels of every loaded memory entry into
+  the review prompt and validates the returned review's memory citations
+  against that set; unknown citations and memory-dependent findings without
+  `memory_refs` are surfaced as warnings.
+- Headless review results carry a `review.memory` report listing the loaded
+  memory domains and entries (id, effective trust, visibility, scope) — see
+  the [headless contract](headless-contract).
 
 ---
 

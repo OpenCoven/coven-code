@@ -52,6 +52,14 @@ use tracing::debug;
 /// `prompt_slash_commands_covers_registry` test in `claurst-commands`
 /// enforces that.
 pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
+    (
+        "accounts",
+        "List stored accounts; `dedupe` collapses duplicate profiles",
+    ),
+    (
+        "attach",
+        "Save and manage file attachments in the structured stash",
+    ),
     ("chrome", "Browser automation via Chrome DevTools Protocol"),
     ("clear", "Clear the conversation transcript"),
     (
@@ -73,7 +81,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "effort",
         "Set effort level (low/normal/high) or toggle fast mode",
     ),
-    ("exit", "Quit Coven Code"),
+    ("exit", "Quit Coven"),
     ("export", "Export, copy, or share the conversation"),
     (
         "familiar",
@@ -95,8 +103,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "learn",
         "Codify the script/workflow we just built into a reusable skill",
     ),
+    ("link", "Save and manage links in the structured stash"),
     ("login", "Log in, switch accounts, or refresh provider auth"),
-    ("logout", "Log out of Coven Code"),
+    ("logout", "Log out of Coven"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
@@ -107,7 +116,7 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Manage plugins (list/info/enable/disable/install/reload)",
     ),
     ("providers", "List available AI providers and their status"),
-    ("quit", "Exit Coven Code"),
+    ("quit", "Exit Coven"),
     ("resume", "Resume a previous session"),
     (
         "review",
@@ -148,9 +157,9 @@ pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
         "update",
         "Check for updates and upgrade to the latest version",
     ),
-    ("release-notes", "Show recent Coven Code highlights"),
+    ("release-notes", "Show recent Coven highlights"),
     ("usage", "Detailed per-call token usage breakdown"),
-    ("version", "Display the current Coven Code version"),
+    ("version", "Display the current Coven version"),
     (
         "whisper",
         "Whisper a side question to your familiar (not kept in history)",
@@ -266,6 +275,7 @@ pub(crate) mod test_env {
         old_anthropic_config_dir: Option<String>,
         old_anthropic_api_key: Option<String>,
         old_oauth_client_id: Option<String>,
+        old_claude_bin: Option<String>,
         old_user: Option<String>,
         old_username: Option<String>,
         _lock: MutexGuard<'static, ()>,
@@ -284,6 +294,8 @@ pub(crate) mod test_env {
                 old_anthropic_config_dir: std::env::var("ANTHROPIC_CONFIG_DIR").ok(),
                 old_anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
                 old_oauth_client_id: std::env::var(claurst_core::oauth::CLIENT_ID_ENV).ok(),
+                old_claude_bin: std::env::var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV)
+                    .ok(),
                 old_user: std::env::var("USER").ok(),
                 old_username: std::env::var("USERNAME").ok(),
                 _lock: lock,
@@ -293,6 +305,7 @@ pub(crate) mod test_env {
             std::env::remove_var("ANTHROPIC_CONFIG_DIR");
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV);
+            std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV);
             match user {
                 Some(value) => std::env::set_var("USER", value),
                 None => std::env::remove_var("USER"),
@@ -325,6 +338,12 @@ pub(crate) mod test_env {
             match &self.old_oauth_client_id {
                 Some(value) => std::env::set_var(claurst_core::oauth::CLIENT_ID_ENV, value),
                 None => std::env::remove_var(claurst_core::oauth::CLIENT_ID_ENV),
+            }
+            match &self.old_claude_bin {
+                Some(value) => {
+                    std::env::set_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV, value)
+                }
+                None => std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV),
             }
             match &self.old_user {
                 Some(value) => std::env::set_var("USER", value),
@@ -389,14 +408,15 @@ fn import_config_picker_items() -> Vec<SelectItem> {
 }
 
 fn provider_picker_items() -> Vec<SelectItem> {
-    let has_cli_login = local_anthropic_cli_login_available();
+    let has_claude_cli = claurst_api::providers::claude_cli::resolve_claude_binary().is_some();
     vec![
         SelectItem {
             id: "anthropic-cli".into(),
-            title: "Claude CLI import".into(),
-            description: "Import Claude Code/ant credentials; Coven Code sends requests".into(),
+            title: "Claude CLI".into(),
+            description: "Run turns through the local claude binary; auth stays in Claude Code"
+                .into(),
             category: "Claude".into(),
-            badge: has_cli_login.then(|| "LOCAL".into()),
+            badge: has_claude_cli.then(|| "LOCAL".into()),
         },
         SelectItem {
             id: "openai-codex".into(),
@@ -406,42 +426,6 @@ fn provider_picker_items() -> Vec<SelectItem> {
             badge: None,
         },
     ]
-}
-
-fn local_anthropic_cli_login_available() -> bool {
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".claude").join(".credentials.json");
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if claurst_core::anthropic_cli_import::parse_claude_code(&text)
-                .is_some_and(|tokens| !tokens.access_token.is_empty())
-            {
-                return true;
-            }
-        }
-    }
-
-    let ant_credentials_dir = std::env::var("ANTHROPIC_CONFIG_DIR")
-        .ok()
-        .filter(|dir| !dir.trim().is_empty())
-        .map(|dir| std::path::PathBuf::from(dir).join("credentials"))
-        .or_else(|| dirs::config_dir().map(|dir| dir.join("anthropic").join("credentials")));
-
-    let Some(dir) = ant_credentials_dir else {
-        return false;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.filter_map(Result::ok).any(|entry| {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return false;
-        }
-        std::fs::read_to_string(path).ok().is_some_and(|text| {
-            claurst_core::anthropic_cli_import::parse_ant(&text)
-                .is_some_and(|tokens| !tokens.access_token.is_empty())
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -874,6 +858,9 @@ pub struct App {
     pub notifications: NotificationQueue,
     /// Scroll offset for error modal text (in lines).
     pub error_modal_scroll_offset: usize,
+    /// Interactive rate-limit recovery modal (auto-retry countdown, one-key
+    /// tier switch, duplicate-account cleanup).
+    pub rate_limit_recovery: crate::rate_limit_recovery::RateLimitRecoveryState,
     /// Plugin hint banners.
     pub plugin_hints: Vec<PluginHintBanner>,
     /// Optional session title shown in the status bar.
@@ -969,9 +956,6 @@ pub struct App {
     pub device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState,
     /// When set, the main loop should spawn the async auth task for this provider.
     pub device_auth_pending: Option<String>,
-    /// When true, the main loop should import Anthropic OAuth credentials from a
-    /// local CLI (Claude Code / `ant`) and, on success, activate Anthropic.
-    pub pending_anthropic_cli_import: bool,
     /// When true, the main loop should rebuild the provider runtime from disk
     /// (same as `/refresh`) so newly-established credentials take effect live.
     pub pending_provider_refresh: bool,
@@ -1417,6 +1401,7 @@ impl App {
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
             error_modal_scroll_offset: 0,
+            rate_limit_recovery: crate::rate_limit_recovery::RateLimitRecoveryState::default(),
             plugin_hints: Vec::new(),
             session_title: None,
             remote_session_url: None,
@@ -1462,7 +1447,6 @@ impl App {
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
             device_auth_dialog: crate::device_auth_dialog::DeviceAuthDialogState::new(),
             device_auth_pending: None,
-            pending_anthropic_cli_import: false,
             pending_provider_refresh: false,
             provider_registry: None,
             model_registry: {
@@ -1768,7 +1752,8 @@ impl App {
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
                 self.context_used_tokens = 0;
-                self.has_credentials = self.config.resolve_api_key().is_some();
+                self.has_credentials = self.config.resolve_api_key().is_some()
+                    || claurst_api::providers::claude_cli::resolve_claude_binary().is_some();
                 self.auth_store = claurst_core::AuthStore::load();
                 self.plan_mode = matches!(
                     self.config.permission_mode,
@@ -1909,6 +1894,11 @@ impl App {
     }
 
     fn open_model_picker_for_provider(&mut self, provider_id: &str, title: Option<String>) {
+        // The device-auth flow and older persisted configs use the
+        // "openai-codex" alias; the provider registry and model catalog
+        // register it as "codex". Canonicalize so the picker seed, the
+        // async fetch, and the current-model prefix all agree.
+        let provider_id = claurst_api::registry::canonical_provider_id(provider_id);
         self.dismiss_error_notifications();
 
         let cache_path = dirs::cache_dir()
@@ -1956,6 +1946,9 @@ impl App {
         provider_name: String,
         status_prefix: &str,
     ) {
+        // Persist the canonical id ("codex", not the "openai-codex" alias)
+        // so later /model opens resolve the provider in the registry.
+        let provider_id = claurst_api::registry::canonical_provider_id(&provider_id).to_string();
         let picker_title = provider_name.clone();
         self.fast_mode = false;
         self.set_provider_default(provider_id.clone());
@@ -1980,8 +1973,17 @@ impl App {
                 self.device_auth_pending = Some("anthropic-oauth".to_string());
             }
             "anthropic-cli" => {
-                self.pending_anthropic_cli_import = true;
-                self.status_message = Some("Importing Claude credentials from local CLI...".into());
+                if claurst_api::providers::claude_cli::resolve_claude_binary().is_none() {
+                    self.status_message = Some(
+                        "claude CLI not found — npm install -g @anthropic-ai/claude-code, then run `claude` to sign in".into(),
+                    );
+                    return;
+                }
+                self.activate_provider(
+                    "anthropic".to_string(),
+                    "Claude CLI".to_string(),
+                    "Connected to",
+                );
             }
             "codex" | "openai-codex" => {
                 self.device_auth_dialog
@@ -2483,7 +2485,7 @@ impl App {
                     PermissionMode::Default
                 };
                 self.status_message = Some(if self.plan_mode {
-                    "Plan mode ON — Coven Code will plan before acting.".to_string()
+                    "Plan mode ON — Coven will plan before acting.".to_string()
                 } else {
                     "Plan mode OFF.".to_string()
                 });
@@ -2664,6 +2666,7 @@ impl App {
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
         self.permission_request.is_some()
+            || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
             || self.help_overlay.visible
@@ -2983,6 +2986,56 @@ impl App {
             self.error_modal_scroll_offset = 0;
         }
         self.notifications.push(kind, msg, duration_secs);
+    }
+
+    // -------------------------------------------------------------------
+    // Rate-limit recovery
+    // -------------------------------------------------------------------
+
+    /// Open the interactive rate-limit recovery modal for a structured 429.
+    pub fn open_rate_limit_recovery(&mut self, message: String, retry_after_secs: Option<u64>) {
+        let is_anthropic = self.config.provider.as_deref().unwrap_or("anthropic") == "anthropic";
+        let model = self.model_name.clone();
+        self.rate_limit_recovery
+            .open(message, model, retry_after_secs, is_anthropic);
+    }
+
+    /// Handle a key press while the recovery modal is open.
+    fn handle_rate_limit_recovery_key(&mut self, key: KeyEvent) {
+        use crate::rate_limit_recovery::{HAIKU_MODEL, SONNET_MODEL};
+        match key.code {
+            KeyCode::Esc => {
+                self.rate_limit_recovery.dismiss();
+                self.status_message =
+                    Some("Recovery dismissed — prompt is yours. Retry any time.".to_string());
+            }
+            KeyCode::Char('r') | KeyCode::Enter => {
+                self.rate_limit_recovery.request_retry(None);
+                self.status_message = Some("Retrying…".to_string());
+            }
+            KeyCode::Char('s')
+                if self.rate_limit_recovery.tier_switch_available
+                    && !self.rate_limit_recovery.model.contains("sonnet")
+                    && !self.rate_limit_recovery.model.contains("haiku") =>
+            {
+                self.set_model(SONNET_MODEL.to_string());
+                self.persist_provider_and_model();
+                self.rate_limit_recovery
+                    .request_retry(Some(SONNET_MODEL.to_string()));
+                self.status_message = Some(format!("Retrying on {}…", SONNET_MODEL));
+            }
+            KeyCode::Char('h')
+                if self.rate_limit_recovery.tier_switch_available
+                    && !self.rate_limit_recovery.model.contains("haiku") =>
+            {
+                self.set_model(HAIKU_MODEL.to_string());
+                self.persist_provider_and_model();
+                self.rate_limit_recovery
+                    .request_retry(Some(HAIKU_MODEL.to_string()));
+                self.status_message = Some(format!("Retrying on {}…", HAIKU_MODEL));
+            }
+            _ => {}
+        }
     }
 
     /// Surface a completion signal for a long-running background bash task
@@ -3370,6 +3423,12 @@ impl App {
         // Permission requests render above other overlays, so they own input.
         if self.permission_request.is_some() {
             self.handle_permission_key(key);
+            return false;
+        }
+
+        // Rate-limit recovery modal owns input while visible.
+        if self.rate_limit_recovery.visible {
+            self.handle_rate_limit_recovery_key(key);
             return false;
         }
 
@@ -5418,6 +5477,26 @@ impl App {
                 }
                 false
             }
+            "moveRight" => {
+                // Right arrow: accept the typeahead suggestion when the
+                // cursor sits at the end of the input (fish-style);
+                // otherwise move the cursor. Acceptance works while
+                // streaming so the popup stays interactive when a turn is
+                // in flight — Enter then queues the completed command.
+                if !self.prompt_input.suggestions.is_empty()
+                    && self.prompt_input.cursor == self.prompt_input.text.len()
+                {
+                    if self.prompt_input.suggestion_index.is_none() {
+                        self.prompt_input.suggestion_index = Some(0);
+                    }
+                    self.prompt_input.accept_suggestion();
+                    self.refresh_prompt_input();
+                } else {
+                    self.prompt_input.move_right();
+                    self.sync_legacy_prompt_fields();
+                }
+                false
+            }
             "killToStart" => {
                 if !self.is_streaming {
                     self.prompt_input.kill_line_backward();
@@ -5593,19 +5672,19 @@ impl App {
                 false
             }
             "indent" => {
-                // Tab: cycle agent mode when prompt is empty, accept
-                // slash-command suggestion otherwise.
-                if !self.is_streaming {
-                    if !self.prompt_input.suggestions.is_empty() {
-                        if self.prompt_input.suggestion_index.is_none() {
-                            self.prompt_input.suggestion_index = Some(0);
-                        }
-                        self.prompt_input.accept_suggestion();
-                        self.refresh_prompt_input();
-                    } else if self.prompt_input.is_empty() {
-                        self.cycle_agent_mode();
-                        self.companion_look_down();
+                // Tab: accept the typeahead suggestion, or cycle agent mode
+                // when the prompt is empty. Acceptance is allowed while
+                // streaming so the popup stays interactive when a turn is
+                // in flight — Enter then queues the completed command.
+                if !self.prompt_input.suggestions.is_empty() {
+                    if self.prompt_input.suggestion_index.is_none() {
+                        self.prompt_input.suggestion_index = Some(0);
                     }
+                    self.prompt_input.accept_suggestion();
+                    self.refresh_prompt_input();
+                } else if !self.is_streaming && self.prompt_input.is_empty() {
+                    self.cycle_agent_mode();
+                    self.companion_look_down();
                 }
                 false
             }
@@ -7900,18 +7979,23 @@ role = "Research"
     }
 
     #[test]
-    fn provider_picker_prioritizes_import_when_claude_credentials_exist() {
+    fn provider_picker_marks_claude_cli_local_when_binary_exists() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
-        std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+        let claude_bin = temp.path().join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        std::fs::create_dir_all(&home).expect("home");
         std::fs::create_dir_all(&coven_home).expect("coven home");
-        std::fs::write(
-            home.join(".claude").join(".credentials.json"),
-            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-test"}}"#,
-        )
-        .expect("credentials");
+        std::fs::write(&claude_bin, "").expect("claude binary");
         let _guard = EnvGuard::set(&home, &coven_home);
+        std::env::set_var(
+            claurst_api::providers::claude_cli::CLAUDE_BIN_ENV,
+            &claude_bin,
+        );
 
         let items = provider_picker_items();
 
@@ -7947,7 +8031,89 @@ role = "Research"
     }
 
     #[test]
-    fn provider_setup_one_starts_claude_cli_import() {
+    fn provider_setup_one_activates_claude_cli_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&coven_home).expect("coven home");
+        let _guard = EnvGuard::set(&home, &coven_home);
+        // Force claude-binary discovery so the test is deterministic on
+        // machines without the CLI installed.
+        let fake_claude = temp.path().join("claude");
+        std::fs::write(&fake_claude, "").expect("fake claude");
+        std::env::set_var(
+            claurst_api::providers::claude_cli::CLAUDE_BIN_ENV,
+            &fake_claude,
+        );
+
+        let mut app = make_app();
+        app.has_credentials = false;
+        app.onboarding_dialog.show_provider_setup();
+
+        app.handle_key_event(press_key(KeyCode::Char('1'), KeyModifiers::empty()));
+
+        std::env::remove_var(claurst_api::providers::claude_cli::CLAUDE_BIN_ENV);
+
+        assert!(!app.onboarding_dialog.visible);
+        assert!(!app.connect_dialog.visible);
+        assert!(!app.key_input_dialog.visible);
+        assert!(app.has_credentials);
+    }
+
+    #[test]
+    fn right_arrow_at_end_accepts_typeahead_suggestion() {
+        let mut app = make_app();
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+        assert!(
+            !app.prompt_input.suggestions.is_empty(),
+            "typing /mode must surface the /model suggestion"
+        );
+
+        app.handle_keybinding_action("moveRight");
+
+        assert_eq!(app.prompt_input.text, "/model");
+        assert_eq!(app.prompt_input.cursor, app.prompt_input.text.len());
+    }
+
+    #[test]
+    fn right_arrow_mid_text_moves_cursor_without_accepting() {
+        let mut app = make_app();
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = 1;
+        app.refresh_prompt_input();
+        assert!(!app.prompt_input.suggestions.is_empty());
+
+        app.handle_keybinding_action("moveRight");
+
+        assert_eq!(
+            app.prompt_input.text, "/mode",
+            "right arrow mid-text must move the cursor, not accept"
+        );
+        assert_eq!(app.prompt_input.cursor, 2);
+    }
+
+    #[test]
+    fn tab_accepts_typeahead_suggestion_while_streaming() {
+        let mut app = make_app();
+        app.is_streaming = true;
+        app.prompt_input.text = "/mode".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+        assert!(!app.prompt_input.suggestions.is_empty());
+
+        app.handle_keybinding_action("indent");
+
+        assert_eq!(
+            app.prompt_input.text, "/model",
+            "Tab must accept the suggestion even while a turn is streaming"
+        );
+    }
+
+    #[test]
+    fn model_picker_accepts_openai_codex_alias() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let coven_home = temp.path().join("coven");
@@ -7956,15 +8122,20 @@ role = "Research"
         let _guard = EnvGuard::set(&home, &coven_home);
 
         let mut app = make_app();
-        app.has_credentials = false;
-        app.onboarding_dialog.show_provider_setup();
+        app.open_model_picker_for_provider("openai-codex", None);
 
-        app.handle_key_event(press_key(KeyCode::Char('1'), KeyModifiers::empty()));
-
-        assert!(!app.onboarding_dialog.visible);
-        assert!(!app.connect_dialog.visible);
-        assert!(!app.key_input_dialog.visible);
-        assert!(app.pending_anthropic_cli_import);
+        assert_eq!(
+            app.model_picker_provider_id.as_deref(),
+            Some("codex"),
+            "picker provider id must be canonicalized"
+        );
+        assert!(
+            app.model_picker
+                .models
+                .iter()
+                .any(|m| m.id == "gpt-5.6-sol"),
+            "alias-opened picker must show the curated Codex models"
+        );
     }
 
     #[test]

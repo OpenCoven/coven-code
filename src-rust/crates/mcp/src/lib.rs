@@ -1636,6 +1636,9 @@ mod tests {
 
     #[test]
     fn test_auth_state_uses_token_expiry_datetime() {
+        // Isolate the token store to a temp home so this never reads or writes
+        // the developer's real `~/.coven-code/mcp-tokens/`.
+        let _home = crate::oauth::test_support::TokenHomeGuard::new();
         let mut mgr = McpManager::new();
         mgr.server_configs.insert(
             "remote".to_string(),

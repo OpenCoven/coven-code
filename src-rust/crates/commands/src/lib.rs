@@ -8,8 +8,10 @@ use async_trait::async_trait;
 use claurst_core::config::{Config, Settings, Theme};
 use claurst_core::cost::CostTracker;
 use claurst_core::types::{ContentBlock, Message};
+use coven_runtime_registry::RegistryIndex;
+use coven_runtime_spec::{validate_adapter, AdapterManifest};
 use once_cell::sync::Lazy;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -273,7 +275,6 @@ pub struct IncantCommand;
 pub struct SandboxToggleCommand;
 pub struct UltrareviewCommand;
 pub struct AdvisorCommand;
-pub struct UndoCommand;
 pub struct RevertCommand;
 pub struct CheckpointsCommand;
 pub struct SnapshotDiffCommand;
@@ -282,6 +283,8 @@ pub struct ConnectCommand;
 pub struct FamiliarCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
+pub struct LinkCommand;
+pub struct AttachCommand;
 pub struct ManagedAgentsCommand;
 pub struct CovenCommand;
 pub struct NamedCommandAdapter {
@@ -574,7 +577,7 @@ impl SlashCommand for HelpCommand {
             ));
         }
 
-        let mut output = String::from("Coven Code — Slash Commands\n");
+        let mut output = String::from("Coven — Slash Commands\n");
         output.push_str("════════════════════════════\n");
 
         for cat in &category_order {
@@ -740,7 +743,7 @@ impl SlashCommand for ExitCommand {
         vec!["quit", "q"]
     }
     fn description(&self) -> &str {
-        "Exit Coven Code"
+        "Exit Coven"
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -763,13 +766,13 @@ impl SlashCommand for ModelCommand {
          Without arguments, opens the model picker for the active provider.\n\n\
          With a model ID, switches to that model. Accepts a bare Claude model\n\
          name (e.g. claude-sonnet-4-6) or, for Codex, the provider-prefixed\n\
-         form codex/<model>. Coven Code dispatches to two providers: Anthropic\n\
+         form codex/<model>. Coven dispatches to two providers: Anthropic\n\
          (Claude) and Codex.\n\n\
          Examples:\n\
            /model                       — open the model picker\n\
            /model claude-sonnet-4-6     — switch to Claude Sonnet 4.6\n\
            /model claude-haiku-4-5      — switch to Claude Haiku 4.5\n\
-           /model codex/gpt-5.2-codex   — switch to Codex (requires codex login)"
+           /model codex/gpt-5.6-sol     — switch to Codex (requires codex login)"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1378,10 +1381,7 @@ impl SlashCommand for VersionCommand {
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        CommandResult::Message(format!(
-            "Coven Code v{}",
-            claurst_core::constants::APP_VERSION
-        ))
+        CommandResult::Message(format!("Coven v{}", claurst_core::constants::APP_VERSION))
     }
 }
 
@@ -1396,7 +1396,7 @@ impl SlashCommand for ReleaseNotesCommand {
         vec!["whats-new", "changelog"]
     }
     fn description(&self) -> &str {
-        "Show recent Coven Code highlights"
+        "Show recent Coven highlights"
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -1406,7 +1406,7 @@ impl SlashCommand for ReleaseNotesCommand {
             .collect::<Vec<_>>()
             .join("\n");
         CommandResult::Message(format!(
-            "What's new in Coven Code v{}\n{}\n{}",
+            "What's new in Coven v{}\n{}\n{}",
             claurst_core::constants::APP_VERSION,
             "─".repeat(40),
             body
@@ -1517,7 +1517,7 @@ impl SlashCommand for StatusCommand {
             .unwrap_or_else(|_| "n/a".to_string());
 
         CommandResult::Message(format!(
-            "Coven Code Status\n\
+            "Coven Status\n\
              ══════════════════\n\
              Auth:           {auth_status}\n\
              Model:          {model}\n\
@@ -1671,8 +1671,8 @@ impl SlashCommand for GoalCommand {
          /goal resume                   — resume a paused goal\n\
          /goal clear                    — delete the current goal\n\
          /goal complete                 — request a completion audit\n\n\
-         Goals let Coven Code work autonomously across turns toward a single\n\
-         verifiable objective. Coven Code will keep iterating until the goal is\n\
+         Goals let Coven work autonomously across turns toward a single\n\
+         verifiable objective. Coven will keep iterating until the goal is\n\
          complete, you pause it, or the 200-turn runaway guard fires.\n\n\
          Examples:\n\
          /goal Migrate the project from Express to Fastify, keeping all routes passing\n\
@@ -1738,7 +1738,7 @@ impl SlashCommand for GoalCommand {
                     return CommandResult::Error(format!("Failed to resume goal: {}", e));
                 }
                 return CommandResult::Message(
-                    "Goal resumed. Coven Code will continue on the next message.".to_string(),
+                    "Goal resumed. Coven will continue on the next message.".to_string(),
                 );
             }
             "clear" => {
@@ -1869,8 +1869,8 @@ impl SlashCommand for MemoryCommand {
     }
     fn help(&self) -> &str {
         "Usage: /memory [edit|clear] [global]\n\n\
-         Shows the content of AGENTS.md files that provide project context to Coven Code.\n\
-         Coven Code reads these files automatically at session start.\n\n\
+         Shows the content of AGENTS.md files that provide project context to Coven.\n\
+         Coven reads these files automatically at session start.\n\n\
          Subcommands:\n\
            /memory              — show all AGENTS.md files\n\
            /memory edit         — open project AGENTS.md in your editor\n\
@@ -1997,7 +1997,7 @@ impl SlashCommand for MemoryCommand {
             return match tokio::fs::write(&target, "").await {
                 Ok(_) => CommandResult::Message(format!(
                     "Cleared {} memory file at {}.\n\
-                     Coven Code will no longer see this content at session start.",
+                     Coven will no longer see this content at session start.",
                     label,
                     target.display()
                 )),
@@ -2078,7 +2078,7 @@ impl SlashCommand for BugCommand {
         vec!["bug"]
     }
     fn description(&self) -> &str {
-        "Submit feedback about Coven Code"
+        "Submit feedback about Coven"
     }
     fn help(&self) -> &str {
         "Usage: /feedback [report]"
@@ -2232,7 +2232,7 @@ impl SlashCommand for PluginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /plugin [list|info <name>|enable <name>|disable <name>|install <path>|reload]\n\
-         Manage Coven Code plugins.\n\n\
+         Manage Coven plugins.\n\n\
          Subcommands:\n\
            /plugin              — list all installed plugins\n\
            /plugin list         — list all installed plugins\n\
@@ -2488,7 +2488,7 @@ impl SlashCommand for DoctorCommand {
          - Tool permission summary\n\
          - Session lock state\n\
          - Coven Substrate (daemon health, api version, sessions, familiars)\n\
-         - Coven Code version"
+         - Coven version"
     }
 
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2496,7 +2496,7 @@ impl SlashCommand for DoctorCommand {
 
         // ── Header ─────────────────────────────────────────────────────────
         lines.push(format!(
-            "Coven Code v{}  |  {}",
+            "Coven v{}  |  {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
         ));
@@ -2906,7 +2906,7 @@ impl SlashCommand for LoginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /login [--console] [--codex] [--label <name>]\n\n\
-         Start an OAuth login. Anthropic OAuth requires a configured Coven Code\n\
+         Start an OAuth login. Anthropic OAuth requires a configured Coven\n\
          client ID via COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID; use\n\
          ANTHROPIC_API_KEY until that client is configured. Pass `--codex` to\n\
          add a ChatGPT/Codex account. `--label work` names the saved profile so\n\
@@ -3056,13 +3056,32 @@ impl SlashCommand for AccountsCommand {
         "List stored Anthropic and Codex accounts"
     }
     fn help(&self) -> &str {
-        "Usage: /accounts\n\n\
+        "Usage: /accounts [dedupe]\n\n\
          Lists every stored Anthropic and Codex account along with the\n\
          currently active one (marked with `*`). Use /switch to change\n\
-         accounts, /login to add a new one, /logout to remove one."
+         accounts, /login to add a new one, /logout to remove one.\n\n\
+         `/accounts dedupe` collapses duplicate Anthropic profiles that\n\
+         point at the same underlying account (re-imports of the same\n\
+         Claude Code credential), keeping the active/freshest one."
     }
 
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        if args.trim() == "dedupe" {
+            let mut registry = claurst_core::accounts::AccountRegistry::load();
+            return match claurst_core::accounts::dedupe_anthropic_profiles(&mut registry) {
+                Ok(summary) if summary.removed.is_empty() => CommandResult::Message(
+                    "No duplicate Anthropic profiles found — every stored profile is a distinct account.".to_string(),
+                ),
+                Ok(summary) => CommandResult::Message(format!(
+                    "Removed {} duplicate profile{}: {}\nKept: {}",
+                    summary.removed.len(),
+                    if summary.removed.len() == 1 { "" } else { "s" },
+                    summary.removed.join(", "),
+                    summary.kept.join(", ")
+                )),
+                Err(err) => CommandResult::Error(format!("Dedupe failed: {err}")),
+            };
+        }
         let registry = claurst_core::accounts::AccountRegistry::load();
         let mut out = String::new();
         for (provider, label) in [
@@ -3086,6 +3105,15 @@ impl SlashCommand for AccountsCommand {
                     .unwrap_or_default();
                 out.push_str(&format!("  {} {}{}  {}\n", marker, p.id, tier, email));
             }
+        }
+        let duplicates = claurst_core::accounts::count_duplicate_anthropic_profiles(&registry);
+        if duplicates > 0 {
+            out.push_str(&format!(
+                "\n⚠ {} Anthropic profile{} duplicate{} of another (same underlying account). Run `/accounts dedupe` to clean up.\n",
+                duplicates,
+                if duplicates == 1 { " is a" } else { "s are" },
+                if duplicates == 1 { "" } else { "s" },
+            ));
         }
         if out.is_empty() {
             out.push_str("No accounts stored. Use /login to add one.");
@@ -3415,6 +3443,73 @@ pub fn validate_structured_review_memory_refs(review: &StructuredReviewOutput) -
         .collect()
 }
 
+/// Extract `mem_...` citation tokens from free-form review text.
+pub fn extract_memory_citations(text: &str) -> Vec<String> {
+    let mut cited: Vec<String> = Vec::new();
+    for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if token.len() > "mem_".len()
+            && token.starts_with("mem_")
+            && !cited.iter().any(|existing| existing == token)
+        {
+            cited.push(token.to_string());
+        }
+    }
+    cited
+}
+
+/// Validate the memory citations in a review against the loaded entry ids.
+///
+/// Returns one warning per citation that does not correspond to a loaded
+/// memory entry, plus structured-output warnings for findings marked
+/// memory-dependent without any `memory_refs`.
+pub fn validate_review_memory_citations(review_text: &str, loaded_ids: &[String]) -> Vec<String> {
+    let mut warnings: Vec<String> = extract_memory_citations(review_text)
+        .into_iter()
+        .filter(|cited| !loaded_ids.iter().any(|id| id == cited))
+        .map(|cited| {
+            format!(
+                "review cites memory entry '{}' that was not among the loaded entries",
+                cited
+            )
+        })
+        .collect();
+    if let Some(structured) = parse_structured_review_output(review_text) {
+        warnings.extend(validate_structured_review_memory_refs(&structured));
+    }
+    warnings
+}
+
+/// Build the memory-citation prompt block for `/review`: lists every loaded
+/// memory entry with its stable id and effective trust so the model can cite
+/// them via `memory_refs`. Returns `None` when no memory entries are loaded.
+fn build_review_memory_citation_block(
+    files: &[claurst_core::claudemd::MemoryFileInfo],
+    options: &claurst_core::claudemd::MemoryLoadOptions,
+) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "Loaded memory entries (when a finding depends on one, cite it with \
+         memory_refs: [\"<id>\"] on that bullet):\n",
+    );
+    for file in files {
+        let trust = serde_json::to_value(claurst_core::claudemd::effective_memory_trust(
+            file, options,
+        ))
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+        block.push_str(&format!(
+            "- {} (trust: {}, from {})\n",
+            claurst_core::claudemd::memory_id(file),
+            trust,
+            file.path.display()
+        ));
+    }
+    Some(block)
+}
+
 #[async_trait]
 impl SlashCommand for ReviewCommand {
     fn name(&self) -> &str {
@@ -3552,6 +3647,20 @@ impl SlashCommand for ReviewCommand {
             }
         };
 
+        // Enumerate the loaded memory entries so the model can cite them and
+        // the output can be validated against what was actually loaded.
+        let memory_options = ctx.config.memory_load_options();
+        let memory_files =
+            claurst_core::claudemd::load_all_memory_files_with_options(&repo_root, &memory_options);
+        let loaded_memory_ids: Vec<String> = memory_files
+            .iter()
+            .map(claurst_core::claudemd::memory_id)
+            .collect();
+        let memory_citation_block =
+            build_review_memory_citation_block(&memory_files, &memory_options)
+                .map(|block| format!("{block}\n"))
+                .unwrap_or_default();
+
         let review_prompt = format!(
             "You are a senior software engineer performing a pull-request code review.\n\
              Provide a concise, actionable review of the following diff.\n\n\
@@ -3567,11 +3676,11 @@ impl SlashCommand for ReviewCommand {
              ## Verdict\n\
              APPROVE / REQUEST_CHANGES / COMMENT — one line with brief rationale\n\n\
              ---\n\
-             {}\n\n\
+             {}{}\n\n\
              ```diff\n\
              {}\n\
              ```",
-            file_summary, diff_for_llm
+            memory_citation_block, file_summary, diff_for_llm
         );
 
         let request = claurst_api::ProviderRequest {
@@ -3622,7 +3731,7 @@ impl SlashCommand for ReviewCommand {
                 // Determine owner/repo from git remote
                 if let Some((owner, repo)) = detect_github_owner_repo(&repo_root) {
                     let comment_body = format!(
-                        "## Coven Code Code Review\n\n{}\n\n---\n*Generated by [Coven Code](https://claude.ai/claude-code)*",
+                        "## Coven Code Review\n\n{}\n\n---\n*Generated by [Coven](https://claude.ai/claude-code)*",
                         review_text
                     );
 
@@ -3678,6 +3787,14 @@ impl SlashCommand for ReviewCommand {
         // 5. Compose and return the final output
         // ------------------------------------------------------------------
         let mut output = format!("## Code Review\n\n{}\n\n{}", file_summary, review_text);
+
+        let citation_warnings = validate_review_memory_citations(&review_text, &loaded_memory_ids);
+        if !citation_warnings.is_empty() {
+            output.push_str("\n\n### Memory citation warnings\n");
+            for warning in &citation_warnings {
+                output.push_str(&format!("- {}\n", warning));
+            }
+        }
 
         if let Some(ref note) = github_post_result {
             output.push_str(note);
@@ -3846,7 +3963,7 @@ impl SlashCommand for McpCommand {
     fn help(&self) -> &str {
         "Usage: /mcp [list|status|auth <server>|connect <server>|logs <server>|resources|prompts|get-prompt ...]\n\n\
          Manages Model Context Protocol (MCP) servers.\n\
-         MCP servers extend Coven Code with external tools, resources, and prompt templates.\n\n\
+         MCP servers extend Coven with external tools, resources, and prompt templates.\n\n\
          Subcommands:\n\
            /mcp                        — list configured servers with live status\n\
            /mcp list                   — same as above\n\
@@ -3967,7 +4084,7 @@ impl SlashCommand for McpCommand {
             if ctx.mcp_manager.is_none() {
                 output.push_str(
                     "\nNote: MCP manager is not active in this session.\n\
-                     Restart Coven Code to connect to MCP servers.\n\
+                     Restart Coven to connect to MCP servers.\n\
                      Use /mcp connect <server> to retry a single server.",
                 );
             }
@@ -4069,7 +4186,7 @@ impl McpCommand {
                  {}\n\n\
                  stdio servers authenticate via environment variables (API keys etc.).\n\
                  Add required variables to the 'env' block in ~/.coven-code/settings.json,\n\
-                 then restart Coven Code or run /mcp connect {} to reconnect.",
+                 then restart Coven or run /mcp connect {} to reconnect.",
                 server_name, token_note, env_note, server_name
             ));
         }
@@ -4150,7 +4267,7 @@ impl McpCommand {
              To authenticate:\n\
              1. Open the server URL in your browser and complete OAuth\n\
              2. The token is saved to ~/.coven-code/mcp-tokens/{}.json\n\
-             3. Restart Coven Code — the token will be used automatically\n\n\
+             3. Restart Coven — the token will be used automatically\n\n\
              Token storage: ~/.coven-code/mcp-tokens/{}.json",
             server_name, token_note, server_url, server_name, server_name
         ))
@@ -4163,7 +4280,7 @@ impl McpCommand {
             None => {
                 return CommandResult::Message(
                     "MCP manager is not active. No tool information available.\n\
-                 Restart Coven Code to connect to MCP servers."
+                 Restart Coven to connect to MCP servers."
                         .to_string(),
                 )
             }
@@ -4245,7 +4362,7 @@ impl McpCommand {
                 // No live manager — give useful instructions.
                 CommandResult::Message(format!(
                     "The MCP manager is not running in this session.\n\
-                     To connect '{}', restart Coven Code — servers connect automatically\n\
+                     To connect '{}', restart Coven — servers connect automatically\n\
                      on startup using the configuration in ~/.coven-code/settings.json.\n\
                      \n\
                      If the server requires authentication, run /mcp auth {} first.",
@@ -4278,7 +4395,7 @@ impl McpCommand {
                              If the server stays disconnected:\n\
                              1. Check authentication: /mcp auth {}\n\
                              2. Verify the command/URL in ~/.coven-code/settings.json\n\
-                             3. Restart Coven Code to force a full reconnect",
+                             3. Restart Coven to force a full reconnect",
                             server_name,
                             manager.server_status(server_name).display(),
                             server_name
@@ -4389,7 +4506,7 @@ impl McpCommand {
             }
         } else {
             lines.push("MCP manager is not active in this session.".to_string());
-            lines.push("Restart Coven Code to start the MCP runtime.".to_string());
+            lines.push("Restart Coven to start the MCP runtime.".to_string());
         }
 
         // Hint about log files.
@@ -4968,7 +5085,7 @@ impl SlashCommand for ThinkingCommand {
         } else {
             CommandResult::Message(format!(
                 "Extended thinking is available with {}.\n\
-                 You can request thinking by asking Coven Code to 'think step by step' or \
+                 You can request thinking by asking Coven to 'think step by step' or \
                  'think carefully before answering'.",
                 model
             ))
@@ -5565,9 +5682,7 @@ impl SlashCommand for RewindCommand {
            /rewind diff [n] — preview a turn's diff without reverting\n\
            /rewind last     — revert the most recent assistant turn\n\
            /rewind <n>      — revert the n-th most recent assistant turn\n\
-           /rewind <uuid>   — revert the turn whose message id starts with <uuid>\n\n\
-         The legacy /undo and /revert commands remain hidden one-release\n\
-         compatibility aliases for the argument forms."
+           /rewind <uuid>   — revert the turn whose message id starts with <uuid>"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -5864,7 +5979,7 @@ impl SlashCommand for CommitCommand {
         "commit"
     }
     fn description(&self) -> &str {
-        "Ask Coven Code to commit staged changes"
+        "Ask Coven to commit staged changes"
     }
 
     async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -6993,7 +7108,7 @@ impl SlashCommand for UpgradeCommand {
     }
     fn help(&self) -> &str {
         "Usage: /update\n\n\
-         Checks GitHub releases for the latest version of Coven Code.\n\
+         Checks GitHub releases for the latest version of Coven.\n\
          If a newer version is available, shows where to download it."
     }
 
@@ -7004,7 +7119,7 @@ impl SlashCommand for UpgradeCommand {
             Ok(latest) => {
                 if latest.version == current {
                     CommandResult::Message(format!(
-                        "Coven Code v{current} - you are up to date.\n\
+                        "Coven v{current} - you are up to date.\n\
                          Release page: {}",
                         latest.url
                     ))
@@ -7151,7 +7266,7 @@ impl SlashCommand for SecurityReviewCommand {
     }
     fn help(&self) -> &str {
         "Usage: /security-review [path]\n\n\
-         Asks Coven Code to perform a security review of the codebase.\n\
+         Asks Coven to perform a security review of the codebase.\n\
          Analyzes for common vulnerabilities: injection attacks, auth issues,\n\
          secrets exposure, unsafe deserialization, path traversal, etc."
     }
@@ -7199,12 +7314,12 @@ impl SlashCommand for TerminalSetupCommand {
         true
     }
     fn description(&self) -> &str {
-        "Help configure your terminal for optimal Coven Code use"
+        "Help configure your terminal for optimal Coven use"
     }
     fn help(&self) -> &str {
         "Usage: /terminal-setup\n\n\
          Diagnoses your terminal environment and gives recommendations for\n\
-         optimal Coven Code display (font, color support, Unicode, etc.)."
+         optimal Coven display (font, color support, Unicode, etc.)."
     }
 
     async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
@@ -7277,7 +7392,7 @@ impl SlashCommand for TerminalSetupCommand {
             "Terminal Setup Diagnostic\n\
              ─────────────────────────\n\
              {checks}\n\n\
-             Recommendations for optimal Coven Code experience:\n\
+             Recommendations for optimal Coven experience:\n\
              ─────────────────────────────────────────────────\n\
              1. Font: Use a Nerd Font for box-drawing characters and icons\n\
                 {nerd_hint}\n\
@@ -7515,7 +7630,7 @@ impl SlashCommand for ThinkBackCommand {
             return CommandResult::Message(
                 "No thinking traces found in this session.\n\
                  Thinking traces appear when the model uses extended thinking mode.\n\
-                 Try asking Coven Code to 'think step by step' or 'think carefully'."
+                 Try asking Coven to 'think step by step' or 'think carefully'."
                     .to_string(),
             );
         }
@@ -8025,32 +8140,6 @@ impl SlashCommand for NamedCommandAdapter {
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         execute_named_command_from_slash(self.target_name, args, ctx)
-    }
-}
-
-// ---- /undo (alias for /revert targeting the most recent assistant turn) ----
-
-#[async_trait]
-impl SlashCommand for UndoCommand {
-    fn name(&self) -> &str {
-        "undo"
-    }
-    fn hidden(&self) -> bool {
-        true
-    }
-    fn aliases(&self) -> Vec<&str> {
-        vec![]
-    }
-    fn description(&self) -> &str {
-        "Revert all file changes from the last assistant turn (alias: /revert)"
-    }
-    fn help(&self) -> &str {
-        "Usage: /undo\n\nReverts all file changes made during the most recent assistant turn.\n\
-         For finer control use /revert. To list what changed, use /checkpoints."
-    }
-
-    async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        RevertCommand.execute("", ctx).await
     }
 }
 
@@ -9260,6 +9349,7 @@ fn coven_help_text() -> &'static str {
        /coven status                   Same as /coven\n\
        /coven goal <objective>         Set or manage a durable autonomous goal\n\
        /coven capabilities             Daemon capability catalog (harness manifests)\n\
+       /coven runtimes [--json]        List accepted runtime registry entries\n\
        /coven familiars                List familiar statuses\n\
        /coven doctor                   Detect installed harness CLIs\n\
        /coven daemon start|status|stop|restart\n\
@@ -9479,10 +9569,15 @@ fn coven_read_calls_ledger(limit: usize) -> String {
     out
 }
 
+#[cfg(test)]
 fn coven_executable_names() -> Vec<String> {
+    coven_executable_candidate_names("coven")
+}
+
+fn coven_executable_candidate_names(executable: &str) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        let mut names = vec!["coven.exe".to_string(), "coven.cmd".to_string()];
+        let mut names = vec![executable.to_string()];
         if let Some(path_ext) = std::env::var_os("PATHEXT") {
             for ext in std::env::split_paths(&path_ext) {
                 let ext = ext.to_string_lossy();
@@ -9495,7 +9590,7 @@ fn coven_executable_names() -> Vec<String> {
                 } else {
                     format!(".{}", ext.to_ascii_lowercase())
                 };
-                let candidate = format!("coven{suffix}");
+                let candidate = format!("{executable}{suffix}");
                 if !names
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(&candidate))
@@ -9508,12 +9603,22 @@ fn coven_executable_names() -> Vec<String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec!["coven".to_string()]
+        vec![executable.to_string()]
     }
 }
 
-fn coven_binary_in_dir(dir: &Path) -> Option<PathBuf> {
-    for name in coven_executable_names() {
+fn coven_executable_name_is_bare(executable: &str) -> bool {
+    !executable.trim().is_empty()
+        && !executable.contains('/')
+        && !executable.contains('\\')
+        && !executable.chars().any(char::is_whitespace)
+}
+
+fn coven_executable_in_dir(dir: &Path, executable: &str) -> Option<PathBuf> {
+    if !coven_executable_name_is_bare(executable) {
+        return None;
+    }
+    for name in coven_executable_candidate_names(executable) {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
@@ -9535,12 +9640,20 @@ fn coven_path_entry_is_trusted(dir: &Path, cwd: Option<&Path>) -> bool {
 }
 
 fn coven_binary_from_path(path: Option<&std::ffi::OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
+    coven_executable_from_path("coven", path, cwd)
+}
+
+fn coven_executable_from_path(
+    executable: &str,
+    path: Option<&std::ffi::OsStr>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
     let path = path?;
     for dir in std::env::split_paths(path) {
         if !coven_path_entry_is_trusted(&dir, cwd) {
             continue;
         }
-        if let Some(candidate) = coven_binary_in_dir(&dir) {
+        if let Some(candidate) = coven_executable_in_dir(&dir, executable) {
             return Some(candidate);
         }
     }
@@ -9550,7 +9663,7 @@ fn coven_binary_from_path(path: Option<&std::ffi::OsStr>, cwd: Option<&Path>) ->
 fn coven_binary_path() -> Result<PathBuf, String> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
-            if let Some(candidate) = coven_binary_in_dir(dir) {
+            if let Some(candidate) = coven_executable_in_dir(dir, "coven") {
                 return Ok(candidate);
             }
         }
@@ -9614,6 +9727,265 @@ fn coven_shell_out(args: &[&str]) -> String {
              Install it from https://github.com/OpenCoven/coven or `npm install -g @opencoven/cli`."
         ),
     }
+}
+
+fn coven_registry_runtime_installed(executable: &str) -> bool {
+    coven_executable_from_path(
+        executable,
+        std::env::var_os("PATH").as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+    .is_some()
+}
+
+#[derive(serde::Serialize)]
+struct CovenRuntimeListing<'a> {
+    id: &'a str,
+    label: &'a str,
+    version: &'a str,
+    installed: bool,
+    capabilities: BTreeMap<&'static str, bool>,
+}
+
+fn coven_runtimes_listing(json: bool) -> String {
+    let registry = RegistryIndex::canonical();
+    let mut listings = Vec::new();
+    for id in registry.runtime_ids() {
+        let entry = match registry.resolve_latest(id) {
+            Ok(entry) => entry,
+            Err(err) => {
+                return format!("Could not resolve runtime `{id}` from canonical registry: {err}");
+            }
+        };
+        let adapter = &entry.adapter;
+        let installed = coven_registry_runtime_installed(&adapter.executable);
+        let capabilities = adapter.capabilities.as_pairs().into_iter().collect();
+        listings.push(CovenRuntimeListing {
+            id,
+            label: adapter.label.as_str(),
+            version: entry.version.as_str(),
+            installed,
+            capabilities,
+        });
+    }
+
+    if json {
+        return match serde_json::to_string_pretty(&listings) {
+            Ok(body) => body,
+            Err(err) => format!("Could not serialize runtime registry listing: {err}"),
+        };
+    }
+
+    let mut out = String::new();
+    out.push_str("Accepted runtime registry\n");
+    out.push_str(&format!(
+        "{:<12}  {:<24}  {:<10}  {:<9}  capabilities\n",
+        "id", "label", "version", "installed"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(82)));
+    for listing in &listings {
+        let installed = if listing.installed { "yes" } else { "no" };
+        let capabilities = listing
+            .capabilities
+            .iter()
+            .filter_map(|(name, enabled)| enabled.then_some(*name))
+            .collect::<Vec<_>>();
+        let capabilities = if capabilities.is_empty() {
+            "baseline".to_string()
+        } else {
+            capabilities.join(", ")
+        };
+        out.push_str(&format!(
+            "{:<12}  {:<24}  {:<10}  {:<9}  {}\n",
+            listing.id, listing.label, listing.version, installed, capabilities
+        ));
+        if !listing.installed {
+            let registry_entry = match registry.resolve_latest(listing.id) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            out.push_str(&format!(
+                "  install: {}\n",
+                registry_entry.adapter.install_hint
+            ));
+        }
+    }
+    out
+}
+
+fn coven_local_adapter_ids() -> Vec<String> {
+    let Some(home) = claurst_core::coven_shared::coven_home() else {
+        return Vec::new();
+    };
+    let adapters_dir = home.join("adapters");
+    let Ok(entries) = std::fs::read_dir(adapters_dir) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            ids.push(stem.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn coven_known_harness_ids() -> BTreeSet<String> {
+    let mut ids = BTreeSet::from(["claude".to_string(), "codex".to_string()]);
+    let registry = RegistryIndex::canonical();
+    ids.extend(registry.runtime_ids().into_iter().map(str::to_string));
+    ids.extend(coven_local_adapter_ids());
+    ids
+}
+
+fn coven_suggest_harness_id<'a>(harness: &str, ids: &'a BTreeSet<String>) -> Option<&'a str> {
+    if harness.is_empty() {
+        return None;
+    }
+    ids.iter().map(String::as_str).find(|id| {
+        id.starts_with(harness)
+            || harness.starts_with(*id)
+            || id.contains(harness)
+            || harness.contains(*id)
+    })
+}
+
+fn coven_run_harness_validation_error(harness: &str) -> Option<String> {
+    if matches!(harness, "claude" | "codex") {
+        return None;
+    }
+
+    let registry = RegistryIndex::canonical();
+    if let Ok(entry) = registry.resolve_latest(harness) {
+        if coven_registry_runtime_installed(&entry.adapter.executable) {
+            return None;
+        }
+        return Some(format!(
+            "Runtime `{harness}` is accepted, but executable `{}` is not installed.\nInstall hint: {}",
+            entry.adapter.executable, entry.adapter.install_hint
+        ));
+    }
+
+    if coven_local_adapter_ids().iter().any(|id| id == harness) {
+        return None;
+    }
+
+    let ids = coven_known_harness_ids();
+    let mut msg = format!(
+        "Unknown runtime `{harness}`.\nValid harness ids: {}",
+        ids.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    if let Some(suggestion) = coven_suggest_harness_id(harness, &ids) {
+        msg.push_str(&format!("\nDid you mean `{suggestion}`?"));
+        if let Ok(entry) = registry.resolve_latest(suggestion) {
+            if !coven_registry_runtime_installed(&entry.adapter.executable) {
+                msg.push_str(&format!(
+                    "\nInstall hint for `{suggestion}`: {}",
+                    entry.adapter.install_hint
+                ));
+            }
+        }
+    }
+    Some(msg)
+}
+
+fn coven_adapter_manifest_paths() -> Vec<PathBuf> {
+    let Some(home) = claurst_core::coven_shared::coven_home() else {
+        return Vec::new();
+    };
+    let adapters_dir = home.join("adapters");
+    let Ok(entries) = std::fs::read_dir(adapters_dir) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn coven_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn coven_adapter_spec_validation_report() -> String {
+    let paths = coven_adapter_manifest_paths();
+    let mut adapter_count = 0usize;
+    let mut violations = Vec::new();
+    let mut notes = Vec::new();
+
+    for path in paths {
+        let label = coven_file_label(&path);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                violations.push(format!("{label}:\n  read error: {err}"));
+                continue;
+            }
+        };
+        let manifest = match AdapterManifest::from_json(&raw) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                violations.push(format!("{label}:\n  parse error: {err}"));
+                continue;
+            }
+        };
+        if manifest.adapters.is_empty() {
+            violations.push(format!(
+                "{label}:\n  manifest [adapters]: manifest declares no adapters"
+            ));
+            continue;
+        }
+        for adapter in &manifest.adapters {
+            adapter_count += 1;
+            if adapter.capabilities.is_baseline() {
+                notes.push(format!(
+                    "{label}: {} capabilities: baseline (one-shot only)",
+                    adapter.id
+                ));
+            }
+            let errors = validate_adapter(adapter);
+            if errors.is_empty() {
+                continue;
+            }
+            let mut section = format!("{label}:");
+            for error in errors {
+                section.push_str(&format!("\n  {error}"));
+            }
+            violations.push(section);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("Runtime adapter spec validation\n");
+    if violations.is_empty() {
+        out.push_str(&format!("spec: OK ({adapter_count} adapter(s))\n"));
+    } else {
+        out.push_str("spec violations:\n");
+        for violation in violations {
+            out.push_str(&violation);
+            out.push('\n');
+        }
+    }
+    for note in notes {
+        out.push_str("  ");
+        out.push_str(&note);
+        out.push('\n');
+    }
+    out
 }
 
 #[async_trait]
@@ -9777,6 +10149,17 @@ impl SlashCommand for CovenCommand {
                     }
                     Err(e) => CommandResult::Error(coven_render_error(&e)),
                 }
+            }
+            "runtimes" => {
+                let mut json = false;
+                for token in rest.split_whitespace() {
+                    if token == "--json" {
+                        json = true;
+                    } else {
+                        return CommandResult::Error("Usage: /coven runtimes [--json]".to_string());
+                    }
+                }
+                CommandResult::Message(coven_runtimes_listing(json))
             }
             "info" => {
                 if rest.is_empty() {
@@ -9957,6 +10340,9 @@ impl SlashCommand for CovenCommand {
                         "Usage: /coven run <harness> <prompt>".to_string(),
                     );
                 }
+                if let Some(msg) = coven_run_harness_validation_error(harness) {
+                    return CommandResult::Message(msg);
+                }
                 CommandResult::Message(coven_shell_out(&["run", harness, prompt]))
             }
             "attach" => {
@@ -10053,7 +10439,15 @@ impl SlashCommand for CovenCommand {
                 }
                 let mut argv: Vec<&str> = vec!["adapter"];
                 argv.extend(rest.split_whitespace());
-                CommandResult::Message(coven_shell_out(&argv))
+                let mut out = coven_shell_out(&argv);
+                if rest.split_whitespace().next() == Some("doctor") {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                    out.push_str(&coven_adapter_spec_validation_report());
+                }
+                CommandResult::Message(out)
             }
             "logs" => {
                 if rest.is_empty() {
@@ -10080,6 +10474,417 @@ impl SlashCommand for CovenCommand {
 // Registry
 // ---------------------------------------------------------------------------
 
+// ---- /link and /attach — structured link/attachment stash ------------------
+
+/// Split an argument string into positional tokens and `--flag value...` pairs.
+/// Tokens may be quoted with single or double quotes to include spaces
+/// (`--title "API spec"`). Flag values run until the next `--flag` token.
+/// `--tags` values are comma-separated.
+fn parse_stash_args(args: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut positional = Vec::new();
+    let mut flags = BTreeMap::new();
+    let mut current_flag: Option<String> = None;
+    let mut current_value: Vec<String> = Vec::new();
+
+    for token in tokenize_stash_args(args) {
+        if let Some(name) = token.strip_prefix("--") {
+            if let Some(flag) = current_flag.take() {
+                flags.insert(flag, current_value.join(" "));
+                current_value.clear();
+            }
+            current_flag = Some(name.to_string());
+        } else if current_flag.is_some() {
+            current_value.push(token);
+        } else {
+            positional.push(token);
+        }
+    }
+    if let Some(flag) = current_flag {
+        flags.insert(flag, current_value.join(" "));
+    }
+    (positional, flags)
+}
+
+/// Whitespace tokenizer with single/double-quote support. Quotes group words
+/// into one token and are stripped; there is no escape syntax.
+fn tokenize_stash_args(args: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for ch in args.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn stash_tags_from_flags(flags: &BTreeMap<String, String>) -> Vec<String> {
+    flags
+        .get("tags")
+        .map(|raw| {
+            raw.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The project scope items are recorded under: the git repo root when inside
+/// a repository, otherwise the working directory.
+fn stash_project_scope(ctx: &CommandContext) -> String {
+    claurst_core::git_utils::get_repo_root(&ctx.working_dir)
+        .unwrap_or_else(|| ctx.working_dir.clone())
+        .display()
+        .to_string()
+}
+
+fn stash_hosted_refusal(ctx: &CommandContext) -> Option<CommandResult> {
+    if ctx.config.hosted_review_enabled() {
+        Some(CommandResult::Message(
+            "The link/attachment stash is a personal local store and is disabled in \
+             hosted review mode."
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+fn format_stash_items(items: &[claurst_core::stash::StashItem], heading: &str) -> String {
+    if items.is_empty() {
+        return format!("{}: none.", heading);
+    }
+    let mut lines = vec![format!("{} ({}):", heading, items.len())];
+    for item in items {
+        let date =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(item.created_at_ms as i64)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+        let mut line = format!("  {}  {}", item.short_id(), date);
+        if let Some(ref title) = item.title {
+            line.push_str(&format!("  {}", title));
+        }
+        line.push_str(&format!("  {}", item.value));
+        if !item.tags.is_empty() {
+            line.push_str(&format!("  [{}]", item.tags.join(", ")));
+        }
+        if let Some(ref note) = item.note {
+            line.push_str(&format!("\n      note: {}", note));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn open_stash_store() -> Result<claurst_core::stash::StashStore, String> {
+    claurst_core::stash::StashStore::open_default()
+        .map_err(|e| format!("Could not open stash: {}", e))
+}
+
+fn looks_like_url(token: &str) -> bool {
+    token.starts_with("http://") || token.starts_with("https://") || token.starts_with("www.")
+}
+
+#[async_trait]
+impl SlashCommand for LinkCommand {
+    fn name(&self) -> &str {
+        "link"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["links"]
+    }
+    fn description(&self) -> &str {
+        "Save and manage links in the structured stash"
+    }
+    fn help(&self) -> &str {
+        "Usage:\n\
+         /link <url> [--title ...] [--note ...] [--tags a,b]   — save a link\n\
+         /link add <url> [flags]                               — same as above\n\
+         /link list [--tag <tag>] [--project]                  — list saved links\n\
+         /link search <term>                                   — search links\n\
+         /link remove <id>                                     — delete a link\n\n\
+         Links are stored in ~/.coven-code/stash.sqlite with title, note,\n\
+         tags, project, and session metadata. Use the short id shown by\n\
+         /link list to remove entries.\n\n\
+         Examples:\n\
+         /link https://docs.rs/tokio --title Tokio docs --tags rust,async\n\
+         /link list --tag rust\n\
+         /link remove 1a2b3c4d"
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        if let Some(refusal) = stash_hosted_refusal(ctx) {
+            return refusal;
+        }
+        let (positional, flags) = parse_stash_args(args);
+        let sub = positional.first().map(String::as_str).unwrap_or("list");
+
+        match sub {
+            "list" => {
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let filter = claurst_core::stash::StashFilter {
+                    kind: Some(claurst_core::stash::StashKind::Link),
+                    tag: flags.get("tag").cloned(),
+                    project: flags
+                        .contains_key("project")
+                        .then(|| stash_project_scope(ctx)),
+                };
+                match store.list(&filter) {
+                    Ok(items) => CommandResult::Message(format_stash_items(&items, "Links")),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "search" => {
+                let term = positional[1..].join(" ");
+                if term.is_empty() {
+                    return CommandResult::Message("Usage: /link search <term>".to_string());
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.search(&term, Some(claurst_core::stash::StashKind::Link)) {
+                    Ok(items) => CommandResult::Message(format_stash_items(
+                        &items,
+                        &format!("Links matching '{}'", term),
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "remove" | "rm" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /link remove <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.remove(id, Some(claurst_core::stash::StashKind::Link)) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Removed link {} ({}).",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            _ => {
+                // `/link add <url>` or bare `/link <url>`.
+                let url = if sub == "add" {
+                    positional.get(1).cloned()
+                } else if looks_like_url(sub) {
+                    Some(sub.to_string())
+                } else {
+                    None
+                };
+                let Some(url) = url else {
+                    return CommandResult::Message(self.help().to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let tags = stash_tags_from_flags(&flags);
+                let project = stash_project_scope(ctx);
+                match store.add_link(
+                    &url,
+                    flags.get("title").map(String::as_str),
+                    flags.get("note").map(String::as_str),
+                    &tags,
+                    Some(&project),
+                    Some(&ctx.session_id),
+                ) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Saved link {} — {}",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SlashCommand for AttachCommand {
+    fn name(&self) -> &str {
+        "attach"
+    }
+    fn aliases(&self) -> Vec<&str> {
+        vec!["attachments"]
+    }
+    fn description(&self) -> &str {
+        "Save and manage file attachments in the structured stash"
+    }
+    fn help(&self) -> &str {
+        "Usage:\n\
+         /attach <path> [--title ...] [--note ...] [--tags a,b]  — save a file\n\
+         /attach add <path> [flags]                              — same as above\n\
+         /attach list [--tag <tag>] [--project]                  — list attachments\n\
+         /attach search <term>                                   — search attachments\n\
+         /attach show <id>                                       — show stored/original paths\n\
+         /attach remove <id>                                     — delete an attachment\n\n\
+         Files are copied into ~/.coven-code/attachments/<id>/ so the stored\n\
+         copy survives even if the original moves. Metadata lives in\n\
+         ~/.coven-code/stash.sqlite alongside saved links.\n\n\
+         Examples:\n\
+         /attach ./design/spec.pdf --title API spec --tags design\n\
+         /attach list --tag design\n\
+         /attach show 1a2b3c4d"
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        if let Some(refusal) = stash_hosted_refusal(ctx) {
+            return refusal;
+        }
+        let (positional, flags) = parse_stash_args(args);
+        let sub = positional.first().map(String::as_str).unwrap_or("list");
+
+        match sub {
+            "list" => {
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let filter = claurst_core::stash::StashFilter {
+                    kind: Some(claurst_core::stash::StashKind::Attachment),
+                    tag: flags.get("tag").cloned(),
+                    project: flags
+                        .contains_key("project")
+                        .then(|| stash_project_scope(ctx)),
+                };
+                match store.list(&filter) {
+                    Ok(items) => CommandResult::Message(format_stash_items(&items, "Attachments")),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "search" => {
+                let term = positional[1..].join(" ");
+                if term.is_empty() {
+                    return CommandResult::Message("Usage: /attach search <term>".to_string());
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.search(&term, Some(claurst_core::stash::StashKind::Attachment)) {
+                    Ok(items) => CommandResult::Message(format_stash_items(
+                        &items,
+                        &format!("Attachments matching '{}'", term),
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "show" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /attach show <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.get(id, Some(claurst_core::stash::StashKind::Attachment)) {
+                    Ok(item) => {
+                        let mut out =
+                            format!("Attachment {}\n  stored:   {}", item.short_id(), item.value);
+                        if let Some(ref original) = item.original_path {
+                            out.push_str(&format!("\n  original: {}", original));
+                        }
+                        if let Some(ref title) = item.title {
+                            out.push_str(&format!("\n  title:    {}", title));
+                        }
+                        if !item.tags.is_empty() {
+                            out.push_str(&format!("\n  tags:     {}", item.tags.join(", ")));
+                        }
+                        if let Some(ref note) = item.note {
+                            out.push_str(&format!("\n  note:     {}", note));
+                        }
+                        CommandResult::Message(out)
+                    }
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            "remove" | "rm" => {
+                let Some(id) = positional.get(1) else {
+                    return CommandResult::Message("Usage: /attach remove <id>".to_string());
+                };
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                match store.remove(id, Some(claurst_core::stash::StashKind::Attachment)) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Removed attachment {} and its stored copy.",
+                        item.short_id()
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+            _ => {
+                // Join the remaining positionals so unquoted paths with
+                // spaces still resolve (quoting also works).
+                let raw_path = if sub == "add" {
+                    (positional.len() > 1).then(|| positional[1..].join(" "))
+                } else {
+                    Some(positional.join(" "))
+                };
+                let Some(raw_path) = raw_path.filter(|p| !p.is_empty()) else {
+                    return CommandResult::Message(self.help().to_string());
+                };
+                let mut path = PathBuf::from(&raw_path);
+                if let Ok(stripped) = path.strip_prefix("~") {
+                    if let Some(home) = dirs::home_dir() {
+                        path = home.join(stripped);
+                    }
+                }
+                if path.is_relative() {
+                    path = ctx.working_dir.join(path);
+                }
+                let store = match open_stash_store() {
+                    Ok(s) => s,
+                    Err(e) => return CommandResult::Error(e),
+                };
+                let tags = stash_tags_from_flags(&flags);
+                let project = stash_project_scope(ctx);
+                match store.add_attachment(
+                    &path,
+                    &claurst_core::stash::StashStore::default_attachments_dir(),
+                    flags.get("title").map(String::as_str),
+                    flags.get("note").map(String::as_str),
+                    &tags,
+                    Some(&project),
+                    Some(&ctx.session_id),
+                ) {
+                    Ok(item) => CommandResult::Message(format!(
+                        "Saved attachment {} — stored at {}",
+                        item.short_id(),
+                        item.value
+                    )),
+                    Err(e) => CommandResult::Error(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
 static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
     vec![
         Box::new(HelpCommand),
@@ -10101,6 +10906,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(DoctorCommand),
         Box::new(LoginCommand),
         Box::new(LogoutCommand),
+        Box::new(AccountsCommand),
         Box::new(SwitchCommand),
         Box::new(RefreshCommand),
         Box::new(IncantCommand),
@@ -10131,7 +10937,7 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
             slash_name: "add-dir",
             target_name: "add-dir",
             slash_aliases: &[],
-            slash_description: "Add a directory to Coven Code's allowed workspace paths",
+            slash_description: "Add a directory to Coven's allowed workspace paths",
             slash_help: "Usage: /add-dir <path>",
             slash_hidden: true,
         }),
@@ -10190,6 +10996,9 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(ManagedAgentsCommand),
         // Durable long-running goals
         Box::new(GoalCommand),
+        // Structured link/attachment stash
+        Box::new(LinkCommand),
+        Box::new(AttachCommand),
         // Coven daemon control surface (sessions, harness runs, rituals)
         Box::new(CovenCommand),
     ]
@@ -10518,6 +11327,170 @@ mod tests {
         assert!(!all_commands().is_empty());
     }
 
+    // ---- Stash command tests -------------------------------------------------
+
+    #[test]
+    fn parse_stash_args_splits_positionals_and_flags() {
+        let (positional, flags) =
+            parse_stash_args("add https://example.com --title Example site --tags a,b --note x y");
+        assert_eq!(positional, vec!["add", "https://example.com"]);
+        assert_eq!(flags.get("title").map(String::as_str), Some("Example site"));
+        assert_eq!(flags.get("tags").map(String::as_str), Some("a,b"));
+        assert_eq!(flags.get("note").map(String::as_str), Some("x y"));
+    }
+
+    #[test]
+    fn parse_stash_args_handles_valueless_flags() {
+        let (positional, flags) = parse_stash_args("list --project");
+        assert_eq!(positional, vec!["list"]);
+        assert_eq!(flags.get("project").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn parse_stash_args_supports_quoted_tokens() {
+        let (positional, flags) =
+            parse_stash_args("add \"/tmp/My Docs/spec v2.pdf\" --title 'API spec (v2)' --tags a,b");
+        assert_eq!(positional, vec!["add", "/tmp/My Docs/spec v2.pdf"]);
+        assert_eq!(
+            flags.get("title").map(String::as_str),
+            Some("API spec (v2)")
+        );
+        assert_eq!(flags.get("tags").map(String::as_str), Some("a,b"));
+    }
+
+    #[test]
+    fn parse_stash_args_quoted_value_keeps_dashes() {
+        let (_, flags) = parse_stash_args("x --note \"see --verbose flag\"");
+        assert_eq!(
+            flags.get("note").map(String::as_str),
+            Some("see --verbose flag")
+        );
+        assert!(!flags.contains_key("verbose"));
+    }
+
+    #[test]
+    fn stash_tags_are_trimmed_and_non_empty() {
+        let (_, flags) = parse_stash_args("x --tags a, b ,,c");
+        assert_eq!(stash_tags_from_flags(&flags), vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn link_command_refuses_hosted_mode() {
+        let mut ctx = make_ctx();
+        ctx.config.hosted_review.enabled = true;
+        let result = LinkCommand.execute("list", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => assert!(msg.contains("hosted review")),
+            other => panic!("expected refusal message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_command_refuses_hosted_mode() {
+        let mut ctx = make_ctx();
+        ctx.config.hosted_review.enabled = true;
+        let result = AttachCommand.execute("list", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => assert!(msg.contains("hosted review")),
+            other => panic!("expected refusal message, got {:?}", other),
+        }
+    }
+
+    fn message_text(result: CommandResult) -> String {
+        match result {
+            CommandResult::Message(msg) => msg,
+            other => panic!("expected message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn link_and_attach_round_trip_against_temp_home() {
+        let _guard = CommandEnvGuard::with_coven_home(Some("tester"));
+        let mut ctx = make_ctx();
+
+        // Save and list a link.
+        let saved = message_text(
+            LinkCommand
+                .execute(
+                    "https://example.com/docs --title \"Example docs\" --tags demo",
+                    &mut ctx,
+                )
+                .await,
+        );
+        assert!(saved.contains("Saved link"), "{saved}");
+        let listing = message_text(LinkCommand.execute("list --tag demo", &mut ctx).await);
+        assert!(listing.contains("https://example.com/docs"), "{listing}");
+        assert!(listing.contains("Example docs"), "{listing}");
+
+        // Attach a file whose path contains spaces (quoted).
+        let files = tempfile::tempdir().unwrap();
+        let src = files.path().join("my spec.txt");
+        std::fs::write(&src, "attached-content").unwrap();
+        let saved = message_text(
+            AttachCommand
+                .execute(
+                    &format!("\"{}\" --title \"API spec\"", src.display()),
+                    &mut ctx,
+                )
+                .await,
+        );
+        assert!(saved.contains("Saved attachment"), "{saved}");
+        // "Saved attachment <id> — stored at <path>"
+        let attachment_id = saved
+            .split_whitespace()
+            .nth(2)
+            .map(str::to_string)
+            .unwrap_or_default();
+        let stored_path = saved
+            .split(" stored at ")
+            .nth(1)
+            .map(str::trim)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        assert!(stored_path.exists(), "stored copy missing: {saved}");
+        assert_eq!(
+            std::fs::read_to_string(&stored_path).unwrap(),
+            "attached-content"
+        );
+
+        // Kind scoping: /link remove cannot resolve the attachment id.
+        let cross = LinkCommand
+            .execute(&format!("remove {attachment_id}"), &mut ctx)
+            .await;
+        assert!(
+            matches!(cross, CommandResult::Error(_)),
+            "cross-kind removal must fail, got {:?}",
+            cross
+        );
+        assert!(stored_path.exists());
+
+        // /attach remove deletes the row and the stored copy.
+        let removed = message_text(
+            AttachCommand
+                .execute(&format!("remove {attachment_id}"), &mut ctx)
+                .await,
+        );
+        assert!(removed.contains("Removed attachment"), "{removed}");
+        assert!(!stored_path.exists());
+
+        // /link remove cleans up the link too.
+        let listing = message_text(LinkCommand.execute("list", &mut ctx).await);
+        let link_id = listing
+            .lines()
+            .nth(1)
+            .and_then(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .unwrap_or_default();
+        let removed = message_text(
+            LinkCommand
+                .execute(&format!("remove {link_id}"), &mut ctx)
+                .await,
+        );
+        assert!(removed.contains("Removed link"), "{removed}");
+        let listing = message_text(LinkCommand.execute("list", &mut ctx).await);
+        assert!(listing.contains("none"), "{listing}");
+    }
+
     #[test]
     fn test_all_commands_have_unique_names() {
         let mut names = std::collections::HashSet::new();
@@ -10552,6 +11525,65 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Auth check"));
         assert!(warnings[0].contains("memory_refs"));
+    }
+
+    #[test]
+    fn extract_memory_citations_finds_ids_in_prose() {
+        // The hex id below is a fake memory id fixture. # gitleaks:allow
+        let text = "Issue depends on mem_auth_policy (see memory_refs: [\"mem_1a2b3c4d5e6f7a8b\"]). mem_auth_policy repeated.";
+        let cited = extract_memory_citations(text);
+        assert_eq!(cited, vec!["mem_auth_policy", "mem_1a2b3c4d5e6f7a8b"]); // gitleaks:allow
+    }
+
+    #[test]
+    fn review_citation_validation_flags_unknown_ids() {
+        let loaded = vec!["mem_known".to_string()];
+        let warnings = validate_review_memory_citations(
+            "- [MAJOR] src/auth.rs:10 — violates mem_unknown policy",
+            &loaded,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mem_unknown"));
+
+        assert!(validate_review_memory_citations(
+            "- [MAJOR] src/auth.rs:10 — violates mem_known policy",
+            &loaded,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn review_citation_validation_covers_structured_output() {
+        let loaded = vec!["mem_known".to_string()];
+        let warnings = validate_review_memory_citations(
+            r#"{"findings":[{"title":"Needs memory","memory_dependent":true}]}"#,
+            &loaded,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("memory_refs"));
+    }
+
+    #[test]
+    fn review_memory_citation_block_lists_loaded_entries() {
+        let options = claurst_core::claudemd::MemoryLoadOptions::hosted_review();
+        let file = claurst_core::claudemd::MemoryFileInfo {
+            path: std::path::PathBuf::from("managed.md"),
+            scope: claurst_core::claudemd::MemoryScope::Managed,
+            content: "Cite this policy.".to_string(),
+            frontmatter: claurst_core::claudemd::MemoryFrontmatter {
+                id: Some("mem_cite_policy".to_string()),
+                trust: Some(claurst_core::hosted_review::MemorySourceTrust::MaintainerApproved),
+                source: Some("managed-rules".to_string()),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+
+        let block = build_review_memory_citation_block(&[file], &options).unwrap();
+        assert!(block.contains("mem_cite_policy"));
+        assert!(block.contains("maintainer-approved"));
+
+        assert!(build_review_memory_citation_block(&[], &options).is_none());
     }
 
     #[tokio::test]
@@ -11082,7 +12114,7 @@ mod tests {
         assert!(matches!(result, CommandResult::Message(_)));
         if let CommandResult::Message(msg) = result {
             assert!(
-                msg.contains("claude") || msg.contains("Coven Code") || msg.contains('.'),
+                msg.contains("claude") || msg.contains("Coven") || msg.contains('.'),
                 "Version message should contain version number, got: {}",
                 msg
             );
@@ -11596,6 +12628,142 @@ mod tests {
                 );
             }
             other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_runtimes_lists_canonical_registry_entries() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("runtimes", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("copilot"), "should list copilot: {msg}");
+                assert!(msg.contains("hermes"), "should list hermes: {msg}");
+                assert!(
+                    msg.contains("capabilities"),
+                    "should show capabilities: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_runtimes_json_is_valid_json() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("runtimes --json", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                let value: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                let runtimes = value.as_array().unwrap();
+                assert!(
+                    runtimes
+                        .iter()
+                        .any(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("copilot")),
+                    "json should list copilot: {msg}"
+                );
+                assert!(
+                    runtimes
+                        .iter()
+                        .any(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("hermes")),
+                    "json should list hermes: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_run_unknown_harness_returns_validation_error_without_shelling_out() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("run unknown-harness do work", &mut ctx).await;
+        match result {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("Unknown runtime `unknown-harness`"),
+                    "should reject unknown harness: {msg}"
+                );
+                assert!(
+                    msg.contains("Valid harness ids"),
+                    "should list valid ids: {msg}"
+                );
+                assert!(msg.contains("claude"), "should include built-in ids: {msg}");
+                assert!(msg.contains("codex"), "should include built-in ids: {msg}");
+                assert!(
+                    msg.contains("copilot"),
+                    "should include registry ids: {msg}"
+                );
+                assert!(
+                    !msg.contains("Could not find a trusted `coven` binary"),
+                    "unknown harness should not shell out: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coven_adapter_doctor_validates_local_adapter_specs() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let adapters_dir = guard.coven_home().join("adapters");
+        std::fs::create_dir_all(&adapters_dir).unwrap();
+        std::fs::write(
+            adapters_dir.join("valid.json"),
+            r#"{
+              "adapters": [{
+                "id": "localgood",
+                "label": "Local Good",
+                "executable": "localgood",
+                "non_interactive_prompt_prefix_args": ["run"],
+                "install_hint": "install localgood"
+              }]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            adapters_dir.join("invalid.json"),
+            r#"{
+              "adapters": [{
+                "id": "Bad Id!",
+                "label": "",
+                "executable": "bad tool",
+                "non_interactive_prompt_prefix_args": ["run"],
+                "install_hint": ""
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut ctx = make_ctx();
+        let cmd = find_command("coven").unwrap();
+        let result = cmd.execute("adapter doctor", &mut ctx).await;
+
+        match result {
+            CommandResult::Message(msg) => {
+                let spec_index = msg.find("Runtime adapter spec validation").unwrap();
+                assert!(
+                    spec_index > 0,
+                    "existing shell-out output should remain first: {msg}"
+                );
+                assert!(
+                    msg.contains("invalid.json"),
+                    "should name invalid file: {msg}"
+                );
+                assert!(msg.contains("valid.json"), "should name valid file: {msg}");
+                assert!(
+                    msg.contains("invalid id"),
+                    "should report spec violation: {msg}"
+                );
+                assert!(
+                    msg.contains("capabilities: baseline (one-shot only)"),
+                    "should report baseline capabilities: {msg}"
+                );
+            }
+            other => panic!("expected Message, got {:?}", other),
         }
     }
 

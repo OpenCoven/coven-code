@@ -50,10 +50,14 @@ impl McpToken {
 }
 
 /// Path to the token store for a given MCP server.
+///
+/// Routed through `config_home()` so MCP tokens live in the same engine home
+/// as all other state and migrate together under the unified coven CLI. (This
+/// previously constructed `~/.coven-code/mcp-tokens` directly, which would have
+/// stranded tokens in the legacy dir after relocation.)
 fn token_path(server_name: &str) -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".coven-code/mcp-tokens")
+    claurst_core::config::config_home()
+        .join("mcp-tokens")
         .join(format!("{}.json", server_name))
 }
 
@@ -592,8 +596,53 @@ pub async fn refresh_mcp_token(
     Ok(new_token)
 }
 
+/// Test-only helpers shared across this crate's test modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Serializes tests that write token files (which land under
+    /// `config_home()`), pointing `config_home()` at a temp dir so they never
+    /// touch the developer's real `~/.coven-code/mcp-tokens/`.
+    ///
+    /// Uses `COVEN_CODE_HOME` (honored in all builds), not the
+    /// `#[cfg(test)]`-gated `COVEN_CODE_TEST_HOME`, which is compiled out when
+    /// `claurst_core` is a plain dependency of this crate's test binary.
+    static TOKEN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that redirects `config_home()` at a fresh temp dir for the
+    /// duration of a test and restores the previous `COVEN_CODE_HOME` on drop.
+    pub(crate) struct TokenHomeGuard {
+        _tmp: tempfile::TempDir,
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TokenHomeGuard {
+        pub(crate) fn new() -> Self {
+            let lock = TOKEN_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let prev = std::env::var("COVEN_CODE_HOME").ok();
+            std::env::set_var("COVEN_CODE_HOME", tmp.path());
+            Self {
+                _tmp: tmp,
+                prev,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TokenHomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("COVEN_CODE_HOME", v),
+                None => std::env::remove_var("COVEN_CODE_HOME"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::TokenHomeGuard;
     use super::*;
 
     #[test]
@@ -647,6 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_reports_unbound_legacy_token_binding() {
+        let _home = TokenHomeGuard::new();
         let server_name = format!("legacy-unbound-{}", std::process::id());
         let _ = remove_mcp_token(&server_name);
         let token = McpToken {

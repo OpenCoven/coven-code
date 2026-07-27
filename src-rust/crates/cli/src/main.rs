@@ -10,7 +10,9 @@
 
 mod codex_oauth_flow;
 mod headless;
+mod memory_admin;
 mod oauth_flow;
+mod stream_mode;
 mod upgrade;
 
 use headless::{RunOutcome, SessionBrief};
@@ -118,7 +120,7 @@ impl Tool for McpToolWrapper {
 #[command(
     name = "coven-code",
     version = APP_VERSION,
-    about = "Coven Code - AI-powered coding assistant",
+    about = "Coven - AI-powered coding assistant",
     long_about = None,
 )]
 struct Cli {
@@ -197,7 +199,7 @@ struct Cli {
     #[arg(long = "auto-commits", action = ArgAction::SetTrue)]
     auto_commits: bool,
 
-    /// Grant Coven Code access to an additional directory (can be repeated)
+    /// Grant Coven access to an additional directory (can be repeated)
     #[arg(long = "add-dir", value_name = "DIR", action = ArgAction::Append)]
     add_dir: Vec<PathBuf>,
 
@@ -252,6 +254,17 @@ struct Cli {
     /// Run with hosted review memory isolation
     #[arg(long = "hosted-review", env = "COVEN_CODE_HOSTED_REVIEW", action = ArgAction::SetTrue)]
     hosted_review: bool,
+
+    /// Hosted repair mode: allow repository file edits but no command execution,
+    /// plugins, MCP servers, sub-agents, or network tools.
+    #[arg(
+        long = "hosted-repair",
+        env = "COVEN_CODE_HOSTED_REPAIR",
+        action = ArgAction::SetTrue,
+        requires_all = ["headless", "context", "output"],
+        conflicts_with_all = ["hosted_review", "dangerously_skip_permissions"]
+    )]
+    hosted_repair: bool,
 
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
@@ -314,6 +327,17 @@ impl From<CliPermissionMode> for PermissionMode {
             CliPermissionMode::BypassPermissions => PermissionMode::BypassPermissions,
             CliPermissionMode::Plan => PermissionMode::Plan,
         }
+    }
+}
+
+fn permission_mode_for_invocation(
+    cli_mode: CliPermissionMode,
+    has_github_context: bool,
+) -> PermissionMode {
+    if has_github_context {
+        PermissionMode::BypassPermissions
+    } else {
+        cli_mode.into()
     }
 }
 
@@ -399,6 +423,11 @@ fn handle_exit_key(
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Perform a best-effort, non-fatal relocation of the engine home from the
+    // legacy ~/.coven-code/ to ~/.coven/code/ when running under the unified
+    // coven CLI.  Must run before any Settings::load() or auth/config access.
+    claurst_core::home_migration::migrate_if_needed();
+
     let raw_args: Vec<String> = std::env::args().collect();
 
     // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
@@ -441,6 +470,11 @@ async fn main() -> anyhow::Result<()> {
     //     plus any disk-cached overlay from models.dev.
     if raw_args.get(1).map(|s| s.as_str()) == Some("models") {
         return run_models_command(&raw_args[2..]).await;
+    }
+
+    // Fast-path: `coven-code memory ...` — inspect and administer memory lifecycle controls.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("memory") {
+        return memory_admin::handle_memory_command(&raw_args[2..]).await;
     }
 
     // Fast-path: named commands (`claude agents`, `claude ide`, `claude branch`, …)
@@ -506,6 +540,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(log_filter)
         .with_target(false)
         .without_time()
+        // Logs go to stderr: stdout belongs to the response — plain text in
+        // --print mode, and strictly JSONL in the stream-json runtime protocol
+        // (a stray WARN line on stdout would corrupt the frame stream).
+        .with_writer(std::io::stderr)
         .init();
 
     // --context loads a coven-github session brief (headless contract v1). It
@@ -554,6 +592,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(brief) = github_context.as_ref() {
         headless::apply_to_config(&mut config, brief);
     }
+    if cli.hosted_repair {
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_file_write_tools = true;
+        config.hosted_review.allow_write_tools = false;
+        config.hosted_review.allow_user_memory = false;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
+    }
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -564,7 +611,8 @@ async fn main() -> anyhow::Result<()> {
         }
         config.permission_mode = PermissionMode::BypassPermissions;
     } else {
-        config.permission_mode = cli.permission_mode.into();
+        config.permission_mode =
+            permission_mode_for_invocation(cli.permission_mode, github_context.is_some());
     }
     config.additional_dirs = cli.add_dir.clone();
     if cli.no_auto_compact {
@@ -627,27 +675,17 @@ async fn main() -> anyhow::Result<()> {
     let is_headless = cli.headless || cli.print || cli.prompt.is_some() || github_context.is_some();
 
     // Initialize API client.
-    // Try config/env first; fall back to saved OAuth tokens.
-    // If no Anthropic credentials are found and Codex is the active provider,
-    // proceed without requiring Anthropic auth. Only launch the OAuth flow when
-    // Anthropic is explicitly the intended provider and no key exists at all.
+    // Try config/env first; fall back to configured-client OAuth tokens.
+    // With no Anthropic credential at all, the client is built with an empty
+    // key and the query loop dispatches Claude turns through the local
+    // `claude` CLI runtime instead (headless included) — imported tokens are
+    // never used.
     let active_provider = config.selected_provider_id();
     let (api_key, use_bearer_auth) = if active_provider == "anthropic" {
-        match config.resolve_anthropic_auth_async().await {
-            Some(auth) => auth,
-            None => {
-                if is_headless {
-                    anyhow::bail!(
-                        "No API key found. Options:\n\
-                         - Set ANTHROPIC_API_KEY for Claude\n\
-                         - Configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, then run `coven-code auth login` to sign in to Claude\n\
-                         - Run `coven-code auth login --provider codex` to sign in to Codex with ChatGPT"
-                    );
-                } else {
-                    (String::new(), false)
-                }
-            }
-        }
+        config
+            .resolve_anthropic_auth_async()
+            .await
+            .unwrap_or((String::new(), false))
     } else {
         (String::new(), false)
     };
@@ -881,6 +919,31 @@ async fn main() -> anyhow::Result<()> {
 
     // --print / headless mode
     if is_headless {
+        // Long-lived stream-json mode: the Coven runtime stream protocol.
+        // Turns arrive as stdin JSON frames; the process exits on stdin EOF.
+        // GitHub App runs (--context) never use this path — their prompt
+        // comes from the session brief.
+        if cli.input_format == CliInputFormat::StreamJson && github_context.is_none() {
+            if cli.prompt.is_some() {
+                eprintln!(
+                    "Warning: positional prompt is ignored with --input-format stream-json; \
+                     send user frames on stdin."
+                );
+            }
+            let run = stream_mode::run_stream_loop(stream_mode::StreamLoopParams {
+                client,
+                tools,
+                tool_ctx,
+                query_config,
+                cost_tracker,
+                model: claurst_api::effective_model_for_config(&config, &model_registry),
+                resume_id: cli.resume.clone(),
+            })
+            .await;
+            cron_cancel.cancel();
+            return run;
+        }
+
         // For a coven-github run, configure git auth from COVEN_GIT_TOKEN before
         // the agent starts. This installs an env-backed credential helper in the
         // workspace (the token stays in the environment, never on disk) so the
@@ -895,6 +958,14 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => warn!("headless: failed to configure git auth: {e}"),
             }
         }
+
+        // Snapshot the memory audit BEFORE the run: the report must describe
+        // the memory that influenced the review, and the agent may modify
+        // AGENTS.md files (and commit) during the run.
+        let review_memory = cli
+            .output
+            .as_ref()
+            .map(|_| headless::collect_review_memory(&cwd, &config));
 
         let run = run_headless(
             &cli,
@@ -919,12 +990,14 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "main".to_string());
             let git_summary = headless::collect_git_summary(&cwd, &default_branch);
             let (envelope, exit_code) = match &run {
-                Ok(r) => headless::build_result(
+                Ok(r) => headless::build_result_with_memory(
                     github_context.as_ref(),
                     &git_summary,
                     r.outcome,
                     &r.final_text,
                     Some(&r.review_trace),
+                    review_memory.clone().unwrap_or_default(),
+                    cli.hosted_repair,
                 ),
                 Err(e) => headless::infra_error_result(
                     github_context.as_ref(),
@@ -958,11 +1031,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Interactive REPL mode
+    if should_show_engine_notice(
+        !is_headless,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        std::env::var_os("COVEN_PARENT").is_some(),
+    ) {
+        eprintln!(
+            "\x1b[2mcoven-code is the Coven engine \u{2014} the supported CLI is 'coven' (npm i -g @opencoven/cli)\x1b[0m"
+        );
+    }
+
     let auth_store = claurst_core::AuthStore::load();
     let has_saved_credentials = !auth_store.credentials.is_empty()
         || claurst_core::oauth_config::get_codex_tokens().is_some();
     let has_credentials = !api_key.is_empty()
         || has_saved_credentials
+        // Keyless Claude runs through the local `claude` CLI runtime.
+        || claurst_api::providers::claude_cli::resolve_claude_binary().is_some()
         || config.provider.as_deref().is_some_and(|p| p != "anthropic");
     let result = run_interactive(
         config,
@@ -1314,10 +1399,7 @@ fn spawn_models_cache_refresh() {
         let url = models_source_url();
         let resp = match client
             .get(&url)
-            .header(
-                "User-Agent",
-                concat!("CovenCode/", env!("CARGO_PKG_VERSION")),
-            )
+            .header("User-Agent", concat!("Coven/", env!("CARGO_PKG_VERSION")))
             .send()
             .await
         {
@@ -1533,6 +1615,31 @@ fn filter_tools_for_hosted_review(
         return tools;
     }
 
+    if config.hosted_review.allow_file_write_tools {
+        // SECURITY (load-bearing): github_context forces BypassPermissions, so
+        // hosted-repair mode has NO permission prompts. This allowlist is the
+        // sole containment boundary — it must expose only repository file tools
+        // and never command/network/task/sub-agent/plugin/MCP surfaces. The
+        // exhaustive test `hosted_repair_allows_only_repository_file_tools`
+        // (with its catch-all assertion) guards against a new tool silently
+        // leaking into this set. Do not widen without updating that test.
+        const FILE_TOOLS: &[&str] = &[
+            "Read",
+            "Grep",
+            "Glob",
+            "Edit",
+            "Write",
+            "ApplyPatch",
+            "BatchEdit",
+            "NotebookEdit",
+        ];
+        let filtered = claurst_tools::all_tools()
+            .into_iter()
+            .filter(|tool| FILE_TOOLS.contains(&tool.name()))
+            .collect();
+        return Arc::new(filtered);
+    }
+
     filter_read_only_tools_except(&tools, &["LSP"])
 }
 
@@ -1605,75 +1712,33 @@ async fn run_headless(
     use tokio_util::sync::CancellationToken;
 
     // Build initial messages list from input.
-    // --input-format stream-json: stdin is newline-delimited JSON, each line is
-    //   {"role":"user"|"assistant","content":"..."} (mirrors TS --input-format stream-json).
-    // --input-format text (default): read prompt from positional arg or entire stdin as text.
-    let mut messages: Vec<claurst_core::types::Message> =
-        if cli.input_format == CliInputFormat::StreamJson {
-            use tokio::io::{self, AsyncBufReadExt, BufReader};
-            let stdin = io::stdin();
-            let mut reader = BufReader::new(stdin);
-            let mut line = String::new();
-            let mut parsed: Vec<claurst_core::types::Message> = Vec::new();
-            loop {
-                line.clear();
-                let n = reader.read_line(&mut line).await?;
-                if n == 0 {
-                    break;
-                }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<serde_json::Value>(trimmed) {
-                    Ok(v) => {
-                        let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                        let content = v
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if role == "assistant" {
-                            parsed.push(claurst_core::types::Message::assistant(content));
-                        } else {
-                            parsed.push(claurst_core::types::Message::user(content));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: skipping malformed JSON line: {} ({:?})",
-                            trimmed, e
-                        );
-                    }
-                }
-            }
-            if parsed.is_empty() {
-                // Also check positional arg as fallback
-                if let Some(ref p) = cli.prompt {
-                    parsed.push(claurst_core::types::Message::user(p.clone()));
-                }
-            }
-            parsed
-        } else {
-            // Plain text mode
-            let prompt = if let Some(ref p) = cli.prompt {
-                p.clone()
-            } else if let Some(brief) = github_context {
-                brief.to_prompt()
+    // --input-format stream-json runs never reach here: main routes them to
+    // stream_mode::run_stream_loop (the long-lived Coven runtime protocol)
+    // before calling run_headless. This path reads the prompt from the
+    // positional arg, the session brief, or stdin as plain text.
+    let mut messages: Vec<claurst_core::types::Message> = {
+        let prompt = if let Some(ref p) = cli.prompt {
+            p.clone()
+        } else if let Some(brief) = github_context {
+            if cli.hosted_repair {
+                brief.to_hosted_repair_prompt()
             } else {
-                use tokio::io::{self, AsyncReadExt};
-                let mut stdin = io::stdin();
-                let mut buf = String::new();
-                stdin.read_to_string(&mut buf).await?;
-                buf.trim().to_string()
-            };
-
-            if prompt.is_empty() {
-                anyhow::bail!("No prompt provided. Use --print <prompt> or pipe text to stdin.");
+                brief.to_prompt()
             }
-
-            vec![claurst_core::types::Message::user(prompt)]
+        } else {
+            use tokio::io::{self, AsyncReadExt};
+            let mut stdin = io::stdin();
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).await?;
+            buf.trim().to_string()
         };
+
+        if prompt.is_empty() {
+            anyhow::bail!("No prompt provided. Use --print <prompt> or pipe text to stdin.");
+        }
+
+        vec![claurst_core::types::Message::user(prompt)]
+    };
 
     // --prefill: inject a partial assistant turn before the query so the model
     // continues from that text (mirrors TS --prefill flag).
@@ -2079,6 +2144,23 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
+
+    // Register this session in the Coven daemon ledger (best-effort, opt-in).
+    // The id is captured here so that a mid-run /resume (which rebinds session.id)
+    // does not leave this registration uncompleted — the exit hook uses this local
+    // rather than session.id, which may have changed to a different session by then.
+    let ledger_session_id: Option<String> = if settings.daemon_ledger {
+        let id = session.id.clone();
+        let root = tool_ctx.working_dir.clone();
+        let title = session.title.clone().unwrap_or_default();
+        let id_for_task = id.clone();
+        tokio::task::spawn_blocking(move || {
+            claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title);
+        });
+        Some(id)
+    } else {
+        None
+    };
 
     // Background: refresh the model registry from models.dev.
     // The fetched JSON is saved as a cache file; the App will reload it from
@@ -3881,6 +3963,12 @@ async fn run_interactive(
         // Drain background model-fetch results (non-blocking).
         if let Some(ref mut rx) = app.model_fetch_rx {
             match rx.try_recv() {
+                // An empty listing must not blank out the options the picker
+                // was seeded with (curated/registry list) — keep them shown.
+                Ok(Ok(entries)) if entries.is_empty() => {
+                    app.model_picker.loading_models = false;
+                    app.model_fetch_rx = None;
+                }
                 Ok(Ok(entries)) => {
                     let provider = app
                         .model_picker_provider_id
@@ -3933,6 +4021,11 @@ async fn run_interactive(
                 .clone()
                 .or_else(|| app.config.provider.clone())
                 .unwrap_or_else(|| "anthropic".to_string());
+            // Older persisted configs may still carry the "openai-codex"
+            // alias; registry lookups are exact-match on "codex".
+            let provider_id_str =
+                claurst_api::registry::canonical_provider_id(&provider_id_str).to_string();
+            let mut fetch_spawned = false;
             if let Some(ref registry) = app.provider_registry {
                 let pid = claurst_core::ProviderId::new(&provider_id_str);
                 if let Some(provider) = registry.get(&pid) {
@@ -3962,7 +4055,13 @@ async fn run_interactive(
                             }
                         }
                     });
+                    fetch_spawned = true;
                 }
+            }
+            // No fetch is running (provider missing from the registry) —
+            // stop the spinner so the seeded model list stays usable.
+            if !fetch_spawned {
+                app.model_picker.loading_models = false;
             }
         }
 
@@ -3995,8 +4094,8 @@ async fn run_interactive(
                         if !client_id_configured {
                             let _ = tx2.send(DeviceAuthEvent::Error(
                                 "Claude subscription login is not configured.\n\
-                                 Set COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID, choose \"Anthropic CLI\" to import an existing\n\
-                                 `claude`/`ant` login, or use ANTHROPIC_API_KEY from console.anthropic.com/settings/keys.".to_string()
+                                 Choose \"Claude CLI\" to run through the local claude binary,\n\
+                                 or use ANTHROPIC_API_KEY from console.anthropic.com/settings/keys.".to_string()
                             )).await;
                             return;
                         }
@@ -4099,35 +4198,9 @@ async fn run_interactive(
             }
         }
 
-        // ---- Anthropic CLI credential import (from /connect → "Anthropic CLI") ----
-        if std::mem::take(&mut app.pending_anthropic_cli_import) {
-            match claurst_core::anthropic_cli_import::import().await {
-                Ok((source, profile_id)) => {
-                    app.notifications.push(
-                        claurst_tui::NotificationKind::Info,
-                        format!(
-                            "Imported Anthropic login from {} (profile {}).",
-                            source.label(),
-                            profile_id
-                        ),
-                        Some(5),
-                    );
-                    // Rebuild the runtime so the imported credential is live now.
-                    app.pending_provider_refresh = true;
-                }
-                Err(e) => {
-                    app.notifications.push(
-                        claurst_tui::NotificationKind::Error,
-                        format!("Anthropic CLI import failed: {}", e),
-                        None,
-                    );
-                }
-            }
-        }
-
         // ---- Apply newly-established Anthropic credentials without a restart ----
-        // Set after an in-session OAuth login or CLI import; rebuilds the client
-        // and provider registry from disk (non-destructively).
+        // Set after an in-session OAuth login; rebuilds the client and
+        // provider registry from disk (non-destructively).
         if std::mem::take(&mut app.pending_provider_refresh) {
             match reload_anthropic_runtime_state(&cmd_ctx.config).await {
                 Ok(refreshed) => {
@@ -4181,6 +4254,73 @@ async fn run_interactive(
                 }
             }
         }
+        // Advance the rate-limit recovery countdown and pick up any retry
+        // directive (auto-retry deadline reached, or the user pressed a
+        // recovery key). The retry re-dispatches the query loop over the
+        // existing conversation — the failed turn's prompt is never lost and
+        // never duplicated.
+        app.rate_limit_recovery.tick();
+        if current_query.is_none() && !app.is_streaming {
+            if let Some(directive) = app.rate_limit_recovery.take_retry_directive() {
+                if !messages.is_empty() {
+                    app.status_message = Some(match &directive.model {
+                        Some(model) => format!("Rate limit recovery — retrying on {}…", model),
+                        None => "Rate limit recovery — retrying…".to_string(),
+                    });
+                    app.is_streaming = true;
+                    app.streaming_text.clear();
+
+                    let ct = CancellationToken::new();
+                    cancel = Some(ct.clone());
+
+                    let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
+                    let msgs_arc_clone = msgs_arc.clone();
+                    let tools_arc_clone = tools_arc.clone();
+                    let ctx_clone = tool_ctx.clone();
+                    let mut qcfg = base_query_config.clone();
+                    qcfg.model =
+                        claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+                    qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
+                    qcfg.append_system_prompt = cmd_ctx.config.append_system_prompt.clone();
+                    qcfg.system_prompt = base_query_config.system_prompt.clone();
+                    qcfg.output_style = cmd_ctx.config.effective_output_style();
+                    qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
+                    qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
+                    let turn_effort = if app.effort_is_set {
+                        Some(app.effort_level.to_core())
+                    } else {
+                        current_effort
+                    };
+                    if let Some(level) = turn_effort {
+                        qcfg.effort_level = Some(level);
+                    }
+                    let tracker = cost_tracker.clone();
+                    let tx = event_tx.clone();
+                    let client_clone = client.clone();
+                    goal_turn_start = std::time::Instant::now();
+
+                    let handle = tokio::spawn(async move {
+                        let mut msgs = msgs_arc_clone.lock().await.clone();
+                        let outcome = claurst_query::run_query_loop(
+                            client_clone.as_ref(),
+                            &mut msgs,
+                            tools_arc_clone.as_slice(),
+                            &ctx_clone,
+                            &qcfg,
+                            tracker,
+                            Some(tx),
+                            ct,
+                            None,
+                        )
+                        .await;
+                        *msgs_arc_clone.lock().await = msgs;
+                        outcome
+                    });
+                    current_query = Some((handle, msgs_arc));
+                }
+            }
+        }
+
         // Check if query task is done; sync messages from the task
         let task_finished = current_query
             .as_ref()
@@ -4192,6 +4332,23 @@ async fn run_interactive(
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
+                    // Structured rate limit → interactive recovery flow
+                    // (countdown auto-retry, one-key tier switch, duplicate
+                    // account cleanup) instead of a dead-end error modal.
+                    Ok(QueryOutcome::Error(claurst_core::error::ClaudeError::RateLimit {
+                        retry_after_secs,
+                        message,
+                    })) => {
+                        while app.notifications.current_is_error() {
+                            app.notifications.dismiss_current();
+                        }
+                        app.open_rate_limit_recovery(
+                            message
+                                .clone()
+                                .unwrap_or_else(|| "Rate limit exceeded.".to_string()),
+                            *retry_after_secs,
+                        );
+                    }
                     Ok(QueryOutcome::Error(err)) => {
                         while app.notifications.current_is_error() {
                             app.notifications.dismiss_current();
@@ -4201,6 +4358,11 @@ async fn run_interactive(
                             err.to_string(),
                             None,
                         );
+                    }
+                    Ok(QueryOutcome::EndTurn { .. }) => {
+                        // Successful turn — refresh the auto-retry budget for
+                        // any future rate-limit episode.
+                        app.rate_limit_recovery.reset_episode();
                     }
                     Err(err) => {
                         while app.notifications.current_is_error() {
@@ -4502,6 +4664,14 @@ async fn run_interactive(
     if let Some(runtime) = bridge_runtime.take() {
         runtime.cancel.cancel();
     }
+
+    // Mark the session complete in the Coven daemon ledger (best-effort, opt-in).
+    // Use the id captured at registration time, not session.id, which may have been
+    // rebound by a mid-run /resume to a completely different session.
+    if let Some(id) = &ledger_session_id {
+        claurst_core::coven_ledger::notify_session_complete(id, Some(0));
+    }
+
     restore_terminal(&mut terminal)?;
     Ok(())
 }
@@ -4556,20 +4726,13 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
         }
 
         Some("import") => {
-            // Import an existing Anthropic OAuth credential from another
-            // first-party CLI (Claude Code or `ant`) into a Coven Code profile.
-            println!("Importing Anthropic credentials from local CLI...");
-            match claurst_core::anthropic_cli_import::import().await {
-                Ok((source, profile_id)) => {
-                    println!("Imported credentials from {}.", source.label());
-                    println!("  Profile: {}", profile_id);
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Import failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            eprintln!(
+                "`auth import` was removed: importing Claude Code's OAuth token gets rate limited."
+            );
+            eprintln!(
+                "Claude subscription access now runs through the local `claude` CLI automatically — no import needed."
+            );
+            std::process::exit(1);
         }
 
         Some("logout") => {
@@ -4617,8 +4780,9 @@ async fn handle_auth_command(args: &[String]) -> anyhow::Result<()> {
 
 fn print_auth_usage() {
     eprintln!("Usage: coven-code auth <subcommand>");
-    eprintln!("  login [--console] [--label <name>]   Authenticate with a configured Coven Code OAuth client");
-    eprintln!("  import                                Import Anthropic OAuth creds from Claude Code / ant CLI");
+    eprintln!(
+        "  login [--console] [--label <name>]   Authenticate with a configured Coven OAuth client"
+    );
     eprintln!("  logout                                Remove the active account's credentials");
     eprintln!("  status [--json]                       Show authentication status");
     eprintln!("  list                                  List all stored Anthropic accounts");
@@ -4960,7 +5124,7 @@ async fn auth_status(json_output: bool) {
         .or_else(|| {
             usable_oauth_tokens.map(|tokens| {
                 if tokens.uses_bearer_auth() {
-                    "Coven Code Account".to_string()
+                    "Coven Account".to_string()
                 } else {
                     "Console Account".to_string()
                 }
@@ -5030,9 +5194,9 @@ async fn auth_status(json_output: bool) {
         if !logged_in {
             let hint = if active_provider == "anthropic" {
                 if disabled_bearer_token {
-                    "Stored claude.ai OAuth tokens were minted by an unsupported client; configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`, or set ANTHROPIC_API_KEY for now.".to_string()
+                    "Stored claude.ai OAuth tokens were minted by an unsupported client and are ignored; Claude runs through the local `claude` CLI instead (or set ANTHROPIC_API_KEY).".to_string()
                 } else {
-                    "Set ANTHROPIC_API_KEY, or configure COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID and run `coven-code auth login`.".to_string()
+                    "Claude runs through the local `claude` CLI when no key is set — install it with `npm install -g @anthropic-ai/claude-code` and run `claude` to sign in (or set ANTHROPIC_API_KEY).".to_string()
                 }
             } else if let Some(env_var) =
                 claurst_core::config::primary_api_key_env_var_for_provider(active_provider)
@@ -5138,6 +5302,12 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         Some(s) => serde_json::Value::String(s.clone()),
         None => serde_json::Value::Null,
     }
+}
+
+/// Show the "use coven" hint only for a direct interactive run that is NOT
+/// driven by the unified coven CLI.
+fn should_show_engine_notice(is_interactive: bool, is_tty: bool, coven_parent_set: bool) -> bool {
+    is_interactive && is_tty && !coven_parent_set
 }
 
 #[cfg(test)]
@@ -5279,7 +5449,7 @@ mod tests {
     #[test]
     fn hosted_review_headless_gets_extra_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -5301,7 +5471,7 @@ mod tests {
     #[test]
     fn hosted_review_headless_caps_existing_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "review this" },
@@ -5323,7 +5493,7 @@ mod tests {
     #[test]
     fn non_review_headless_keeps_turn_budget() {
         let raw = r#"{
-            "contract_version": "2",
+            "contract_version": "3",
             "trigger": "issue_mention",
             "repo": { "owner": "o", "name": "r", "clone_url": "https://github.com/o/r.git", "default_branch": "main" },
             "task": { "kind": "respond_to_mention", "issue_number": 7, "comment_body": "answer this" },
@@ -5382,7 +5552,265 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hosted_repair_allows_only_repository_file_tools() {
+        let all = Arc::new(claurst_tools::all_tools());
+        let config = Config {
+            hosted_review: claurst_core::hosted_review::HostedReviewConfig {
+                enabled: true,
+                allow_file_write_tools: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let names = tool_names(&filter_tools_for_hosted_review(all, &config));
+        for required in ["Read", "Grep", "Glob", "Edit", "Write", "ApplyPatch"] {
+            assert!(
+                names.contains(&required.to_string()),
+                "hosted repair missing {required}: {names:?}"
+            );
+        }
+        for forbidden in [
+            "Bash",
+            "PtyBash",
+            "PowerShell",
+            "WebSearch",
+            "WebFetch",
+            "Agent",
+            "TeamCreate",
+            "Skill",
+            "ToolSearch",
+            "ListMcpResources",
+            "ReadMcpResource",
+        ] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "hosted repair must not include {forbidden}: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().all(|name| [
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit",
+                "Write",
+                "ApplyPatch",
+                "BatchEdit",
+                "NotebookEdit",
+            ]
+            .contains(&name.as_str())),
+            "hosted repair exposed an unexpected tool: {names:?}"
+        );
+    }
+
+    #[test]
+    fn hosted_repair_cli_requires_the_structured_headless_contract() {
+        assert!(Cli::try_parse_from(["coven-code", "--hosted-repair"]).is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-review",
+            "--hosted-repair",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "coven-code",
+            "--headless",
+            "--hosted-repair",
+            "--dangerously-skip-permissions",
+            "--context",
+            "brief.json",
+            "--output",
+            "result.json",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn github_context_forces_noninteractive_permission_bypass() {
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Default, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::Plan, true),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_for_invocation(CliPermissionMode::AcceptEdits, false),
+            PermissionMode::AcceptEdits
+        );
+    }
+
     // NOTE: the coven-github headless-contract types + behavior moved to the
     // `headless` module; their conformance tests live in `headless.rs`
     // (`#[cfg(test)] mod tests`), pinned to the vendored golden fixtures.
+
+    // ── coven-runtimes manifest drift guard ─────────────────────────────────
+    //
+    // `spec/runtime-manifest/coven-code.json` is the runtime adapter manifest
+    // accepted into the OpenCoven/coven-runtimes canonical registry. Registry
+    // versions are immutable: if one of these tests fails, a CLI flag the
+    // manifest depends on drifted. Fix the flag or publish a new manifest
+    // version and re-accept it in coven-runtimes (`conjure registry add`) —
+    // do not silently edit the shipped 1.0.0 definition.
+
+    const RUNTIME_MANIFEST: &str =
+        include_str!("../../../../spec/runtime-manifest/coven-code.json");
+
+    fn runtime_adapter() -> coven_runtime_spec::RuntimeAdapter {
+        let manifest = coven_runtime_spec::AdapterManifest::from_json(RUNTIME_MANIFEST)
+            .expect("runtime manifest parses");
+        assert_eq!(manifest.adapters.len(), 1, "exactly one adapter expected");
+        manifest.adapters.into_iter().next().expect("one adapter")
+    }
+
+    #[test]
+    fn runtime_manifest_passes_spec_validation() {
+        let adapter = runtime_adapter();
+        let errors = coven_runtime_spec::validate_adapter(&adapter);
+        assert!(errors.is_empty(), "spec violations: {errors:?}");
+        assert_eq!(adapter.id, "coven-code");
+        assert_eq!(adapter.executable, "coven-code");
+    }
+
+    #[test]
+    fn runtime_manifest_declares_full_stream_capabilities() {
+        let caps = runtime_adapter().capabilities;
+        assert!(caps.stream, "stream mode is implemented in stream_mode.rs");
+        assert!(caps.preassigned_session_id);
+        assert!(caps.think, "think maps to --thinking");
+        assert!(caps.speed, "speed maps to --effort");
+    }
+
+    #[test]
+    fn runtime_manifest_stream_launch_args_parse() {
+        let adapter = runtime_adapter();
+        let stream = adapter.stream_args.as_ref().expect("stream_args declared");
+
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(stream.prefix_args.iter().cloned());
+        let session_flag = stream
+            .session_id_flag
+            .as_deref()
+            .expect("session_id_flag declared");
+        argv.push(session_flag.to_string());
+        argv.push("00000000-0000-0000-0000-000000000000".into());
+        argv.push(adapter.model_flag.clone().expect("model_flag declared"));
+        argv.push("claude-sonnet-4-5".into());
+        argv.push(
+            adapter
+                .system_prompt_flag
+                .clone()
+                .expect("system_prompt_flag declared"),
+        );
+        argv.push("identity preamble".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("stream launch argv parses");
+        assert!(cli.print);
+        assert_eq!(cli.input_format, CliInputFormat::StreamJson);
+        assert_eq!(cli.output_format, CliOutputFormat::StreamJson);
+        assert_eq!(
+            cli.session_id_flag.as_deref(),
+            Some("00000000-0000-0000-0000-000000000000")
+        );
+    }
+
+    #[test]
+    fn runtime_manifest_resume_flag_parses() {
+        let adapter = runtime_adapter();
+        let stream = adapter.stream_args.as_ref().expect("stream_args declared");
+        let resume_flag = stream.resume_flag.as_deref().expect("resume_flag declared");
+
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(stream.prefix_args.iter().cloned());
+        argv.push(resume_flag.to_string());
+        argv.push("11111111-1111-1111-1111-111111111111".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("resume argv parses");
+        assert_eq!(
+            cli.resume.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
+    fn runtime_manifest_sandbox_mapping_parses_for_both_policies() {
+        let adapter = runtime_adapter();
+        let sandbox = adapter.sandbox.as_ref().expect("sandbox declared");
+
+        for (permission, expected) in [
+            (
+                coven_runtime_spec::Permission::Full,
+                CliPermissionMode::BypassPermissions,
+            ),
+            (
+                coven_runtime_spec::Permission::ReadOnly,
+                CliPermissionMode::Plan,
+            ),
+        ] {
+            let mut argv: Vec<String> = vec!["coven-code".into()];
+            argv.extend(adapter.non_interactive_prompt_prefix_args.iter().cloned());
+            argv.extend(sandbox.args(permission));
+            argv.push("do the thing".into());
+
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{permission:?} sandbox argv rejected: {e}"));
+            assert_eq!(cli.permission_mode, expected);
+        }
+    }
+
+    #[test]
+    fn runtime_manifest_one_shot_launch_parses() {
+        let adapter = runtime_adapter();
+        let mut argv: Vec<String> = vec!["coven-code".into()];
+        argv.extend(adapter.non_interactive_prompt_prefix_args.iter().cloned());
+        argv.push("hello".into());
+
+        let cli = Cli::try_parse_from(&argv).expect("one-shot argv parses");
+        assert!(cli.print);
+        assert_eq!(cli.prompt.as_deref(), Some("hello"));
+    }
+
+    // --- should_show_engine_notice truth table ---
+
+    #[test]
+    fn engine_notice_shown_for_direct_interactive_tty() {
+        // All three conditions met: interactive + TTY + no COVEN_PARENT
+        assert!(should_show_engine_notice(true, true, false));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_coven_parent_set() {
+        // Driven by the unified coven CLI
+        assert!(!should_show_engine_notice(true, true, true));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_non_interactive() {
+        // Headless/print/prompt mode
+        assert!(!should_show_engine_notice(false, true, false));
+    }
+
+    #[test]
+    fn engine_notice_suppressed_when_not_a_tty() {
+        // Piped stdout/stderr (e.g. CI, script)
+        assert!(!should_show_engine_notice(true, false, false));
+    }
 }

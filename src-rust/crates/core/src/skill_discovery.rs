@@ -353,7 +353,8 @@ pub fn discover_skills(
                 break;
             }
             add(scan_skill_root(
-                &dir.join(".coven-code").join("skills"),
+                &dir.join(crate::config::PROJECT_CONFIG_DIRNAME)
+                    .join("skills"),
                 SkillScope::Project,
                 "coven",
             ));
@@ -377,7 +378,7 @@ pub fn discover_skills(
     // ---- 2. User skills: home directory -------------------------------------
     if let Some(home) = home {
         add(scan_skill_root(
-            &home.join(".coven-code").join("skills"),
+            &crate::config::config_home().join("skills"),
             SkillScope::User,
             "coven",
         ));

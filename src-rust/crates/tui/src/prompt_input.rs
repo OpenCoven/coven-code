@@ -1789,8 +1789,18 @@ pub fn handle_paste(content: &str, paste_counter: &mut u32) -> (String, Option<S
         return (content.to_string(), None);
     }
     *paste_counter += 1;
-    let placeholder = format!("[Pasted ~{} lines #{}]", line_count, paste_counter);
-    (placeholder, Some(content.to_string()))
+    (
+        paste_placeholder(line_count, *paste_counter),
+        Some(content.to_string()),
+    )
+}
+
+/// The placeholder shown in the input in place of a large paste.
+///
+/// `PromptInputState::take` rebuilds this exact string from the stored
+/// content to expand placeholders at submit time, so the two must not drift.
+fn paste_placeholder(line_count: usize, id: u32) -> String {
+    format!("[Pasted ~{line_count} lines #{id}]")
 }
 
 /// Normalize a pasted string into a filesystem path if it looks like one.
@@ -3148,11 +3158,26 @@ impl PromptInputState {
         self.visual_anchor = None;
         self.vim_command_buf.clear();
         self.vim_search_buf.clear();
+        // Placeholders live in `text`, so once that is gone the stored paste
+        // contents are unreachable. `paste_counter` stays monotonic so a
+        // stale placeholder (e.g. restored via undo) can never collide with
+        // a later paste's id.
+        self.paste_contents.clear();
     }
 
     /// Take the current text, clearing the input.
+    ///
+    /// Placeholders inserted by [`handle_paste`] are expanded back to their
+    /// stored paste contents, so callers receive what the user actually
+    /// pasted rather than the `[Pasted ~N lines #K]` marker.
     pub fn take(&mut self) -> String {
-        let text = self.text.clone();
+        let mut text = std::mem::take(&mut self.text);
+        for (id, content) in &self.paste_contents {
+            let placeholder = paste_placeholder(content.lines().count(), *id);
+            if text.contains(&placeholder) {
+                text = text.replace(&placeholder, content);
+            }
+        }
         self.clear();
         text
     }
@@ -4264,6 +4289,64 @@ mod tests {
         handle_paste(&big, &mut counter);
         handle_paste(&big, &mut counter);
         assert_eq!(counter, 2);
+    }
+
+    #[test]
+    fn take_expands_paste_placeholders() {
+        let mut s = PromptInputState::new();
+        s.paste("look at this: ");
+        let big = "x".repeat(200);
+        s.paste(&big);
+        let taken = s.take();
+        assert!(
+            taken.contains(&big),
+            "placeholder should expand to the pasted content"
+        );
+        assert!(
+            !taken.contains("[Pasted ~"),
+            "no placeholder should survive take(): {taken}"
+        );
+        assert!(
+            s.paste_contents.is_empty(),
+            "paste store should be dropped after take()"
+        );
+    }
+
+    #[test]
+    fn take_expands_multiple_pastes() {
+        let mut s = PromptInputState::new();
+        let first = "a".repeat(160);
+        let second = "line\n".repeat(4);
+        s.paste(&first);
+        s.paste(" between ");
+        s.paste(&second);
+        let taken = s.take();
+        assert!(taken.contains(&first));
+        assert!(taken.contains(" between "));
+        assert!(taken.contains(&second));
+        assert!(!taken.contains("[Pasted ~"));
+    }
+
+    #[test]
+    fn take_drops_deleted_placeholder_content() {
+        let mut s = PromptInputState::new();
+        let big = "y".repeat(200);
+        s.paste(&big);
+        // User deleted the placeholder and typed something else instead —
+        // the stored content must not leak into the submitted text.
+        s.text = "typed instead".to_string();
+        s.cursor = s.text.len();
+        let taken = s.take();
+        assert_eq!(taken, "typed instead");
+        assert!(s.paste_contents.is_empty());
+    }
+
+    #[test]
+    fn clear_drops_paste_contents() {
+        let mut s = PromptInputState::new();
+        s.paste(&"z".repeat(200));
+        s.clear();
+        assert!(s.paste_contents.is_empty());
     }
 
     // ---- compute_typeahead ---------------------------------------------

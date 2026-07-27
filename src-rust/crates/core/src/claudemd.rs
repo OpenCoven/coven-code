@@ -50,9 +50,15 @@ pub struct MemoryFrontmatter {
     #[serde(default)]
     pub source_ref: Option<String>,
     #[serde(default)]
+    pub source_repo: Option<String>,
+    #[serde(default)]
+    pub source_commit: Option<String>,
+    #[serde(default)]
+    pub source_actor: Option<String>,
+    #[serde(default)]
     pub expires_at: Option<String>,
     #[serde(default)]
-    pub retention_class: Option<String>,
+    pub retention_class: Option<RetentionClass>,
     #[serde(default)]
     pub redacted_at: Option<String>,
     #[serde(default)]
@@ -67,6 +73,271 @@ pub struct MemoryFrontmatter {
     pub transcript_ref: Option<String>,
     #[serde(default)]
     pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionClass {
+    Standard,
+    ShortLived,
+    Security,
+    LegalHold,
+}
+
+impl RetentionClass {
+    pub fn parse(value: &str) -> Option<Self> {
+        match normalized_frontmatter_value(value).as_str() {
+            "standard" => Some(Self::Standard),
+            "short_lived" => Some(Self::ShortLived),
+            "security" => Some(Self::Security),
+            "legal_hold" => Some(Self::LegalHold),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::ShortLived => "short_lived",
+            Self::Security => "security",
+            Self::LegalHold => "legal_hold",
+        }
+    }
+
+    pub fn default_retention_days(self) -> Option<i64> {
+        match self {
+            Self::ShortLived => Some(30),
+            Self::Security => Some(90),
+            Self::Standard | Self::LegalHold => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+impl MemoryProvenance {
+    pub fn new(source_kind: impl Into<String>, created_by: impl Into<String>) -> Self {
+        Self {
+            created_by: non_empty_string(created_by.into()),
+            source_kind: non_empty_string(source_kind.into()),
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        }
+    }
+
+    pub fn manual(created_by: impl Into<String>) -> Self {
+        Self::new("manual", created_by)
+    }
+
+    pub fn session_memory_extraction(session_id: impl Into<String>) -> Self {
+        Self::new("session-memory-extraction", "coven-code").with_session_id(session_id)
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = non_empty_string(session_id.into());
+        self
+    }
+
+    pub fn with_source_repo(mut self, source_repo: impl Into<String>) -> Self {
+        self.source_repo = non_empty_string(source_repo.into());
+        self
+    }
+
+    pub fn with_source_commit(mut self, source_commit: impl Into<String>) -> Self {
+        self.source_commit = non_empty_string(source_commit.into());
+        self
+    }
+
+    pub fn with_source_actor(mut self, source_actor: impl Into<String>) -> Self {
+        self.source_actor = non_empty_string(source_actor.into());
+        self
+    }
+
+    pub fn with_transcript_ref(mut self, transcript_ref: impl Into<String>) -> Self {
+        self.transcript_ref = non_empty_string(transcript_ref.into());
+        self
+    }
+
+    pub fn with_confidence(mut self, confidence: f32) -> Self {
+        self.confidence = Some(confidence.clamp(0.0, 1.0));
+        self
+    }
+
+    pub fn compact_string(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(session_id) = self
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "session:{}",
+                compact_provenance_component(session_id)
+            ));
+        }
+        if let Some(source_kind) = self
+            .source_kind
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "source:{}",
+                compact_provenance_component(source_kind)
+            ));
+        }
+        if let Some(source_repo) = self
+            .source_repo
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "repo:{}",
+                compact_provenance_component(source_repo)
+            ));
+        }
+        if let Some(source_commit) = self
+            .source_commit
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let commit = source_commit.trim();
+            let short_len = commit
+                .char_indices()
+                .nth(7)
+                .map(|(idx, _)| idx)
+                .unwrap_or(commit.len());
+            parts.push(format!(
+                "commit:{}",
+                compact_provenance_component(&commit[..short_len])
+            ));
+        }
+        if let Some(source_actor) = self
+            .source_actor
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "actor:{}",
+                compact_provenance_component(source_actor)
+            ));
+        }
+        if let Some(created_by) = self
+            .created_by
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!("by:{}", compact_provenance_component(created_by)));
+        }
+        if let Some(transcript_ref) = self
+            .transcript_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "transcript:{}",
+                compact_provenance_component(transcript_ref)
+            ));
+        }
+        if let Some(created_at) = self
+            .created_at
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(format!(
+                "created:{}",
+                compact_provenance_component(created_at)
+            ));
+        }
+        if let Some(confidence) = self.confidence {
+            parts.push(format!(
+                "confidence:{:.0}",
+                confidence.clamp(0.0, 1.0) * 100.0
+            ));
+        }
+        parts.join(";")
+    }
+
+    pub fn populate_frontmatter(&self, frontmatter: &mut MemoryFrontmatter) {
+        frontmatter.source = self.source_kind.clone();
+        frontmatter.created_by = self.created_by.clone();
+        frontmatter.source_repo = self.source_repo.clone();
+        frontmatter.source_commit = self.source_commit.clone();
+        frontmatter.source_actor = self.source_actor.clone();
+        frontmatter.session_id = self.session_id.clone();
+        frontmatter.transcript_ref = self.transcript_ref.clone();
+        frontmatter.created_at = self.created_at.clone();
+        frontmatter.confidence = self.confidence;
+    }
+
+    pub fn frontmatter_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::new();
+        if let Some(source_kind) = self.source_kind.as_deref() {
+            pairs.push(("source", source_kind.to_string()));
+        }
+        if let Some(created_by) = self.created_by.as_deref() {
+            pairs.push(("created_by", created_by.to_string()));
+        }
+        if let Some(source_repo) = self.source_repo.as_deref() {
+            pairs.push(("source_repo", source_repo.to_string()));
+        }
+        if let Some(source_commit) = self.source_commit.as_deref() {
+            pairs.push(("source_commit", source_commit.to_string()));
+        }
+        if let Some(source_actor) = self.source_actor.as_deref() {
+            pairs.push(("source_actor", source_actor.to_string()));
+        }
+        if let Some(session_id) = self.session_id.as_deref() {
+            pairs.push(("session_id", session_id.to_string()));
+        }
+        if let Some(transcript_ref) = self.transcript_ref.as_deref() {
+            pairs.push(("transcript_ref", transcript_ref.to_string()));
+        }
+        if let Some(created_at) = self.created_at.as_deref() {
+            pairs.push(("created_at", created_at.to_string()));
+        }
+        if let Some(confidence) = self.confidence {
+            pairs.push(("confidence", format!("{}", confidence.clamp(0.0, 1.0))));
+        }
+        pairs
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn compact_provenance_component(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| *ch != ';' && *ch != '\n' && *ch != '\r')
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,10 +467,17 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
                     "visibility" => fm.visibility = parse_memory_visibility(&val),
                     "source" => fm.source = Some(strip_frontmatter_value(&val).to_string()),
                     "source_ref" => fm.source_ref = Some(strip_frontmatter_value(&val).to_string()),
-                    "expires_at" => fm.expires_at = Some(strip_frontmatter_value(&val).to_string()),
-                    "retention_class" => {
-                        fm.retention_class = Some(strip_frontmatter_value(&val).to_string())
+                    "source_repo" => {
+                        fm.source_repo = Some(strip_frontmatter_value(&val).to_string())
                     }
+                    "source_commit" => {
+                        fm.source_commit = Some(strip_frontmatter_value(&val).to_string())
+                    }
+                    "source_actor" => {
+                        fm.source_actor = Some(strip_frontmatter_value(&val).to_string())
+                    }
+                    "expires_at" => fm.expires_at = Some(strip_frontmatter_value(&val).to_string()),
+                    "retention_class" => fm.retention_class = RetentionClass::parse(&val),
                     "redacted_at" => {
                         fm.redacted_at = Some(strip_frontmatter_value(&val).to_string())
                     }
@@ -210,7 +488,7 @@ pub fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, &str) {
                     "transcript_ref" => {
                         fm.transcript_ref = Some(strip_frontmatter_value(&val).to_string())
                     }
-                    "confidence" => fm.confidence = val.parse().ok(),
+                    "confidence" => fm.confidence = strip_frontmatter_value(&val).parse().ok(),
                     _ => {}
                 }
             }
@@ -229,6 +507,46 @@ fn normalized_frontmatter_value(value: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace('-', "_")
+}
+
+pub fn upsert_frontmatter_key(content: &str, key: &str, value: &str) -> String {
+    if !content.starts_with("---") {
+        return format!("---\n{key}: {value}\n---\n{content}");
+    }
+
+    let after_first = &content[3..];
+    let Some(end) = after_first.find("\n---") else {
+        return format!("---\n{key}: {value}\n---\n{content}");
+    };
+
+    let yaml = after_first[..end]
+        .strip_prefix('\n')
+        .unwrap_or(&after_first[..end]);
+    let mut updated = Vec::new();
+    let mut replaced = false;
+    for line in yaml.lines() {
+        if line
+            .split_once(':')
+            .map(|(existing_key, _)| existing_key.trim() == key)
+            .unwrap_or(false)
+        {
+            updated.push(format!("{key}: {value}"));
+            replaced = true;
+        } else {
+            updated.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        updated.push(format!("{key}: {value}"));
+    }
+
+    let mut result = String::from("---\n");
+    result.push_str(&updated.join("\n"));
+    result.push('\n');
+    result.push_str("---");
+    result.push_str(&after_first[end + 4..]);
+    result
 }
 
 fn parse_memory_trust(value: &str) -> Option<MemorySourceTrust> {
@@ -365,7 +683,7 @@ pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLo
         return true;
     }
 
-    if memory_is_expired(file.frontmatter.expires_at.as_deref()) {
+    if memory_is_expired(&file.frontmatter) {
         return false;
     }
 
@@ -384,11 +702,25 @@ pub fn memory_file_allowed_for_options(file: &MemoryFileInfo, options: &MemoryLo
     effective_memory_trust(file, options).meets_threshold(options.min_trust)
 }
 
-fn effective_memory_trust(file: &MemoryFileInfo, options: &MemoryLoadOptions) -> MemorySourceTrust {
+/// Effective trust of a loaded memory file under the given load options.
+/// Hosted mode floors unattributed entries and caps repo-writable scopes.
+pub fn effective_memory_trust(
+    file: &MemoryFileInfo,
+    options: &MemoryLoadOptions,
+) -> MemorySourceTrust {
     let declared = file.frontmatter.trust.unwrap_or(MemorySourceTrust::Unknown);
     if !options.mode.is_hosted_review() {
         return declared;
     }
+
+    // Hosted loads floor the trust of entries that carry no provenance:
+    // without a `source` attribution the declared trust level cannot be
+    // audited, so it is treated as contributor input at best.
+    let declared = if memory_has_provenance(&file.frontmatter) {
+        declared
+    } else {
+        declared.capped_at(MemorySourceTrust::ContributorInput)
+    };
 
     match file.scope {
         MemoryScope::Project | MemoryScope::Local => {
@@ -399,14 +731,46 @@ fn effective_memory_trust(file: &MemoryFileInfo, options: &MemoryLoadOptions) ->
     }
 }
 
-fn memory_is_expired(expires_at: Option<&str>) -> bool {
-    let Some(expires_at) = expires_at else {
+fn memory_has_provenance(frontmatter: &MemoryFrontmatter) -> bool {
+    frontmatter
+        .source
+        .as_deref()
+        .is_some_and(|source| !source.trim().is_empty())
+}
+
+pub fn effective_memory_expires_at(frontmatter: &MemoryFrontmatter) -> Option<chrono::NaiveDate> {
+    if let Some(expires_at) = frontmatter.expires_at.as_deref() {
+        return parse_memory_date(expires_at);
+    }
+
+    let retention_class = frontmatter.retention_class?;
+    if retention_class == RetentionClass::LegalHold {
+        return None;
+    }
+    let days = retention_class.default_retention_days()?;
+    let created_at = parse_memory_date(frontmatter.created_at.as_deref()?)?;
+    created_at.checked_add_signed(chrono::Duration::days(days))
+}
+
+fn parse_memory_date(value: &str) -> Option<chrono::NaiveDate> {
+    let trimmed = value.trim();
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Some(date);
+    }
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(timestamp.date_naive());
+    }
+    if let Some((date, _)) = trimmed.split_once('T') {
+        return chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok();
+    }
+    None
+}
+
+fn memory_is_expired(frontmatter: &MemoryFrontmatter) -> bool {
+    let Some(expires) = effective_memory_expires_at(frontmatter) else {
         return false;
     };
-    let Ok(expires) = chrono::NaiveDate::parse_from_str(expires_at.trim(), "%Y-%m-%d") else {
-        return false;
-    };
-    expires < chrono::Local::now().date_naive()
+    expires <= chrono::Local::now().date_naive()
 }
 
 pub fn memory_id(file: &MemoryFileInfo) -> String {
@@ -453,6 +817,27 @@ pub fn format_memory_file_for_prompt(file: &MemoryFileInfo, options: &MemoryLoad
     }
     if let Some(session_id) = file.frontmatter.session_id.as_deref() {
         attrs.push_str(&format!(" session_id=\"{}\"", xml_escape_attr(session_id)));
+    }
+    if let Some(source_repo) = file.frontmatter.source_repo.as_deref() {
+        attrs.push_str(&format!(" repo=\"{}\"", xml_escape_attr(source_repo)));
+    }
+    if let Some(source_commit) = file.frontmatter.source_commit.as_deref() {
+        attrs.push_str(&format!(" commit=\"{}\"", xml_escape_attr(source_commit)));
+    }
+    if let Some(source_actor) = file.frontmatter.source_actor.as_deref() {
+        attrs.push_str(&format!(" actor=\"{}\"", xml_escape_attr(source_actor)));
+    }
+    if let Some(created_by) = file.frontmatter.created_by.as_deref() {
+        attrs.push_str(&format!(" created_by=\"{}\"", xml_escape_attr(created_by)));
+    }
+    if let Some(transcript_ref) = file.frontmatter.transcript_ref.as_deref() {
+        attrs.push_str(&format!(
+            " transcript_ref=\"{}\"",
+            xml_escape_attr(transcript_ref)
+        ));
+    }
+    if let Some(created_at) = file.frontmatter.created_at.as_deref() {
+        attrs.push_str(&format!(" created_at=\"{}\"", xml_escape_attr(created_at)));
     }
 
     format!("<memory {}>\n{}\n</memory>", attrs, xml_escape_text(body))
@@ -526,9 +911,10 @@ pub fn load_all_memory_files_with_options(
     let mut files = Vec::new();
 
     // 1. Managed: ~/.coven-code/rules/*.md
-    if let Some(home) = memory_home_dir() {
+    {
+        let config_home = crate::config::config_home();
         if options.allow_managed_rules {
-            let rules_dir = home.join(".coven-code/rules");
+            let rules_dir = config_home.join("rules");
             if let Ok(entries) = std::fs::read_dir(&rules_dir) {
                 let mut paths: Vec<PathBuf> = entries
                     .flatten()
@@ -552,7 +938,7 @@ pub fn load_all_memory_files_with_options(
 
         // 2. User: ~/.coven-code/AGENTS.md then ~/.coven-code/CLAUDE.md
         if options.allow_user_memory {
-            load_scope_files(&home.join(".coven-code"), MemoryScope::User, &mut files);
+            load_scope_files(&config_home, MemoryScope::User, &mut files);
         }
     }
 
@@ -570,6 +956,52 @@ pub fn load_all_memory_files_with_options(
         .into_iter()
         .filter(|file| memory_file_allowed_for_options(file, options))
         .collect()
+}
+
+/// Enumerate the memory files the live context build injects into the model
+/// prompt: the user-global `AGENTS.md` (when allowed) followed by every
+/// `AGENTS.md` on the walk from the filesystem root down to `cwd` (outermost
+/// first), each gated through [`memory_file_allowed_for_options`].
+///
+/// This is the single source of truth shared by
+/// `ContextBuilder::find_and_read_claude_md` (which formats these files into
+/// the prompt) and the headless `review.memory` audit report — keeping the
+/// report exactly aligned with what the model actually saw.
+pub fn enumerate_context_memory_files(
+    cwd: &Path,
+    options: &MemoryLoadOptions,
+) -> Vec<MemoryFileInfo> {
+    let mut files: Vec<MemoryFileInfo> = Vec::new();
+
+    if options.allow_user_memory {
+        let global = crate::config::config_home().join(crate::constants::CLAUDE_MD_FILENAME);
+        if global.exists() {
+            if let Some(file) = load_memory_file(&global, MemoryScope::User)
+                .filter(|file| memory_file_allowed_for_options(file, options))
+            {
+                files.push(file);
+            }
+        }
+    }
+
+    // Walk from cwd up to the filesystem root, then reverse so the outermost
+    // directory comes first — matching the prompt assembly order.
+    let mut project: Vec<MemoryFileInfo> = Vec::new();
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let candidate = d.join(crate::constants::CLAUDE_MD_FILENAME);
+        if candidate.exists() {
+            if let Some(file) = load_memory_file(&candidate, MemoryScope::Project)
+                .filter(|file| memory_file_allowed_for_options(file, options))
+            {
+                project.push(file);
+            }
+        }
+        dir = d.parent();
+    }
+    project.reverse();
+    files.extend(project);
+    files
 }
 
 /// Concatenate all memory file contents into a single system-prompt fragment.
@@ -623,6 +1055,32 @@ mod tests {
         assert_eq!(fm.session_id.as_deref(), Some("sess-1"));
         assert_eq!(fm.confidence, Some(0.9));
         assert_eq!(body.trim(), "Use explicit auth checks.");
+    }
+
+    #[test]
+    fn memory_provenance_populates_frontmatter_fields() {
+        let mut fm = MemoryFrontmatter::default();
+        let provenance = MemoryProvenance::new("session-memory-extraction", "coven-code")
+            .with_session_id("sess-1")
+            .with_source_repo("OpenCoven/coven-code")
+            .with_source_commit("0123456789abcdef0123456789abcdef01234567")
+            .with_source_actor("BunsDev")
+            .with_transcript_ref("sha256:abc123")
+            .with_confidence(0.82);
+
+        provenance.populate_frontmatter(&mut fm);
+
+        assert_eq!(fm.source.as_deref(), Some("session-memory-extraction"));
+        assert_eq!(fm.created_by.as_deref(), Some("coven-code"));
+        assert_eq!(fm.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(fm.source_repo.as_deref(), Some("OpenCoven/coven-code"));
+        assert_eq!(
+            fm.source_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(fm.source_actor.as_deref(), Some("BunsDev"));
+        assert_eq!(fm.transcript_ref.as_deref(), Some("sha256:abc123"));
+        assert_eq!(fm.confidence, Some(0.82));
     }
 
     #[test]
@@ -729,7 +1187,7 @@ mod tests {
         std::fs::create_dir_all(&rules).unwrap();
         std::fs::write(
             rules.join("managed.md"),
-            "---\ntrust: system_policy\nvisibility: public_review\n---\nmanaged hosted policy",
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: coven-managed-rules\n---\nmanaged hosted policy",
         )
         .unwrap();
 
@@ -812,6 +1270,112 @@ mod tests {
     }
 
     #[test]
+    fn hosted_review_floors_trust_for_entries_missing_provenance() {
+        let no_source = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: "unattributed policy".to_string(),
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::SystemPolicy),
+                visibility: Some(MemoryVisibility::PublicReview),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+        let options = MemoryLoadOptions::hosted_review();
+
+        assert_eq!(
+            effective_memory_trust(&no_source, &options),
+            MemorySourceTrust::ContributorInput,
+            "hosted trust must be floored when no source provenance is present"
+        );
+        assert!(
+            !memory_file_allowed_for_options(&no_source, &options),
+            "unattributed entries must not pass the hosted trust threshold"
+        );
+
+        let with_source = MemoryFileInfo {
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::SystemPolicy),
+                visibility: Some(MemoryVisibility::PublicReview),
+                source: Some("coven-managed-rules".to_string()),
+                ..Default::default()
+            },
+            ..no_source
+        };
+        assert_eq!(
+            effective_memory_trust(&with_source, &options),
+            MemorySourceTrust::SystemPolicy
+        );
+        assert!(memory_file_allowed_for_options(&with_source, &options));
+    }
+
+    #[test]
+    fn hosted_review_accepts_structured_source_provenance_only_with_source_kind() {
+        let options = MemoryLoadOptions::hosted_review();
+        let with_session_only = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: "session-only policy".to_string(),
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::SystemPolicy),
+                visibility: Some(MemoryVisibility::PublicReview),
+                session_id: Some("sess-1".to_string()),
+                source_repo: Some("OpenCoven/coven-code".to_string()),
+                source_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+
+        assert_eq!(
+            effective_memory_trust(&with_session_only, &options),
+            MemorySourceTrust::ContributorInput
+        );
+        assert!(!memory_file_allowed_for_options(
+            &with_session_only,
+            &options
+        ));
+
+        let with_structured_source = MemoryFileInfo {
+            frontmatter: MemoryFrontmatter {
+                source: Some("session-memory-extraction".to_string()),
+                ..with_session_only.frontmatter.clone()
+            },
+            ..with_session_only
+        };
+        assert_eq!(
+            effective_memory_trust(&with_structured_source, &options),
+            MemorySourceTrust::SystemPolicy
+        );
+        assert!(memory_file_allowed_for_options(
+            &with_structured_source,
+            &options
+        ));
+    }
+
+    #[test]
+    fn local_mode_does_not_floor_unattributed_trust() {
+        let file = MemoryFileInfo {
+            path: PathBuf::from("AGENTS.md"),
+            scope: MemoryScope::Project,
+            content: "local memory".to_string(),
+            frontmatter: MemoryFrontmatter {
+                trust: Some(MemorySourceTrust::MaintainerApproved),
+                ..Default::default()
+            },
+            mtime: None,
+        };
+        let options = MemoryLoadOptions::local();
+
+        assert_eq!(
+            effective_memory_trust(&file, &options),
+            MemorySourceTrust::MaintainerApproved
+        );
+        assert!(memory_file_allowed_for_options(&file, &options));
+    }
+
+    #[test]
     fn hosted_review_excludes_expired_memory() {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -824,6 +1388,115 @@ mod tests {
             load_all_memory_files_with_options(project.path(), &MemoryLoadOptions::hosted_review());
 
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn hosted_review_excludes_memory_expiring_today() {
+        let expires_at = chrono::Local::now().date_naive().format("%Y-%m-%d");
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nexpires_at: {expires_at}\n---\nexpires today"
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(!memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn hosted_review_expires_short_lived_memory_from_created_at_default() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(31);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: short_lived\ncreated_at: {}\n---\nshort lived memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(!memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn explicit_expires_at_wins_over_retention_class_default() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(31);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: short_lived\ncreated_at: {}\nexpires_at: 2099-12-31\n---\nshort lived memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn legal_hold_memory_never_auto_expires_from_created_at() {
+        let created = chrono::Local::now().date_naive() - chrono::Duration::days(3650);
+        let content = format!(
+            "---\ntrust: system_policy\nvisibility: public_review\nsource: operator\nretention_class: legal_hold\ncreated_at: {}\n---\nlegal hold memory",
+            created.format("%Y-%m-%d")
+        );
+        let (frontmatter, body) = parse_frontmatter(&content);
+        let file = MemoryFileInfo {
+            path: PathBuf::from("managed.md"),
+            scope: MemoryScope::Managed,
+            content: body.to_string(),
+            frontmatter,
+            mtime: None,
+        };
+
+        assert!(memory_file_allowed_for_options(
+            &file,
+            &MemoryLoadOptions::hosted_review()
+        ));
+    }
+
+    #[test]
+    fn upsert_frontmatter_key_preserves_other_keys_and_body() {
+        let content = "---\ntrust: maintainer_approved\nsource: operator\n---\n\nBody: keep me\n";
+        let updated = upsert_frontmatter_key(content, "expires_at", "2026-07-07");
+
+        assert!(updated.contains("trust: maintainer_approved\n"));
+        assert!(updated.contains("source: operator\n"));
+        assert!(updated.contains("expires_at: 2026-07-07\n"));
+        assert!(updated.ends_with("\nBody: keep me\n"));
+    }
+
+    #[test]
+    fn upsert_frontmatter_key_replaces_existing_key_without_touching_body() {
+        let content =
+            "---\nexpires_at: 2026-01-01\nsource: operator\n---\nBody: 2026-01-01 remains here\n";
+        let updated = upsert_frontmatter_key(content, "expires_at", "2026-07-07");
+
+        assert!(updated.contains("expires_at: 2026-07-07\n"));
+        assert!(!updated.contains("expires_at: 2026-01-01\n"));
+        assert!(updated.ends_with("Body: 2026-01-01 remains here\n"));
     }
 
     #[test]
@@ -894,6 +1567,8 @@ mod tests {
                 source: Some("github_pr".to_string()),
                 source_ref: Some("OpenCoven/coven-code#123".to_string()),
                 session_id: Some("sess-1".to_string()),
+                source_repo: Some("OpenCoven/coven-code".to_string()),
+                source_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
                 ..Default::default()
             },
             mtime: None,
@@ -905,6 +1580,8 @@ mod tests {
         assert!(prompt.contains("trust=\"maintainer-approved\""));
         assert!(prompt.contains("source_ref=\"OpenCoven/coven-code#123\""));
         assert!(prompt.contains("session_id=\"sess-1\""));
+        assert!(prompt.contains("repo=\"OpenCoven/coven-code\""));
+        assert!(prompt.contains("commit=\"0123456789abcdef0123456789abcdef01234567\""));
         assert!(prompt.contains("Always cite auth policy."));
     }
 

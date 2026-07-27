@@ -105,12 +105,12 @@ static ACTIVE_TEAMS: Lazy<DashMap<String, Vec<CancellationToken>>> = Lazy::new(D
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn teams_base_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".coven-code").join("teams"))
+fn teams_base_dir() -> std::path::PathBuf {
+    claurst_core::config::config_home().join("teams")
 }
 
-fn team_dir(team_name: &str) -> Option<std::path::PathBuf> {
-    teams_base_dir().map(|b| b.join(sanitize_name(team_name)))
+fn team_dir(team_name: &str) -> std::path::PathBuf {
+    teams_base_dir().join(sanitize_name(team_name))
 }
 
 /// Sanitize a team name to a safe directory component.
@@ -282,18 +282,12 @@ impl Tool for TeamCreateTool {
         let lead_agent_id = format!("team-lead@{}", safe_name);
 
         // Resolve team directory, disambiguating if name already exists.
-        let dir = match team_dir(&params.team_name) {
-            Some(d) => d,
-            None => return ToolResult::error("Could not determine home directory".to_string()),
-        };
+        let dir = team_dir(&params.team_name);
 
         let (final_name, final_dir) = if dir.exists() {
             let suffix = &Uuid::new_v4().to_string()[..6];
             let new_name = format!("{}-{}", safe_name, suffix);
-            let new_dir = match team_dir(&new_name) {
-                Some(d) => d,
-                None => return ToolResult::error("Could not determine home directory".to_string()),
-            };
+            let new_dir = team_dir(&new_name);
             (new_name, new_dir)
         } else {
             (safe_name.clone(), dir)
@@ -537,10 +531,7 @@ impl Tool for TeamDeleteTool {
         };
 
         // Remove the team directory from disk.
-        let dir = match team_dir(&params.team_name) {
-            Some(d) => d,
-            None => return ToolResult::error("Could not determine home directory".to_string()),
-        };
+        let dir = team_dir(&params.team_name);
 
         if !dir.exists() {
             // Directory already gone — treat as success if we cancelled agents,

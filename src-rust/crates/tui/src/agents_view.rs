@@ -533,8 +533,12 @@ impl Default for AgentsMenuState {
 pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefinition> {
     let mut defs = Vec::new();
     let dirs = [
-        dirs::home_dir().map(|h| h.join(".coven-code").join("agents")),
-        Some(project_root.join(".coven-code").join("agents")),
+        Some(claurst_core::config::config_home().join("agents")),
+        Some(
+            project_root
+                .join(claurst_core::config::PROJECT_CONFIG_DIRNAME)
+                .join("agents"),
+        ),
     ];
 
     for dir_opt in &dirs {
@@ -1113,7 +1117,7 @@ pub fn render_agents_menu(state: &AgentsMenuState, area: Rect, buf: &mut Buffer)
         ),
         AgentsRoute::ResetConfirm => (
             "Reset familiars and agents".to_string(),
-            " This removes saved user roster state from Coven Code and Coven.".to_string(),
+            " This removes saved user roster state from Coven.".to_string(),
             " enter/y reset  ·  n/esc cancel".to_string(),
         ),
     };

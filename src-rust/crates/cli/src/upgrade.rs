@@ -385,15 +385,25 @@ fn swap_binary(current: &Path, new: &Path) -> Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // On unix, std::fs::rename won't work across mounts; copy + chmod is safer.
-        // The kernel will let us replace the file even while it's running because
-        // unlink-and-replace just frees the directory entry.
-        std::fs::copy(new, current)
-            .with_context(|| format!("failed to copy new binary into {}", current.display()))?;
-        let _ = std::process::Command::new("chmod")
-            .arg("755")
-            .arg(current)
-            .status();
+        use std::os::unix::fs::PermissionsExt;
+
+        // Never overwrite the target in place: `fs::copy` truncates and
+        // rewrites the existing inode, and macOS caches code-signature
+        // validation per inode — the kernel then kills the upgraded binary
+        // with SIGKILL (Code Signature Invalid) on every launch. Instead,
+        // stage the new binary next to the target (same filesystem, so
+        // rename is atomic) and rename it over the directory entry, which
+        // installs a fresh inode and works while the old binary is running.
+        let staged = current.with_extension("upgrade-new");
+        std::fs::copy(new, &staged)
+            .with_context(|| format!("failed to stage new binary at {}", staged.display()))?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to chmod {}", staged.display()))?;
+        if let Err(e) = std::fs::rename(&staged, current) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e)
+                .with_context(|| format!("failed to move new binary into {}", current.display()));
+        }
         Ok(())
     }
 }

@@ -52,7 +52,10 @@ pub fn reset_familiars_and_agents(
 
     let mut agent_dirs = vec![Settings::config_dir().join("agents")];
     if let Some(root) = project_root {
-        agent_dirs.push(root.join(".coven-code").join("agents"));
+        agent_dirs.push(
+            root.join(crate::config::PROJECT_CONFIG_DIRNAME)
+                .join("agents"),
+        );
     }
     for dir in agent_dirs {
         summary.removed_agent_files += remove_agent_markdown_files(&dir)?;

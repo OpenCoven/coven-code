@@ -392,9 +392,7 @@ pub fn merge_remote_into_local(local: &Value, remote: &Value) -> Value {
 
 /// Return the ~/.coven-code directory, falling back to the current directory.
 fn claude_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".coven-code"))
-        .unwrap_or_else(|| PathBuf::from(".coven-code"))
+    crate::config::config_home()
 }
 
 /// Exponential backoff delay for retry attempt `n` (1-indexed).
@@ -403,6 +401,17 @@ fn retry_delay(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(30); // prevent overflow
     let secs: u64 = 1u64.checked_shl(shift).unwrap_or(u64::MAX).min(30);
     Duration::from_secs(secs)
+}
+
+// ---------------------------------------------------------------------------
+// Test accessors
+// ---------------------------------------------------------------------------
+
+/// Expose the remote settings directory for cross-module consolidation tests
+/// (Phase 4.1).
+#[cfg(test)]
+pub(crate) fn remote_settings_dir_for_test() -> PathBuf {
+    claude_config_dir()
 }
 
 // ---------------------------------------------------------------------------

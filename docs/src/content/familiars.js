@@ -86,7 +86,7 @@ node validators/validate.js ../../familiars/dev</code></pre>
 
     <p>Install the daemon to unlock the full roster:</p>
 
-    <pre><code data-lang="bash">npm install -g @opencoven/coven</code></pre>
+    <pre><code data-lang="bash">npm install -g @opencoven/cli</code></pre>
 
     <p>See <a href="https://github.com/OpenCoven/coven-code/blob/main/docs/familiars.md" target="_blank" rel="noopener">the full familiars reference</a> for access tiers, persona authoring, and CLI integration.</p>
   `;

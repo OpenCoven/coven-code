@@ -153,6 +153,14 @@ shared surfaces back in:
 }
 ```
 
+The GitHub worker's `--hosted-repair` mode is narrower than
+`allowWriteTools`: it enables only `Read`, `Grep`, `Glob`, `Edit`, `Write`,
+`ApplyPatch`, `BatchEdit`, and `NotebookEdit`. It requires the complete
+`--headless --context ... --output ...` invocation and still disables command,
+network-tool, sub-agent, plugin, MCP, user-memory, and automatic-memory access.
+Use this worker-controlled mode for automated branch repair; do not enable the
+broader `allowWriteTools` setting for contributor-controlled reviews.
+
 `allowUserMemory` also exists for explicitly trusted deployments, but hosted
 review jobs should prefer tenant-approved managed rules over operator-global
 user memory.
@@ -161,8 +169,10 @@ Auto-extracted memories are approval-gated in hosted review mode. By default,
 hosted sessions write reviewable JSON candidates under
 `.coven-code/memory-candidates/` instead of appending directly to durable
 `.coven-code/AGENTS.md` memory. Each candidate records content, category,
-confidence, provenance, source trust, proposed scope, proposed visibility,
-status, and any rejection reason.
+confidence, structured provenance, source trust, proposed scope, proposed
+visibility, status, and any rejection reason. Auto-extracted provenance records
+the session id, source kind, creator, and best-effort repository and commit
+references; it does not store secret values.
 
 Trusted deployments can opt into direct durable writes only when the source
 trust meets the configured threshold:
@@ -373,13 +383,25 @@ Frontmatter fields:
 | `scope` | Intended scope, such as `user`, `tenant`, `installation`, `repo`, `branch`, or `pr`. |
 | `trust` | Source trust. Hosted review enforces this against `hostedReview.memoryTrustThreshold`. Supported values include `system_policy`, `maintainer_approved`, `default_branch_code`, `model_inferred`, `contributor_input`, `fork_input`, and `unknown`. |
 | `visibility` | Intended review visibility: `public_review`, `private_review`, or `security_private`. Hosted public reviews exclude `security_private` memory by default. |
-| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session_memory_extraction`. |
+| `source` | Provenance source kind, for example `manual`, `github_pr`, `github_pr_review`, or `session-memory-extraction`. |
 | `source_ref` | Source reference such as `owner/repo#123`, a commit SHA, or another non-secret audit handle. |
+| `source_repo`, `source_commit`, `source_actor` | Optional structured provenance for repository slug, commit SHA, and source actor. Store references only, not secret values. |
 | `expires_at` | Optional expiry date in `YYYY-MM-DD` format. Expired hosted memory is ignored. |
 | `retention_class` | Optional lifecycle class such as `standard`, `short_lived`, `security`, or `legal_hold`. |
 | `redacted_at` | Marks content as redacted. Hosted review keeps the metadata visible but replaces the body with a redaction stub. |
 | `deleted_at` | Marks memory as deleted. Hosted review excludes deleted entries from prompt loading. |
 | `created_at`, `created_by`, `session_id`, `transcript_ref`, `confidence` | Optional provenance fields for audit and review artifacts. |
+
+Retention defaults apply only when `expires_at` is absent. Hosted review treats
+the effective expiry as `created_at + default window`; malformed dates fail open
+the same way as explicit expiry parsing, so operators should use `YYYY-MM-DD`.
+
+| Retention class | Default window | Operator behavior |
+|-----------------|----------------|-------------------|
+| `standard` | No automatic expiry | Active until explicitly expired, redacted, or deleted. |
+| `short_lived` | 30 days from `created_at` | Automatically excluded from hosted loads after the default window. |
+| `security` | 90 days from `created_at` | Used for redaction stubs and security-sensitive audit records. |
+| `legal_hold` | No automatic expiry | Never auto-expires; `memory expire` and `memory delete` require `--force`. |
 
 Local mode tolerates missing metadata for backward compatibility. Hosted review
 mode treats missing trust as `unknown`, ignores expired memory, and excludes
@@ -398,6 +420,22 @@ both local and remote content changed since the last known server checksum; a
 conflict record is written for operator review instead of overwriting local
 memory. Hosted team-memory sync also sends tenant, installation, repo, and
 domain scope metadata so the server can authorize the full tuple.
+
+### Memory lifecycle operator controls
+
+Use `coven-code memory` to inspect and administer local and hosted memory
+without exposing redacted or deleted content to the model.
+
+| Command | Purpose |
+|---------|---------|
+| `coven-code memory list [--dir <path>] [--tenant <id>] [--repo <id>] [--domain <name>] [--json]` | List memory id, path, retention class, trust, created time, effective expiry, and status. With no `--dir`, scans the project auto-memory directory plus hosted scopes under the Coven Code config directory. |
+| `coven-code memory expire <id-or-path> [--at YYYY-MM-DD] [--force]` | Set `expires_at` in frontmatter. Defaults to today and refuses `legal_hold` entries unless `--force` is present. |
+| `coven-code memory redact <id-or-path> --reason <text>` | Replace the file with a redaction tombstone stub via `redact_memory_file`; the original body is removed. |
+| `coven-code memory delete <id-or-path> --reason <text> [--force]` | Replace the file with a deletion tombstone stub. `legal_hold` entries require `--force`. |
+| `coven-code memory delete --scope tenant=<t>,install=<i>,repo=<r>[,domain=<d>] --reason <text> [--force]` | Remove the hosted memory directory for a scoped tenant/installation/repo/domain. Scope deletion refuses legal-hold files unless forced. |
+| `coven-code memory conflicts [--dir <team-memory-path>] [--json]` | List unresolved team-memory pull conflicts (key, kind, reason). With no `--dir`, uses the project's team-memory directory. Team memory with pending conflicts is treated as unavailable by hosted review until they are resolved. |
+| `coven-code memory resolve-conflict <key> [--dir <team-memory-path>]` | Remove the persisted conflict record for `<key>`, unblocking it for the next pull. Keys are validated against path traversal. |
+| `coven-code memory ledger [--dir <path>] [--json]` | Export tombstoned entries only: id, path, redacted/deleted timestamp, retention class, tombstone reason line, and provenance source. The ledger reads tombstone stubs and never includes original memory body content. |
 
 ### @include directives
 
@@ -437,7 +475,7 @@ active provider via the `provider` key in settings or the `--provider` CLI flag.
 | Provider ID | Default model |
 |-------------|--------------|
 | `anthropic` | `claude-sonnet-4-6` (or latest) |
-| `codex` | `gpt-5-codex` (ChatGPT/Codex OAuth login) |
+| `codex` | `gpt-5.6-sol` (ChatGPT/Codex OAuth login) |
 
 ### Per-provider configuration
 
