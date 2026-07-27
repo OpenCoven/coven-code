@@ -1640,17 +1640,25 @@ fn filter_tools_for_hosted_review(
         return Arc::new(filtered);
     }
 
-    filter_read_only_tools(&tools)
+    filter_read_only_tools_except(&tools, &["LSP"])
 }
 
 fn filter_read_only_tools(
     tools: &[Box<dyn claurst_tools::Tool>],
+) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    filter_read_only_tools_except(tools, &[])
+}
+
+fn filter_read_only_tools_except(
+    tools: &[Box<dyn claurst_tools::Tool>],
+    excluded_names: &[&str],
 ) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
     use claurst_tools::PermissionLevel as PL;
     // Collect names of tools that are read-only, then rebuild from all_tools
     // (Box<dyn Tool> is not Clone so we can't directly filter-and-keep).
     let allowed_names: Vec<String> = tools
         .iter()
+        .filter(|t| !excluded_names.contains(&t.name()))
         .filter(|t| {
             matches!(t.permission_level(), PL::ReadOnly | PL::None) || t.name() == "AskUserQuestion"
         })
@@ -5517,7 +5525,7 @@ mod tests {
         let names = tool_names(&filter_tools_for_hosted_review(all, &config));
 
         assert!(names.contains(&"Read".to_string()));
-        for forbidden in ["Bash", "Edit", "Write", "NotebookEdit", "ApplyPatch"] {
+        for forbidden in ["Bash", "Edit", "Write", "NotebookEdit", "ApplyPatch", "LSP"] {
             assert!(
                 !names.contains(&forbidden.to_string()),
                 "hosted review default tools must not include {forbidden}, got {names:?}"

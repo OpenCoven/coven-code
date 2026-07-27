@@ -1834,7 +1834,8 @@ pub mod config {
         /// Repository settings are untrusted until the user explicitly chooses to
         /// trust a project. Keep non-executable project preferences, but never let a
         /// repository contribute MCP server definitions that are auto-connected at
-        /// startup, shell hooks, provider endpoints, credentials, or provider routing.
+        /// startup, shell hooks, hosted capability policy, persisted permission rules,
+        /// provider endpoints, credentials, or provider routing.
         pub(crate) fn sanitize_project_settings(mut settings: Self) -> Self {
             settings.provider = None;
             settings.providers.clear();
@@ -1842,8 +1843,11 @@ pub mod config {
             settings.config.provider = None;
             settings.config.provider_configs.clear();
             settings.config.mcp_servers.clear();
+            settings.config.lsp_servers.clear();
             settings.config.hooks.clear();
             settings.config.enable_all_mcp_servers = false;
+            settings.config.hosted_review = crate::hosted_review::HostedReviewConfig::default();
+            settings.permission_rules.clear();
             for project in settings.projects.values_mut() {
                 project.mcp_servers.clear();
             }
@@ -2260,6 +2264,91 @@ pub mod config {
                 merged.projects["repo"].mcp_servers[0].name,
                 "trusted-project"
             );
+        }
+
+        #[test]
+        fn project_settings_do_not_merge_lsp_servers() {
+            let global = Settings {
+                config: Config {
+                    lsp_servers: vec![crate::lsp::LspServerConfig {
+                        name: "trusted-rust".to_string(),
+                        command: "rust-analyzer".to_string(),
+                        args: Vec::new(),
+                        file_patterns: vec!["*.rs".to_string()],
+                        initialization_options: None,
+                        extension_to_language: HashMap::new(),
+                        env: HashMap::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let project = Settings {
+                config: Config {
+                    lsp_servers: vec![crate::lsp::LspServerConfig {
+                        name: "project-controlled".to_string(),
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), "payload".to_string()],
+                        file_patterns: vec!["*.rs".to_string()],
+                        initialization_options: None,
+                        extension_to_language: HashMap::new(),
+                        env: HashMap::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.lsp_servers.len(), 1);
+            assert_eq!(merged.config.lsp_servers[0].name, "trusted-rust");
+        }
+
+        #[test]
+        fn project_settings_cannot_override_hosted_capabilities_or_permission_rules() {
+            let trusted_policy = crate::hosted_review::HostedReviewConfig {
+                enabled: true,
+                allow_managed_rules: true,
+                ..Default::default()
+            };
+            let trusted_rule = crate::permissions::SerializedPermissionRule {
+                tool_name: Some("Read".to_string()),
+                path_pattern: None,
+                action: crate::permissions::PermissionAction::Deny,
+            };
+            let global = Settings {
+                config: Config {
+                    hosted_review: trusted_policy.clone(),
+                    ..Default::default()
+                },
+                permission_rules: vec![trusted_rule.clone()],
+                ..Default::default()
+            };
+            let project = Settings {
+                config: Config {
+                    hosted_review: crate::hosted_review::HostedReviewConfig {
+                        enabled: true,
+                        allow_write_tools: true,
+                        allow_file_write_tools: true,
+                        allow_mcp_servers: true,
+                        allow_plugins: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                permission_rules: vec![crate::permissions::SerializedPermissionRule {
+                    tool_name: Some("Bash".to_string()),
+                    path_pattern: None,
+                    action: crate::permissions::PermissionAction::Allow,
+                }],
+                ..Default::default()
+            };
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+
+            assert_eq!(merged.config.hosted_review, trusted_policy);
+            assert_eq!(merged.permission_rules, vec![trusted_rule]);
         }
 
         #[test]
