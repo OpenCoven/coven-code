@@ -473,13 +473,25 @@ impl ToolContext {
     }
 
     fn path_is_within_working_dir(&self, path: &Path) -> bool {
+        if let Ok(relative) = path.strip_prefix(&self.working_dir) {
+            if contains_git_metadata_component(relative) {
+                return false;
+            }
+        }
+
         let Ok(root) = std::fs::canonicalize(&self.working_dir) else {
             return false;
         };
         let Ok(resolved) = canonicalize_path_allow_missing(path) else {
             return false;
         };
-        resolved.starts_with(root)
+        let Ok(relative) = resolved.strip_prefix(&root) else {
+            return false;
+        };
+
+        // Git metadata controls later host-side `git` calls (for example via
+        // core.fsmonitor), so hosted repair must treat it as control-plane data.
+        !contains_git_metadata_component(relative)
     }
 
     pub fn check_permission_with_details_and_path(
@@ -524,6 +536,16 @@ impl ToolContext {
             tool_name,
         );
     }
+}
+
+fn contains_git_metadata_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name)
+                if name.to_str().is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        )
+    })
 }
 
 /// Resolve every existing component before applying later `..` components,
@@ -1069,6 +1091,62 @@ mod tests {
     }
 
     #[test]
+    fn hosted_repair_path_check_rejects_git_metadata() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("git metadata dir");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        for path in [
+            workspace.join(".git"),
+            workspace.join(".git/config"),
+            workspace.join("nested/.GiT/config"),
+            workspace.join(".git/missing/../../source.rs"),
+        ] {
+            let error = ctx
+                .check_hosted_repair_path("Write", &path)
+                .expect_err("Git control metadata must be immutable in hosted repair")
+                .to_string();
+
+            assert!(error.contains("hosted repair file tools are limited"));
+        }
+    }
+
+    #[test]
+    fn hosted_repair_path_check_rejects_linked_worktree_gitdir_file() {
+        use claurst_core::permissions::AutoPermissionHandler;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+        std::fs::write(
+            workspace.join(".git"),
+            "gitdir: ../main.git/worktrees/workspace\n",
+        )
+        .expect("gitdir file");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let error = ctx
+            .check_hosted_repair_path("Edit", &workspace.join(".git"))
+            .expect_err("linked-worktree gitdir file must be immutable")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[test]
     fn hosted_repair_path_resolution_does_not_pop_past_filesystem_root() {
         let temp = tempfile::tempdir().expect("tempdir");
         let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
@@ -1146,6 +1224,32 @@ mod tests {
         let error = ctx
             .check_hosted_repair_path("Write", &path)
             .expect_err("symlink must resolve before applying parent component")
+            .to_string();
+
+        assert!(error.contains("hosted repair file tools are limited"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_repair_path_check_rejects_symlink_alias_to_git_metadata() {
+        use claurst_core::permissions::AutoPermissionHandler;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("git metadata dir");
+        symlink(".git", workspace.join("metadata")).expect("symlink");
+        let mut ctx = test_tool_context(Arc::new(AutoPermissionHandler {
+            mode: claurst_core::config::PermissionMode::BypassPermissions,
+        }));
+        ctx.working_dir = workspace.clone();
+        ctx.config.hosted_review.enabled = true;
+        ctx.config.hosted_review.allow_file_write_tools = true;
+
+        let path = workspace.join("metadata/config");
+        let error = ctx
+            .check_hosted_repair_path("Write", &path)
+            .expect_err("symlink alias to Git metadata must be rejected")
             .to_string();
 
         assert!(error.contains("hosted repair file tools are limited"));
