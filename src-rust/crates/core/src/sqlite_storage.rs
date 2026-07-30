@@ -76,8 +76,9 @@ impl SqliteSessionStore {
         cost_usd: Option<f64>,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
+        let transaction = self.conn.unchecked_transaction()?;
         // Insert the message; ignore if already stored.
-        let inserted = self.conn.execute(
+        let inserted = transaction.execute(
             "INSERT OR IGNORE INTO messages
              (id, session_id, role, content, created_at, cost_usd)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -85,7 +86,7 @@ impl SqliteSessionStore {
         )?;
         // Only bump count when we actually inserted a new row.
         if inserted > 0 {
-            self.conn.execute(
+            transaction.execute(
                 "UPDATE sessions
                  SET updated_at    = ?1,
                      message_count = message_count + 1
@@ -93,6 +94,7 @@ impl SqliteSessionStore {
                 rusqlite::params![now, session_id],
             )?;
         }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -171,4 +173,131 @@ pub struct SessionSummary {
     pub created_at: String,
     pub updated_at: String,
     pub message_count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with_session() -> (tempfile::TempDir, SqliteSessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteSessionStore::open(&dir.path().join("sessions.db")).unwrap();
+        store
+            .save_session("session-1", Some("Test session"), "test-model")
+            .unwrap();
+        (dir, store)
+    }
+
+    fn stored_message_count(store: &SqliteSessionStore, message_id: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                rusqlite::params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn session_state(store: &SqliteSessionStore) -> (String, i64) {
+        store
+            .conn
+            .query_row(
+                "SELECT updated_at, message_count FROM sessions WHERE id = 'session-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn save_message_rolls_back_insert_when_session_update_fails() {
+        let (_dir, store) = store_with_session();
+        let initial_session_state = session_state(&store);
+        store
+            .conn
+            .execute_batch(
+                "
+                CREATE TEMP TRIGGER fail_session_update
+                BEFORE UPDATE OF updated_at, message_count ON sessions
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected session update failure');
+                END;
+                ",
+            )
+            .unwrap();
+
+        let error = store
+            .save_message("session-1", "message-1", "user", "first attempt", None)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("injected session update failure"));
+        assert_eq!(stored_message_count(&store, "message-1"), 0);
+        assert_eq!(session_state(&store), initial_session_state);
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_session_update;")
+            .unwrap();
+
+        store
+            .save_message("session-1", "message-1", "user", "retry", None)
+            .unwrap();
+        store
+            .save_message("session-1", "message-1", "user", "duplicate retry", None)
+            .unwrap();
+
+        assert_eq!(stored_message_count(&store, "message-1"), 1);
+        assert_eq!(session_state(&store).1, 1);
+    }
+
+    #[test]
+    fn save_message_is_idempotent_for_duplicate_message_ids() {
+        let (_dir, store) = store_with_session();
+
+        store
+            .save_message(
+                "session-1",
+                "message-1",
+                "user",
+                "original content",
+                Some(0.25),
+            )
+            .unwrap();
+        let session_state_after_insert = session_state(&store);
+
+        store
+            .save_message(
+                "session-1",
+                "message-1",
+                "assistant",
+                "replacement content",
+                Some(1.0),
+            )
+            .unwrap();
+
+        let stored_message = store
+            .conn
+            .query_row(
+                "SELECT role, content, cost_usd FROM messages WHERE id = 'message-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(stored_message_count(&store, "message-1"), 1);
+        assert_eq!(session_state(&store), session_state_after_insert);
+        assert_eq!(
+            stored_message,
+            ("user".to_owned(), "original content".to_owned(), Some(0.25))
+        );
+    }
 }
