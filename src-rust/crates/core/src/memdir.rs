@@ -1039,6 +1039,16 @@ mod tests {
 
     #[test]
     fn hosted_memory_path_uses_separate_namespace() {
+        // Serialize against every COVEN_CODE_TEST_HOME mutator (cave-r78ad):
+        // path resolution reads the home through config_home(), so a parallel
+        // test's set_var/remove_var mid-test makes two resolutions disagree.
+        // Pin a private home for the duration so the assertions are hermetic.
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         let project = PathBuf::from("/tmp/repo");
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
@@ -1061,10 +1071,25 @@ mod tests {
         assert!(hosted.to_string_lossy().contains("install-1"));
         assert!(hosted.to_string_lossy().contains("repo-1"));
         assert!(hosted.to_string_lossy().contains("default-branch"));
+
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
     }
 
     #[test]
     fn hosted_memory_path_splits_installations_and_domains() {
+        // Serialize against every COVEN_CODE_TEST_HOME mutator (cave-r78ad):
+        // path resolution reads the home through config_home(), so a parallel
+        // test's set_var/remove_var mid-test makes two resolutions disagree.
+        // Pin a private home for the duration so the assertions are hermetic.
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         let project = PathBuf::from("/tmp/repo");
         let first_install = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
@@ -1110,6 +1135,11 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(first, branch);
         assert!(branch.to_string_lossy().contains("branch-feature~2Freview"));
+
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
     }
 
     #[test]
@@ -1161,6 +1191,16 @@ mod tests {
 
     #[test]
     fn hosted_memory_ignores_local_checkout_path() {
+        // Serialize against every COVEN_CODE_TEST_HOME mutator (cave-r78ad):
+        // path resolution reads the home through config_home(), so a parallel
+        // test's set_var/remove_var mid-test makes two resolutions disagree.
+        // Pin a private home for the duration so the assertions are hermetic.
+        let home = tempfile::tempdir().unwrap();
+        let _lock = crate::coven_shared::COVEN_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let original_test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
         let scope = crate::hosted_review::HostedReviewScope::new(
             "tenant-a".to_string(),
             "install-1".to_string(),
@@ -1197,6 +1237,11 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first, same_path_other_repo);
+
+        match original_test_home {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
     }
 
     #[test]
