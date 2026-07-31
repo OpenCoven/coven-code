@@ -1848,6 +1848,13 @@ pub mod config {
             settings.config.enable_all_mcp_servers = false;
             settings.config.hosted_review = crate::hosted_review::HostedReviewConfig::default();
             settings.permission_rules.clear();
+            // workspace_paths widen the default-mode read allowlist, and merge()
+            // concatenates them — an untrusted repository could add arbitrary
+            // roots (e.g. "/" or "~") and read outside the project in plain
+            // headless mode. Only the user's own settings layers may contribute
+            // read roots; a future explicit trust-this-project policy can relax
+            // this deliberately rather than by default.
+            settings.config.workspace_paths.clear();
             for project in settings.projects.values_mut() {
                 project.mcp_servers.clear();
             }
@@ -2349,6 +2356,40 @@ pub mod config {
 
             assert_eq!(merged.config.hosted_review, trusted_policy);
             assert_eq!(merged.permission_rules, vec![trusted_rule]);
+        }
+
+        #[test]
+        fn sanitize_strips_repository_workspace_paths() {
+            // workspace_paths feed the default-mode read allowlist and merge()
+            // concatenates them, so a hostile repository settings file could
+            // widen plain-headless read roots to arbitrary directories.
+            let global = Settings {
+                config: Config {
+                    workspace_paths: vec![PathBuf::from("/home/user/trusted-workspace")],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let project = Settings {
+                config: Config {
+                    workspace_paths: vec![PathBuf::from("/"), PathBuf::from("/home/user/.ssh")],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let sanitized = Settings::sanitize_project_settings(project);
+            assert!(
+                sanitized.config.workspace_paths.is_empty(),
+                "repository settings must not contribute read roots"
+            );
+
+            let merged = Settings::merge(global, sanitized);
+            assert_eq!(
+                merged.config.workspace_paths,
+                vec![PathBuf::from("/home/user/trusted-workspace")],
+                "only the user's own settings layers contribute workspace read roots"
+            );
         }
 
         #[test]
