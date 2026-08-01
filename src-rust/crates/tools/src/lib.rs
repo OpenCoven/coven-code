@@ -70,7 +70,7 @@ pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use formatter::try_format_file;
 pub use glob_tool::GlobTool;
-pub use goal_complete::GoalCompleteTool;
+pub use goal_complete::{GoalCompleteTool, PathScopedGoalCompleteTool};
 pub use grep_tool::GrepTool;
 pub use lsp_tool::LspTool;
 pub use mcp_auth_tool::McpAuthTool;
