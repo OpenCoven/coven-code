@@ -1322,15 +1322,10 @@ pub async fn run_query_loop(
                     effective_max_turns
                 )));
             }
-            // Return the last assistant message if any
-            let last_msg = messages
-                .last()
-                .cloned()
-                .unwrap_or_else(|| Message::assistant("Max turns reached."));
-            return QueryOutcome::EndTurn {
-                message: last_msg,
-                usage: UsageInfo::default(),
-            };
+            return QueryOutcome::Error(ClaudeError::Api(format!(
+                "Maximum turn limit ({}) reached",
+                effective_max_turns
+            )));
         }
 
         // Check for cancellation
@@ -1791,12 +1786,14 @@ pub async fn run_query_loop(
                     let provider_stall = tokio::time::sleep(provider_stall_timeout);
                     tokio::pin!(provider_stall);
                     let mut provider_stream_stalled = false;
+                    let mut provider_stream_cancelled = false;
                     let mut terminal_stream_error = None;
 
                     loop {
                         tokio::select! {
                             _ = cancel_token.cancelled() => {
-                                return QueryOutcome::Cancelled;
+                                provider_stream_cancelled = true;
+                                break;
                             }
                             _ = &mut provider_stall => {
                                 provider_stream_stalled = true;
@@ -1941,6 +1938,18 @@ pub async fn run_query_loop(
                         snapshot_patch: None,
                     };
 
+                    if provider_stream_cancelled {
+                        finalize_terminal_assistant_message(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                        )
+                        .await;
+                        return QueryOutcome::Cancelled;
+                    }
+
                     cost_tracker.add_usage(
                         usage.input_tokens,
                         usage.output_tokens,
@@ -2002,22 +2011,6 @@ pub async fn run_query_loop(
                         })
                         .collect();
 
-                    if stop_str == "max_tokens" {
-                        finalize_terminal_assistant_message(
-                            messages,
-                            &mut assistant_msg,
-                            shadow_snap.as_ref(),
-                            initial_snapshot.as_deref(),
-                            event_tx.as_ref(),
-                        )
-                        .await;
-                        emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
-                        return QueryOutcome::MaxTokens {
-                            partial_message: assistant_msg,
-                            usage,
-                        };
-                    }
-
                     // PostModelTurn hooks run before tool execution, matching
                     // the Anthropic stream path. A hard veto makes the sampled
                     // response terminal and must not be converted into a
@@ -2057,6 +2050,43 @@ pub async fn run_query_loop(
                             debug!("PostModelTurn hook injecting error message");
                             messages.push(err_msg);
                         }
+                    }
+
+                    if stop_str == "max_tokens" {
+                        finalize_terminal_assistant_message(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                        )
+                        .await;
+                        emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
+                        return QueryOutcome::MaxTokens {
+                            partial_message: assistant_msg,
+                            usage,
+                        };
+                    }
+
+                    if stop_str == "content_filtered"
+                        || !matches!(
+                            stop_str.as_str(),
+                            "end_turn" | "tool_use" | "max_tokens" | "stop_sequence"
+                        )
+                    {
+                        finalize_terminal_assistant_message(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                        )
+                        .await;
+                        emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
+                        return QueryOutcome::Error(ClaudeError::Api(format!(
+                            "Provider '{}' returned unsupported stop reason '{}'",
+                            provider_id_str, stop_str
+                        )));
                     }
 
                     if stop_str == "tool_use" && tool_use_blocks.is_empty() {
@@ -2254,10 +2284,12 @@ pub async fn run_query_loop(
         let stall_deadline = tokio::time::sleep(STALL_TIMEOUT);
         tokio::pin!(stall_deadline);
 
+        let mut stream_cancelled = false;
         let stream_stalled = loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    return QueryOutcome::Cancelled;
+                    stream_cancelled = true;
+                    break false;
                 }
                 _ = &mut stall_deadline => {
                     // No data for 45s — stall detected
@@ -2306,6 +2338,18 @@ pub async fn run_query_loop(
         let (mut assistant_msg, usage, stop_reason) = accumulator.finish();
         if assistant_msg.uuid.is_none() {
             assistant_msg.uuid = Some(uuid::Uuid::new_v4().to_string());
+        }
+
+        if stream_cancelled {
+            finalize_terminal_assistant_message(
+                messages,
+                &mut assistant_msg,
+                shadow_snap.as_ref(),
+                initial_snapshot.as_deref(),
+                event_tx.as_ref(),
+            )
+            .await;
+            return QueryOutcome::Cancelled;
         }
 
         if stream_stalled {
@@ -2367,21 +2411,13 @@ pub async fn run_query_loop(
             return QueryOutcome::Error(error);
         }
 
-        // If the provider returned an unknown stop reason but the assistant
-        // message contains tool_use blocks, treat it as tool_use so we don't
-        // silently end the turn (issue #149: agent stops after tool call for
-        // providers that emit non-standard finish reasons).
+        // Unknown stop reasons are terminal failures. In particular, do not
+        // infer tool continuation from blocks when the provider could not
+        // report a recognized completion reason.
         let raw_stop = stop_reason.as_deref().unwrap_or("end_turn");
         let stop = match raw_stop {
             "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filtered" => {
                 raw_stop
-            }
-            _ if !assistant_msg.get_tool_use_blocks().is_empty() => {
-                warn!(
-                    stop_reason = raw_stop,
-                    "Unknown stop reason with tool_use blocks present; treating as tool_use"
-                );
-                "tool_use"
             }
             _ => raw_stop,
         };
@@ -2514,6 +2550,14 @@ pub async fn run_query_loop(
                     Err(claurst_core::error::ClaudeError::Cancelled) => {
                         warn!("Reactive compact was cancelled");
                         *messages = original_messages;
+                        finalize_terminal_assistant_message(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                        )
+                        .await;
                         return QueryOutcome::Cancelled;
                     }
                     Err(e) => {
@@ -2893,11 +2937,24 @@ pub async fn run_query_loop(
                     usage,
                 };
             }
+            "content_filtered" => {
+                finalize_terminal_assistant_message(
+                    messages,
+                    &mut assistant_msg,
+                    shadow_snap.as_ref(),
+                    initial_snapshot.as_deref(),
+                    event_tx.as_ref(),
+                )
+                .await;
+                if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                }
+                return QueryOutcome::Error(ClaudeError::Api(
+                    "Provider content filter blocked the response".to_string(),
+                ));
+            }
             other => {
-                warn!(
-                    stop_reason = other,
-                    "Unknown stop reason, treating as end_turn"
-                );
+                warn!(stop_reason = other, "Unknown stop reason");
                 fire_stop_hook!(assistant_msg);
                 let _bg = stop_hooks_with_full_behavior(
                     &assistant_msg,
@@ -2915,10 +2972,9 @@ pub async fn run_query_loop(
                 if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
                     emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
                 }
-                return QueryOutcome::EndTurn {
-                    message: assistant_msg,
-                    usage,
-                };
+                return QueryOutcome::Error(ClaudeError::Api(format!(
+                    "Provider returned unsupported stop reason '{other}'"
+                )));
             }
         }
     }
@@ -3293,29 +3349,49 @@ mod tests {
     use claurst_core::provider_id::ProviderId;
     use claurst_core::types::{MessageContent, Role};
     use claurst_tools::{PermissionLevel, ToolResult};
-    use futures::Stream;
+    use futures::{Stream, StreamExt};
 
     const SCRIPTED_PROVIDER_ID: &str = "scripted-goal-journal";
 
     struct ScriptedProvider {
         id: ProviderId,
-        rounds: Mutex<VecDeque<Vec<Result<StreamEvent, ProviderError>>>>,
+        rounds: Mutex<VecDeque<ScriptedRound>>,
+    }
+
+    enum ScriptedRound {
+        Events(Vec<Result<StreamEvent, ProviderError>>),
+        PendingAfter(Vec<Result<StreamEvent, ProviderError>>),
     }
 
     impl ScriptedProvider {
         fn new(rounds: Vec<Vec<StreamEvent>>) -> Self {
-            Self::with_results(
-                rounds
-                    .into_iter()
-                    .map(|round| round.into_iter().map(Ok).collect())
-                    .collect(),
-            )
+            Self {
+                id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                rounds: Mutex::new(
+                    rounds
+                        .into_iter()
+                        .map(|round| ScriptedRound::Events(round.into_iter().map(Ok).collect()))
+                        .collect(),
+                ),
+            }
         }
 
         fn with_results(rounds: Vec<Vec<Result<StreamEvent, ProviderError>>>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
-                rounds: Mutex::new(rounds.into()),
+                rounds: Mutex::new(rounds.into_iter().map(ScriptedRound::Events).collect()),
+            }
+        }
+
+        fn partial_then_pending(events: Vec<StreamEvent>) -> Self {
+            Self {
+                id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                rounds: Mutex::new(
+                    vec![ScriptedRound::PendingAfter(
+                        events.into_iter().map(Ok).collect(),
+                    )]
+                    .into(),
+                ),
             }
         }
     }
@@ -3350,13 +3426,20 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
             ProviderError,
         > {
-            let events = self
+            let round = self
                 .rounds
                 .lock()
                 .unwrap()
                 .pop_front()
                 .expect("scripted provider ran out of rounds");
-            Ok(Box::pin(futures::stream::iter(events)))
+            let stream: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> =
+                match round {
+                    ScriptedRound::Events(events) => Box::pin(futures::stream::iter(events)),
+                    ScriptedRound::PendingAfter(events) => {
+                        Box::pin(futures::stream::iter(events).chain(futures::stream::pending()))
+                    }
+                };
+            Ok(stream)
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -3566,6 +3649,87 @@ mod tests {
         (outcome, events, messages)
     }
 
+    async fn run_scripted_provider_until_partial_then_cancel(
+        provider: ScriptedProvider,
+    ) -> (QueryOutcome, Vec<QueryEvent>, Vec<Message>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = claurst_api::ProviderRegistry::new();
+        registry.register(Arc::new(provider));
+        let mut config = make_config(None, None);
+        config.model = "scripted".to_string();
+        config.provider_registry = Some(Arc::new(registry));
+        let cost_tracker = claurst_core::cost::CostTracker::new();
+        let tool_ctx = ToolContext {
+            working_dir: temp.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: cost_tracker.clone(),
+            session_id: "provider-cancellation".to_string(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config {
+                provider: Some(SCRIPTED_PROVIDER_ID.to_string()),
+                permission_mode: PermissionMode::BypassPermissions,
+                ..Config::default()
+            },
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "unused-test-key".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut messages = vec![Message::user("test provider cancellation")];
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let mut events = Vec::new();
+        let outcome = {
+            let query = run_query_loop(
+                &client,
+                &mut messages,
+                &[],
+                &tool_ctx,
+                &config,
+                cost_tracker,
+                Some(event_tx),
+                cancel_token.clone(),
+                None,
+            );
+            tokio::pin!(query);
+            loop {
+                tokio::select! {
+                    outcome = &mut query => break outcome,
+                    event = event_rx.recv() => {
+                        let event = event.expect("query event channel must stay open before cancellation");
+                        let received_partial = matches!(
+                            &event,
+                            QueryEvent::Stream(AnthropicStreamEvent::ContentBlockDelta {
+                                delta: claurst_api::streaming::ContentDelta::TextDelta { text },
+                                ..
+                            }) if text == "partial before cancellation"
+                        );
+                        events.push(event);
+                        if received_partial {
+                            cancel_token.cancel();
+                        }
+                    }
+                }
+            }
+        };
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        (outcome, events, messages)
+    }
+
     async fn serve_anthropic_sse_sequence(bodies: Vec<&'static str>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3598,6 +3762,80 @@ mod tests {
 
     async fn serve_anthropic_sse(body: &'static str) -> String {
         serve_anthropic_sse_sequence(vec![body]).await
+    }
+
+    async fn serve_anthropic_partial_sse(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind partial Anthropic test listener");
+        let addr = listener
+            .local_addr()
+            .expect("partial Anthropic test listener addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept partial Anthropic test connection");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n{}",
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write partial Anthropic test response");
+            stream
+                .flush()
+                .await
+                .expect("flush partial Anthropic response");
+            std::future::pending::<()>().await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn serve_anthropic_sse_then_wait_for_compaction(
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind compaction Anthropic test listener");
+        let addr = listener
+            .local_addr()
+            .expect("compaction Anthropic test listener addr");
+        let (compaction_started_tx, compaction_started_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut first_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept initial Anthropic test connection");
+            let mut request = [0u8; 8192];
+            let _ = first_stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            first_stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write initial Anthropic test response");
+            let _ = first_stream.shutdown().await;
+
+            let (mut compact_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept compaction Anthropic test connection");
+            let _ = compact_stream.read(&mut request).await;
+            let _ = compaction_started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        (format!("http://{addr}"), compaction_started_rx)
     }
 
     async fn run_anthropic_sse(
@@ -3648,6 +3886,79 @@ mod tests {
         )
         .await;
         let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        (outcome, events, messages)
+    }
+
+    async fn run_anthropic_until_partial_then_cancel(
+        body: &'static str,
+    ) -> (QueryOutcome, Vec<QueryEvent>, Vec<Message>) {
+        let temp = tempfile::tempdir().unwrap();
+        let api_base = serve_anthropic_partial_sse(body).await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".to_string(),
+            api_base,
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cost_tracker = claurst_core::cost::CostTracker::new();
+        let tool_ctx = ToolContext {
+            working_dir: temp.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: cost_tracker.clone(),
+            session_id: "anthropic-cancellation".to_string(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let mut messages = vec![Message::user("test Anthropic cancellation")];
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let query_config = make_config(None, None);
+        let mut events = Vec::new();
+        let outcome = {
+            let query = run_query_loop(
+                &client,
+                &mut messages,
+                &[],
+                &tool_ctx,
+                &query_config,
+                cost_tracker,
+                Some(event_tx),
+                cancel_token.clone(),
+                None,
+            );
+            tokio::pin!(query);
+            loop {
+                tokio::select! {
+                    outcome = &mut query => break outcome,
+                    event = event_rx.recv() => {
+                        let event = event.expect("query event channel must stay open before cancellation");
+                        let completed_partial_block = matches!(
+                            &event,
+                            QueryEvent::Stream(AnthropicStreamEvent::ContentBlockStop { index: 0 })
+                        );
+                        events.push(event);
+                        if completed_partial_block {
+                            cancel_token.cancel();
+                        }
+                    }
+                }
+            }
+        };
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
@@ -3838,6 +4149,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_cancellation_after_partial_sampling_finalizes_exactly_once() {
+        let provider = ScriptedProvider::partial_then_pending(vec![
+            StreamEvent::MessageStart {
+                id: "provider-cancelled-partial".to_string(),
+                model: "scripted".to_string(),
+                usage: UsageInfo::default(),
+            },
+            StreamEvent::TextDelta {
+                index: 0,
+                text: "partial before cancellation".to_string(),
+            },
+        ]);
+
+        let (outcome, events, messages) =
+            run_scripted_provider_until_partial_then_cancel(provider).await;
+
+        assert!(matches!(outcome, QueryOutcome::Cancelled));
+        let durable_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, QueryEvent::DurableMessage { message }
+                    if message.uuid.as_deref() == Some("provider-cancelled-partial")
+                        && message.get_all_text() == "partial before cancellation")
+            })
+            .expect("cancelled provider response must be durable");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, QueryEvent::DurableMessage { message }
+                        if message.uuid.as_deref() == Some("provider-cancelled-partial"))
+                })
+                .count(),
+            1
+        );
+        assert!(messages.iter().any(|message| {
+            message.uuid.as_deref() == Some("provider-cancelled-partial")
+                && message.get_all_text() == "partial before cancellation"
+        }));
+        assert!(events[durable_index + 1..]
+            .iter()
+            .all(|event| !matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    #[tokio::test]
     async fn anthropic_stream_error_finalizes_partial_response_before_returning_error() {
         const STREAM_ERROR_SSE: &str = concat!(
             "event: message_start\n",
@@ -3867,6 +4223,187 @@ mod tests {
         assert!(messages.iter().any(|message| {
             message.uuid == durable.uuid && message.get_all_text() == "partial"
         }));
+    }
+
+    #[tokio::test]
+    async fn anthropic_cancellation_after_partial_sampling_finalizes_exactly_once() {
+        const PARTIAL_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"anthropic-cancelled-partial\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial before cancellation\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+        );
+
+        let (outcome, events, messages) =
+            run_anthropic_until_partial_then_cancel(PARTIAL_SSE).await;
+
+        assert!(matches!(outcome, QueryOutcome::Cancelled));
+        let durable_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, QueryEvent::DurableMessage { message }
+                    if message.get_all_text() == "partial before cancellation")
+            })
+            .unwrap_or_else(|| {
+                panic!("cancelled Anthropic response must be durable; events: {events:?}")
+            });
+        let durable_uuid = match &events[durable_index] {
+            QueryEvent::DurableMessage { message } => message.uuid.clone(),
+            _ => unreachable!("durable index points to durable event"),
+        };
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, QueryEvent::DurableMessage { message }
+                        if message.uuid == durable_uuid)
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.uuid == durable_uuid)
+                .count(),
+            1
+        );
+        assert!(events[durable_index + 1..]
+            .iter()
+            .all(|event| !matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    #[tokio::test]
+    async fn reactive_compaction_cancellation_restores_and_finalizes_sampled_assistant() {
+        struct FeatureGateGuard {
+            prior: Option<std::ffi::OsString>,
+        }
+
+        impl FeatureGateGuard {
+            fn enable_reactive_compact() -> Self {
+                let prior = std::env::var_os("COVEN_CODE_FEATURE_REACTIVE_COMPACT");
+                std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", "1");
+                Self { prior }
+            }
+        }
+
+        impl Drop for FeatureGateGuard {
+            fn drop(&mut self) {
+                match self.prior.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", value),
+                    None => std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+                }
+            }
+        }
+
+        const COMPACTION_TRIGGER_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"compaction-cancelled\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":180000,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"sampled before compaction cancellation\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+
+        let _feature_gate = FeatureGateGuard::enable_reactive_compact();
+        let temp = tempfile::tempdir().unwrap();
+        let (api_base, compaction_started) =
+            serve_anthropic_sse_then_wait_for_compaction(COMPACTION_TRIGGER_SSE).await;
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".to_string(),
+            api_base,
+            max_retries: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let cost_tracker = claurst_core::cost::CostTracker::new();
+        let tool_ctx = ToolContext {
+            working_dir: temp.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: cost_tracker.clone(),
+            session_id: "compaction-cancellation".to_string(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let query_config = make_config(None, None);
+        let mut messages = (0..12)
+            .map(|index| Message::user(format!("history {index}")))
+            .collect::<Vec<_>>();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let mut events = Vec::new();
+        let outcome = {
+            tokio::pin!(compaction_started);
+            let query = run_query_loop(
+                &client,
+                &mut messages,
+                &[],
+                &tool_ctx,
+                &query_config,
+                cost_tracker,
+                Some(event_tx),
+                cancel_token.clone(),
+                None,
+            );
+            tokio::pin!(query);
+            tokio::select! {
+                outcome = &mut query => outcome,
+                result = &mut compaction_started => {
+                    result.expect("compaction request must start");
+                    cancel_token.cancel();
+                    tokio::time::timeout(std::time::Duration::from_secs(1), &mut query)
+                        .await
+                        .expect("reactive compaction must observe cancellation")
+                }
+            }
+        };
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, QueryOutcome::Cancelled));
+        let durable_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, QueryEvent::DurableMessage { message }
+                    if message.get_all_text() == "sampled before compaction cancellation")
+            })
+            .expect("cancelled compaction response must be durable");
+        let durable_uuid = match &events[durable_index] {
+            QueryEvent::DurableMessage { message } => message.uuid.clone(),
+            _ => unreachable!("durable index points to durable event"),
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| {
+                    message.uuid == durable_uuid
+                        && message.get_all_text() == "sampled before compaction cancellation"
+                })
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3956,6 +4493,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_max_tokens_runs_hard_post_model_veto_before_classification() {
+        let provider = ScriptedProvider::new(vec![scripted_round(
+            "max-tokens-veto",
+            vec![ContentBlock::ToolUse {
+                id: "write-fixture".to_string(),
+                name: "WriteFixture".to_string(),
+                input: serde_json::json!({}),
+            }],
+            ProviderStopReason::MaxTokens,
+        )]);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(WriteFixtureTool)];
+        let mut tool_config = Config {
+            provider: Some(SCRIPTED_PROVIDER_ID.to_string()),
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Config::default()
+        };
+        tool_config.hooks.insert(
+            HookEvent::PostModelTurn,
+            vec![HookEntry {
+                command: "printf 'max-token veto ran' >&2; exit 2".to_string(),
+                tool_filter: None,
+                blocking: true,
+            }],
+        );
+
+        let (outcome, events, _) =
+            run_scripted_provider_with(provider, make_config(None, None), tool_config, &tools)
+                .await;
+
+        assert!(
+            matches!(&outcome, QueryOutcome::Error(error) if error.to_string().contains("max-token veto ran"))
+        );
+        assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
+        assert!(!matches!(&outcome, QueryOutcome::MaxTokens { .. }));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                QueryEvent::ToolStart { tool_id, .. } | QueryEvent::ToolEnd { tool_id, .. }
+                    if tool_id == "write-fixture"
+            )
+        }));
+        let durable_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("max-tokens-veto"))
+            })
+            .expect("vetoed max_tokens response must be durable");
+        let complete_index = events
+            .iter()
+            .position(|event| matches!(event, QueryEvent::TurnComplete { .. }))
+            .expect("vetoed max_tokens response must publish completion after durability");
+        assert!(durable_index < complete_index);
+    }
+
+    #[tokio::test]
+    async fn provider_content_filtered_and_unknown_stops_are_non_successful_and_durable() {
+        for (id, stop_reason) in [
+            (
+                "provider-content-filtered",
+                ProviderStopReason::ContentFiltered,
+            ),
+            (
+                "provider-unknown-stop",
+                ProviderStopReason::Other("provider_extension".to_string()),
+            ),
+        ] {
+            let provider = ScriptedProvider::new(vec![scripted_round(
+                id,
+                vec![ContentBlock::Text {
+                    text: "sampled terminal text".to_string(),
+                }],
+                stop_reason,
+            )]);
+
+            let (outcome, events, messages) = run_scripted_provider(provider).await;
+
+            assert!(matches!(&outcome, QueryOutcome::Error(_)));
+            assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
+            let durable_index = events
+                .iter()
+                .position(|event| {
+                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(id))
+                })
+                .expect("terminal provider response must be durable");
+            let complete_index = events
+                .iter()
+                .position(|event| matches!(event, QueryEvent::TurnComplete { .. }))
+                .expect("terminal provider response must publish completion after durability");
+            assert!(durable_index < complete_index);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.uuid.as_deref() == Some(id))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn provider_budget_exhaustion_with_tool_blocks_does_not_execute_or_continue_tools() {
         let provider = ScriptedProvider::new(vec![
             scripted_round(
@@ -4032,6 +4669,63 @@ mod tests {
             .position(|event| matches!(event, QueryEvent::TurnComplete { .. }))
             .expect("malformed provider terminal must publish completion after durability");
         assert!(durable_index < complete_index);
+    }
+
+    #[tokio::test]
+    async fn max_turn_exhaustion_after_a_tool_round_is_not_goal_continuation_eligible() {
+        let provider = ScriptedProvider::new(vec![scripted_round(
+            "max-turn-tool-round",
+            vec![ContentBlock::ToolUse {
+                id: "write-fixture".to_string(),
+                name: "WriteFixture".to_string(),
+                input: serde_json::json!({}),
+            }],
+            ProviderStopReason::ToolUse,
+        )]);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(WriteFixtureTool)];
+        let mut config = make_config(None, None);
+        config.max_turns = 1;
+
+        let (outcome, events, messages) = run_scripted_provider_with(
+            provider,
+            config,
+            Config {
+                provider: Some(SCRIPTED_PROVIDER_ID.to_string()),
+                permission_mode: PermissionMode::BypassPermissions,
+                ..Config::default()
+            },
+            &tools,
+        )
+        .await;
+
+        assert!(matches!(&outcome, QueryOutcome::Error(_)));
+        assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("max-turn-tool-round"))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| match event {
+                    QueryEvent::DurableMessage { message } => is_tool_result_carrier(message),
+                    _ => false,
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.uuid.as_deref() == Some("max-turn-tool-round"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -4162,6 +4856,70 @@ mod tests {
             .position(|event| matches!(event, QueryEvent::TurnComplete { .. }))
             .unwrap();
         assert!(durable_index < terminal_index);
+    }
+
+    #[tokio::test]
+    async fn anthropic_content_filtered_and_unknown_stops_are_non_successful_and_durable() {
+        const CONTENT_FILTERED_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"anthropic-content-filtered\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"filtered terminal text\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"content_filtered\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        const UNKNOWN_STOP_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"anthropic-unknown-stop\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"unknown terminal text\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"provider_extension\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+
+        for (text, body) in [
+            ("filtered terminal text", CONTENT_FILTERED_SSE),
+            ("unknown terminal text", UNKNOWN_STOP_SSE),
+        ] {
+            let (outcome, events, messages) = run_anthropic_sse(body, Config::default()).await;
+
+            assert!(matches!(&outcome, QueryOutcome::Error(_)));
+            assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
+            let durable_index = events
+                .iter()
+                .position(|event| {
+                    matches!(event, QueryEvent::DurableMessage { message } if message.get_all_text() == text)
+                })
+                .expect("terminal Anthropic response must be durable");
+            let complete_index = events
+                .iter()
+                .position(|event| matches!(event, QueryEvent::TurnComplete { .. }))
+                .expect("terminal Anthropic response must publish completion after durability");
+            assert!(durable_index < complete_index);
+            let durable_uuid = match &events[durable_index] {
+                QueryEvent::DurableMessage { message } => message.uuid.clone(),
+                _ => unreachable!("durable index points to durable event"),
+            };
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.uuid == durable_uuid)
+                    .count(),
+                1
+            );
+        }
     }
 
     #[tokio::test]
