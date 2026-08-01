@@ -6850,6 +6850,7 @@ impl App {
                     _ => {}
                 }
             }
+            QueryEvent::DurableMessage { .. } => {}
         }
 
         // Update token count from tracker.
