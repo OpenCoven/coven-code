@@ -2287,14 +2287,7 @@ pub async fn run_query_loop(
         let mut stream_cancelled = false;
         let stream_stalled = loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    stream_cancelled = true;
-                    break false;
-                }
-                _ = &mut stall_deadline => {
-                    // No data for 45s — stall detected
-                    break true;
-                }
+                biased;
                 event = stream_rx.recv() => {
                     // Reset stall timer on every received event.
                     stall_deadline.as_mut().reset(tokio::time::Instant::now() + STALL_TIMEOUT);
@@ -2320,10 +2313,45 @@ pub async fn run_query_loop(
                         None => break false, // Stream ended
                     }
                 }
+                _ = cancel_token.cancelled() => {
+                    // The stream handler can publish a delta before this loop
+                    // has accumulated it. Drain buffered events so cancellation
+                    // finalizes the assistant the user actually saw.
+                    stream_rx.close();
+                    while let Ok(event) = stream_rx.try_recv() {
+                        accumulator.on_event(&event);
+                    }
+                    stream_cancelled = true;
+                    break false;
+                }
+                _ = &mut stall_deadline => {
+                    // No data for 45s — stall detected
+                    break true;
+                }
             }
         };
 
         if stream_stalled && retries_left > 0 {
+            let (mut assistant_msg, usage, _) = accumulator.finish();
+            if !assistant_msg.get_all_text().is_empty() {
+                if assistant_msg.uuid.is_none() {
+                    assistant_msg.uuid = Some(uuid::Uuid::new_v4().to_string());
+                }
+                cost_tracker.add_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
+                finalize_terminal_assistant_message(
+                    messages,
+                    &mut assistant_msg,
+                    shadow_snap.as_ref(),
+                    initial_snapshot.as_deref(),
+                    event_tx.as_ref(),
+                )
+                .await;
+            }
             retries_left -= 1;
             warn!(model = %effective_model, retries_left, "Stream stalled — retrying request");
             if let Some(ref tx) = event_tx {
@@ -2504,15 +2532,36 @@ pub async fn run_query_loop(
                     ));
                 }
                 let original_messages = std::mem::take(messages);
-                match compact::context_collapse(original_messages.clone(), client, config).await {
-                    Ok(result) => {
+                let collapse_result = {
+                    let collapse =
+                        compact::context_collapse(original_messages.clone(), client, config);
+                    tokio::pin!(collapse);
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => None,
+                        result = &mut collapse => Some(result),
+                    }
+                };
+                match collapse_result {
+                    None => {
+                        *messages = original_messages;
+                        finalize_terminal_assistant_message(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                        )
+                        .await;
+                        return QueryOutcome::Cancelled;
+                    }
+                    Some(Ok(result)) => {
                         *messages = result.messages;
                         info!(
                             tokens_freed = result.tokens_freed,
                             "Context-collapse complete"
                         );
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         warn!(error = %e, "Context-collapse failed");
                         *messages = original_messages;
                         finalize_terminal_assistant_message(
@@ -2531,23 +2580,29 @@ pub async fn run_query_loop(
                     let _ = tx.send(QueryEvent::Status("Compacting context...".to_string()));
                 }
                 let original_messages = std::mem::take(messages);
-                match compact::reactive_compact(
-                    original_messages.clone(),
-                    client,
-                    config,
-                    cancel_token.clone(),
-                    &[],
-                )
-                .await
-                {
-                    Ok(result) => {
+                let compact_result = {
+                    let compact = compact::reactive_compact(
+                        original_messages.clone(),
+                        client,
+                        config,
+                        cancel_token.clone(),
+                        &[],
+                    );
+                    tokio::pin!(compact);
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => None,
+                        result = &mut compact => Some(result),
+                    }
+                };
+                match compact_result {
+                    Some(Ok(result)) => {
                         *messages = result.messages;
                         info!(
                             tokens_freed = result.tokens_freed,
                             "Reactive compact complete"
                         );
                     }
-                    Err(claurst_core::error::ClaudeError::Cancelled) => {
+                    None | Some(Err(claurst_core::error::ClaudeError::Cancelled)) => {
                         warn!("Reactive compact was cancelled");
                         *messages = original_messages;
                         finalize_terminal_assistant_message(
@@ -2560,7 +2615,7 @@ pub async fn run_query_loop(
                         .await;
                         return QueryOutcome::Cancelled;
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         warn!(error = %e, "Reactive compact failed");
                         *messages = original_messages;
                         finalize_terminal_assistant_message(

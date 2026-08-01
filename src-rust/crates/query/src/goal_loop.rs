@@ -129,8 +129,13 @@ fn check_and_continue_goal_in_store(
     total_tokens_used: u64,
     turn_elapsed_secs: u64,
 ) -> Result<GoalContinuation, GoalError> {
-    store.record_completed_turn(session_id, total_tokens_used, turn_elapsed_secs)?;
-    check_goal_guards(store, session_id, None)
+    match store.record_completed_turn(session_id, total_tokens_used, turn_elapsed_secs) {
+        Ok(()) => check_goal_guards(store, session_id, None),
+        Err(error @ GoalError::NotActive { .. }) => {
+            reload_after_racing_transition(store, session_id, error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn check_and_continue_goal_in_store_for_goal(
@@ -140,13 +145,18 @@ fn check_and_continue_goal_in_store_for_goal(
     total_tokens_used: u64,
     turn_elapsed_secs: u64,
 ) -> Result<GoalContinuation, GoalError> {
-    store.record_completed_turn_for_goal(
+    match store.record_completed_turn_for_goal(
         session_id,
         expected_goal_id,
         total_tokens_used,
         turn_elapsed_secs,
-    )?;
-    check_goal_guards(store, session_id, Some(expected_goal_id))
+    ) {
+        Ok(()) => check_goal_guards(store, session_id, Some(expected_goal_id)),
+        Err(error @ GoalError::NotActive { .. }) => {
+            reload_after_racing_transition(store, session_id, error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn check_goal_guards(
@@ -320,6 +330,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = check_and_continue_goal_at_path(&goal_path(&dir), "missing", 0, 0).unwrap_err();
         assert!(matches!(error, GoalError::NotFound { .. }));
+    }
+
+    #[test]
+    fn explicit_path_terminal_goals_stop_without_recording_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = goal_path(&dir);
+        let store = GoalStore::open(&path).unwrap();
+
+        for (session_id, status, expected_reason) in [
+            ("complete", GoalStatus::Complete, StopReason::GoalComplete),
+            ("paused", GoalStatus::Paused, StopReason::Paused),
+            (
+                "budget-limited",
+                GoalStatus::BudgetLimited,
+                StopReason::BudgetLimited,
+            ),
+        ] {
+            store.set_goal(session_id, "finish", None).unwrap();
+            match status {
+                GoalStatus::Complete => store.complete_active_goal(session_id).unwrap(),
+                GoalStatus::Paused => store.pause_active_goal(session_id).unwrap(),
+                GoalStatus::BudgetLimited => store.budget_limit_active_goal(session_id).unwrap(),
+                GoalStatus::Active => unreachable!("only terminal states are under test"),
+            }
+
+            let decision = check_and_continue_goal_at_path(&path, session_id, 999, 8).unwrap();
+            assert!(matches!(
+                (decision, expected_reason),
+                (
+                    GoalContinuation::Stop {
+                        reason: StopReason::GoalComplete
+                    },
+                    StopReason::GoalComplete
+                ) | (
+                    GoalContinuation::Stop {
+                        reason: StopReason::Paused
+                    },
+                    StopReason::Paused
+                ) | (
+                    GoalContinuation::Stop {
+                        reason: StopReason::BudgetLimited
+                    },
+                    StopReason::BudgetLimited
+                )
+            ));
+
+            let goal = store.try_get_goal(session_id).unwrap().unwrap();
+            assert_eq!(goal.tokens_used, 0);
+            assert_eq!(goal.time_used_secs, 0);
+            assert_eq!(goal.turns_used, 0);
+        }
     }
 
     #[test]
