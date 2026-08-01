@@ -895,8 +895,8 @@ fn strip_images(messages: Vec<claurst_core::types::Message>) -> Vec<claurst_core
 /// Feature gate: only call this when
 /// `claurst_core::feature_gates::is_feature_enabled("reactive_compact")` is true.
 ///
-/// The `cancel` token is checked before the API call so the user can abort
-/// a long-running compact.
+/// The `cancel` token is checked before and during the API call so the user
+/// can abort a long-running compact.
 pub async fn reactive_compact(
     messages: Vec<claurst_core::types::Message>,
     client: &claurst_api::AnthropicClient,
@@ -934,8 +934,10 @@ pub async fn reactive_compact(
 
     let original_token_estimate = estimate_tokens_for_messages(&stripped[..split_at]) as u64;
 
-    let mut new_messages =
-        summarise_head(client, &stripped, split_at, &config.model, 20_000).await?;
+    let mut new_messages = tokio::select! {
+        _ = cancel.cancelled() => return Err(claurst_core::error::ClaudeError::Cancelled),
+        result = summarise_head(client, &stripped, split_at, &config.model, 20_000) => result?,
+    };
 
     // The summary lives as the first message in new_messages.
     let summary_text = new_messages

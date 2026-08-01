@@ -680,26 +680,48 @@ impl GoalStore {
 
     /// Pause an active goal. Repeating a pause for a paused goal is idempotent.
     pub fn pause_active_goal(&self, session_id: &str) -> Result<(), GoalError> {
-        let updated = self
-            .conn
+        self.pause_active_goal_with_outcome(session_id).map(|_| ())
+    }
+
+    /// Pause an active goal and report whether this call changed its status.
+    ///
+    /// A `false` outcome means the goal was already paused. Other terminal
+    /// states retain the existing `NotActive` error behavior.
+    pub fn pause_active_goal_with_outcome(&self, session_id: &str) -> Result<bool, GoalError> {
+        let transaction = self.immediate_transaction()?;
+        let goal = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
+            GoalError::NotFound {
+                session_id: session_id.to_string(),
+            }
+        })?;
+        if goal.status == GoalStatus::Paused {
+            return Ok(false);
+        }
+        if goal.status != GoalStatus::Active {
+            return Err(GoalError::NotActive {
+                session_id: session_id.to_string(),
+            });
+        }
+        let updated = transaction
             .execute(
                 "UPDATE goals SET status = 'paused', updated_at_ms = ?1
-             WHERE session_id = ?2 AND status = 'active'",
-                rusqlite::params![Self::sqlite_i64(Self::now_ms(), "timestamp")?, session_id],
+                 WHERE session_id = ?2 AND id = ?3 AND status = 'active'",
+                rusqlite::params![
+                    Self::sqlite_i64(Self::now_ms(), "timestamp")?,
+                    session_id,
+                    goal.id,
+                ],
             )
             .map_err(|err| GoalError::Db(err.to_string()))?;
-        if updated > 0 {
-            return Ok(());
-        }
-        match self.try_get_goal(session_id)? {
-            Some(goal) if goal.status == GoalStatus::Paused => Ok(()),
-            Some(_) => Err(GoalError::NotActive {
+        if updated == 0 {
+            return Err(GoalError::NotActive {
                 session_id: session_id.to_string(),
-            }),
-            None => Err(GoalError::NotFound {
-                session_id: session_id.to_string(),
-            }),
+            });
         }
+        transaction
+            .commit()
+            .map_err(|err| GoalError::Db(err.to_string()))?;
+        Ok(true)
     }
 
     /// Pause the goal only if `expected_goal_id` still owns the session row.
@@ -708,6 +730,19 @@ impl GoalStore {
         session_id: &str,
         expected_goal_id: &str,
     ) -> Result<(), GoalError> {
+        self.pause_active_goal_for_goal_with_outcome(session_id, expected_goal_id)
+            .map(|_| ())
+    }
+
+    /// Pause the expected active goal and report whether this call changed it.
+    ///
+    /// A `false` outcome means the expected goal was already paused. A
+    /// replacement remains an error and is never modified.
+    pub fn pause_active_goal_for_goal_with_outcome(
+        &self,
+        session_id: &str,
+        expected_goal_id: &str,
+    ) -> Result<bool, GoalError> {
         let transaction = self.immediate_transaction()?;
         let goal = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
             GoalError::NotFound {
@@ -722,7 +757,7 @@ impl GoalStore {
             });
         }
         if goal.status == GoalStatus::Paused {
-            return Ok(());
+            return Ok(false);
         }
         if goal.status != GoalStatus::Active {
             return Err(GoalError::NotActive {
@@ -748,7 +783,7 @@ impl GoalStore {
         transaction
             .commit()
             .map_err(|err| GoalError::Db(err.to_string()))?;
-        Ok(())
+        Ok(true)
     }
 
     /// Resume a paused goal if it has not reached the automatic turn cap.
@@ -1359,6 +1394,102 @@ mod tests {
     }
 
     #[test]
+    fn strict_pause_reports_whether_it_transitioned_the_active_goal() {
+        let store = open_tmp();
+        store.set_goal("session", "work", None).unwrap();
+
+        assert!(store.pause_active_goal_with_outcome("session").unwrap());
+        assert!(!store.pause_active_goal_with_outcome("session").unwrap());
+
+        store.set_goal("complete", "finished", None).unwrap();
+        store.complete_active_goal("complete").unwrap();
+        assert!(matches!(
+            store.pause_active_goal_with_outcome("complete"),
+            Err(GoalError::NotActive { session_id }) if session_id == "complete"
+        ));
+    }
+
+    #[test]
+    fn strict_pause_keeps_paused_classification_when_resume_races() {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum RacePhase {
+            Waiting,
+            PauseUpdateCompleted,
+            PausedRowRead,
+            ResumeAttempted,
+            ResumeCompleted,
+        }
+
+        static RACE_STATE: OnceLock<(Mutex<RacePhase>, Condvar)> = OnceLock::new();
+
+        fn race_state() -> &'static (Mutex<RacePhase>, Condvar) {
+            RACE_STATE.get_or_init(|| (Mutex::new(RacePhase::Waiting), Condvar::new()))
+        }
+
+        fn pause_race_profile(sql: &str, _: Duration) {
+            let (lock, condvar) = race_state();
+            let mut phase = lock.lock().unwrap();
+            if sql.starts_with("UPDATE goals SET status = 'paused'") {
+                *phase = RacePhase::PauseUpdateCompleted;
+                condvar.notify_all();
+                while *phase != RacePhase::ResumeCompleted {
+                    phase = condvar.wait(phase).unwrap();
+                }
+            } else if sql.contains("FROM goals WHERE session_id") && *phase == RacePhase::Waiting {
+                *phase = RacePhase::PausedRowRead;
+                condvar.notify_all();
+                while *phase != RacePhase::ResumeAttempted {
+                    phase = condvar.wait(phase).unwrap();
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let mut first = GoalStore::open(&path).unwrap();
+        first.set_goal("session", "work", None).unwrap();
+        first.pause_active_goal("session").unwrap();
+        let second = GoalStore::open(&path).unwrap();
+        let (lock, _) = race_state();
+        *lock.lock().unwrap() = RacePhase::Waiting;
+        first.conn.profile(Some(pause_race_profile));
+
+        let resumer = thread::spawn(move || {
+            let (lock, condvar) = race_state();
+            let mut phase = lock.lock().unwrap();
+            while *phase == RacePhase::Waiting {
+                phase = condvar.wait(phase).unwrap();
+            }
+            match *phase {
+                RacePhase::PauseUpdateCompleted => {
+                    drop(phase);
+                    second.resume_paused_goal("session").unwrap();
+                    let mut phase = lock.lock().unwrap();
+                    *phase = RacePhase::ResumeCompleted;
+                    condvar.notify_all();
+                }
+                RacePhase::PausedRowRead => {
+                    *phase = RacePhase::ResumeAttempted;
+                    condvar.notify_all();
+                    drop(phase);
+                    second.resume_paused_goal("session").unwrap();
+                }
+                _ => unreachable!("unexpected pause race phase"),
+            }
+        });
+
+        let outcome = first.pause_active_goal_with_outcome("session");
+        first.conn.profile(None);
+        resumer.join().unwrap();
+
+        assert_eq!(outcome, Ok(false));
+        assert_eq!(
+            first.try_get_goal("session").unwrap().unwrap().status,
+            GoalStatus::Active
+        );
+    }
+
+    #[test]
     fn guarded_transitions_reject_missing_and_non_active_goals() {
         let store = open_tmp();
         for transition in [
@@ -1404,6 +1535,35 @@ mod tests {
         assert_eq!(current.tokens_used, 0);
         assert_eq!(current.time_used_secs, 0);
         assert_eq!(current.turns_used, 0);
+    }
+
+    #[test]
+    fn expected_goal_strict_pause_reports_outcome_and_preserves_replacement() {
+        let store = open_tmp();
+        let original = store.set_goal("session", "original", None).unwrap();
+
+        assert!(store
+            .pause_active_goal_for_goal_with_outcome("session", &original.id)
+            .unwrap());
+        assert!(!store
+            .pause_active_goal_for_goal_with_outcome("session", &original.id)
+            .unwrap());
+
+        let replacement = store.set_goal("session", "replacement", None).unwrap();
+        let error = store
+            .pause_active_goal_for_goal_with_outcome("session", &original.id)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GoalError::Replaced {
+                expected_goal_id,
+                actual_goal_id,
+                ..
+            } if expected_goal_id == original.id && actual_goal_id == replacement.id
+        ));
+        let current = store.try_get_goal("session").unwrap().unwrap();
+        assert_eq!(current.id, replacement.id);
+        assert_eq!(current.status, GoalStatus::Active);
     }
 
     #[test]

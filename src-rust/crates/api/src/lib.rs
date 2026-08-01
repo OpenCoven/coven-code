@@ -850,7 +850,13 @@ pub mod client {
             let mut byte_stream = resp.bytes_stream();
             let mut leftover = String::new();
 
-            while let Some(chunk_result) = byte_stream.next().await {
+            loop {
+                let Some(chunk_result) = (tokio::select! {
+                    _ = tx.closed() => return Ok(()),
+                    chunk = byte_stream.next() => chunk,
+                }) else {
+                    break;
+                };
                 let chunk = chunk_result.map_err(ClaudeError::Http)?;
                 let text = String::from_utf8_lossy(&chunk);
 
@@ -1102,11 +1108,14 @@ impl CreateMessageRequestBuilder {
 pub struct StreamAccumulator {
     id: Option<String>,
     model: Option<String>,
-    content_blocks: Vec<ContentBlock>,
+    /// Completed blocks paired with their stream indexes so open and completed
+    /// blocks can be reconstructed in their original order at finalization.
+    content_blocks: Vec<(usize, ContentBlock)>,
     /// Partial accumulators keyed by block index.
     partials: std::collections::HashMap<usize, PartialBlock>,
     stop_reason: Option<String>,
     usage: UsageInfo,
+    received_message_stop: bool,
 }
 
 #[derive(Debug)]
@@ -1121,6 +1130,27 @@ enum PartialBlock {
         thinking_buf: String,
         signature_buf: String,
     },
+    Other(ContentBlock),
+}
+
+impl PartialBlock {
+    fn into_content_block(self) -> ContentBlock {
+        match self {
+            Self::Text(text) => ContentBlock::Text { text },
+            Self::ToolUse { id, name, json_buf } => {
+                let input = serde_json::from_str(&json_buf).unwrap_or(Value::String(json_buf));
+                ContentBlock::ToolUse { id, name, input }
+            }
+            Self::Thinking {
+                thinking_buf,
+                signature_buf,
+            } => ContentBlock::Thinking {
+                thinking: thinking_buf,
+                signature: signature_buf,
+            },
+            Self::Other(block) => block,
+        }
+    }
 }
 
 impl Default for StreamAccumulator {
@@ -1138,6 +1168,7 @@ impl StreamAccumulator {
             partials: Default::default(),
             stop_reason: None,
             usage: UsageInfo::default(),
+            received_message_stop: false,
         }
     }
 
@@ -1169,12 +1200,29 @@ impl StreamAccumulator {
                         thinking_buf: thinking.clone(),
                         signature_buf: signature.clone(),
                     },
-                    _ => return,
+                    other => PartialBlock::Other(other.clone()),
                 };
                 self.partials.insert(*index, partial);
             }
 
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+                match delta {
+                    streaming::ContentDelta::TextDelta { .. } => {
+                        self.partials
+                            .entry(*index)
+                            .or_insert_with(|| PartialBlock::Text(String::new()));
+                    }
+                    streaming::ContentDelta::ThinkingDelta { .. }
+                    | streaming::ContentDelta::SignatureDelta { .. } => {
+                        self.partials
+                            .entry(*index)
+                            .or_insert_with(|| PartialBlock::Thinking {
+                                thinking_buf: String::new(),
+                                signature_buf: String::new(),
+                            });
+                    }
+                    streaming::ContentDelta::InputJsonDelta { .. } => {}
+                }
                 if let Some(partial) = self.partials.get_mut(index) {
                     match (partial, delta) {
                         (PartialBlock::Text(buf), streaming::ContentDelta::TextDelta { text }) => {
@@ -1205,22 +1253,8 @@ impl StreamAccumulator {
 
             AnthropicStreamEvent::ContentBlockStop { index } => {
                 if let Some(partial) = self.partials.remove(index) {
-                    let block = match partial {
-                        PartialBlock::Text(text) => ContentBlock::Text { text },
-                        PartialBlock::ToolUse { id, name, json_buf } => {
-                            let input = serde_json::from_str(&json_buf)
-                                .unwrap_or(Value::Object(Default::default()));
-                            ContentBlock::ToolUse { id, name, input }
-                        }
-                        PartialBlock::Thinking {
-                            thinking_buf,
-                            signature_buf,
-                        } => ContentBlock::Thinking {
-                            thinking: thinking_buf,
-                            signature: signature_buf,
-                        },
-                    };
-                    self.content_blocks.push(block);
+                    self.content_blocks
+                        .push((*index, partial.into_content_block()));
                 }
             }
 
@@ -1229,21 +1263,125 @@ impl StreamAccumulator {
                     self.stop_reason = Some(sr.clone());
                 }
                 if let Some(u) = usage {
-                    // The delta usage usually only has output_tokens;
-                    // add them to the running total.
-                    self.usage.output_tokens += u.output_tokens;
+                    self.merge_usage(u);
                 }
             }
 
-            AnthropicStreamEvent::MessageStop => {}
+            AnthropicStreamEvent::MessageStop => self.received_message_stop = true,
             AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { .. } => {}
         }
     }
 
+    /// Feed a provider-agnostic event through the same indexed lossless
+    /// accumulation used by Anthropic's native stream.
+    pub fn on_provider_event(&mut self, event: &crate::provider_types::StreamEvent) {
+        use crate::provider_types::{StopReason, StreamEvent};
+        use streaming::{AnthropicStreamEvent, ContentDelta};
+
+        let anthropic_event = match event {
+            StreamEvent::MessageStart { id, model, usage } => AnthropicStreamEvent::MessageStart {
+                id: id.clone(),
+                model: model.clone(),
+                usage: usage.clone(),
+            },
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => AnthropicStreamEvent::ContentBlockStart {
+                index: *index,
+                content_block: content_block.clone(),
+            },
+            StreamEvent::TextDelta { index, text } => AnthropicStreamEvent::ContentBlockDelta {
+                index: *index,
+                delta: ContentDelta::TextDelta { text: text.clone() },
+            },
+            StreamEvent::ThinkingDelta { index, thinking } => {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *index,
+                    delta: ContentDelta::ThinkingDelta {
+                        thinking: thinking.clone(),
+                    },
+                }
+            }
+            StreamEvent::ReasoningDelta { index, reasoning } => {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *index,
+                    delta: ContentDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                }
+            }
+            StreamEvent::InputJsonDelta {
+                index,
+                partial_json,
+            } => AnthropicStreamEvent::ContentBlockDelta {
+                index: *index,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: partial_json.clone(),
+                },
+            },
+            StreamEvent::SignatureDelta { index, signature } => {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *index,
+                    delta: ContentDelta::SignatureDelta {
+                        signature: signature.clone(),
+                    },
+                }
+            }
+            StreamEvent::ContentBlockStop { index } => {
+                AnthropicStreamEvent::ContentBlockStop { index: *index }
+            }
+            StreamEvent::MessageDelta { stop_reason, usage } => {
+                let stop_reason = stop_reason.as_ref().map(|reason| match reason {
+                    StopReason::EndTurn => "end_turn".to_string(),
+                    StopReason::StopSequence => "stop_sequence".to_string(),
+                    StopReason::MaxTokens => "max_tokens".to_string(),
+                    StopReason::ToolUse => "tool_use".to_string(),
+                    StopReason::ContentFiltered => "content_filtered".to_string(),
+                    StopReason::Other(reason) => reason.clone(),
+                });
+                AnthropicStreamEvent::MessageDelta {
+                    stop_reason,
+                    usage: usage.clone(),
+                }
+            }
+            StreamEvent::MessageStop => AnthropicStreamEvent::MessageStop,
+            StreamEvent::Error {
+                error_type,
+                message,
+            } => AnthropicStreamEvent::Error {
+                error_type: error_type.clone(),
+                message: message.clone(),
+            },
+        };
+        self.on_event(&anthropic_event);
+    }
+
+    fn merge_usage(&mut self, update: &UsageInfo) {
+        self.usage.input_tokens = self.usage.input_tokens.max(update.input_tokens);
+        self.usage.output_tokens = self.usage.output_tokens.max(update.output_tokens);
+        self.usage.cache_creation_input_tokens = self
+            .usage
+            .cache_creation_input_tokens
+            .max(update.cache_creation_input_tokens);
+        self.usage.cache_read_input_tokens = self
+            .usage
+            .cache_read_input_tokens
+            .max(update.cache_read_input_tokens);
+    }
+
     /// Finalize and produce the accumulated `Message`.
     pub fn finish(self) -> (Message, UsageInfo, Option<String>) {
-        let msg = Message::assistant_blocks(self.content_blocks);
+        let mut content_blocks = self.content_blocks;
+        content_blocks.extend(
+            self.partials
+                .into_iter()
+                .map(|(index, partial)| (index, partial.into_content_block())),
+        );
+        content_blocks.sort_unstable_by_key(|(index, _)| *index);
+        let msg =
+            Message::assistant_blocks(content_blocks.into_iter().map(|(_, block)| block).collect());
         (msg, self.usage, self.stop_reason)
     }
 
@@ -1257,6 +1395,16 @@ impl StreamAccumulator {
 
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// Provider-assigned message identifier, if one arrived before finalization.
+    pub fn message_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// Whether the stream supplied the explicit protocol completion event.
+    pub fn received_message_stop(&self) -> bool {
+        self.received_message_stop
     }
 }
 
@@ -1285,6 +1433,97 @@ mod tests {
         assert_eq!(req.model, "claude-opus-4-6");
         assert_eq!(req.max_tokens, 4096);
         assert!(req.stream);
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_receiver_closes_a_stalled_sse_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled SSE listener");
+        let addr = listener.local_addr().expect("stalled SSE listener address");
+        let (request_active_tx, request_active_rx) = tokio::sync::oneshot::channel();
+        let (connection_closed_tx, connection_closed_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept SSE request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let headers_end = loop {
+                let read = stream.read(&mut buffer).await.expect("read SSE request");
+                assert_ne!(read, 0, "SSE client closed before sending a request");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&request[..headers_end])
+                .expect("SSE request headers are UTF-8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .expect("SSE request has a content length")
+                .trim()
+                .parse::<usize>()
+                .expect("SSE request content length is valid");
+            while request.len() < headers_end + content_length {
+                let read = stream
+                    .read(&mut buffer)
+                    .await
+                    .expect("read SSE request body");
+                assert_ne!(read, 0, "SSE client closed while sending the request body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .expect("write stalled SSE response headers");
+            stream.flush().await.expect("flush stalled SSE response");
+            let _ = request_active_tx.send(());
+
+            let mut byte = [0_u8; 1];
+            loop {
+                if stream
+                    .read(&mut byte)
+                    .await
+                    .expect("wait for stalled SSE connection closure")
+                    == 0
+                {
+                    let _ = connection_closed_tx.send(());
+                    return;
+                }
+            }
+        });
+
+        let client = AnthropicClient::new(client::ClientConfig {
+            api_key: "test-key".to_string(),
+            api_base: format!("http://{addr}"),
+            max_retries: 0,
+            ..Default::default()
+        })
+        .expect("create Anthropic client");
+        let receiver = client
+            .create_message_stream(
+                CreateMessageRequest::builder("claude-test", 1).build(),
+                Arc::new(streaming::NullStreamHandler),
+            )
+            .await
+            .expect("create stalled message stream");
+
+        tokio::time::timeout(Duration::from_secs(1), request_active_rx)
+            .await
+            .expect("stalled SSE request must become active")
+            .expect("stalled SSE server must report the active request");
+        drop(receiver);
+
+        tokio::time::timeout(Duration::from_secs(1), connection_closed_rx)
+            .await
+            .expect("dropping the receiver must close the stalled SSE connection")
+            .expect("stalled SSE server must observe connection closure");
     }
 
     #[test]
@@ -1397,5 +1636,139 @@ mod tests {
         let (msg, _usage, stop) = acc.finish();
         assert_eq!(msg.get_text(), Some("Hello world!"));
         assert_eq!(stop.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn stream_accumulator_finish_keeps_open_blocks_in_stream_index_order() {
+        let mut acc = StreamAccumulator::new();
+
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Text {
+                text: "partial ".into(),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: streaming::ContentDelta::TextDelta {
+                text: "text".into(),
+            },
+        });
+
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 1,
+            content_block: ContentBlock::ToolUse {
+                id: "completed-tool".into(),
+                name: "completed".into(),
+                input: serde_json::json!({}),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 1,
+            delta: streaming::ContentDelta::InputJsonDelta {
+                partial_json: r#"{"complete":true}"#.into(),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStop { index: 1 });
+
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 2,
+            content_block: ContentBlock::Thinking {
+                thinking: "partial ".into(),
+                signature: "sig-".into(),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 2,
+            delta: streaming::ContentDelta::ThinkingDelta {
+                thinking: "thinking".into(),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 2,
+            delta: streaming::ContentDelta::SignatureDelta {
+                signature: "partial".into(),
+            },
+        });
+
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 3,
+            content_block: ContentBlock::Text {
+                text: "completed".into(),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStop { index: 3 });
+
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 4,
+            content_block: ContentBlock::ToolUse {
+                id: "partial-tool".into(),
+                name: "partial".into(),
+                input: serde_json::json!({}),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 4,
+            delta: streaming::ContentDelta::InputJsonDelta {
+                partial_json: r#"{"preserved":"json"}"#.into(),
+            },
+        });
+
+        let (message, _, _) = acc.finish();
+        let claurst_core::types::MessageContent::Blocks(blocks) = message.content else {
+            panic!("stream accumulator must return block content");
+        };
+
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "partial text"));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::ToolUse { id, name, input }
+                if id == "completed-tool"
+                    && name == "completed"
+                    && input == &serde_json::json!({"complete": true})
+        ));
+        assert!(matches!(
+            &blocks[2],
+            ContentBlock::Thinking { thinking, signature }
+                if thinking == "partial thinking" && signature == "sig-partial"
+        ));
+        assert!(matches!(&blocks[3], ContentBlock::Text { text } if text == "completed"));
+        assert!(matches!(
+            &blocks[4],
+            ContentBlock::ToolUse { id, name, input }
+                if id == "partial-tool"
+                    && name == "partial"
+                    && input == &serde_json::json!({"preserved": "json"})
+        ));
+    }
+
+    #[test]
+    fn stream_accumulator_preserves_incomplete_tool_json() {
+        let raw_json = r#"{"path":"unfinished"#;
+        let mut acc = StreamAccumulator::new();
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::ToolUse {
+                id: "incomplete-tool".into(),
+                name: "Write".into(),
+                input: serde_json::json!({}),
+            },
+        });
+        acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: streaming::ContentDelta::InputJsonDelta {
+                partial_json: raw_json.into(),
+            },
+        });
+
+        let (message, _, _) = acc.finish();
+        assert!(matches!(
+            &message.content,
+            claurst_core::types::MessageContent::Blocks(blocks)
+                if matches!(
+                    &blocks[0],
+                    ContentBlock::ToolUse { input, .. } if input == &Value::String(raw_json.into())
+                )
+        ));
     }
 }

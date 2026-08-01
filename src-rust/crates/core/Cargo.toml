@@ -105,3 +105,4 @@ cpal = { version = "0.15", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true, features = ["trace"] }
