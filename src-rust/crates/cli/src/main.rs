@@ -2009,6 +2009,72 @@ fn permission_request_from_core(
     }
 }
 
+#[derive(Debug, Clone)]
+struct GoalTurnBaseline {
+    goal_id: String,
+    tracker_total: u64,
+    started_at: std::time::Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GoalTurnAccountingDecision {
+    Skip,
+    Record { total_tokens_used: u64 },
+}
+
+fn capture_goal_turn_baseline(
+    session_id: &str,
+    tracker_total: u64,
+) -> Result<Option<GoalTurnBaseline>, claurst_core::GoalError> {
+    let store = claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())?;
+    let goal = store.try_get_goal(session_id)?;
+    Ok(goal
+        .filter(|goal| goal.status == claurst_core::GoalStatus::Active)
+        .map(|goal| GoalTurnBaseline {
+            goal_id: goal.id,
+            tracker_total,
+            started_at: std::time::Instant::now(),
+        }))
+}
+
+fn decide_goal_turn_accounting(
+    baseline: Option<&GoalTurnBaseline>,
+    current_goal: Option<&claurst_core::Goal>,
+    tracker_total: u64,
+) -> Result<GoalTurnAccountingDecision, String> {
+    match (baseline, current_goal) {
+        (None, None) => Ok(GoalTurnAccountingDecision::Skip),
+        (None, Some(goal)) if goal.status != claurst_core::GoalStatus::Active => {
+            Ok(GoalTurnAccountingDecision::Skip)
+        }
+        (None, Some(_)) => Err("missing active-goal turn baseline".to_string()),
+        (Some(_), None) => {
+            Err("goal changed during the turn: original goal is missing".to_string())
+        }
+        (Some(baseline), Some(goal)) if baseline.goal_id != goal.id => Err(format!(
+            "goal changed during the turn: expected {}, found {}",
+            baseline.goal_id, goal.id
+        )),
+        (Some(_), Some(goal)) if goal.status != claurst_core::GoalStatus::Active => {
+            Ok(GoalTurnAccountingDecision::Skip)
+        }
+        (Some(baseline), Some(goal)) => {
+            let turn_tokens = tracker_total
+                .checked_sub(baseline.tracker_total)
+                .ok_or_else(|| {
+                    format!(
+                        "goal token tracker moved backwards: start {}, end {}",
+                        baseline.tracker_total, tracker_total
+                    )
+                })?;
+            let total_tokens_used = goal.tokens_used.checked_add(turn_tokens).ok_or_else(|| {
+                "goal token accounting overflow while adding completed turn".to_string()
+            })?;
+            Ok(GoalTurnAccountingDecision::Record { total_tokens_used })
+        }
+    }
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -2377,8 +2443,10 @@ async fn run_interactive(
     // Active effort level (None = use model default / High).
     // Tracks the user's /effort selection; flows into qcfg each turn.
     let mut current_effort: Option<claurst_core::effort::EffortLevel> = None;
-    // Timestamp of when the most recent query turn was dispatched (for goal elapsed tracking).
-    let mut goal_turn_start: std::time::Instant = std::time::Instant::now();
+    // Start time and session-wide tracker baseline for the most recent real
+    // query turn. Goal accounting converts the tracker delta into a durable,
+    // goal-absolute token total only after a successful EndTurn.
+    let mut goal_turn_baseline: Option<GoalTurnBaseline> = None;
 
     // Background update check: spawned once at startup; result delivered via channel.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
@@ -3286,7 +3354,23 @@ async fn run_interactive(
                         let tracker = cost_tracker.clone();
                         let tx = event_tx.clone();
                         let client_clone = client.clone();
-                        goal_turn_start = std::time::Instant::now();
+                        goal_turn_baseline = if claurst_core::goals_enabled() {
+                            match capture_goal_turn_baseline(
+                                &session.id,
+                                cost_tracker.total_tokens(),
+                            ) {
+                                Ok(baseline) => baseline,
+                                Err(error) => {
+                                    app.status_message = Some(format!(
+                                        "Goal error: could not capture turn baseline: {}",
+                                        error
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
 
                         let handle = tokio::spawn(async move {
                             let mut msgs = msgs_arc_clone.lock().await.clone();
@@ -3650,6 +3734,7 @@ async fn run_interactive(
                     claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
                 let client_clone = client.clone();
                 app.is_streaming = true;
+                goal_turn_baseline = None;
 
                 let handle = tokio::spawn(async move {
                     if ct.is_cancelled() {
@@ -3813,6 +3898,23 @@ async fn run_interactive(
                         let tracker = cost_tracker.clone();
                         let tx = event_tx.clone();
                         let client_clone = client.clone();
+                        goal_turn_baseline = if claurst_core::goals_enabled() {
+                            match capture_goal_turn_baseline(
+                                &session.id,
+                                cost_tracker.total_tokens(),
+                            ) {
+                                Ok(baseline) => baseline,
+                                Err(error) => {
+                                    app.status_message = Some(format!(
+                                        "Goal error: could not capture turn baseline: {}",
+                                        error
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         let handle = tokio::spawn(async move {
                             let mut msgs = msgs_arc_clone.lock().await.clone();
                             let outcome = claurst_query::run_query_loop(
@@ -3925,6 +4027,20 @@ async fn run_interactive(
                 let tracker = cost_tracker.clone();
                 let tx = event_tx.clone();
                 let client_clone = client.clone();
+                goal_turn_baseline = if claurst_core::goals_enabled() {
+                    match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
+                        Ok(baseline) => baseline,
+                        Err(error) => {
+                            app.status_message = Some(format!(
+                                "Goal error: could not capture turn baseline: {}",
+                                error
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let handle = tokio::spawn(async move {
                     let mut msgs = msgs_arc_clone.lock().await.clone();
                     let outcome = claurst_query::run_query_loop(
@@ -4297,7 +4413,20 @@ async fn run_interactive(
                     let tracker = cost_tracker.clone();
                     let tx = event_tx.clone();
                     let client_clone = client.clone();
-                    goal_turn_start = std::time::Instant::now();
+                    goal_turn_baseline = if claurst_core::goals_enabled() {
+                        match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
+                            Ok(baseline) => baseline,
+                            Err(error) => {
+                                app.status_message = Some(format!(
+                                    "Goal error: could not capture turn baseline: {}",
+                                    error
+                                ));
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
                     let handle = tokio::spawn(async move {
                         let mut msgs = msgs_arc_clone.lock().await.clone();
@@ -4376,8 +4505,9 @@ async fn run_interactive(
                     }
                     _ => {}
                 };
-                let auto_compact_succeeded =
-                    matches!(query_outcome, Ok(QueryOutcome::EndTurn { .. }));
+                let completed_end_turn = matches!(&query_outcome, Ok(QueryOutcome::EndTurn { .. }));
+                let was_auto_compact = app.auto_compact_running;
+                let auto_compact_succeeded = completed_end_turn;
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -4451,14 +4581,46 @@ async fn run_interactive(
                 // After every completed turn check if there is an active goal.
                 // If so, inject a continuation user message and dispatch another turn
                 // without waiting for user input.
-                if !app.auto_compact_running && claurst_core::goals_enabled() {
-                    let elapsed_secs = goal_turn_start.elapsed().as_secs();
-                    let total_tokens = cost_tracker.total_tokens();
-                    match claurst_query::check_and_continue_goal(
-                        &session.id,
-                        total_tokens,
-                        elapsed_secs,
-                    ) {
+                if completed_end_turn && !was_auto_compact && claurst_core::goals_enabled() {
+                    let baseline = goal_turn_baseline.take();
+                    let current_goal =
+                        claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())
+                            .and_then(|store| store.try_get_goal(&session.id));
+                    let continuation = match current_goal {
+                        Ok(goal) => match decide_goal_turn_accounting(
+                            baseline.as_ref(),
+                            goal.as_ref(),
+                            cost_tracker.total_tokens(),
+                        ) {
+                            Ok(GoalTurnAccountingDecision::Skip) => {
+                                claurst_query::GoalContinuation::NoGoal
+                            }
+                            Ok(GoalTurnAccountingDecision::Record { total_tokens_used }) => {
+                                match baseline.as_ref() {
+                                    Some(baseline) => {
+                                        claurst_query::check_and_continue_goal_for_goal(
+                                            &session.id,
+                                            &baseline.goal_id,
+                                            total_tokens_used,
+                                            baseline.started_at.elapsed().as_secs(),
+                                        )
+                                    }
+                                    None => claurst_query::GoalContinuation::Stop {
+                                        reason: claurst_query::StopReason::Error(
+                                            "missing active-goal turn baseline".to_string(),
+                                        ),
+                                    },
+                                }
+                            }
+                            Err(error) => claurst_query::GoalContinuation::Stop {
+                                reason: claurst_query::StopReason::Error(error),
+                            },
+                        },
+                        Err(error) => claurst_query::GoalContinuation::Stop {
+                            reason: claurst_query::StopReason::Error(error.to_string()),
+                        },
+                    };
+                    match continuation {
                         claurst_query::GoalContinuation::Continue { message } => {
                             // Show a subtle status notice.
                             app.status_message = Some(
@@ -4546,7 +4708,23 @@ async fn run_interactive(
                             let tracker = cost_tracker.clone();
                             let tx = event_tx.clone();
                             let client_clone = client.clone();
-                            goal_turn_start = std::time::Instant::now();
+                            goal_turn_baseline = if claurst_core::goals_enabled() {
+                                match capture_goal_turn_baseline(
+                                    &session.id,
+                                    cost_tracker.total_tokens(),
+                                ) {
+                                    Ok(baseline) => baseline,
+                                    Err(error) => {
+                                        app.status_message = Some(format!(
+                                            "Goal error: could not capture turn baseline: {}",
+                                            error
+                                        ));
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
 
                             let handle = tokio::spawn(async move {
                                 let mut msgs = msgs_arc_clone.lock().await.clone();
@@ -4577,6 +4755,8 @@ async fn run_interactive(
                             app.active_goal_badge = None;
                         }
                     }
+                } else {
+                    goal_turn_baseline = None;
                 }
             }
         }
@@ -5812,5 +5992,96 @@ mod tests {
     fn engine_notice_suppressed_when_not_a_tty() {
         // Piped stdout/stderr (e.g. CI, script)
         assert!(!should_show_engine_notice(true, false, false));
+    }
+
+    fn accounting_goal(
+        id: &str,
+        status: claurst_core::GoalStatus,
+        tokens_used: u64,
+    ) -> claurst_core::Goal {
+        claurst_core::Goal {
+            id: id.to_string(),
+            session_id: "session".to_string(),
+            objective: "finish".to_string(),
+            status,
+            token_budget: None,
+            tokens_used,
+            time_used_secs: 0,
+            turns_used: 0,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn accounting_baseline(id: &str, tracker_total: u64) -> GoalTurnBaseline {
+        GoalTurnBaseline {
+            goal_id: id.to_string(),
+            tracker_total,
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn goal_accounting_excludes_pre_goal_tracker_usage() {
+        let baseline = accounting_baseline("goal-1", 1_000);
+        let goal = accounting_goal("goal-1", claurst_core::GoalStatus::Active, 30);
+
+        assert_eq!(
+            decide_goal_turn_accounting(Some(&baseline), Some(&goal), 1_025).unwrap(),
+            GoalTurnAccountingDecision::Record {
+                total_tokens_used: 55
+            }
+        );
+    }
+
+    #[test]
+    fn goal_accounting_skips_goal_that_became_terminal_during_turn() {
+        let baseline = accounting_baseline("goal-1", 100);
+        let goal = accounting_goal("goal-1", claurst_core::GoalStatus::Complete, 9);
+
+        assert_eq!(
+            decide_goal_turn_accounting(Some(&baseline), Some(&goal), 110).unwrap(),
+            GoalTurnAccountingDecision::Skip
+        );
+    }
+
+    #[test]
+    fn goal_accounting_skips_terminal_goal_without_active_baseline() {
+        let goal = accounting_goal("goal-1", claurst_core::GoalStatus::Paused, 9);
+
+        assert_eq!(
+            decide_goal_turn_accounting(None, Some(&goal), 110).unwrap(),
+            GoalTurnAccountingDecision::Skip
+        );
+    }
+
+    #[test]
+    fn goal_accounting_rejects_active_goal_without_baseline() {
+        let goal = accounting_goal("goal-1", claurst_core::GoalStatus::Active, 0);
+
+        let error = decide_goal_turn_accounting(None, Some(&goal), 110).unwrap_err();
+
+        assert!(error.contains("missing active-goal turn baseline"));
+    }
+
+    #[test]
+    fn goal_accounting_rejects_replacement_goal_identity() {
+        let baseline = accounting_baseline("old-goal", 100);
+        let replacement = accounting_goal("new-goal", claurst_core::GoalStatus::Active, 0);
+
+        let error =
+            decide_goal_turn_accounting(Some(&baseline), Some(&replacement), 110).unwrap_err();
+
+        assert!(error.contains("goal changed during the turn"));
+    }
+
+    #[test]
+    fn goal_accounting_reports_tracker_underflow() {
+        let baseline = accounting_baseline("goal-1", 100);
+        let goal = accounting_goal("goal-1", claurst_core::GoalStatus::Active, 0);
+
+        let error = decide_goal_turn_accounting(Some(&baseline), Some(&goal), 99).unwrap_err();
+
+        assert!(error.contains("tracker moved backwards"));
     }
 }
