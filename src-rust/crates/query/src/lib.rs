@@ -1880,15 +1880,15 @@ pub async fn run_query_loop(
                     // If the stream stalled (no data for 45s), retry.
                     if provider_stream_stalled && retries_left > 0 {
                         let partial_text = text_chunks.join("");
+                        cost_tracker.add_usage(
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_creation_input_tokens,
+                            usage.cache_read_input_tokens,
+                        );
                         if !partial_text.is_empty() {
                             let mut partial_assistant = Message::assistant(partial_text);
                             partial_assistant.uuid = Some(msg_id.clone());
-                            cost_tracker.add_usage(
-                                usage.input_tokens,
-                                usage.output_tokens,
-                                usage.cache_creation_input_tokens,
-                                usage.cache_read_input_tokens,
-                            );
                             finalize_terminal_assistant_message(
                                 messages,
                                 &mut partial_assistant,
@@ -2352,16 +2352,16 @@ pub async fn run_query_loop(
 
         if stream_stalled && retries_left > 0 {
             let (mut assistant_msg, usage, _) = accumulator.finish();
+            cost_tracker.add_usage(
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
             if !assistant_msg.get_all_text().is_empty() {
                 if assistant_msg.uuid.is_none() {
                     assistant_msg.uuid = Some(uuid::Uuid::new_v4().to_string());
                 }
-                cost_tracker.add_usage(
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cache_creation_input_tokens,
-                    usage.cache_read_input_tokens,
-                );
                 finalize_terminal_assistant_message(
                     messages,
                     &mut assistant_msg,
