@@ -1879,6 +1879,25 @@ pub async fn run_query_loop(
 
                     // If the stream stalled (no data for 45s), retry.
                     if provider_stream_stalled && retries_left > 0 {
+                        let partial_text = text_chunks.join("");
+                        if !partial_text.is_empty() {
+                            let mut partial_assistant = Message::assistant(partial_text);
+                            partial_assistant.uuid = Some(msg_id.clone());
+                            cost_tracker.add_usage(
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                usage.cache_creation_input_tokens,
+                                usage.cache_read_input_tokens,
+                            );
+                            finalize_terminal_assistant_message(
+                                messages,
+                                &mut partial_assistant,
+                                shadow_snap.as_ref(),
+                                initial_snapshot.as_deref(),
+                                event_tx.as_ref(),
+                            )
+                            .await;
+                        }
                         retries_left -= 1;
                         warn!(provider = %provider_id_str, model = %model_id_str, retries_left, "Provider stream stalled — retrying");
                         if let Some(ref tx) = event_tx {
