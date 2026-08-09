@@ -106,6 +106,8 @@ pub struct RegisterExternalSession {
     pub harness: String,
     pub title: String,
     pub transcript_path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,24 +1142,34 @@ mod tests {
             harness: "coven-code".to_string(),
             title: "My session".to_string(),
             transcript_path: Some("/home/user/.coven-code/sessions/sess-1.jsonl".to_string()),
+            labels: vec!["source:psyche-build".to_string()],
         };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(
-            json.contains("\"projectRoot\""),
-            "expected camelCase projectRoot, got: {json}"
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "sess-1",
+                "projectRoot": "/home/user/repo",
+                "harness": "coven-code",
+                "title": "My session",
+                "transcriptPath": "/home/user/.coven-code/sessions/sess-1.jsonl",
+                "labels": ["source:psyche-build"],
+            })
         );
-        assert!(
-            json.contains("\"transcriptPath\""),
-            "expected camelCase transcriptPath, got: {json}"
-        );
-        assert!(
-            !json.contains("\"project_root\""),
-            "snake_case leaked: {json}"
-        );
-        assert!(
-            !json.contains("\"transcript_path\""),
-            "snake_case leaked: {json}"
-        );
+    }
+
+    #[test]
+    fn register_external_session_omits_empty_labels() {
+        let req = RegisterExternalSession {
+            id: "sess-1".to_string(),
+            project_root: "/home/user/repo".to_string(),
+            harness: "coven-code".to_string(),
+            title: "My session".to_string(),
+            transcript_path: None,
+            labels: Vec::new(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json.get("labels"), None);
     }
 
     #[test]
