@@ -54,6 +54,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/04_help_overlay.sh` | Help overlay | `?` opens keybinding + command reference, `Esc` closes it |
 | `cases/05_input_editing.sh` | Prompt input | typed text echoes into the buffer, `Ctrl+U` clears it |
 | `cases/06_quit.sh` | Shutdown | `Ctrl+C` twice exits cleanly back to the shell |
+| `cases/07_paste_burst.sh` | Paste burst | a line delivered in one write still submits; interior newlines coalesce without submitting |
 
 ## Configuration
 
@@ -83,6 +84,7 @@ tc_mything() {
 
   tui_keys C-k                 # send a binding (tmux key tokens)
   tui_type "some text"         # type literal characters
+  tui_paste "line"$'\r'        # deliver bytes in ONE write (paste / host pane)
   tui_settle                   # let it redraw
 
   local s; s="$(tui_capture)"
@@ -92,8 +94,14 @@ tc_mything() {
 }
 ```
 
+`tui_type` sends characters the way a human types them; `tui_paste` delivers
+the whole string in a single write, the way a host application drives an
+embedded pane or a terminal without bracketed paste delivers a clipboard
+paste. The distinction matters: only the second shape engages the TUI's
+paste-burst detector.
+
 Helpers from [`lib.sh`](lib.sh): `tui_start` / `tui_stop`, `tui_keys`,
-`tui_type`, `tui_settle`, `tui_capture`, `wait_for`, and the assertions
+`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`, and the assertions
 `assert_contains` / `assert_absent` / `assert_matches` / `assert_eq`. For
 headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 
