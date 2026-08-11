@@ -6225,7 +6225,21 @@ impl App {
             match crossterm::event::read() {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
                     KeyCode::Char(c) => buf.push(c),
-                    KeyCode::Enter => buf.push('\n'),
+                    KeyCode::Enter => {
+                        // A newline with more input behind it is an interior
+                        // line break of a multi-line paste, so it belongs in
+                        // the text. A newline with nothing behind it is the
+                        // keystroke that ends the line — replay it so the
+                        // caller submits. Swallowing it here is how a pasted
+                        // (or programmatically typed) message ends up sitting
+                        // in the prompt with a trailing '\n', never sent.
+                        if crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                            buf.push('\n');
+                        } else {
+                            self.pending_key = Some(k);
+                            break;
+                        }
+                    }
                     _ => {
                         // Non-character key — save it for replay.
                         self.pending_key = Some(k);

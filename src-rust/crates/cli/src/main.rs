@@ -2560,7 +2560,7 @@ async fn run_interactive(
                         crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
                     ) {
                         if let KeyCode::Char(c) = key.code {
-                            if app.prompt_is_accepting_text() && !app.any_modal_open() {
+                            if app.prompt_is_accepting_text() && !app.any_blocking_modal_open() {
                                 if let Some(burst) = app.try_detect_paste_burst(c) {
                                     app.handle_paste_data(burst);
                                     app.refresh_prompt_input();
@@ -2579,9 +2579,13 @@ async fn run_interactive(
                         continue;
                     }
 
-                    // Enter => submit input (but NOT when ANY dialog/overlay is open —
-                    // dialogs handle their own Enter in handle_key_event).
-                    let any_dialog_open = app.any_modal_open();
+                    // Enter => submit input (but NOT when a dialog/overlay that
+                    // captures input is open — those handle their own Enter in
+                    // handle_key_event). Gate on the *blocking* predicate:
+                    // `any_modal_open` also counts passive banners that render
+                    // as overlays but never take a keystroke, and those would
+                    // silently eat Enter and strand the conversation.
+                    let any_dialog_open = app.any_blocking_modal_open();
                     if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
