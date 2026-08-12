@@ -5,11 +5,10 @@
 
 const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
 const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
-const PSYCHE_SOURCE_LABEL: &str = "source:psyche-build";
 
 fn registration_labels(source: Option<&str>) -> Vec<String> {
     match source {
-        Some(PSYCHE_SESSION_SOURCE) => vec![PSYCHE_SOURCE_LABEL.to_string()],
+        Some(PSYCHE_SESSION_SOURCE) => vec![format!("source:{PSYCHE_SESSION_SOURCE}")],
         _ => Vec::new(),
     }
 }
@@ -58,8 +57,8 @@ mod tests {
     #[test]
     fn maps_only_the_exact_psyche_source() {
         assert_eq!(
-            registration_labels(Some("psyche-build")),
-            vec!["source:psyche-build".to_string()]
+            registration_labels(Some(PSYCHE_SESSION_SOURCE)),
+            vec![format!("source:{PSYCHE_SESSION_SOURCE}")]
         );
 
         for source in [
