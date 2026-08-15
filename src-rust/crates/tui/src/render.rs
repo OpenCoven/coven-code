@@ -53,7 +53,7 @@ use crate::transcript_turn::{build_transcript_turns, TranscriptTurn};
 use crate::virtual_list::{VirtualItem, VirtualList};
 use crate::voice_mode_notice::render_voice_mode_notice;
 use claurst_core::constants::APP_VERSION;
-use claurst_core::types::Role;
+use claurst_core::types::{Message, Role};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1329,6 +1329,21 @@ fn render_live_thinking_lines(
     lines
 }
 
+/// Build the reader affordance for a completed assistant message with visible text.
+/// The line count uses the same transcript text renderer as the normal response.
+fn response_reader_footer(message: &Message, width: u16) -> Option<Line<'static>> {
+    let text = message.get_all_text();
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let line_count = render_transcript_live_text(&text, width).len();
+    Some(Line::from(Span::styled(
+        format!("  Response · {line_count} lines  ·  Enter to read"),
+        Style::default().fg(COVEN_CODE_MUTED),
+    )))
+}
+
 fn append_turn_items(
     items: &mut Vec<RenderedLineItem>,
     turn: &TranscriptTurn<'_>,
@@ -1421,6 +1436,12 @@ fn append_turn_items(
                     SectionContent::Plain(vec![meta_line]),
                     Some(turn.primary_message_index()),
                 ));
+            }
+        }
+
+        if let Some((message_index, message)) = turn.assistant_messages.last() {
+            if let Some(footer) = response_reader_footer(message, width) {
+                sections.push((SectionContent::Plain(vec![footer]), Some(*message_index)));
             }
         }
     }
@@ -3868,5 +3889,89 @@ mod welcome_tests {
                 "suggestion list should include {expected} badge, got {content:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transcript_response_reader_tests {
+    use super::*;
+    use claurst_core::{
+        config::Config,
+        cost::CostTracker,
+        types::{ContentBlock, Message},
+    };
+
+    fn make_app() -> App {
+        App::new(Config::default(), CostTracker::new())
+    }
+
+    fn rendered_transcript(app: &App, width: u16) -> String {
+        render_message_items(app, width)
+            .iter()
+            .map(|item| item.search_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn completed_text_response_keeps_all_lines_and_gets_reader_footer() {
+        let mut app = make_app();
+        app.push_message(Message::user("show the complete result"));
+        let response = (0..1_500)
+            .map(|line| format!("response line {line:04}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.push_message(Message::assistant(response));
+
+        let items = render_message_items(&app, 120);
+        let rendered = items
+            .iter()
+            .map(|item| item.search_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(rendered.matches("response line ").count(), 1_500);
+        for expected in [
+            "response line 0000",
+            "response line 0750",
+            "response line 1499",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}");
+        }
+        assert!(
+            rendered.contains("Response · 1500 lines  ·  Enter to read"),
+            "missing reader footer: {rendered}"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.search_text.contains("Enter to read"))
+                .and_then(|item| item.message_index),
+            Some(1),
+            "reader footer must target the final assistant message"
+        );
+    }
+
+    #[test]
+    fn completed_tool_only_and_empty_responses_do_not_get_reader_footer() {
+        let mut tool_only = make_app();
+        tool_only.push_message(Message::user("run a tool"));
+        tool_only.push_message(Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command": "true"}),
+        }]));
+        assert!(
+            !rendered_transcript(&tool_only, 120).contains("Enter to read"),
+            "tool-only responses must not advertise the reader"
+        );
+
+        let mut empty = make_app();
+        empty.push_message(Message::user("respond with nothing"));
+        empty.push_message(Message::assistant("   \n\t"));
+        assert!(
+            !rendered_transcript(&empty, 120).contains("Enter to read"),
+            "empty responses must not advertise the reader"
+        );
     }
 }
