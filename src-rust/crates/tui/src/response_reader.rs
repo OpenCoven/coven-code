@@ -1,6 +1,6 @@
 //! Full-screen reader for completed assistant response text.
 
-use claurst_core::types::Message;
+use claurst_core::types::{ContentBlock, Message};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -25,6 +25,20 @@ pub struct ResponseReaderState {
     pub restore_transcript_offset: usize,
     pub search_query: String,
     pub search_active: bool,
+}
+
+/// Reconstruct visible assistant text with the transcript's section boundaries.
+/// Non-text blocks are omitted, but text that resumes after one starts on a new line.
+pub fn response_reader_text(message: &Message) -> String {
+    message
+        .content_blocks()
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl ResponseReaderState {
@@ -111,7 +125,7 @@ pub fn render_response_reader(
         width: inner_area.width,
         height: inner_area.height.saturating_sub(2),
     };
-    let lines = render_markdown(&message.get_all_text(), body_area.width);
+    let lines = render_markdown(&response_reader_text(message), body_area.width);
     let line_count = lines.len();
     let scroll_offset = state
         .scroll_offset
@@ -222,6 +236,24 @@ mod tests {
         assert_eq!(state.scroll_offset, 6);
         state.end(8, 3);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn reader_text_separates_text_sections_around_non_text_blocks() {
+        let message = Message::assistant_blocks(vec![
+            ContentBlock::Text {
+                text: "one".to_string(),
+            },
+            ContentBlock::Thinking {
+                thinking: "internal work".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "two".to_string(),
+            },
+        ]);
+
+        assert_eq!(response_reader_text(&message), "one\ntwo");
     }
 
     #[test]

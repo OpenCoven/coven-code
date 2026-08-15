@@ -18,7 +18,7 @@ use crate::overlays::{
 use crate::plugin_views::PluginHintBanner;
 use crate::prompt_input::{InputMode, PromptInputState, VimMode};
 use crate::render;
-use crate::response_reader::ResponseReaderState;
+use crate::response_reader::{response_reader_text, ResponseReaderState};
 use crate::session_browser::SessionBrowserState;
 use crate::settings_screen::SettingsScreen;
 use crate::stats_dialog::StatsDialogState;
@@ -763,6 +763,8 @@ pub struct App {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub scroll_offset: usize,
+    /// Transcript message selected by a pointer interaction, when any.
+    pub selected_transcript_message: Option<usize>,
     pub is_streaming: bool,
     pub streaming_text: String,
     pub streaming_thinking: String,
@@ -1357,6 +1359,7 @@ impl App {
             input_history: Vec::new(),
             history_index: None,
             scroll_offset: 0,
+            selected_transcript_message: None,
             is_streaming: false,
             streaming_text: String::new(),
             streaming_thinking: String::new(),
@@ -2445,6 +2448,7 @@ impl App {
             "clear" => {
                 self.close_response_reader();
                 self.messages.clear();
+                self.selected_transcript_message = None;
                 self.system_annotations.clear();
                 self.display_messages.clear();
                 self.streaming_text.clear();
@@ -2967,6 +2971,9 @@ impl App {
             self.close_response_reader();
         }
         self.messages = messages;
+        self.selected_transcript_message = self
+            .selected_transcript_message
+            .filter(|&index| index < self.messages.len());
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
     }
@@ -2983,11 +2990,20 @@ impl App {
 
     /// Open the most recent completed assistant message with text in the response reader.
     pub fn open_latest_response_reader(&mut self) -> bool {
-        let Some((message_index, _)) =
-            self.messages.iter().enumerate().rev().find(|(_, message)| {
-                message.role == Role::Assistant && !message.get_all_text().trim().is_empty()
-            })
-        else {
+        let is_eligible = |message: &Message| {
+            message.role == Role::Assistant && !response_reader_text(message).trim().is_empty()
+        };
+        let selected = self
+            .selected_transcript_message
+            .filter(|&index| self.messages.get(index).is_some_and(is_eligible));
+        let Some(message_index) = selected.or_else(|| {
+            self.messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, message)| is_eligible(message))
+                .map(|(index, _)| index)
+        }) else {
             return false;
         };
 
@@ -3006,7 +3022,7 @@ impl App {
         self.response_reader
             .message_index
             .and_then(|index| self.messages.get(index))
-            .map(Message::get_all_text)
+            .map(response_reader_text)
     }
 
     fn response_reader_match(&self, start: usize) -> Option<usize> {
@@ -6677,6 +6693,7 @@ impl App {
                     self.click_count = 0;
                 } else if in_selectable {
                     self.focus = FocusTarget::Transcript;
+                    self.selected_transcript_message = self.message_index_at_row(mouse_event.row);
 
                     let current_pos = (mouse_event.column, mouse_event.row);
                     let now = std::time::Instant::now();
@@ -7931,6 +7948,18 @@ role = "Research"
         assert!(app.response_reader.visible);
         assert_eq!(app.response_reader.message_index, Some(2));
         assert_eq!(app.response_reader.restore_transcript_offset, 37);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_the_selected_completed_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "selected response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.selected_transcript_message = Some(1);
+
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.response_reader.message_index, Some(1));
     }
 
     #[test]

@@ -43,7 +43,7 @@ use crate::overlays::{
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
-use crate::response_reader::render_response_reader;
+use crate::response_reader::{render_response_reader, response_reader_text};
 use crate::session_branching::render_session_branching;
 use crate::session_browser::render_session_browser;
 use crate::settings_screen::render_settings_screen;
@@ -1342,7 +1342,7 @@ fn render_live_thinking_lines(
 /// The line count follows the normal tagged assistant renderer's text-section
 /// boundaries, which flush around thinking and tool blocks.
 fn response_reader_footer(message: &Message, width: u16) -> Option<Line<'static>> {
-    if message.get_all_text().trim().is_empty() {
+    if response_reader_text(message).trim().is_empty() {
         return None;
     }
 
@@ -1479,7 +1479,7 @@ fn append_turn_items(
             }
         }
 
-        if let Some((message_index, message)) = turn.assistant_messages.last() {
+        for (message_index, message) in &turn.assistant_messages {
             if let Some(footer) = response_reader_footer(message, width) {
                 sections.push((SectionContent::Plain(vec![footer]), Some(*message_index)));
             }
@@ -4035,6 +4035,22 @@ mod transcript_response_reader_tests {
         let rendered = rendered_transcript(&app, 120);
 
         assert!(rendered.contains("Response · 2 lines  ·  Enter to read"));
+    }
+
+    #[test]
+    fn every_completed_assistant_message_gets_a_tagged_reader_footer() {
+        let mut app = make_app();
+        app.push_message(Message::user("show two responses"));
+        app.push_message(Message::assistant("first completed response"));
+        app.push_message(Message::assistant("second completed response"));
+
+        let footer_targets = render_message_items(&app, 120)
+            .iter()
+            .filter(|item| item.search_text.contains("Enter to read"))
+            .filter_map(|item| item.message_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(footer_targets, vec![1, 2]);
     }
 
     #[test]
