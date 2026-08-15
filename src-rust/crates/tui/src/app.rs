@@ -2966,11 +2966,17 @@ impl App {
         self.on_new_message();
     }
 
-    pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        if messages.is_empty() {
+pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+
+        let reader_out_of_bounds = self
+            .response_reader
+            .message_index
+            .is_some_and(|index| index >= self.messages.len());
+        if self.messages.is_empty() || reader_out_of_bounds {
             self.close_response_reader();
         }
-        self.messages = messages;
+
         self.selected_transcript_message = self
             .selected_transcript_message
             .filter(|&index| index < self.messages.len());
