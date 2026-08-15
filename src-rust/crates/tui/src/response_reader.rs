@@ -138,10 +138,12 @@ pub fn render_response_reader(
             height: 1,
         },
     );
-    frame.render_widget(
-        Paragraph::new(lines).scroll((scroll_offset as u16, 0)),
-        body_area,
-    );
+    let visible_lines: Vec<_> = lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(body_area.height as usize)
+        .collect();
+    frame.render_widget(Paragraph::new(visible_lines), body_area);
     frame.render_widget(
         Paragraph::new(Line::styled(
             "PgUp/PgDn  j/k  / search  y copy  Esc close",
@@ -237,5 +239,27 @@ mod tests {
         assert!(content.contains("visible reader text"));
         assert!(!content.contains("secret_tool"));
         assert!(content.contains("PgUp/PgDn"));
+    }
+
+    #[test]
+    fn render_keeps_tail_visible_after_more_than_u16_lines() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut state = ResponseReaderState::default();
+        state.open(0, 0);
+        let message = Message::assistant(format!("{}TAIL MARKER", "line\n".repeat(70_000)));
+        state.end(22, 70_001);
+
+        terminal
+            .draw(|frame| render_response_reader(frame, &state, &message, frame.area()))
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("TAIL MARKER"));
     }
 }
