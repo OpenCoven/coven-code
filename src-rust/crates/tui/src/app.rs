@@ -2969,11 +2969,13 @@ impl App {
 pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
 
-        let reader_out_of_bounds = self
-            .response_reader
-            .message_index
-            .is_some_and(|index| index >= self.messages.len());
-        if self.messages.is_empty() || reader_out_of_bounds {
+        let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
+            self.messages
+                .get(index)
+                .map(|m| response_reader_text(m).trim().is_empty())
+                .unwrap_or(true)
+        });
+        if reader_message_gone {
             self.close_response_reader();
         }
 
