@@ -24,6 +24,7 @@ pub struct ResponseReaderState {
     pub scroll_offset: usize,
     pub restore_transcript_offset: usize,
     pub search_query: String,
+    pub search_active: bool,
 }
 
 impl ResponseReaderState {
@@ -34,6 +35,7 @@ impl ResponseReaderState {
         self.scroll_offset = 0;
         self.restore_transcript_offset = restore_offset;
         self.search_query.clear();
+        self.search_active = false;
     }
 
     /// Close the reader and return the transcript offset captured on open.
@@ -48,6 +50,7 @@ impl ResponseReaderState {
         let restore_offset = self.restore_transcript_offset;
         self.restore_transcript_offset = 0;
         self.search_query.clear();
+        self.search_active = false;
         Some(restore_offset)
     }
 
@@ -123,14 +126,21 @@ pub fn render_response_reader(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(COVEN_CODE_ACCENT));
     frame.render_widget(block, dialog_area);
+    let mut header = vec![
+        Span::styled("Reader", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" · line {line_position} / {line_count}"),
+            Style::default().fg(COVEN_CODE_MUTED),
+        ),
+    ];
+    if !state.search_query.is_empty() {
+        header.push(Span::styled(
+            format!(" · /{}", state.search_query),
+            Style::default().fg(COVEN_CODE_MUTED),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Reader", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(" · line {line_position} / {line_count}"),
-                Style::default().fg(COVEN_CODE_MUTED),
-            ),
-        ])),
+        Paragraph::new(Line::from(header)),
         Rect {
             x: inner_area.x,
             y: inner_area.y,
@@ -146,7 +156,11 @@ pub fn render_response_reader(
     frame.render_widget(Paragraph::new(visible_lines), body_area);
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "PgUp/PgDn  j/k  / search  y copy  Esc close",
+            if state.search_active {
+                "Type search  Enter done  Esc close"
+            } else {
+                "PgUp/PgDn  j/k  / search  y copy  Esc close"
+            },
             Style::default().fg(COVEN_CODE_MUTED),
         )),
         Rect {
@@ -172,6 +186,7 @@ mod tests {
             scroll_offset: 7,
             restore_transcript_offset: 0,
             search_query: "old".to_string(),
+            search_active: true,
         };
 
         state.open(4, 12);
@@ -181,12 +196,14 @@ mod tests {
         assert_eq!(state.scroll_offset, 0);
         assert_eq!(state.restore_transcript_offset, 12);
         assert!(state.search_query.is_empty());
+        assert!(!state.search_active);
         assert_eq!(state.close(), Some(12));
         assert!(!state.visible);
         assert_eq!(state.message_index, None);
         assert_eq!(state.scroll_offset, 0);
         assert_eq!(state.restore_transcript_offset, 0);
         assert!(state.search_query.is_empty());
+        assert!(!state.search_active);
     }
 
     #[test]

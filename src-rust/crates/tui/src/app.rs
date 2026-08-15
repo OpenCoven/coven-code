@@ -3001,6 +3001,78 @@ impl App {
         }
     }
 
+    fn response_reader_text(&self) -> Option<String> {
+        self.response_reader
+            .message_index
+            .and_then(|index| self.messages.get(index))
+            .map(Message::get_all_text)
+    }
+
+    fn response_reader_match(&self, start: usize) -> Option<usize> {
+        let query = self.response_reader.search_query.to_lowercase();
+        if query.is_empty() {
+            return None;
+        }
+
+        let area = self.last_selectable_area.get();
+        let content_width = area.width.saturating_sub(6);
+        let text = self.response_reader_text()?;
+        let lines = crate::messages::render_markdown(&text, content_width);
+        let line_matches = |line: &ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .to_lowercase()
+                .contains(&query)
+        };
+
+        lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .chain(lines.iter().enumerate().take(start))
+            .find_map(|(index, line)| line_matches(line).then_some(index))
+    }
+
+    fn update_response_reader_search(&mut self) {
+        if let Some(match_offset) = self.response_reader_match(0) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn advance_response_reader_search(&mut self) {
+        let start = self.response_reader.scroll_offset.saturating_add(1);
+        if let Some(match_offset) = self.response_reader_match(start) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn copy_response_reader_text(&mut self) {
+        let Some(text) = self.response_reader_text() else {
+            self.push_notification(
+                NotificationKind::Warning,
+                "No response text to copy.".to_string(),
+                Some(3),
+            );
+            return;
+        };
+
+        if try_copy_to_clipboard(&text) {
+            self.push_notification(
+                NotificationKind::Info,
+                "Copied response to clipboard.".to_string(),
+                Some(3),
+            );
+        } else {
+            self.push_notification(
+                NotificationKind::Info,
+                format!("Response: {} chars (clipboard unavailable)", text.len()),
+                Some(5),
+            );
+        }
+    }
+
     fn handle_response_reader_key(&mut self, key: KeyEvent) {
         let area = self.last_selectable_area.get();
         let viewport_height = usize::from(area.height.saturating_sub(8)).max(1);
@@ -3016,6 +3088,25 @@ impl App {
 
         match key.code {
             KeyCode::Esc => self.close_response_reader(),
+            KeyCode::Char('/') if !self.response_reader.search_active => {
+                if self.response_reader.search_query.is_empty() {
+                    self.response_reader.search_active = true;
+                } else {
+                    self.advance_response_reader_search();
+                }
+            }
+            KeyCode::Enter if self.response_reader.search_active => {
+                self.response_reader.search_active = false;
+            }
+            KeyCode::Backspace if self.response_reader.search_active => {
+                self.response_reader.search_query.pop();
+                self.update_response_reader_search();
+            }
+            KeyCode::Char(ch) if self.response_reader.search_active => {
+                self.response_reader.search_query.push(ch);
+                self.update_response_reader_search();
+            }
+            KeyCode::Char('y') => self.copy_response_reader_text(),
             KeyCode::PageUp | KeyCode::Char('k') => self.response_reader.page_up(viewport_height),
             KeyCode::PageDown | KeyCode::Char('j') => {
                 self.response_reader.page_down(viewport_height, line_count)
@@ -7865,6 +7956,51 @@ role = "Research"
         assert!(app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!app.response_reader.visible);
         assert_eq!(app.prompt_input.text, "send this");
+    }
+
+    #[test]
+    fn reader_search_enters_query_and_repeats_to_the_next_match() {
+        let mut app = make_app();
+        app.add_message(
+            Role::Assistant,
+            "intro\nneedle first\nspacing\nneedle second".to_string(),
+        );
+        app.last_selectable_area
+            .set(ratatui::layout::Rect::new(0, 0, 80, 20));
+        assert!(app.open_latest_response_reader());
+
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for ch in "needle".chars() {
+            app.handle_key_event(press_key(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.response_reader.search_active);
+        assert_eq!(app.response_reader.search_query, "needle");
+        let first_match = app.response_reader.scroll_offset;
+
+        app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.response_reader.search_active);
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.response_reader.scroll_offset > first_match);
+    }
+
+    #[test]
+    fn reader_y_copies_its_target_response_and_notifies() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "copy this completed response".to_string());
+        assert!(app.open_latest_response_reader());
+        assert_eq!(
+            app.response_reader_text().as_deref(),
+            Some("copy this completed response")
+        );
+
+        app.handle_key_event(press_key(KeyCode::Char('y'), KeyModifiers::NONE));
+        let notification = app.notifications.current().expect("copy should notify");
+        assert!(
+            notification.message.contains("Copied")
+                || notification.message.contains("clipboard unavailable"),
+            "unexpected copy notification: {}",
+            notification.message
+        );
     }
 
     #[test]
