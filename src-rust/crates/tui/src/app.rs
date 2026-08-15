@@ -2670,7 +2670,8 @@ impl App {
     /// (overage / voice / memory), which render as overlays but let the user
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
-        self.permission_request.is_some()
+        self.response_reader.visible
+            || self.permission_request.is_some()
             || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -8001,6 +8002,19 @@ role = "Research"
             "unexpected copy notification: {}",
             notification.message
         );
+    }
+
+    #[test]
+    fn reader_blocks_cli_submit_and_retains_a_preserved_draft() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft that must not submit".to_string());
+        assert!(app.open_latest_response_reader());
+
+        assert!(app.any_blocking_modal_open());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "draft that must not submit");
     }
 
     #[test]
