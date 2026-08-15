@@ -21,6 +21,7 @@ set -uo pipefail
 : "${TUI_WIDTH:=120}"                    # terminal columns
 : "${TUI_HEIGHT:=40}"                    # terminal rows
 : "${TUI_BOOT_STRING:=Coven v}"          # string proving the TUI has drawn
+: "${TUI_PROMPT:=❯}"                     # composer prompt glyph (anchors input-buffer assertions)
 : "${TUI_WAIT_TIMEOUT:=20}"              # seconds to wait for a string
 : "${TUI_POLL_INTERVAL:=0.4}"            # seconds between capture polls
 : "${TUI_SETTLE:=0.6}"                   # seconds to let a keypress redraw
@@ -164,6 +165,21 @@ tui_keys() { _tmux send-keys -t "$TUI_SESSION" "$@"; }
 
 # tui_type <literal-string>   (typed verbatim, no Enter)
 tui_type() { _tmux send-keys -t "$TUI_SESSION" -l -- "$1"; }
+
+# tui_paste <literal-string>
+# Delivers the string to the pane in a SINGLE write, so every byte lands in the
+# child's pty at once. That is how a host application drives an embedded pane
+# (it writes `text + "\r"` in one go) and how a terminal without bracketed
+# paste delivers a clipboard paste. It is also the only way to exercise the
+# TUI's paste-burst detector, which only engages when more input is already
+# queued behind the first character.
+#
+# Deliberately NOT `paste-buffer -p`: bracketed paste arrives as a single Paste
+# event and bypasses the burst detector entirely, which is the code under test.
+tui_paste() {
+  _tmux set-buffer -b tui_burst -- "$1"
+  _tmux paste-buffer -b tui_burst -t "$TUI_SESSION" -d
+}
 
 # tui_settle [seconds]
 tui_settle() { sleep "${1:-$TUI_SETTLE}"; }
