@@ -43,6 +43,7 @@ use crate::overlays::{
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
+use crate::response_reader::render_response_reader;
 use crate::session_branching::render_session_branching;
 use crate::session_browser::render_session_browser;
 use crate::settings_screen::render_settings_screen;
@@ -525,6 +526,14 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     render_footer(frame, app, chunks[5]);
 
     // Overlays (rendered on top in Z-order)
+
+    if let Some(message) = app
+        .response_reader
+        .message_index
+        .and_then(|index| app.messages.get(index))
+    {
+        render_response_reader(frame, &app.response_reader, message, size);
+    }
 
     // Rewind flow (takes over screen)
     if app.rewind_flow.visible {

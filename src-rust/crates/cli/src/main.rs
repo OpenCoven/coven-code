@@ -2599,6 +2599,15 @@ async fn run_interactive(
                         continue;
                     }
                     if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                        // A plain Enter on an empty prompt opens the latest completed
+                        // response reader. Route it through App before take_input(),
+                        // which would otherwise consume the key as a no-op.
+                        if app.prompt_input.text.is_empty()
+                            && app.prompt_input.suggestion_index.is_none()
+                        {
+                            app.handle_key_event(key);
+                            continue;
+                        }
                         // If a file-ref suggestion is active, accept it instead of submitting.
                         if !app.prompt_input.suggestions.is_empty()
                             && app.prompt_input.suggestion_index.is_some()
@@ -3281,6 +3290,7 @@ async fn run_interactive(
                         }
 
                         // Start async query
+                        app.close_response_reader();
                         app.is_streaming = true;
                         app.streaming_text.clear();
 

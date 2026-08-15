@@ -18,6 +18,7 @@ use crate::overlays::{
 use crate::plugin_views::PluginHintBanner;
 use crate::prompt_input::{InputMode, PromptInputState, VimMode};
 use crate::render;
+use crate::response_reader::ResponseReaderState;
 use crate::session_browser::SessionBrowserState;
 use crate::settings_screen::SettingsScreen;
 use crate::stats_dialog::StatsDialogState;
@@ -852,6 +853,8 @@ pub struct App {
     pub message_selector: MessageSelectorOverlay,
     /// Multi-step rewind flow overlay.
     pub rewind_flow: RewindFlowOverlay,
+    /// Full-screen reader for a completed assistant response.
+    pub response_reader: ResponseReaderState,
     /// Bridge connection state.
     pub bridge_state: BridgeConnectionState,
     /// Active notification queue.
@@ -1398,6 +1401,7 @@ impl App {
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
             rewind_flow: RewindFlowOverlay::new(),
+            response_reader: ResponseReaderState::default(),
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
             error_modal_scroll_offset: 0,
@@ -2439,6 +2443,7 @@ impl App {
                 true
             }
             "clear" => {
+                self.close_response_reader();
                 self.messages.clear();
                 self.system_annotations.clear();
                 self.display_messages.clear();
@@ -2957,6 +2962,9 @@ impl App {
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        if messages.is_empty() {
+            self.close_response_reader();
+        }
         self.messages = messages;
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
@@ -2970,6 +2978,52 @@ impl App {
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
         self.on_new_message();
+    }
+
+    /// Open the most recent completed assistant message with text in the response reader.
+    pub fn open_latest_response_reader(&mut self) -> bool {
+        let Some((message_index, _)) =
+            self.messages.iter().enumerate().rev().find(|(_, message)| {
+                message.role == Role::Assistant && !message.get_all_text().trim().is_empty()
+            })
+        else {
+            return false;
+        };
+
+        self.response_reader.open(message_index, self.scroll_offset);
+        true
+    }
+
+    /// Close the reader and restore the exact transcript position captured when it opened.
+    pub fn close_response_reader(&mut self) {
+        if let Some(offset) = self.response_reader.close() {
+            self.scroll_offset = offset;
+        }
+    }
+
+    fn handle_response_reader_key(&mut self, key: KeyEvent) {
+        let area = self.last_selectable_area.get();
+        let viewport_height = usize::from(area.height.saturating_sub(8)).max(1);
+        let content_width = area.width.saturating_sub(6);
+        let line_count = self
+            .response_reader
+            .message_index
+            .and_then(|index| self.messages.get(index))
+            .map(|message| {
+                crate::messages::render_markdown(&message.get_all_text(), content_width).len()
+            })
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc => self.close_response_reader(),
+            KeyCode::PageUp | KeyCode::Char('k') => self.response_reader.page_up(viewport_height),
+            KeyCode::PageDown | KeyCode::Char('j') => {
+                self.response_reader.page_down(viewport_height, line_count)
+            }
+            KeyCode::Home => self.response_reader.home(),
+            KeyCode::End => self.response_reader.end(viewport_height, line_count),
+            _ => {}
+        }
     }
 
     /// Push a synthetic system annotation into the conversation pane.
@@ -3420,6 +3474,12 @@ impl App {
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // The reader owns its visible keys before any normal TUI interaction.
+        if self.response_reader.visible {
+            self.handle_response_reader_key(key);
+            return false;
+        }
+
         // Permission requests render above other overlays, so they own input.
         if self.permission_request.is_some() {
             self.handle_permission_key(key);
@@ -4398,6 +4458,18 @@ impl App {
                 }
                 _ => return false,
             }
+        }
+
+        // Plain Enter opens the latest completed response when the prompt is
+        // empty and no typeahead item is selected. This must run before the
+        // user keybinding resolver, which normally claims Enter as submit.
+        if key.code == KeyCode::Enter
+            && !self.is_streaming
+            && self.prompt_input.text.is_empty()
+            && self.prompt_input.suggestion_index.is_none()
+            && self.open_latest_response_reader()
+        {
+            return false;
         }
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
@@ -6637,6 +6709,7 @@ impl App {
 
         match event {
             QueryEvent::Stream(stream_evt) => {
+                self.close_response_reader();
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
@@ -7750,6 +7823,48 @@ role = "Research"
         assert_eq!(app.messages.len(), 2);
         assert!(app.intercept_slash_command("clear"));
         assert_eq!(app.messages.len(), 0);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_latest_completed_text_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "first response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.scroll_offset = 37;
+
+        assert!(app.prompt_input.text.is_empty());
+        assert!(app.prompt_input.suggestion_index.is_none());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.response_reader.message_index, Some(2));
+        assert_eq!(app.response_reader.restore_transcript_offset, 37);
+    }
+
+    #[test]
+    fn reader_escape_restores_exact_transcript_offset_and_preserves_prompt() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft prompt".to_string());
+        app.scroll_offset = 19;
+        assert!(app.open_latest_response_reader());
+
+        app.scroll_offset = 0;
+        assert!(!app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.scroll_offset, 19);
+        assert_eq!(app.prompt_input.text, "draft prompt");
+    }
+
+    #[test]
+    fn plain_enter_with_prompt_still_submits_without_opening_reader() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("send this".to_string());
+
+        assert!(app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "send this");
     }
 
     #[test]
