@@ -53,7 +53,7 @@ use crate::transcript_turn::{build_transcript_turns, TranscriptTurn};
 use crate::virtual_list::{VirtualItem, VirtualList};
 use crate::voice_mode_notice::render_voice_mode_notice;
 use claurst_core::constants::APP_VERSION;
-use claurst_core::types::{Message, Role};
+use claurst_core::types::{ContentBlock, Message, Role};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1330,18 +1330,49 @@ fn render_live_thinking_lines(
 }
 
 /// Build the reader affordance for a completed assistant message with visible text.
-/// The line count uses the same transcript text renderer as the normal response.
+/// The line count follows the normal tagged assistant renderer's text-section
+/// boundaries, which flush around thinking and tool blocks.
 fn response_reader_footer(message: &Message, width: u16) -> Option<Line<'static>> {
-    let text = message.get_all_text();
-    if text.trim().is_empty() {
+    if message.get_all_text().trim().is_empty() {
         return None;
     }
 
-    let line_count = render_transcript_live_text(&text, width).len();
+    let line_count = rendered_assistant_text_line_count(message, width);
     Some(Line::from(Span::styled(
         format!("  Response · {line_count} lines  ·  Enter to read"),
         Style::default().fg(COVEN_CODE_MUTED),
     )))
+}
+
+/// Count only text lines exactly as `render_transcript_assistant_message_tagged`
+/// renders them: adjacent text blocks are joined, while every non-text block
+/// flushes the pending text section first.
+fn rendered_assistant_text_line_count(message: &Message, width: u16) -> usize {
+    let mut pending_text = String::new();
+    let mut line_count = 0;
+
+    let flush = |pending_text: &mut String, line_count: &mut usize| {
+        if pending_text.is_empty() {
+            return;
+        }
+        *line_count += render_transcript_live_text(pending_text, width).len();
+        pending_text.clear();
+    };
+
+    for block in message.content_blocks() {
+        match block {
+            ContentBlock::Text { text } => {
+                if !pending_text.is_empty() {
+                    pending_text.push('\n');
+                }
+                pending_text.push_str(&text);
+            }
+            _ => flush(&mut pending_text, &mut line_count),
+        }
+    }
+    flush(&mut pending_text, &mut line_count);
+
+    line_count
 }
 
 fn append_turn_items(
@@ -3972,6 +4003,51 @@ mod transcript_response_reader_tests {
         assert!(
             !rendered_transcript(&empty, 120).contains("Enter to read"),
             "empty responses must not advertise the reader"
+        );
+    }
+
+    #[test]
+    fn completed_multiblock_response_counts_normal_text_sections() {
+        let mut app = make_app();
+        app.push_message(Message::user("separate the response sections"));
+        app.push_message(Message::assistant_blocks(vec![
+            ContentBlock::Text {
+                text: "one".to_string(),
+            },
+            ContentBlock::Thinking {
+                thinking: "work through it".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "two".to_string(),
+            },
+        ]));
+
+        let rendered = rendered_transcript(&app, 120);
+
+        assert!(rendered.contains("Response · 2 lines  ·  Enter to read"));
+    }
+
+    #[test]
+    fn active_and_thinking_only_responses_do_not_get_reader_footer() {
+        let mut active = make_app();
+        active.push_message(Message::user("keep working"));
+        active.push_message(Message::assistant("partial response"));
+        active.is_streaming = true;
+        assert!(
+            !rendered_transcript(&active, 120).contains("Enter to read"),
+            "active responses must not advertise the reader"
+        );
+
+        let mut thinking_only = make_app();
+        thinking_only.push_message(Message::user("think privately"));
+        thinking_only.push_message(Message::assistant_blocks(vec![ContentBlock::Thinking {
+            thinking: "private reasoning".to_string(),
+            signature: String::new(),
+        }]));
+        assert!(
+            !rendered_transcript(&thinking_only, 120).contains("Enter to read"),
+            "thinking-only responses must not advertise the reader"
         );
     }
 }
