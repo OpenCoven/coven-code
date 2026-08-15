@@ -179,7 +179,7 @@ pub fn render_response_reader(
         )),
         Rect {
             x: inner_area.x,
-            y: inner_area.y + inner_area.height.saturating_sub(1),
+            y: inner_area.y.saturating_add(inner_area.height.saturating_sub(1)),
             width: inner_area.width,
             height: 1,
         },

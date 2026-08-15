@@ -2966,7 +2966,7 @@ impl App {
         self.on_new_message();
     }
 
-pub fn replace_messages(&mut self, messages: Vec<Message>) {
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
 
         let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
@@ -3102,7 +3102,7 @@ pub fn replace_messages(&mut self, messages: Vec<Message>) {
         let area = self.last_selectable_area.get();
         let viewport_height = usize::from(area.height.saturating_sub(8)).max(1);
         let content_width = area.width.saturating_sub(6);
-let line_count = self
+        let line_count = self
             .response_reader_text()
             .map(|text| crate::messages::render_markdown(&text, content_width).len())
             .unwrap_or(0);
