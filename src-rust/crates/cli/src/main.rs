@@ -2560,7 +2560,7 @@ async fn run_interactive(
                         crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
                     ) {
                         if let KeyCode::Char(c) = key.code {
-                            if app.prompt_is_accepting_text() && !app.any_blocking_modal_open() {
+                            if app.prompt_is_accepting_text() {
                                 if let Some(burst) = app.try_detect_paste_burst(c) {
                                     app.handle_paste_data(burst);
                                     app.refresh_prompt_input();
