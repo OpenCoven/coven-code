@@ -18,6 +18,7 @@ use crate::overlays::{
 use crate::plugin_views::PluginHintBanner;
 use crate::prompt_input::{InputMode, PromptInputState, VimMode};
 use crate::render;
+use crate::response_reader::{response_reader_text, ResponseReaderState};
 use crate::session_browser::SessionBrowserState;
 use crate::settings_screen::SettingsScreen;
 use crate::stats_dialog::StatsDialogState;
@@ -762,6 +763,8 @@ pub struct App {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub scroll_offset: usize,
+    /// Transcript message selected by a pointer interaction, when any.
+    pub selected_transcript_message: Option<usize>,
     pub is_streaming: bool,
     pub streaming_text: String,
     pub streaming_thinking: String,
@@ -852,6 +855,8 @@ pub struct App {
     pub message_selector: MessageSelectorOverlay,
     /// Multi-step rewind flow overlay.
     pub rewind_flow: RewindFlowOverlay,
+    /// Full-screen reader for a completed assistant response.
+    pub response_reader: ResponseReaderState,
     /// Bridge connection state.
     pub bridge_state: BridgeConnectionState,
     /// Active notification queue.
@@ -1354,6 +1359,7 @@ impl App {
             input_history: Vec::new(),
             history_index: None,
             scroll_offset: 0,
+            selected_transcript_message: None,
             is_streaming: false,
             streaming_text: String::new(),
             streaming_thinking: String::new(),
@@ -1398,6 +1404,7 @@ impl App {
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
             rewind_flow: RewindFlowOverlay::new(),
+            response_reader: ResponseReaderState::default(),
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
             error_modal_scroll_offset: 0,
@@ -2439,7 +2446,9 @@ impl App {
                 true
             }
             "clear" => {
+                self.close_response_reader();
                 self.messages.clear();
+                self.selected_transcript_message = None;
                 self.system_annotations.clear();
                 self.display_messages.clear();
                 self.streaming_text.clear();
@@ -2665,7 +2674,8 @@ impl App {
     /// (overage / voice / memory), which render as overlays but let the user
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
-        self.permission_request.is_some()
+        self.response_reader.visible
+            || self.permission_request.is_some()
             || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2958,6 +2968,20 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+
+        let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
+            self.messages
+                .get(index)
+                .map(|m| response_reader_text(m).trim().is_empty())
+                .unwrap_or(true)
+        });
+        if reader_message_gone {
+            self.close_response_reader();
+        }
+
+        self.selected_transcript_message = self
+            .selected_transcript_message
+            .filter(|&index| index < self.messages.len());
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
     }
@@ -2970,6 +2994,148 @@ impl App {
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
         self.on_new_message();
+    }
+
+    /// Open the most recent completed assistant message with text in the response reader.
+    pub fn open_latest_response_reader(&mut self) -> bool {
+        let is_eligible = |message: &Message| {
+            message.role == Role::Assistant && !response_reader_text(message).trim().is_empty()
+        };
+        let selected = self
+            .selected_transcript_message
+            .filter(|&index| self.messages.get(index).is_some_and(is_eligible));
+        let Some(message_index) = selected.or_else(|| {
+            self.messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, message)| is_eligible(message))
+                .map(|(index, _)| index)
+        }) else {
+            return false;
+        };
+
+        self.response_reader.open(message_index, self.scroll_offset);
+        true
+    }
+
+    /// Close the reader and restore the exact transcript position captured when it opened.
+    pub fn close_response_reader(&mut self) {
+        if let Some(offset) = self.response_reader.close() {
+            self.scroll_offset = offset;
+        }
+    }
+
+    fn response_reader_text(&self) -> Option<String> {
+        self.response_reader
+            .message_index
+            .and_then(|index| self.messages.get(index))
+            .map(response_reader_text)
+    }
+
+    fn response_reader_match(&self, start: usize) -> Option<usize> {
+        let query = self.response_reader.search_query.to_lowercase();
+        if query.is_empty() {
+            return None;
+        }
+
+        let area = self.last_selectable_area.get();
+        let content_width = area.width.saturating_sub(6);
+        let text = self.response_reader_text()?;
+        let lines = crate::messages::render_markdown(&text, content_width);
+        let line_matches = |line: &ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .to_lowercase()
+                .contains(&query)
+        };
+
+        lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .chain(lines.iter().enumerate().take(start))
+            .find_map(|(index, line)| line_matches(line).then_some(index))
+    }
+
+    fn update_response_reader_search(&mut self) {
+        if let Some(match_offset) = self.response_reader_match(0) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn advance_response_reader_search(&mut self) {
+        let start = self.response_reader.scroll_offset.saturating_add(1);
+        if let Some(match_offset) = self.response_reader_match(start) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn copy_response_reader_text(&mut self) {
+        let Some(text) = self.response_reader_text() else {
+            self.push_notification(
+                NotificationKind::Warning,
+                "No response text to copy.".to_string(),
+                Some(3),
+            );
+            return;
+        };
+
+        if try_copy_to_clipboard(&text) {
+            self.push_notification(
+                NotificationKind::Info,
+                "Copied response to clipboard.".to_string(),
+                Some(3),
+            );
+        } else {
+            self.push_notification(
+                NotificationKind::Info,
+                format!("Response: {} chars (clipboard unavailable)", text.len()),
+                Some(5),
+            );
+        }
+    }
+
+    fn handle_response_reader_key(&mut self, key: KeyEvent) {
+        let area = self.last_selectable_area.get();
+        let viewport_height = usize::from(area.height.saturating_sub(8)).max(1);
+        let content_width = area.width.saturating_sub(6);
+        let line_count = self
+            .response_reader_text()
+            .map(|text| crate::messages::render_markdown(&text, content_width).len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc => self.close_response_reader(),
+            KeyCode::Char('/') if !self.response_reader.search_active => {
+                if self.response_reader.search_query.is_empty() {
+                    self.response_reader.search_active = true;
+                } else {
+                    self.advance_response_reader_search();
+                }
+            }
+            KeyCode::Enter if self.response_reader.search_active => {
+                self.response_reader.search_active = false;
+            }
+            KeyCode::Backspace if self.response_reader.search_active => {
+                self.response_reader.search_query.pop();
+                self.update_response_reader_search();
+            }
+            KeyCode::Char(ch) if self.response_reader.search_active => {
+                self.response_reader.search_query.push(ch);
+                self.update_response_reader_search();
+            }
+            KeyCode::Char('y') => self.copy_response_reader_text(),
+            KeyCode::PageUp | KeyCode::Char('k') => self.response_reader.page_up(viewport_height),
+            KeyCode::PageDown | KeyCode::Char('j') => {
+                self.response_reader.page_down(viewport_height, line_count)
+            }
+            KeyCode::Home => self.response_reader.home(),
+            KeyCode::End => self.response_reader.end(viewport_height, line_count),
+            _ => {}
+        }
     }
 
     /// Push a synthetic system annotation into the conversation pane.
@@ -3420,6 +3586,12 @@ impl App {
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // The reader owns its visible keys before any normal TUI interaction.
+        if self.response_reader.visible {
+            self.handle_response_reader_key(key);
+            return false;
+        }
+
         // Permission requests render above other overlays, so they own input.
         if self.permission_request.is_some() {
             self.handle_permission_key(key);
@@ -4398,6 +4570,18 @@ impl App {
                 }
                 _ => return false,
             }
+        }
+
+        // Plain Enter opens the latest completed response when the prompt is
+        // empty and no typeahead item is selected. This must run before the
+        // user keybinding resolver, which normally claims Enter as submit.
+        if key.code == KeyCode::Enter
+            && !self.is_streaming
+            && self.prompt_input.text.is_empty()
+            && self.prompt_input.suggestion_index.is_none()
+            && self.open_latest_response_reader()
+        {
+            return false;
         }
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
@@ -6527,6 +6711,7 @@ impl App {
                     self.click_count = 0;
                 } else if in_selectable {
                     self.focus = FocusTarget::Transcript;
+                    self.selected_transcript_message = self.message_index_at_row(mouse_event.row);
 
                     let current_pos = (mouse_event.column, mouse_event.row);
                     let now = std::time::Instant::now();
@@ -6651,6 +6836,7 @@ impl App {
 
         match event {
             QueryEvent::Stream(stream_evt) => {
+                self.close_response_reader();
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
@@ -7764,6 +7950,118 @@ role = "Research"
         assert_eq!(app.messages.len(), 2);
         assert!(app.intercept_slash_command("clear"));
         assert_eq!(app.messages.len(), 0);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_latest_completed_text_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "first response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.scroll_offset = 37;
+
+        assert!(app.prompt_input.text.is_empty());
+        assert!(app.prompt_input.suggestion_index.is_none());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.response_reader.message_index, Some(2));
+        assert_eq!(app.response_reader.restore_transcript_offset, 37);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_the_selected_completed_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "selected response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.selected_transcript_message = Some(1);
+
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.response_reader.message_index, Some(1));
+    }
+
+    #[test]
+    fn reader_escape_restores_exact_transcript_offset_and_preserves_prompt() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft prompt".to_string());
+        app.scroll_offset = 19;
+        assert!(app.open_latest_response_reader());
+
+        app.scroll_offset = 0;
+        assert!(!app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.scroll_offset, 19);
+        assert_eq!(app.prompt_input.text, "draft prompt");
+    }
+
+    #[test]
+    fn plain_enter_with_prompt_still_submits_without_opening_reader() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("send this".to_string());
+
+        assert!(app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "send this");
+    }
+
+    #[test]
+    fn reader_search_enters_query_and_repeats_to_the_next_match() {
+        let mut app = make_app();
+        app.add_message(
+            Role::Assistant,
+            "intro\nneedle first\nspacing\nneedle second".to_string(),
+        );
+        app.last_selectable_area
+            .set(ratatui::layout::Rect::new(0, 0, 80, 20));
+        assert!(app.open_latest_response_reader());
+
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for ch in "needle".chars() {
+            app.handle_key_event(press_key(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.response_reader.search_active);
+        assert_eq!(app.response_reader.search_query, "needle");
+        let first_match = app.response_reader.scroll_offset;
+
+        app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.response_reader.search_active);
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.response_reader.scroll_offset > first_match);
+    }
+
+    #[test]
+    fn reader_y_copies_its_target_response_and_notifies() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "copy this completed response".to_string());
+        assert!(app.open_latest_response_reader());
+        assert_eq!(
+            app.response_reader_text().as_deref(),
+            Some("copy this completed response")
+        );
+
+        app.handle_key_event(press_key(KeyCode::Char('y'), KeyModifiers::NONE));
+        let notification = app.notifications.current().expect("copy should notify");
+        assert!(
+            notification.message.contains("Copied")
+                || notification.message.contains("clipboard unavailable"),
+            "unexpected copy notification: {}",
+            notification.message
+        );
+    }
+
+    #[test]
+    fn reader_blocks_cli_submit_and_retains_a_preserved_draft() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft that must not submit".to_string());
+        assert!(app.open_latest_response_reader());
+
+        assert!(app.any_blocking_modal_open());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "draft that must not submit");
     }
 
     #[test]
