@@ -6424,8 +6424,7 @@ impl App {
                         .map(Self::is_paste_text_key)
                         .unwrap_or(false);
                     if has_following_text {
-                        buffer.push('
-');
+                        buffer.push('\n');
                     } else {
                         pending.push_back(key);
                         pending.extend(remaining);
