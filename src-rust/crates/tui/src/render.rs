@@ -2455,6 +2455,17 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 
         s.push(Span::raw(" "));
         s.extend(shimmer_spans(&label, app.frame_count));
+        // Elapsed time for the turn in flight. The spinner and the shimmer
+        // both say "alive"; neither answers the question someone waiting
+        // actually has, which is whether this has been running four seconds
+        // or four minutes. Until now that number only appeared once the turn
+        // was already over.
+        if let Some(elapsed) = app.turn_start.map(|start| start.elapsed()) {
+            s.push(Span::styled(
+                format!(" · {}", crate::app::format_elapsed_ms(elapsed.as_millis())),
+                Style::default().fg(COVEN_CODE_MUTED),
+            ));
+        }
         s
     } else if let (Some(verb), Some(elapsed)) =
         (app.last_turn_verb, app.last_turn_elapsed.as_deref())
@@ -3745,6 +3756,68 @@ mod welcome_tests {
         // flash cadence.
         assert_eq!(spinner_char(0), spinner_char(1));
         assert_ne!(spinner_char(1), spinner_char(2));
+    }
+
+    fn status_row_text(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
+        terminal
+            .draw(|frame| render_status_row(frame, app, frame.area()))
+            .expect("draw status row");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn streaming_status_row_shows_elapsed_time_for_the_turn_in_flight() {
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = true;
+        app.turn_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+
+        let row = status_row_text(&app);
+
+        assert!(
+            row.contains("12s"),
+            "a running turn reports how long it has been running: {row:?}"
+        );
+        assert!(
+            row.contains("Waiting on network"),
+            "the existing status label survives: {row:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_status_row_omits_elapsed_when_no_turn_is_timed() {
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = true;
+        app.turn_start = None;
+
+        let row = status_row_text(&app);
+
+        assert!(
+            !row.contains(" · "),
+            "no separator without a timed turn: {row:?}"
+        );
+    }
+
+    #[test]
+    fn idle_status_row_keeps_the_completed_turn_summary() {
+        // The live counter must not displace the post-turn line, which is a
+        // different branch and reads "Worked for 2m 5s · done".
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = false;
+        app.turn_start = Some(std::time::Instant::now());
+        app.last_turn_verb = Some("Worked");
+        app.last_turn_elapsed = Some("2m 5s".to_string());
+
+        let row = status_row_text(&app);
+
+        assert!(row.contains("Worked for 2m 5s"), "got {row:?}");
+        assert!(row.contains("done"), "got {row:?}");
     }
 
     #[test]
