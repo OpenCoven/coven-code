@@ -1300,7 +1300,7 @@ pub fn readable_fg_on(bg: Color) -> Color {
     }
 }
 
-fn format_elapsed_ms(ms: u128) -> String {
+pub(crate) fn format_elapsed_ms(ms: u128) -> String {
     let total_secs = ((ms + 500) / 1000) as u64; // round to nearest second
     if total_secs < 60 {
         format!("{}s", total_secs)
