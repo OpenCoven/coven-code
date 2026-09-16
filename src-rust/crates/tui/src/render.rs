@@ -1782,6 +1782,57 @@ fn truncate_meta(s: &str, max: usize) -> String {
     }
 }
 
+/// The OpenCoven crown, downsampled from `brand/logo/opencoven-mark.svg` to
+/// the same 11x4 half-block slot the familiar sigils occupy.
+const COVEN_CROWN: [&str; 4] = [
+    "     \u{2584}     ",
+    "\u{2584}\u{2584} \u{2584}\u{2588}\u{2580}\u{2588}\u{2584} \u{2584}\u{2584}",
+    "\u{2588}\u{2580}\u{2580}\u{2588}\u{2584} \u{2584}\u{2588}\u{2580}\u{2580}\u{2588}",
+    " \u{2580}\u{2584}\u{2584}\u{2588}\u{2588}\u{2588}\u{2584}\u{2584}\u{2580} ",
+];
+
+/// Dim end of the crown's vertical ramp. The sigils already read as
+/// `primary` climbing to `accent`; the crown borrows that grammar rather than
+/// inventing a second one, ramping a dimmed violet up to `COVEN_CODE_ACCENT`.
+const COVEN_CROWN_DIM: Color = Color::Rgb(86, 57, 152);
+
+fn ramp_channel(from: u8, to: u8, t: f32) -> u8 {
+    let from = f32::from(from);
+    let to = f32::from(to);
+    (from + (to - from) * t).round().clamp(0.0, 255.0) as u8
+}
+
+fn coven_crown_lines() -> Vec<Line<'static>> {
+    let (Color::Rgb(dr, dg, db), Color::Rgb(br, bg, bb)) = (COVEN_CROWN_DIM, COVEN_CODE_ACCENT)
+    else {
+        // Both ends are Rgb literals; this arm is unreachable in practice and
+        // degrades to a flat mark rather than panicking if that ever changes.
+        return COVEN_CROWN
+            .iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    (*row).to_string(),
+                    Style::default().fg(COVEN_CODE_ACCENT),
+                ))
+            })
+            .collect();
+    };
+    let last = COVEN_CROWN.len().saturating_sub(1).max(1) as f32;
+    COVEN_CROWN
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let t = index as f32 / last;
+            let tint = Color::Rgb(
+                ramp_channel(dr, br, t),
+                ramp_channel(dg, bg, t),
+                ramp_channel(db, bb, t),
+            );
+            Line::from(Span::styled((*row).to_string(), Style::default().fg(tint)))
+        })
+        .collect()
+}
+
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // --- Box dimensions ---
     // Fixed height; width capped so the box doesn't stretch edge-to-edge on
@@ -1905,6 +1956,13 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
                 &app.companion_current_pose,
             ));
         }
+        left_lines.push(Line::from(""));
+    } else {
+        // Nobody's familiar to show, so the identity slot carries Coven's own
+        // mark rather than sitting empty. Same slot, same width, same
+        // half-block vocabulary as the sigils it stands in for -- a familiar
+        // always wins it back.
+        left_lines.extend(coven_crown_lines());
         left_lines.push(Line::from(""));
     }
     // Gray metadata block mirroring the reference layout: model, provider ·
@@ -3745,6 +3803,62 @@ mod welcome_tests {
         // flash cadence.
         assert_eq!(spinner_char(0), spinner_char(1));
         assert_ne!(spinner_char(1), spinner_char(2));
+    }
+
+    #[test]
+    fn coven_crown_fits_the_sigil_slot_and_ramps() {
+        let lines = coven_crown_lines();
+        assert_eq!(lines.len(), 4, "the crown occupies the 4-row sigil slot");
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(text.as_str()),
+                11,
+                "every crown row is the sigil slot's 11 columns: {text:?}"
+            );
+        }
+
+        // The ramp must actually ramp, dim at the base of the mark to the
+        // app accent at its crown.
+        let first = lines[0].spans[0].style.fg.expect("tinted");
+        let last = lines[3].spans[0].style.fg.expect("tinted");
+        assert_eq!(first, COVEN_CROWN_DIM);
+        assert_eq!(last, COVEN_CODE_ACCENT);
+        assert_ne!(first, last, "a flat mark is not a ramp");
+    }
+
+    #[test]
+    fn welcome_box_shows_the_crown_when_no_familiar_is_configured() {
+        let (app, _guard, _tmp) = make_isolated_status_app();
+        assert!(
+            visible_familiar(&app).is_none(),
+            "this fixture configures no familiar"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).expect("terminal");
+        terminal
+            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .expect("draw welcome box");
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            content.contains('\u{2588}'),
+            "the identity slot carries the crown rather than sitting empty"
+        );
+        // The slot is borrowed, not stolen: the surrounding welcome content
+        // that scripts/tui-tests/cases/02_startup.sh pins must survive.
+        assert!(content.contains("Coven v"), "version title survives");
+        assert!(
+            content.contains("Tips for getting started"),
+            "tips section survives"
+        );
+        assert!(content.contains("What's new"), "changelog section survives");
     }
 
     #[test]
