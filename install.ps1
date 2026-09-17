@@ -243,6 +243,18 @@ GithubPathHint
 
 Write-Host ""
 Write-Success "coven-code is installed!"
+
+# The unified Coven CLI keeps its own engine under %USERPROFILE%\.coven\engine
+# and runs that one ahead of anything on PATH. Say so, or this copy looks like
+# an upgrade that `coven` ignores.
+$managedRoot = Join-Path $env:USERPROFILE '.coven\engine'
+$managedCurrent = Join-Path $managedRoot 'current'
+if (Test-Path $managedCurrent) {
+    $managedVersion = (Get-Content $managedCurrent -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($managedVersion)) { $managedVersion = 'current' } else { $managedVersion = $managedVersion.Trim() }
+    Write-Warn "The Coven CLI already manages an engine at $managedRoot\$managedVersion and runs that one, not this copy."
+    Write-Warn "Upgrade the engine 'coven' runs with: coven engine install. Keep this copy only if you launch coven-code directly; 'coven doctor' reports which one is in use."
+}
 Write-Host ""
 Write-Muted  "Quickstart:"
 Write-Muted  "  # Set an API key"
