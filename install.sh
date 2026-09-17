@@ -145,6 +145,16 @@ fi
 
 print_message success "${APP} v${specific_version} installed to ${INSTALL_DIR}/${APP}"
 print_message success "${ALIAS} alias installed to ${INSTALL_DIR}"
+
+# The unified Coven CLI keeps its own engine under ~/.coven/engine and runs that
+# one ahead of anything on PATH. Say so, or this copy looks like an upgrade
+# that `coven` ignores.
+managed_engine_root="$HOME/.coven/engine"
+if [[ -f "${managed_engine_root}/current" ]]; then
+  managed_version=$(tr -d '[:space:]' < "${managed_engine_root}/current" 2>/dev/null || true)
+  print_message warning "The Coven CLI already manages an engine at ${managed_engine_root}/${managed_version:-current} and runs that one, not this copy."
+  print_message warning "Upgrade the engine 'coven' runs with: coven engine install. Keep this copy only if you launch '${APP}' directly; 'coven doctor' reports which one is in use."
+fi
 echo ""
 echo -e "  ${GREEN}${APP}${NC}              ${MUTED}# Interactive TUI${NC}"
 echo -e "  ${GREEN}${ALIAS}${NC}              ${MUTED}# Alias for ${APP}${NC}"
