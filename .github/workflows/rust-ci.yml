@@ -63,6 +63,18 @@ jobs:
         working-directory: src-rust
         run: cargo test --workspace --locked --quiet
 
+      # Contract-freeze fixtures (coven/docs/ENGINE-CONTRACT.md surfaces,
+      # slash-command registry, default keybindings, Classic TUI baselines).
+      # Already covered by the workspace run above; repeated by name so a
+      # contract break is visible as its own failing step.
+      - name: Contract fixtures
+        working-directory: src-rust
+        run: |
+          cargo test -p claurst --locked --test engine_contract
+          cargo test -p claurst-commands --locked --test slash_command_registry
+          cargo test -p claurst-core --locked --test keybindings_golden
+          cargo test -p claurst-tui --locked --test classic_baselines
+
   coven-contract:
     name: Coven engine contract (non-blocking until coven#346 lands)
     runs-on: ubuntu-latest
