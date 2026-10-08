@@ -1,0 +1,24 @@
+╭ Coven vX.Y.Z ────────────────────────────────────────────────────────────────╮
+│     Welcome back baseline!     │Tips for getting started                     │
+│                                │Start with small features or bug fixes, tell │
+│                ▄               │Coven to propose a plan, and verify its      │
+│           ▄▄ ▄█▀█▄ ▄▄          │suggested edits                              │
+│           █▀▀█▄ ▄█▀▀█          │──────────────────────────────────────────── │
+│            ▀▄▄███▄▄▀           │What's new                                   │
+│                                │<whats-new-0>                                │
+│            ╭───────────────────────────────────────────────────╮ommand, wit… │
+│       Anthr│  ⚠ Error                                          │nd model la… │
+│            │───────────────────────────────────────────────────│             │
+│            │                                                   │             │
+╰────────────│ Baseline fixture: provider returned HTTP 500      │─────────────╯
+             │ (synthetic error for the golden)                  │
+             │                                                   │
+             ╰───────────────────────────────────────────────────╯
+
+  BUILD  claude-opus-4-8 · loc                                      ? shortcuts
+────────────────────────────────────────────────────────────────────────────────
+❯ █
+────────────────────────────────────────────────────────────────────────────────
+
+ ○ coven  F2 familiar  Ctrl+B branch  Tab mode                          $0.0000
+

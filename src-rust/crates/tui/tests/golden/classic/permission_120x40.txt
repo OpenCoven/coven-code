@@ -1,0 +1,40 @@
+╭ Coven vX.Y.Z ────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│     Welcome back baseline!     │Tips for getting started                                                             │
+│                                │Start with small features or bug fixes, tell Coven to propose a plan, and verify its │
+│                ▄               │suggested edits                                                                      │
+│           ▄▄ ▄█▀█▄ ▄▄          │──────────────────────────────────────────────────────────────────────────────────── │
+│           █▀▀█▄ ▄█▀▀█          │What's new                                                                           │
+│            ▀▄▄███▄▄▀           │<whats-new-0>                                                                        │
+│                                │<whats-new-1>                                                                        │
+│            Opus 4.8            │<whats-new-2>                                                                        │
+│       Anthropic · offline      │/release-notes for more                                                              │
+│            ~/project           │                                                                                     │
+│                                │                                                                                     │
+╰───────────────────┌ Permission Required ─────────────────────────────────────────────────────────┐───────────────────╯
+▏                   │  Tool: Bash                                                                  │
+▏   Run the test sui│                                                                              │
+▏                   │  ❯ cargo test --workspace                                                    │
+                    │                                                                              │
+  Thinking          │  Runs a shell command in the project                                         │
+                    │                                                                              │
+                    │                                                                              │
+                    │  ► [y] Yes, allow once                                                       │
+                    │    [Y] Yes, allow this session                                               │
+                    │    [p] Yes, always allow (persistent)                                        │
+                    │    [P] Allow commands matching cargo test*                                   │
+                    │    [n] No, deny                                                              │
+                    │                                                                              │
+                    │                                                                              │
+                    └──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+· Permission pending…
+  BUILD  claude-opus-4-8 · local                                                                            ? shortcuts
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ ○ coven                                                                                                        $0.0000
+
