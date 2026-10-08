@@ -2,9 +2,13 @@
 //!
 //! Renders the main screen through Ratatui's `TestBackend` at 40x12, 80x24
 //! and 120x40 in four states — idle, streaming, permission prompt, error
-//! modal — and compares the text of every cell against a checked-in golden.
-//! These are the "before" pictures for the theme-token work: any layout or
-//! glyph change in Classic shows up here as a diff a reviewer can read.
+//! modal — and compares every cell against two checked-in goldens per frame:
+//! `<state>_<w>x<h>.txt` holds the cell symbols, `<state>_<w>x<h>.styles.txt`
+//! holds one letter per cell naming its fg/bg/modifier combination, with a
+//! legend of the distinct styles appended. These are the "before" pictures
+//! for the theme-token work: a layout or glyph change shows in the text
+//! golden, a color change shows in the style map, and both are diffs a
+//! reviewer can read.
 //!
 //! Determinism: the whole test binary runs against a scratch `HOME` /
 //! `COVEN_HOME` / `COVEN_CODE_HOME` (no user keybindings, no familiar
@@ -34,6 +38,8 @@ use claurst_tui::dialogs::PermissionRequest;
 use claurst_tui::notifications::NotificationKind;
 use claurst_tui::render::render_app;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Cell;
+use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
 const SIZES: &[(u16, u16)] = &[(40, 12), (80, 24), (120, 40)];
@@ -139,7 +145,24 @@ fn error_modal() -> App {
     app
 }
 
-fn render_text(app: &App, width: u16, height: u16) -> String {
+/// Letters assigned to distinct non-default styles in order of first
+/// appearance; `.` is the default style and `#` means the alphabet ran out.
+const STYLE_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+struct Frame {
+    text: String,
+    styles: String,
+}
+
+fn style_key(cell: &Cell) -> String {
+    format!("fg={:?} bg={:?} mod={:?}", cell.fg, cell.bg, cell.modifier)
+}
+
+fn is_default_style(cell: &Cell) -> bool {
+    cell.fg == Color::Reset && cell.bg == Color::Reset && cell.modifier == Modifier::empty()
+}
+
+fn render_frame(app: &App, width: u16, height: u16) -> Frame {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
     terminal
         .draw(|frame| render_app(frame, app))
@@ -147,12 +170,43 @@ fn render_text(app: &App, width: u16, height: u16) -> String {
     let buffer = terminal.backend().buffer();
     let width = usize::from(buffer.area.width);
     let mut text = String::new();
+    let mut styles = String::new();
+    let mut legend: Vec<String> = Vec::new();
     for row in buffer.content.chunks(width) {
         let line: String = row.iter().map(|cell| cell.symbol()).collect();
         text.push_str(line.trim_end());
         text.push('\n');
+        let style_row: String = row
+            .iter()
+            .map(|cell| {
+                if is_default_style(cell) {
+                    return '.';
+                }
+                let key = style_key(cell);
+                let index = match legend.iter().position(|k| *k == key) {
+                    Some(index) => index,
+                    None => {
+                        legend.push(key);
+                        legend.len() - 1
+                    }
+                };
+                STYLE_ALPHABET.chars().nth(index).unwrap_or('#')
+            })
+            .collect();
+        styles.push_str(style_row.trim_end_matches('.'));
+        styles.push('\n');
     }
-    mask_release_text(&text)
+    styles.push('\n');
+    for (index, key) in legend.iter().enumerate() {
+        styles.push_str(&format!(
+            "{} {key}\n",
+            STYLE_ALPHABET.chars().nth(index).unwrap_or('#')
+        ));
+    }
+    Frame {
+        text: mask_release_text(&text),
+        styles,
+    }
 }
 
 /// Replace `v<APP_VERSION>` and each "What's new" line with placeholders of
@@ -209,10 +263,10 @@ fn mask_prefix_of(line: &str, item: &str, label: &str) -> String {
     out
 }
 
-fn golden_path(state: &str, width: u16, height: u16) -> PathBuf {
+fn golden_path(state: &str, width: u16, height: u16, suffix: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden/classic")
-        .join(format!("{state}_{width}x{height}.txt"))
+        .join(format!("{state}_{width}x{height}{suffix}"))
 }
 
 fn assert_golden(path: &Path, actual: &str) {
@@ -246,8 +300,12 @@ fn assert_golden(path: &Path, actual: &str) {
 fn check_state(state: &str, build: fn() -> App) {
     for &(width, height) in SIZES {
         let app = build();
-        let text = render_text(&app, width, height);
-        assert_golden(&golden_path(state, width, height), &text);
+        let frame = render_frame(&app, width, height);
+        assert_golden(&golden_path(state, width, height, ".txt"), &frame.text);
+        assert_golden(
+            &golden_path(state, width, height, ".styles.txt"),
+            &frame.styles,
+        );
     }
 }
 

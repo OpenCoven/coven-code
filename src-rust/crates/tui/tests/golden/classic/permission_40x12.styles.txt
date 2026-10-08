@@ -1,0 +1,26 @@
+abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ccddddddddcccccccccccccccccccccccccccccc
+ccefffffffffffffffffffffeeeeeeeeeeeeeecg
+cce........ffff......................ecc
+hce..................................ecc
+cceiiiijjjjjjjjjjjjjjjjjjjjjj........ekc
+lle..................................ell
+mme..eeeeeeeeeeeeeeeeeeeeeeeeeee.....ecc
+lle..eeeeeee.........................ell
+cceeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeecc
+cdddddddccccccccccccccccccccccccdddddddc
+cccccccccccccccccccccccccccccccccccccccc
+
+a fg=Rgb(184, 175, 220) bg=Rgb(23, 23, 31) mod=NONE
+b fg=Rgb(235, 235, 240) bg=Rgb(23, 23, 31) mod=NONE
+c fg=Rgb(235, 235, 240) bg=Rgb(10, 10, 14) mod=NONE
+d fg=DarkGray bg=Rgb(10, 10, 14) mod=NONE
+e fg=Yellow bg=Reset mod=NONE
+f fg=Yellow bg=Reset mod=BOLD
+g fg=Rgb(110, 110, 130) bg=Rgb(10, 10, 14) mod=NONE
+h fg=Yellow bg=Rgb(10, 10, 14) mod=BOLD
+i fg=Green bg=Reset mod=BOLD
+j fg=White bg=Reset mod=BOLD
+k fg=Rgb(161, 161, 170) bg=Rgb(10, 10, 14) mod=NONE
+l fg=Rgb(139, 92, 246) bg=Rgb(10, 10, 14) mod=NONE
+m fg=Rgb(139, 92, 246) bg=Rgb(10, 10, 14) mod=BOLD
