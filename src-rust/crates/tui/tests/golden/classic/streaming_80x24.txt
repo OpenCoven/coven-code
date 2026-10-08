@@ -1,0 +1,24 @@
+▏
+▏   Summarize the engine contract in one sentence.
+▏
+
+   The engine exposes a small versioned CLI surface that coven drives over
+
+
+
+
+
+
+
+
+
+
+
+· Generating…
+  BUILD  claude-opus-4-8 · loc                                      ? shortcuts
+────────────────────────────────────────────────────────────────────────────────
+❯ █
+────────────────────────────────────────────────────────────────────────────────
+
+ ○ coven                                                                $0.0000
+
