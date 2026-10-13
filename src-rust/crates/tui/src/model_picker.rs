@@ -118,13 +118,18 @@ impl EffortLevel {
 pub fn model_supports_effort(id: &str) -> bool {
     id.starts_with("claude-3-7")
         || id.starts_with("claude-opus-4")
+        || id.starts_with("claude-opus-5")
         || id.starts_with("claude-sonnet-4")
+        || id.starts_with("claude-sonnet-5")
         || id.starts_with("claude-fable")
 }
 
 /// Returns `true` for models that support the maximum effort tier.
 pub fn model_supports_max_effort(id: &str) -> bool {
-    id.starts_with("claude-opus-4") || id.starts_with("claude-fable")
+    id.starts_with("claude-opus-4")
+        || id.starts_with("claude-opus-5")
+        || id.starts_with("claude-sonnet-5")
+        || id.starts_with("claude-fable")
 }
 
 /// Returns a short description string based on the model family inferred from
@@ -652,22 +657,60 @@ impl ModelPickerState {
     pub fn default_models() -> Vec<ModelEntry> {
         vec![
             ModelEntry {
+                id: "claude-fable-5-1".to_string(),
+                display_name: "Claude Fable 5.1".to_string(),
+                description: "Most powerful model — deepest reasoning, 1M context".to_string(),
+                is_current: false,
+            },
+            ModelEntry {
                 id: "claude-fable-5".to_string(),
                 display_name: "Claude Fable 5".to_string(),
-                description: "Most powerful model — deepest reasoning, 1M context".to_string(),
+                description: "Previous Fable generation — deepest reasoning, 1M context"
+                    .to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-opus-5-5".to_string(),
+                display_name: "Claude Opus 5.5".to_string(),
+                description: "Current Opus — top-tier agentic work at lower cost".to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-opus-5".to_string(),
+                display_name: "Claude Opus 5".to_string(),
+                description: "Previous Opus generation — long-horizon agentic work".to_string(),
                 is_current: false,
             },
             ModelEntry {
                 id: "claude-opus-4-8".to_string(),
                 display_name: "Claude Opus 4.8".to_string(),
-                description: "Most capable Opus — long-horizon agentic work and analysis"
-                    .to_string(),
+                description: "Opus 4.8 — long-horizon agentic work and analysis".to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-opus-4-7".to_string(),
+                display_name: "Claude Opus 4.7".to_string(),
+                description: "Opus 4.7 — strong complex reasoning".to_string(),
                 is_current: false,
             },
             ModelEntry {
                 id: "claude-opus-4-6".to_string(),
                 display_name: "Claude Opus 4.6".to_string(),
                 description: "Previous Opus generation — strong complex reasoning".to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-sonnet-5-5".to_string(),
+                display_name: "Claude Sonnet 5.5".to_string(),
+                description: "Current Sonnet — speed and capability for everyday coding"
+                    .to_string(),
+                is_current: false,
+            },
+            ModelEntry {
+                id: "claude-sonnet-5".to_string(),
+                display_name: "Claude Sonnet 5".to_string(),
+                description: "Previous Sonnet generation — balanced performance and speed"
+                    .to_string(),
                 is_current: false,
             },
             ModelEntry {
@@ -1013,6 +1056,47 @@ mod tests {
     }
 
     // 1. Default model list is non-empty and contains expected IDs.
+    #[test]
+    fn current_claude_picker_preserves_effort_through_confirmation() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+        ] {
+            let mut picker = ModelPickerState::new();
+            picker.set_models(vec![model_entry(id, id, "")]);
+            picker.open_with_state(id, EffortLevel::Normal, false);
+            assert_eq!(picker.effective_effort(), Some(EffortLevel::Normal), "{id}");
+            picker.effort_next();
+            assert_eq!(picker.effective_effort(), Some(EffortLevel::High), "{id}");
+            picker.effort_next();
+            assert_eq!(picker.effective_effort(), Some(EffortLevel::Max), "{id}");
+            assert_eq!(
+                picker.confirm(),
+                Some((id.to_string(), Some(EffortLevel::Max))),
+                "{id}"
+            );
+            assert!(!picker.visible);
+        }
+    }
+
+    #[test]
+    fn current_claude_models_available_in_fallback_picker() {
+        let models = ModelPickerState::default_models();
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-7",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5",
+        ] {
+            assert!(models.iter().any(|model| model.id == id), "{id}");
+        }
+    }
+
     #[test]
     fn default_models_are_populated() {
         let models = ModelPickerState::default_models();

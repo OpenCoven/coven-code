@@ -15,7 +15,8 @@
 /// and have removed the manual `budget_tokens` and sampling parameters
 /// (`temperature` / `top_p` / `top_k`).
 ///
-/// On these models (Claude Opus 4.7, Opus 4.8, and Fable 5) sending
+/// On these models (Claude Opus 4.7, Opus 4.8, the Opus 5 and Sonnet 5
+/// families, and the Fable models) sending
 /// `thinking: {type: "enabled", budget_tokens: N}` or a `temperature` returns
 /// a 400 error. Callers must instead send `thinking: {type: "adaptive"}` and
 /// control reasoning depth with the `effort` parameter. See the Anthropic
@@ -27,6 +28,8 @@ pub fn model_uses_adaptive_thinking(model: &str) -> bool {
         || m.contains("opus-4-7")
         || m.contains("claude-opus-4-8")
         || m.contains("opus-4-8")
+        || m.contains("opus-5")
+        || m.contains("sonnet-5")
 }
 
 // ---------------------------------------------------------------------------
@@ -45,7 +48,7 @@ pub enum EffortLevel {
     Medium,
     /// Comprehensive implementation with extensive testing and documentation.
     High,
-    /// Maximum capability with deepest reasoning (Opus-tier and Fable models).
+    /// Maximum capability with deepest reasoning on supported models.
     Max,
 }
 
@@ -130,7 +133,7 @@ impl EffortLevel {
             Self::Low => "Quick, straightforward implementation with minimal overhead",
             Self::Medium => "Balanced approach with standard implementation and testing",
             Self::High => "Comprehensive implementation with extensive testing and documentation",
-            Self::Max => "Maximum capability with deepest reasoning (Opus-tier and Fable models)",
+            Self::Max => "Maximum capability with deepest reasoning on supported models",
         }
     }
 }
@@ -219,6 +222,21 @@ mod tests {
         assert!(!model_uses_adaptive_thinking("claude-opus-4-6"));
         assert!(!model_uses_adaptive_thinking("claude-sonnet-4-6"));
         assert!(!model_uses_adaptive_thinking("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn current_claude_models_use_adaptive_thinking() {
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "CLAUDE-OPUS-5-5",
+        ] {
+            assert!(model_uses_adaptive_thinking(model), "{model}");
+        }
     }
 
     #[test]
