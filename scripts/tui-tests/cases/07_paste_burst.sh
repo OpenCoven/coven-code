@@ -59,4 +59,27 @@ tc_paste_burst() {
   fi
 
   tui_stop
+
+  # ---- 3. Stop lookahead at navigation before a bracketed paste -----------
+  # Reading past Left would consume and discard the following Paste event.
+  # No Enter is sent, so this remains entirely inside the composer.
+  tui_start || { tui_stop; return 0; }
+  tui_settle
+  _tmux set-buffer -b tui_burst -- $'ab\e[D\e[200~PASTEqzx\e[201~'
+  # Newer tmux sanitizes control bytes unless -S is supplied; older versions
+  # already deliver them literally and do not recognize that flag.
+  local paste_flags=(-d)
+  local tmux_commands; tmux_commands="$(_tmux list-commands)"
+  if grep -q 'paste-buffer .*S' <<<"$tmux_commands"; then paste_flags+=(-S); fi
+  _tmux paste-buffer "${paste_flags[@]}" -b tui_burst -t "$TUI_SESSION"
+  if wait_for "PASTEqzx" 8; then
+    # Move the block cursor off the original suffix so it is visible in capture.
+    tui_keys End
+    tui_settle
+    assert_contains "$(tui_capture)" "aPASTEqzxb" \
+      "navigation leaves the following bracketed paste for the event loop"
+  else
+    _fail "bracketed paste after navigation is preserved" "$(tui_capture)"
+  fi
+  tui_stop
 }
