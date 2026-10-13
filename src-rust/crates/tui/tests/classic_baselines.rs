@@ -15,8 +15,9 @@
 //! roster, no daemon socket, no tip history), a fixed `USER`, a working
 //! directory under the scratch home (so the welcome panel prints `~/project`),
 //! a pinned model id, and `frame_count = 0`. The only release-coupled text —
-//! the version banner and the "What's new" lines — is masked to fixed-width
-//! placeholders so a version bump does not invalidate the baselines.
+//! the version banner and visible prefixes of "What's new" lines — is masked
+//! to same-width placeholders. Release changes that alter layout, styles, or
+//! text partly obscured by a modal still require reviewed regeneration.
 //!
 //! Regenerate after a deliberate presentation change and review every
 //! changed frame in the PR:
@@ -100,10 +101,6 @@ fn fixture_app() -> App {
     app.has_credentials = true;
     app.frame_count = 0;
     app
-}
-
-fn idle() -> App {
-    fixture_app()
 }
 
 fn streaming() -> App {
@@ -311,7 +308,7 @@ fn check_state(state: &str, build: fn() -> App) {
 
 #[test]
 fn classic_idle_matches_baseline() {
-    check_state("idle", idle);
+    check_state("idle", fixture_app);
 }
 
 #[test]

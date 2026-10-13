@@ -18,17 +18,13 @@
 //! ```
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use claurst_commands::all_commands;
 use claurst_tui::app::{slash_command_category, PROMPT_SLASH_COMMANDS};
 
 /// Feature-gated names excluded from the golden so it is build-invariant.
 const FEATURE_GATED: &[&str] = &["steer"];
-
-fn golden_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/slash_command_registry.txt")
-}
 
 fn assert_golden(path: &Path, actual: &str) {
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
@@ -95,5 +91,7 @@ fn render_registry() -> String {
 
 #[test]
 fn slash_command_registry_matches_golden() {
-    assert_golden(&golden_path(), &render_registry());
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/slash_command_registry.txt");
+    assert_golden(&path, &render_registry());
 }

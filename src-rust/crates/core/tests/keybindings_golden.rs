@@ -13,13 +13,9 @@
 //! ```
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use claurst_core::keybindings::{default_bindings, ParsedKeystroke};
-
-fn golden_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/default_keybindings.txt")
-}
 
 fn assert_golden(path: &Path, actual: &str) {
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
@@ -89,5 +85,6 @@ fn render_bindings() -> String {
 
 #[test]
 fn default_keybindings_match_golden() {
-    assert_golden(&golden_path(), &render_bindings());
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/default_keybindings.txt");
+    assert_golden(&path, &render_bindings());
 }
