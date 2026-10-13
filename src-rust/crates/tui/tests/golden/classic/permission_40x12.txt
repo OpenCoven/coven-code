@@ -1,0 +1,12 @@
+▏
+  Thinking
+  ┌ Permission Required ─────────────┐ ▐
+  │  Tool: Bash                      │
+· │                                  │
+  │  ❯ cargo test --workspace        │s
+──│                                  │──
+❯ │  Runs a shell command in the     │
+──│  project                         │──
+  └──────────────────────────────────┘
+ ○ coven                        $0.0000
+

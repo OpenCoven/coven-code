@@ -1,0 +1,12 @@
+Coven vX.Y.Z · claude-opus-4-8 · Daemon:
+
+
+
+
+                            ? shortcuts
+────────────────────────────────────────
+❯ █
+────────────────────────────────────────
+
+ ○ coven  F2 familiar  Ctrl+B branch  T
+

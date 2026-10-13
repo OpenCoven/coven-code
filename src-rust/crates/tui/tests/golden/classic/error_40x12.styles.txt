@@ -1,0 +1,20 @@
+aaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cccccccccccccccccccccccccccccccccccccccc
+dddddddddddddddddddddddddddddddddddddddd
+deeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeed
+dffffffffffffffffffffffffffffffffffffffd
+dddddddddddddddddddddddddddddddddddddddd
+ddggggggggggggggggggggggggggggggggggggdd
+ddggggggggggggggggggggggggggggggggggggdd
+ddggggggggggggggggggggggggggggggggggggdd
+dddddddddddddddddddddddddddddddddddddddd
+cbbbbbbbccbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc
+cccccccccccccccccccccccccccccccccccccccc
+
+a fg=Rgb(184, 175, 220) bg=Rgb(10, 10, 14) mod=BOLD
+b fg=DarkGray bg=Rgb(10, 10, 14) mod=NONE
+c fg=Rgb(235, 235, 240) bg=Rgb(10, 10, 14) mod=NONE
+d fg=Red bg=Reset mod=NONE
+e fg=Red bg=Rgb(60, 15, 15) mod=BOLD
+f fg=Rgb(80, 20, 20) bg=Reset mod=NONE
+g fg=Rgb(220, 220, 220) bg=Reset mod=NONE

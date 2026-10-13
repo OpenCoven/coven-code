@@ -1,0 +1,120 @@
+# PROMPT_SLASH_COMMANDS in palette order: name	category	description
+accounts	Other	List stored accounts; `dedupe` collapses duplicate profiles
+attach	Other	Save and manage file attachments in the structured stash
+chrome	Integrations	Browser automation via Chrome DevTools Protocol
+clear	Conversation	Clear the conversation transcript
+commit	Project	Stage and commit changes (model drafts the message)
+compact	Conversation	Compact the conversation context
+config	Settings	Open settings (theme, keybindings, advisor, import, UI)
+connect	Auth & Permissions	Connect an AI provider
+coven	Coven	Drive the local Coven daemon (sessions, harness runs, rituals)
+diff	Project	Inspect the current git diff
+effort	Settings	Set effort level (low/normal/high) or toggle fast mode
+exit	General	Quit Coven
+export	Conversation	Export, copy, or share the conversation
+familiar	Coven	Your familiar & agents — switch persona, inspect, and manage
+feedback	General	Open session feedback survey
+handoff	Coven	Hand off current session context to a Coven familiar
+help	General	Show help
+hooks	Integrations	Browse configured hooks (read-only)
+incant	Tools & Extras	Cast a speech incantation (caveman, rocky) or lift it with off
+init	Project	Initialize AGENTS.md for this project
+learn	Tools & Extras	Codify the script/workflow we just built into a reusable skill
+link	Other	Save and manage links in the structured stash
+login	Auth & Permissions	Log in, switch accounts, or refresh provider auth
+logout	Auth & Permissions	Log out of Coven
+mcp	Integrations	Browse configured MCP servers
+memory	Project	Browse and open AGENTS.md memory files
+model	Settings	Change the AI model
+permissions	Auth & Permissions	Manage tool permission rules
+plan	AI & Thinking	Enter plan mode (read-only)
+plugin	Tools & Extras	Manage plugins (list/info/enable/disable/install/reload)
+providers	Auth & Permissions	List available AI providers and their status
+quit	General	Exit Coven
+resume	Sessions & Remote	Resume a previous session
+review	Project	Review changes (security/ultra variants, PR comments)
+rewind	Conversation	Rewind the conversation or roll back file changes
+sandbox	Settings	Toggle sandboxed shell execution
+search	Sessions & Remote	Search the codebase by natural language or regex
+splash	Settings	Show, hide, or toggle the empty-session splash screen
+session	Sessions & Remote	Browse, rename, fork, branch, and tag sessions
+settings	Settings	Open settings (theme, keybindings, advisor, import, UI)
+skills	Tools & Extras	List and manage skills
+status	System	Show session status or run diagnostics (/status doctor)
+survey	General	Open session feedback survey
+tasks	AI & Thinking	Manage tracked background tasks
+thinking	AI & Thinking	Configure extended thinking or view past thinking traces
+update	System	Check for updates and upgrade to the latest version
+release-notes	Other	Show recent Coven highlights
+usage	Usage & Cost	Detailed per-call token usage breakdown
+version	System	Display the current Coven version
+whisper	Tools & Extras	Whisper a side question to your familiar (not kept in history)
+
+# registered SlashCommands sorted by name: name	category	aliases	hidden
+accounts	Other	-	false
+add-dir	Other	-	true
+advisor	AI & Thinking	-	true
+agents	Other	-	true
+attach	Other	attachments	false
+branch	Conversation	-	true
+chrome	Integrations	-	false
+clear	Conversation	c,reset,new	false
+commit	Project	-	false
+compact	Conversation	-	false
+config	Settings	settings	false
+connect	Auth & Permissions	-	false
+copy	Tools & Extras	-	true
+coven	Coven	-	false
+diff	Project	-	false
+doctor	System	-	true
+effort	Settings	-	false
+exit	General	quit,q	false
+export	Conversation	-	false
+familiar	Coven	familiars,agent	false
+fast	Settings	speed	true
+feedback	General	bug	false
+fork	Conversation	-	true
+goal	AI & Thinking	-	true
+help	General	h,?	false
+hooks	Integrations	-	false
+import-config	Project	-	true
+incant	Tools & Extras	-	false
+init	Project	-	false
+keybindings	Settings	-	true
+learn	Tools & Extras	scribe	false
+link	Other	links	false
+login	Auth & Permissions	-	false
+logout	Auth & Permissions	-	false
+managed-agents	Other	-	true
+mcp	Integrations	-	false
+memory	Project	-	false
+model	Settings	-	false
+output-style	Settings	-	true
+permissions	Auth & Permissions	-	false
+plan	AI & Thinking	-	false
+plugin	Tools & Extras	plugins	false
+pr-comments	Other	-	true
+providers	Auth & Permissions	-	false
+refresh	Auth & Permissions	-	true
+release-notes	Other	whats-new,changelog	false
+reload-plugins	Tools & Extras	-	true
+resume	Sessions & Remote	r,continue	false
+review	Project	-	false
+rewind	Conversation	-	false
+sandbox	Settings	sandbox-toggle	false
+search	Sessions & Remote	-	false
+session	Sessions & Remote	remote	false
+share	Sessions & Remote	-	true
+skills	Tools & Extras	skill	false
+splash	Settings	welcome-screen	false
+status	System	-	false
+switch	Auth & Permissions	-	true
+tag	Other	-	true
+tasks	AI & Thinking	bashes	false
+theme	Settings	-	true
+think-back	AI & Thinking	thinkback	true
+thinking	AI & Thinking	think	false
+update	System	upgrade	false
+usage	Usage & Cost	-	false
+version	System	v	false
+whisper	Tools & Extras	btw	false
