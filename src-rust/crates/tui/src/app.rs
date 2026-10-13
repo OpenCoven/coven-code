@@ -6411,7 +6411,7 @@ impl App {
                 break;
             }
 
-            match key.code.clone() {
+            match key.code {
                 KeyCode::Char(character) => buffer.push(character),
                 KeyCode::Enter => {
                     // Enter is an interior line break only when the next
@@ -6455,7 +6455,7 @@ impl App {
     /// keystroke. Submission and non-text press events reached during lookahead
     /// are retained in `self.pending_keys` and replayed in FIFO order.
     pub fn try_detect_paste_burst(&mut self, first: char) -> Option<String> {
-        use crossterm::event::Event;
+        use crossterm::event::{Event, KeyEventKind};
 
         // Minimum number of chars (including `first`) to classify as a paste.
         // Two or more is enough: at 120 WPM the inter-key interval is ~60 ms,
@@ -6463,23 +6463,29 @@ impl App {
         // from a human typist but guaranteed from a clipboard paste.
         const BURST_THRESHOLD: usize = 2;
 
-        // Quick exit: don't bother if nothing is queued immediately.
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            return None;
-        }
-
-        let mut drained = Vec::new();
-        while let Ok(true) = crossterm::event::poll(std::time::Duration::ZERO) {
-            match crossterm::event::read() {
-                Ok(Event::Key(key)) => drained.push(key),
-                // Preserve the existing contract for mouse/resize events: the
-                // first non-key event ends paste detection after being consumed.
-                _ => break,
+        // A replayed character must finish its original burst before looking
+        // at newer terminal input, otherwise text can jump ahead of saved keys.
+        let mut drained = std::mem::take(&mut self.pending_keys);
+        if drained.is_empty() {
+            while let Ok(true) = crossterm::event::poll(std::time::Duration::ZERO) {
+                match crossterm::event::read() {
+                    Ok(Event::Key(key)) => {
+                        drained.push_back(key);
+                        // Keep the boundary key for replay, but leave later
+                        // events (including bracketed paste) for the event loop.
+                        if key.kind == KeyEventKind::Press && !Self::is_paste_text_key(&key) {
+                            break;
+                        }
+                    }
+                    // Preserve the existing contract for mouse/resize events:
+                    // the first non-key event ends detection after consumption.
+                    _ => break,
+                }
             }
         }
 
         let (buffer, pending) = Self::classify_paste_burst_events(first, drained);
-        self.pending_keys.extend(pending);
+        self.pending_keys = pending;
 
         if buffer.chars().count() >= BURST_THRESHOLD {
             Some(buffer)
@@ -7571,6 +7577,71 @@ mod tests {
 
         assert_eq!(text, "a");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn paste_burst_replayed_text_keeps_interior_newlines() {
+        let mut app = make_app();
+        let (text, pending) = App::classify_paste_burst_events(
+            'x',
+            [
+                press_key(KeyCode::Left, KeyModifiers::NONE),
+                press_key(KeyCode::Char('a'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+            ],
+        );
+        assert_eq!(text, "x");
+        app.pending_keys = pending;
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Left);
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Char('a'));
+
+        assert_eq!(app.try_detect_paste_burst('a').as_deref(), Some("a\nb"));
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Enter);
+        assert!(app.take_pending_key().is_none());
+    }
+
+    #[test]
+    fn paste_burst_replayed_text_preserves_submit_and_navigation_order() {
+        let mut app = make_app();
+        app.pending_keys.extend([
+            press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+            press_key(KeyCode::Enter, KeyModifiers::NONE),
+            press_key(KeyCode::Left, KeyModifiers::NONE),
+        ]);
+
+        assert_eq!(app.try_detect_paste_burst('a').as_deref(), Some("ab"));
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Enter);
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Left);
+        assert!(app.take_pending_key().is_none());
+    }
+
+    #[test]
+    fn paste_burst_ignores_repeat_and_replays_modified_keys() {
+        let modified = press_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [
+                KeyEvent {
+                    kind: KeyEventKind::Repeat,
+                    ..press_key(KeyCode::Char('a'), KeyModifiers::NONE)
+                },
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent {
+                    kind: KeyEventKind::Repeat,
+                    ..press_key(KeyCode::Char('b'), KeyModifiers::NONE)
+                },
+                modified,
+            ],
+        );
+
+        assert_eq!(text, "ab");
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            vec![press_key(KeyCode::Enter, KeyModifiers::NONE), modified]
+        );
     }
 
     fn test_agent_definition() -> claurst_core::AgentDefinition {

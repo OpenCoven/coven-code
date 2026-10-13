@@ -178,7 +178,7 @@ pub fn render_table(table: &Table) -> Vec<Line<'static>> {
                 let left_pad = total_pad / 2;
                 format!(
                     "{:>width$}",
-                    &format!("{}{}", " ".repeat(left_pad), header),
+                    format!("{}{}", " ".repeat(left_pad), header),
                     width = width + left_pad
                 )
             }
@@ -233,7 +233,7 @@ pub fn render_table(table: &Table) -> Vec<Line<'static>> {
                         let left_pad = total_pad / 2;
                         format!(
                             "{:>width$}",
-                            &format!("{}{}", " ".repeat(left_pad), cell),
+                            format!("{}{}", " ".repeat(left_pad), cell),
                             width = width + left_pad
                         )
                     }
