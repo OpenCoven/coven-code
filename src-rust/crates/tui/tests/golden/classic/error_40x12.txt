@@ -1,0 +1,12 @@
+Coven vX.Y.Z · claude-opus-4-8 · Daemon:
+
+╭──────────────────────────────────────╮
+│  ⚠ Error                             │
+│──────────────────────────────────────│
+│                                      │
+│ Baseline fixture: provider returned  │
+│ HTTP 500 (synthetic error for the    │
+│ golden)                              │
+╰──────────────────────────────────────╯
+ ○ coven  F2 familiar  Ctrl+B branch  T
+

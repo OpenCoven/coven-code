@@ -1,0 +1,24 @@
+╭ Coven vX.Y.Z ────────────────────────────────────────────────────────────────╮
+│     Welcome back baseline!     │Tips for getting started                     │
+│                                │Start with small features or bug fixes, tell │
+│                ▄               │Coven to propose a plan, and verify its      │
+│           ▄▄ ▄█▀█▄ ▄▄          │suggested edits                              │
+│           █▀▀█▄ ▄█▀▀█          │──────────────────────────────────────────── │
+│            ▀▄▄███▄▄▀           │What's new                                   │
+│                                │<whats-new-0>                                │
+│            Opus 4.8            │<whats-new-1>                                │
+│       Anthropic · offline      │<whats-new-2>                                │
+│            ~/project           │/release-notes for more                      │
+│                                │                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+  BUILD  claude-opus-4-8 · loc                                      ? shortcuts
+────────────────────────────────────────────────────────────────────────────────
+❯ █
+────────────────────────────────────────────────────────────────────────────────
+
+ ○ coven  F2 familiar  Ctrl+B branch  Tab mode                          $0.0000
+

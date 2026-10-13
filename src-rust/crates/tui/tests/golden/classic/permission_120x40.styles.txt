@@ -1,0 +1,63 @@
+abbbbbbbcccccccaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+adddddeeeeeeeeeeeeeeeeeeeeeedddddabbbbbbbbbbbbbbbbbbbbbbbbddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+addddddddddddddddddddddddddddddddaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffda
+adddddddddddgggggggggggddddddddddafffffffffffffffdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+adddddddddddhhhhhhhhhhhddddddddddaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaada
+adddddddddddiiiiiiiiiiiddddddddddabbbbbbbbbbddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+adddddddddddaaaaaaaaaaaddddddddddaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffddddddda
+addddddddddddddddddddddddddddddddafffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffdddddddddddddddddda
+addddddddddddffffffffddddddddddddaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffda
+adddddddfffffffffffffffffffddddddajjjjjjjjjjjjjjjjjjjjjjjdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+addddddddddddcccccccccdddddddddddaddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+addddddddddddddddddddddddddddddddaddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+aaaaaaaaaaaaaaaaaaaaklllllllllllllllllllllkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkaaaaaaaaaaaaaaaaaaaa
+mnnnnnnnnnnnnnnnnnnnk........llll..................................................................knnnnnnnnnnnnnnnnnnnn
+mnooooooooooooooooook..............................................................................knnnnnnnnnnnnnnnnnnnn
+mnnnnnnnnnnnnnnnnnnnkppppqqqqqqqqqqqqqqqqqqqqqq....................................................knnnnnnnnnnnnnnnnnnnn
+ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
+ddccccccccddddddddddk..kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk.........................................kdddddddddddddddddddd
+ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....ppp.rrrrrrrrrrrrrrr.......................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
+ddddddddddddddddddddkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkdddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+tdcccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+duuuuuuudeeeeeeeeeeeeeeevvvvvvvvddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddvvvvvvvvvvvd
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+bbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+dcccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddcccccccd
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+
+a fg=Rgb(139, 92, 246) bg=Rgb(10, 10, 14) mod=NONE
+b fg=Rgb(139, 92, 246) bg=Rgb(10, 10, 14) mod=BOLD
+c fg=DarkGray bg=Rgb(10, 10, 14) mod=NONE
+d fg=Rgb(235, 235, 240) bg=Rgb(10, 10, 14) mod=NONE
+e fg=White bg=Rgb(10, 10, 14) mod=BOLD
+f fg=Gray bg=Rgb(10, 10, 14) mod=NONE
+g fg=Rgb(86, 57, 152) bg=Rgb(10, 10, 14) mod=NONE
+h fg=Rgb(104, 69, 183) bg=Rgb(10, 10, 14) mod=NONE
+i fg=Rgb(121, 80, 215) bg=Rgb(10, 10, 14) mod=NONE
+j fg=DarkGray bg=Rgb(10, 10, 14) mod=ITALIC
+k fg=Yellow bg=Reset mod=NONE
+l fg=Yellow bg=Reset mod=BOLD
+m fg=Rgb(184, 175, 220) bg=Rgb(23, 23, 31) mod=NONE
+n fg=Rgb(235, 235, 240) bg=Rgb(23, 23, 31) mod=NONE
+o fg=Rgb(236, 236, 241) bg=Rgb(23, 23, 31) mod=NONE
+p fg=Green bg=Reset mod=BOLD
+q fg=White bg=Reset mod=BOLD
+r fg=Reset bg=Reset mod=BOLD
+s fg=DarkGray bg=Reset mod=NONE
+t fg=Yellow bg=Rgb(10, 10, 14) mod=BOLD
+u fg=Rgb(0, 0, 0) bg=Rgb(139, 92, 246) mod=BOLD
+v fg=Rgb(161, 161, 170) bg=Rgb(10, 10, 14) mod=NONE

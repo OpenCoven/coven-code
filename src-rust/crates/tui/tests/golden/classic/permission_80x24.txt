@@ -1,0 +1,24 @@
+▏
+▏   Run the test suite.
+▏
+
+  Th┌ Permission Required ─────────────────────────────────────────────────┐
+    │  Tool: Bash                                                          │
+    │                                                                      │
+    │  ❯ cargo test --workspace                                            │
+    │                                                                      │
+    │  Runs a shell command in the project                                 │
+    │                                                                      │
+    │                                                                      │
+    │  ► [y] Yes, allow once                                               │
+    │    [Y] Yes, allow this session                                       │
+    │    [p] Yes, always allow (persistent)                                │
+    │    [P] Allow commands matching cargo test*                           │
+· Pe│    [n] No, deny                                                      │
+  BU│                                                                      │uts
+────│                                                                      │────
+❯   └──────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+
+ ○ coven                                                                $0.0000
+
