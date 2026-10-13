@@ -32,9 +32,30 @@ pub(crate) fn claude_model_catalog() -> Vec<ModelInfo> {
     let anthropic_id = ProviderId::new(ProviderId::ANTHROPIC);
     vec![
         ModelInfo {
+            id: ModelId::new("claude-fable-5-1"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Fable 5.1".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
             id: ModelId::new("claude-fable-5"),
             provider_id: anthropic_id.clone(),
             name: "Claude Fable 5".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-opus-5-5"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Opus 5.5".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-opus-5"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Opus 5".to_string(),
             context_window: 1_000_000,
             max_output_tokens: 128_000,
         },
@@ -46,25 +67,46 @@ pub(crate) fn claude_model_catalog() -> Vec<ModelInfo> {
             max_output_tokens: 128_000,
         },
         ModelInfo {
+            id: ModelId::new("claude-opus-4-7"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Opus 4.7".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
             id: ModelId::new("claude-opus-4-6"),
             provider_id: anthropic_id.clone(),
             name: "Claude Opus 4.6".to_string(),
-            context_window: 200_000,
-            max_output_tokens: 32_000,
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-sonnet-5-5"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Sonnet 5.5".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-sonnet-5"),
+            provider_id: anthropic_id.clone(),
+            name: "Claude Sonnet 5".to_string(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
         },
         ModelInfo {
             id: ModelId::new("claude-sonnet-4-6"),
             provider_id: anthropic_id.clone(),
             name: "Claude Sonnet 4.6".to_string(),
-            context_window: 200_000,
-            max_output_tokens: 16_000,
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
         },
         ModelInfo {
             id: ModelId::new("claude-haiku-4-5-20251001"),
             provider_id: anthropic_id,
             name: "Claude Haiku 4.5".to_string(),
             context_window: 200_000,
-            max_output_tokens: 8_096,
+            max_output_tokens: 64_000,
         },
     ]
 }
@@ -133,7 +175,7 @@ impl AnthropicProvider {
             builder = builder.stop_sequences(request.stop_sequences.clone());
         }
 
-        // Opus 4.7+, Opus 4.8, and Fable 5 reject sampling params and manual
+        // Adaptive Claude models reject sampling params and manual
         // `budget_tokens` with a 400. Send adaptive thinking instead and drop
         // temperature / top_p / top_k.
         if claurst_core::effort::model_uses_adaptive_thinking(&request.model) {
@@ -360,6 +402,71 @@ mod tests {
     use futures::stream;
 
     use super::*;
+
+    #[test]
+    fn current_claude_requests_use_adaptive_thinking_without_sampling() {
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+        ] {
+            for thinking in [None, Some(ThinkingConfig::enabled(10_000))] {
+                let has_thinking = thinking.is_some();
+                let request = ProviderRequest {
+                    model: model.to_string(),
+                    messages: Vec::new(),
+                    system_prompt: None,
+                    tools: Vec::new(),
+                    max_tokens: 16_000,
+                    temperature: Some(0.5),
+                    top_p: Some(0.9),
+                    top_k: Some(20),
+                    stop_sequences: Vec::new(),
+                    thinking,
+                    provider_options: serde_json::json!({}),
+                };
+                let wire = serde_json::to_value(AnthropicProvider::build_request(&request))
+                    .expect("request serializes");
+                for field in ["temperature", "top_p", "top_k"] {
+                    assert!(wire.get(field).is_none(), "{model} must omit {field}");
+                }
+                if has_thinking {
+                    assert_eq!(
+                        wire["thinking"],
+                        serde_json::json!({"type": "adaptive"}),
+                        "{model}"
+                    );
+                } else {
+                    assert!(wire.get("thinking").is_none(), "{model}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn current_claude_catalog_has_correct_token_limits() {
+        let catalog = claude_model_catalog();
+        for (id, context, output) in [
+            ("claude-fable-5-1", 1_000_000, 128_000),
+            ("claude-opus-5-5", 1_000_000, 128_000),
+            ("claude-opus-5", 1_000_000, 128_000),
+            ("claude-opus-4-7", 1_000_000, 128_000),
+            ("claude-opus-4-6", 1_000_000, 128_000),
+            ("claude-sonnet-5-5", 1_000_000, 128_000),
+            ("claude-sonnet-5", 1_000_000, 128_000),
+            ("claude-sonnet-4-6", 1_000_000, 128_000),
+            ("claude-haiku-4-5-20251001", 200_000, 64_000),
+        ] {
+            let entry = catalog
+                .iter()
+                .find(|entry| &*entry.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(entry.context_window, context, "{id}");
+            assert_eq!(entry.max_output_tokens, output, "{id}");
+        }
+    }
 
     fn response_stream(
         events: Vec<StreamEvent>,

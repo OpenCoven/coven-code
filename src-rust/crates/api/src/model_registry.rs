@@ -964,7 +964,9 @@ impl Default for ModelRegistry {
 fn flagship_patterns_for(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" | "amazon-bedrock" | "azure" | "google-vertex" => &[
+            "claude-opus-5",
             "claude-opus-4",
+            "claude-sonnet-5",
             "claude-sonnet-4",
             "claude-3-5-sonnet",
             "claude-sonnet-3",
@@ -1104,6 +1106,71 @@ pub fn effective_model_for_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_claude_snapshot_contains_models_and_pricing() {
+        let registry = ModelRegistry::new();
+        for id in [
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+        ] {
+            let entry = registry
+                .get("anthropic", id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(entry.info.context_window, 1_000_000, "{id}");
+            assert_eq!(entry.info.max_output_tokens, 128_000, "{id}");
+            assert!(entry.reasoning, "{id}");
+            assert!(!entry.temperature, "{id}");
+        }
+        let sonnet = registry.get("anthropic", "claude-sonnet-5-5").unwrap();
+        assert_eq!(sonnet.cost_cache_read, Some(0.1));
+        assert_eq!(sonnet.cost.cache_read, Some(0.1));
+        assert_eq!(
+            registry
+                .get("anthropic", "claude-sonnet-4-6")
+                .unwrap()
+                .info
+                .max_output_tokens,
+            128_000
+        );
+    }
+
+    #[test]
+    fn current_claude_default_prefers_new_opus_generation() {
+        let registry = ModelRegistry::new();
+        assert_eq!(
+            registry.best_model_for_provider("anthropic").as_deref(),
+            Some("claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn current_claude_snapshot_retains_existing_model_ids() {
+        let registry = ModelRegistry::new();
+        for id in [
+            "claude-3-5-haiku-20241022",
+            "claude-3-5-haiku-latest",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-haiku-20240307",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-opus-4-0",
+            "claude-opus-4-1",
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-0",
+            "claude-sonnet-4-20250514",
+        ] {
+            assert!(registry.get("anthropic", id).is_some(), "missing {id}");
+        }
+    }
 
     #[test]
     fn bundled_snapshot_loads() {
