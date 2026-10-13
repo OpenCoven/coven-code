@@ -10,20 +10,17 @@ tc_palette() {
   if ! have_tmux; then _skip "tmux not installed"; return 0; fi
   tui_start || { tui_stop; return 0; }
 
-  # Typing "/" as the first character opens the palette.
+  # Contextual roots replace the expired standalone account/integration paths.
   tui_type "/"
-  if ! wait_for "/clear"; then
-    _fail "palette opened on '/' (/clear never appeared)" "$(tui_capture)"
+  if ! wait_for "/help"; then
+    _fail "palette opened on '/' (/help never appeared)" "$(tui_capture)"
     tui_stop; return 0
   fi
   local s; s="$(tui_capture)"
-  # Assert on entries near the top of the alphabetical list — the palette
-  # viewport shows a handful of rows, so entries further down (e.g. /config)
-  # scroll out of view as new commands are registered.
-  assert_contains "$s" "/accounts" "palette lists /accounts"
-  assert_contains "$s" "/attach"   "palette lists /attach"
-  assert_contains "$s" "/chrome"   "palette lists /chrome"
-  assert_contains "$s" "/clear"    "palette lists /clear"
+  assert_contains "$s" "/help" "palette lists contextual /help"
+  assert_absent "$s" "/accounts " "palette omits retired /accounts"
+  assert_absent "$s" "/attach " "palette omits retired /attach"
+  assert_absent "$s" "/chrome " "palette omits retired /chrome"
 
   # Filtering narrows the list: "/config" should surface /config, drop /clear.
   tui_type "config"
@@ -39,12 +36,38 @@ tc_palette() {
 
   # Ctrl+K is the second documented entry point to the palette.
   tui_keys C-k
-  if wait_for "/clear" 5; then
+  if wait_for "Command Palette" 5; then
     _pass "Ctrl+K opens the command palette"
   else
     _fail "Ctrl+K opens the command palette" "$(tui_capture)"
   fi
   tui_keys Escape; tui_settle
+
+  # Enter on a selected palette leaf submits through the CLI in one step.
+  tui_keys C-k; tui_settle
+  tui_type "help feedback"; tui_settle
+  tui_keys Enter
+  if wait_for "Session Feedback" 5; then
+    _pass "palette leaf executes on one Enter"
+  else
+    _fail "palette leaf executes on one Enter" "$(tui_capture)"
+  fi
+
+  tui_keys Escape; tui_settle
+
+  # Exact retired input must be rejected before automatic suggestion acceptance.
+  tui_type "/fork"; tui_settle; tui_keys Enter
+  if wait_for "/fork was removed; use /session fork" 5; then
+    _pass "retired /fork cannot execute through completion"
+  else
+    _fail "retired /fork cannot execute through completion" "$(tui_capture)"
+  fi
+  tui_type "/theme"; tui_settle; tui_keys Enter
+  if wait_for "/theme was removed; use /config theme" 5; then
+    _pass "retired /theme cannot open picker through completion"
+  else
+    _fail "retired /theme cannot open picker through completion" "$(tui_capture)"
+  fi
 
   tui_stop
 }

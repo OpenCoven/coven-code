@@ -281,6 +281,9 @@ pub struct SnapshotDiffCommand;
 pub struct ProvidersCommand;
 pub struct ConnectCommand;
 pub struct FamiliarCommand;
+pub struct HandoffCommand;
+#[cfg(feature = "steer")]
+pub struct SteerCommand;
 pub struct SearchCommand;
 pub struct ForkCommand;
 pub struct LinkCommand;
@@ -484,13 +487,6 @@ fn execute_named_command_from_slash(
 
 // ---- /help ---------------------------------------------------------------
 
-/// Category labels for help grouping. Delegates to the canonical
-/// categorization in `claurst-tui` so the `/help` text output, the F1 help
-/// overlay, and the command palette all group commands identically.
-fn command_category(name: &str) -> &'static str {
-    claurst_tui::app::slash_command_category(name)
-}
-
 #[async_trait]
 impl SlashCommand for HelpCommand {
     fn name(&self) -> &str {
@@ -503,93 +499,63 @@ impl SlashCommand for HelpCommand {
         "Show available commands and usage information"
     }
 
-    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
-        if !args.is_empty() {
-            // Show help for a specific command
-            if let Some(cmd) = find_command(args) {
-                let aliases = cmd.aliases();
-                let alias_line = if aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\nAliases: {}",
-                        aliases
-                            .iter()
-                            .map(|a| format!("/{}", a))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let args = args.trim().trim_start_matches('/');
+        if let Some(report) = args
+            .strip_prefix("feedback")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return BugCommand.execute(report.trim(), ctx).await;
+        }
+        let builtin = builtin_catalog();
+        if let Some(spec) = catalog::find_catalog_spec(&builtin, args) {
+            if let catalog::CommandLifecycle::Removed { replacement } = &spec.lifecycle {
                 return CommandResult::Message(format!(
-                    "/{name}{aliases}\n{desc}\n\n{help}",
-                    name = cmd.name(),
-                    aliases = alias_line,
-                    desc = cmd.description(),
-                    help = cmd.help(),
+                    "/{} was removed; use /{}",
+                    args, replacement
                 ));
             }
-            return CommandResult::Error(format!("Unknown command: /{}", args));
         }
-
-        // Grouped output
-        let commands = all_commands();
-        let visible: Vec<_> = commands.iter().filter(|c| !c.hidden()).collect();
-
-        // Collect categories in stable order
-        let category_order = [
-            "Conversation",
-            "Settings",
-            "Usage & Cost",
-            "System",
-            "Auth & Permissions",
-            "Project",
-            "Integrations",
-            "Sessions & Remote",
-            "AI & Thinking",
-            "Tools & Extras",
-            "Coven",
-            "General",
-            "Other",
-        ];
-
-        let mut by_cat: std::collections::HashMap<&str, Vec<String>> =
-            std::collections::HashMap::new();
-
-        for cmd in &visible {
-            let cat = command_category(cmd.name());
-            let aliases = cmd.aliases();
-            let alias_str = if aliases.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " ({})",
-                    aliases
-                        .iter()
-                        .map(|a| format!("/{}", a))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            by_cat.entry(cat).or_default().push(format!(
-                "  /{:<20} {}",
-                format!("{}{}", cmd.name(), alias_str),
-                cmd.description()
-            ));
-        }
-
-        let mut output = String::from("Coven — Slash Commands\n");
-        output.push_str("════════════════════════════\n");
-
-        for cat in &category_order {
-            if let Some(entries) = by_cat.get(cat) {
-                output.push_str(&format!("\n{}\n", cat));
-                for entry in entries {
-                    output.push_str(&format!("{}\n", entry));
+        let plugin_commands = claurst_plugins::global_plugin_registry()
+            .map(|registry| registry.all_command_defs())
+            .unwrap_or_default();
+        let catalog = composed_catalog(&ctx.config, &ctx.working_dir, &plugin_commands);
+        if !args.is_empty() {
+            let entry = claurst_tui::flatten_command_catalog(&catalog)
+                .into_iter()
+                .find(|entry| {
+                    entry.path == args || entry.aliases.iter().any(|alias| alias == args)
+                });
+            // The catalog owns discovery. Retain handler details for argument-rich
+            // commands whose complete grammar is not a palette navigation tree.
+            let root = args.split_whitespace().next().unwrap_or(args);
+            let details = find_command(root).map(|command| command.help());
+            return match (entry, details) {
+                (Some(entry), details) => {
+                    let mut help = format!(
+                        "/{}\n{}\n\nUsage: {}",
+                        entry.path, entry.summary, entry.usage
+                    );
+                    if let Some(details) = details.filter(|details| !details.is_empty()) {
+                        help.push_str("\n\n");
+                        help.push_str(details);
+                    }
+                    CommandResult::Message(help)
                 }
-            }
+                (None, Some(details)) => CommandResult::Message(details.to_string()),
+                (None, None) => CommandResult::Error(format!("Unknown command: /{args}")),
+            };
         }
-
-        output.push_str("\nType /help <command> for detailed help on a specific command.");
+        let mut output = String::from("Coven — Slash Commands\n");
+        let mut category = "";
+        for entry in &catalog {
+            if entry.category != category {
+                category = &entry.category;
+                output.push_str(&format!("\n{category}\n"));
+            }
+            output.push_str(&format!("  /{:<20} {}\n", entry.path, entry.summary));
+        }
+        output.push_str("\nType /help <command> for usage, including grouped paths such as /help account login.");
         CommandResult::Message(output)
     }
 }
@@ -833,6 +799,7 @@ impl SlashCommand for ConfigCommand {
            /config statusline [show|hide] [cost|tokens|model|time|all]\n\
            /config terminal-setup\n\
            /config theme [name]      — theme picker / set theme\n\
+           /config splash [show|hide|toggle] — configure the welcome screen\n\
            /config keybindings       — open keybindings.json\n\
            /config output-style [s]  — show or set the output style\n\
            /config import            — import settings from ~/.claude\n\
@@ -850,9 +817,7 @@ impl SlashCommand for ConfigCommand {
             ));
         }
 
-        let mut subcommand_parts = args.splitn(2, char::is_whitespace);
-        let subcommand = subcommand_parts.next().unwrap_or_default();
-        let subcommand_args = subcommand_parts.next().unwrap_or_default().trim();
+        let (subcommand, subcommand_args) = grouped_commands::split_subcommand(args);
         match subcommand {
             "color" | "prompt-color" | "prompt_color" => {
                 return ColorCommand.execute(subcommand_args, ctx).await;
@@ -872,10 +837,12 @@ impl SlashCommand for ConfigCommand {
                 }
                 return TerminalSetupCommand.execute("", ctx).await;
             }
-            // Folded in Phase 3 (issue #73); the old top-level names stay
-            // hidden one-release aliases.
+            // Canonical config areas delegate to their retained implementations.
             "keybindings" | "keybinding" => {
                 return KeybindingsCommand.execute(subcommand_args, ctx).await;
+            }
+            "splash" => {
+                return SplashCommand.execute(subcommand_args, ctx).await;
             }
             "theme" => {
                 return ThemeCommand.execute(subcommand_args, ctx).await;
@@ -1129,6 +1096,9 @@ impl SlashCommand for SplashCommand {
     fn name(&self) -> &str {
         "splash"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
 
     fn aliases(&self) -> Vec<&str> {
         vec!["welcome-screen"]
@@ -1373,6 +1343,9 @@ impl SlashCommand for VersionCommand {
     fn name(&self) -> &str {
         "version"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["v"]
     }
@@ -1391,6 +1364,9 @@ impl SlashCommand for VersionCommand {
 impl SlashCommand for ReleaseNotesCommand {
     fn name(&self) -> &str {
         "release-notes"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["whats-new", "changelog"]
@@ -1420,6 +1396,9 @@ impl SlashCommand for ReleaseNotesCommand {
 impl SlashCommand for ResumeCommand {
     fn name(&self) -> &str {
         "resume"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["r", "continue"]
@@ -1470,8 +1449,7 @@ impl SlashCommand for StatusCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        // /status doctor absorbs the former standalone /doctor command
-        // (issue #73); the old name stays a hidden one-release alias.
+        // /status doctor owns the retained diagnostic implementation.
         let trimmed = args.trim();
         if let Some(rest) = trimmed.strip_prefix("doctor") {
             return DoctorCommand.execute(rest.trim(), ctx).await;
@@ -1663,20 +1641,20 @@ impl SlashCommand for GoalCommand {
     }
     fn help(&self) -> &str {
         "Usage:\n\
-         /goal <objective>              — set a new goal and begin working autonomously\n\
-         /goal --tokens 250K <text>     — set a goal with a soft token budget\n\
-         /goal                          — show current goal status\n\
-         /goal status                   — show current goal status\n\
-         /goal pause                    — pause the active goal\n\
-         /goal resume                   — resume a paused goal\n\
-         /goal clear                    — delete the current goal\n\
-         /goal complete                 — request a completion audit\n\n\
+         /coven goal <objective>              — set a new goal and begin working autonomously\n\
+         /coven goal --tokens 250K <text>     — set a goal with a soft token budget\n\
+         /coven goal                          — show current goal status\n\
+         /coven goal status                   — show current goal status\n\
+         /coven goal pause                    — pause the active goal\n\
+         /coven goal resume                   — resume a paused goal\n\
+         /coven goal clear                    — delete the current goal\n\
+         /coven goal complete                 — request a completion audit\n\n\
          Goals let Coven work autonomously across turns toward a single\n\
          verifiable objective. Coven will keep iterating until the goal is\n\
          complete, you pause it, or the 200-turn runaway guard fires.\n\n\
          Examples:\n\
-         /goal Migrate the project from Express to Fastify, keeping all routes passing\n\
-         /goal --tokens 500K Fix all TypeScript errors in src/ without breaking tests"
+         /coven goal Migrate the project from Express to Fastify, keeping all routes passing\n\
+         /coven goal --tokens 500K Fix all TypeScript errors in src/ without breaking tests"
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1705,7 +1683,8 @@ impl SlashCommand for GoalCommand {
                     }
                     Some(g) if g.status == claurst_core::GoalStatus::Paused => {
                         return CommandResult::Message(
-                            "Goal is already paused. Use /goal resume to continue.".to_string(),
+                            "Goal is already paused. Use /coven goal resume to continue."
+                                .to_string(),
                         );
                     }
                     _ => {}
@@ -1714,7 +1693,7 @@ impl SlashCommand for GoalCommand {
                     return CommandResult::Error(format!("Failed to pause goal: {}", e));
                 }
                 return CommandResult::Message(
-                    "Goal paused. Use /goal resume to continue.".to_string(),
+                    "Goal paused. Use /coven goal resume to continue.".to_string(),
                 );
             }
             "resume" => {
@@ -1729,7 +1708,8 @@ impl SlashCommand for GoalCommand {
                     }
                     Some(g) if g.status == claurst_core::GoalStatus::Complete => {
                         return CommandResult::Message(
-                            "Goal is complete. Use /goal <objective> to set a new one.".to_string(),
+                            "Goal is complete. Use /coven goal <objective> to set a new one."
+                                .to_string(),
                         );
                     }
                     _ => {}
@@ -1758,7 +1738,7 @@ impl SlashCommand for GoalCommand {
                 match store.get_active_goal(session_id) {
                     None => {
                         return CommandResult::Message(
-                            "No active goal. Set one with /goal <objective>.".to_string(),
+                            "No active goal. Set one with /coven goal <objective>.".to_string(),
                         );
                     }
                     Some(goal) => {
@@ -1796,8 +1776,8 @@ impl SlashCommand for GoalCommand {
 
         if objective.is_empty() {
             return CommandResult::Message(
-                "Usage: /goal <objective> [--tokens 250K]\n\
-                 Or: /goal status|pause|resume|clear|complete"
+                "Usage: /coven goal <objective> [--tokens 250K]\n\
+                 Or: /coven goal status|pause|resume|clear|complete"
                     .to_string(),
             );
         }
@@ -1832,9 +1812,9 @@ fn goal_status(session_id: &str) -> CommandResult {
         None => return CommandResult::Error("Could not open goal store.".to_string()),
     };
     match store.get_goal(session_id) {
-        None => {
-            CommandResult::Message("No active goal. Set one with:\n  /goal <objective>".to_string())
-        }
+        None => CommandResult::Message(
+            "No active goal. Set one with:\n  /coven goal <objective>".to_string(),
+        ),
         Some(g) => {
             let budget_line = g
                 .budget_display()
@@ -2074,8 +2054,11 @@ impl SlashCommand for BugCommand {
     fn name(&self) -> &str {
         "feedback"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
-        vec!["bug"]
+        vec!["bug", "survey"]
     }
     fn description(&self) -> &str {
         "Submit feedback about Coven"
@@ -2901,6 +2884,9 @@ impl SlashCommand for LoginCommand {
     fn name(&self) -> &str {
         "login"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Authenticate with Anthropic or Codex (multi-account)"
     }
@@ -2917,13 +2903,10 @@ impl SlashCommand for LoginCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        // Subcommands absorbed from the former /switch and /refresh commands
-        // (issue #73); both stay as hidden one-release aliases.
+        // Retain the historical nested forms while canonical account routing
+        // owns the former standalone /switch and /refresh commands.
         let trimmed = args.trim();
-        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-            Some((h, r)) => (h, r.trim()),
-            None => (trimmed, ""),
-        };
+        let (head, rest) = grouped_commands::split_subcommand(trimmed);
         match head {
             "switch" => return SwitchCommand.execute(rest, ctx).await,
             "refresh" => return RefreshCommand.execute(rest, ctx).await,
@@ -2967,6 +2950,9 @@ fn parse_label_arg(tokens: &[&str]) -> Option<String> {
 impl SlashCommand for LogoutCommand {
     fn name(&self) -> &str {
         "logout"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Clear credentials for the active account"
@@ -3051,6 +3037,9 @@ pub struct AccountsCommand;
 impl SlashCommand for AccountsCommand {
     fn name(&self) -> &str {
         "accounts"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "List stored Anthropic and Codex accounts"
@@ -3222,6 +3211,9 @@ fn parse_speech_level(args: &str) -> String {
 impl SlashCommand for IncantCommand {
     fn name(&self) -> &str {
         "incant"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Cast a speech incantation — change the model's voice (caveman, rocky) or lift it"
@@ -3547,8 +3539,7 @@ impl SlashCommand for ReviewCommand {
         match head {
             "security" => return SecurityReviewCommand.execute(rest, ctx).await,
             "ultra" | "ultrareview" => return UltrareviewCommand.execute(rest, ctx).await,
-            // /review comments absorbs the former standalone /pr-comments
-            // command (issue #73); the old name stays a hidden alias.
+            // /review comments owns the retained pull-request implementation.
             "comments" | "pr-comments" => {
                 return execute_named_command_from_slash("pr-comments", rest, ctx)
             }
@@ -3913,6 +3904,9 @@ impl SlashCommand for HooksCommand {
     fn name(&self) -> &str {
         "hooks"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Show configured event hooks"
     }
@@ -3956,6 +3950,9 @@ impl SlashCommand for HooksCommand {
 impl SlashCommand for McpCommand {
     fn name(&self) -> &str {
         "mcp"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Show MCP server status and manage connections"
@@ -4663,13 +4660,14 @@ impl SlashCommand for PermissionsCommand {
         "View or change tool permission settings"
     }
     fn help(&self) -> &str {
-        "Usage: /permissions [set <mode>|allow <tool>|deny <tool>|reset]\n\n\
+        "Usage: /permissions [set <mode>|allow <tool>|deny <tool>|sandbox|reset]\n\n\
          Modes: default, accept-edits, bypass-permissions, plan\n\n\
          Examples:\n\
            /permissions                    — show current permissions\n\
            /permissions set accept-edits   — auto-accept file edits\n\
            /permissions allow Bash         — allow a specific tool\n\
            /permissions deny Write         — deny a specific tool\n\
+           /permissions sandbox [on|off]   — configure sandboxed execution\n\
            /permissions reset              — clear overrides"
     }
 
@@ -4700,11 +4698,10 @@ impl SlashCommand for PermissionsCommand {
             ));
         }
 
-        let mut parts = args.splitn(2, ' ');
-        let sub = parts.next().unwrap_or("").trim();
-        let arg = parts.next().unwrap_or("").trim();
+        let (sub, arg) = grouped_commands::split_subcommand(args);
 
         match sub {
+            "sandbox" => SandboxToggleCommand.execute(arg, ctx).await,
             "set" => {
                 let mode = match arg.to_lowercase().as_str() {
                     "default" => claurst_core::config::PermissionMode::Default,
@@ -4871,32 +4868,30 @@ impl SlashCommand for SessionCommand {
         "Show or manage conversation sessions"
     }
     fn help(&self) -> &str {
-        "Usage: /session [list|rename <name>|fork [name]|branch ...|tag ...|add-dir <path>]\n\n\
+        "Usage: /session [list|rename <name>|resume [id]|fork [name]|branch ...|tag ...|add-dir <path>]\n\n\
          Without arguments, shows the current session (or the active remote URL).\n\n\
          Subcommands:\n\
            /session list           — list saved sessions\n\
            /session rename <name>  — rename the current session\n\
+           /session resume [id]    — resume a saved session\n\
            /session fork [name]    — fork the session into a new branch\n\
            /session branch ...     — create/switch/list conversation branches\n\
            /session tag ...        — toggle searchable session tags\n\
            /session add-dir <path> — add a workspace root to the session\n\n\
-         The legacy /fork, /branch, /tag, and /add-dir commands remain hidden\n\
-         one-release compatibility aliases."
+         Former /fork, /branch, /tag, and /add-dir roots now point here."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let trimmed = args.trim();
         // /session rename [...] absorbs the former standalone /rename command.
-        if let Some(rest) = trimmed.strip_prefix("rename") {
-            return RenameCommand.execute(rest.trim(), ctx).await;
+        let (head, rest) = grouped_commands::split_subcommand(trimmed);
+        if head == "rename" {
+            return RenameCommand.execute(rest, ctx).await;
         }
         // Subcommands absorbed from the former /fork, /branch, /tag, and
         // /add-dir commands (issue #73).
-        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-            Some((h, r)) => (h, r.trim()),
-            None => (trimmed, ""),
-        };
         match head {
+            "resume" => return ResumeCommand.execute(rest, ctx).await,
             "fork" => return ForkCommand.execute(rest, ctx).await,
             "branch" => return execute_named_command_from_slash("branch", rest, ctx),
             "tag" => return execute_named_command_from_slash("tag", rest, ctx),
@@ -5061,18 +5056,35 @@ impl SlashCommand for ThinkingCommand {
     }
 
     fn help(&self) -> &str {
-        "Usage: /thinking [back ...]\n\n\
-         Shows extended-thinking availability for the active model.\n\
-         /thinking back [play] shows extended-thinking traces from previous\n\
-         responses (absorbing the former /think-back command)."
+        #[cfg(feature = "steer")]
+        {
+            "Usage: /thinking [back ...|steer <message>]\n\n\
+             Shows extended-thinking availability for the active model.\n\
+             /thinking back [play] shows extended-thinking traces from previous\n\
+             responses (absorbing the former /think-back command).\n\
+             /thinking steer <message> queues guidance for a running turn in the TUI."
+        }
+        #[cfg(not(feature = "steer"))]
+        {
+            "Usage: /thinking [back ...]\n\n\
+             Shows extended-thinking availability for the active model.\n\
+             /thinking back [play] shows extended-thinking traces from previous\n\
+             responses (absorbing the former /think-back command)."
+        }
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        // /thinking back absorbs the former standalone /think-back command
-        // (issue #73); the old name stays a hidden one-release alias.
+        // /thinking back owns the retained thinking-trace implementation.
         let trimmed = args.trim();
-        if let Some(rest) = trimmed.strip_prefix("back") {
-            return ThinkBackCommand.execute(rest.trim(), ctx).await;
+        let (subcommand, remaining_args) = grouped_commands::split_subcommand(trimmed);
+        if subcommand == "back" {
+            return ThinkBackCommand.execute(remaining_args, ctx).await;
+        }
+        #[cfg(feature = "steer")]
+        if subcommand == "steer" {
+            return CommandResult::Error(
+                "Use /thinking steer <message> while an interactive turn is running.".to_string(),
+            );
         }
         // Extended thinking is configured through the model; just inform the user
         let model = ctx.config.effective_model();
@@ -5281,8 +5293,7 @@ impl SlashCommand for ExportCommand {
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         // ── Parse flags ────────────────────────────────────────────────────
         let args = args.trim();
-        // Subcommands absorbed from the former /copy and /share commands
-        // (issue #73); both stay as hidden one-release aliases.
+        // /export owns the retained copy and share implementations.
         let (head, rest) = match args.split_once(char::is_whitespace) {
             Some((h, r)) => (h, r.trim()),
             None => (args, ""),
@@ -5940,11 +5951,11 @@ impl SlashCommand for EffortCommand {
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        // /effort fast absorbs the former standalone /fast command
-        // (issue #73); the old name stays a hidden one-release alias.
+        // /effort fast owns the retained fast-mode implementation.
         let trimmed = args.trim();
-        if let Some(rest) = trimmed.strip_prefix("fast") {
-            return FastCommand.execute(rest.trim(), ctx).await;
+        let (subcommand, rest) = grouped_commands::split_subcommand(trimmed);
+        if subcommand == "fast" {
+            return FastCommand.execute(rest, ctx).await;
         }
         match args.trim() {
             "" => CommandResult::Message(
@@ -6674,6 +6685,9 @@ impl SlashCommand for ChromeCommand {
     fn name(&self) -> &str {
         "chrome"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Browser automation via Chrome DevTools Protocol (CDP)"
     }
@@ -7107,12 +7121,21 @@ impl SlashCommand for UpgradeCommand {
         "Check for updates and download the latest release"
     }
     fn help(&self) -> &str {
-        "Usage: /update\n\n\
+        "Usage: /update [version|notes]\n\n\
          Checks GitHub releases for the latest version of Coven.\n\
-         If a newer version is available, shows where to download it."
+         If a newer version is available, shows where to download it.\n\
+         Use /update version to show the installed version or /update notes for highlights."
     }
 
-    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let (subcommand, remaining_args) = grouped_commands::split_subcommand(args);
+        match subcommand {
+            "version" => return VersionCommand.execute(remaining_args, ctx).await,
+            "notes" | "release-notes" => {
+                return ReleaseNotesCommand.execute(remaining_args, ctx).await
+            }
+            _ => {}
+        }
         let current = claurst_core::constants::APP_VERSION;
 
         match fetch_latest_release(current).await {
@@ -7810,6 +7833,9 @@ impl SlashCommand for BtwCommand {
     fn name(&self) -> &str {
         "whisper"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["btw"]
     }
@@ -7849,6 +7875,9 @@ impl SlashCommand for BtwCommand {
 impl SlashCommand for SandboxToggleCommand {
     fn name(&self) -> &str {
         "sandbox"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["sandbox-toggle"]
@@ -8451,6 +8480,9 @@ impl SlashCommand for ProvidersCommand {
     fn name(&self) -> &str {
         "providers"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "List available AI providers and their status"
     }
@@ -8517,6 +8549,9 @@ impl SlashCommand for ConnectCommand {
     fn name(&self) -> &str {
         "connect"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Connect an AI provider"
     }
@@ -8537,7 +8572,7 @@ impl SlashCommand for ConnectCommand {
 // agent map — `default_agents_with_familiars_and_config` — so they share a
 // single command. `/familiar` absorbs the former `/agent` (which had
 // absorbed `/agents` and `/managed-agents`, issue #73); `agent` stays as an
-// alias and `/agents` / `/managed-agents` remain hidden one-release shims.
+// ergonomic alias while the removed slash roots point users here.
 //
 // Switching updates settings.json AND live-swaps app.config so the mascot
 // changes immediately; the TUI main loop also activates the familiar's
@@ -8801,10 +8836,50 @@ fn familiar_rename(rest: &str) -> CommandResult {
 }
 
 #[async_trait]
+impl SlashCommand for HandoffCommand {
+    fn name(&self) -> &str {
+        "handoff"
+    }
+
+    fn hidden(&self) -> bool {
+        true
+    }
+
+    fn description(&self) -> &str {
+        "Hand work to a familiar in the TUI"
+    }
+
+    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        CommandResult::Silent
+    }
+}
+
+#[cfg(feature = "steer")]
+#[async_trait]
+impl SlashCommand for SteerCommand {
+    fn name(&self) -> &str {
+        "steer"
+    }
+
+    fn hidden(&self) -> bool {
+        true
+    }
+
+    fn description(&self) -> &str {
+        "Queue guidance for the running turn in the TUI"
+    }
+
+    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        CommandResult::Silent
+    }
+}
+
+#[async_trait]
 impl SlashCommand for FamiliarCommand {
     fn name(&self) -> &str {
         "familiar"
     }
+
     fn description(&self) -> &str {
         "Your familiar & agents — switch persona, inspect, and manage"
     }
@@ -8812,13 +8887,16 @@ impl SlashCommand for FamiliarCommand {
         vec!["familiars", "agent"]
     }
     fn help(&self) -> &str {
-        "Usage: /familiar [name | info <name> | list|create|edit|delete [name] | managed ... | clear | wipe-roster | auto]\n\n\
+        "Usage: /familiar [name | incant ... | whisper <question> | handoff <name> | info <name> | list|create|edit|delete [name] | managed ... | clear | wipe-roster | auto]\n\n\
          One surface for familiars and agents — both resolve through the same\n\
          runtime agent map and access-tier security under the hood.\n\n\
          /familiar                  Current familiar, roster, and agents (with access tiers)\n\
          /familiar <name>           Switch familiar — persists and applies the persona's\n\
                                     agent definition + tool access immediately\n\
          /familiar <agent>          Details for a built-in or workspace agent\n\
+         /familiar incant ...       Change the model's speech incantation\n\
+         /familiar whisper <text>   Ask a side question without history\n\
+         /familiar handoff <name>   Hand the current work to a familiar in the TUI\n\
          /familiar info <name>      Details for any familiar or agent\n\
          /familiar list|create|edit|delete [name]   Manage workspace agents\n\
          /familiar new <id> [name]  Create a familiar (standalone; writes ~/.coven/familiars.toml)\n\
@@ -8835,12 +8913,12 @@ impl SlashCommand for FamiliarCommand {
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
         let trimmed = args.trim();
-        let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-            Some((h, r)) => (h, r.trim()),
-            None => (trimmed, ""),
-        };
+        let (head, rest) = grouped_commands::split_subcommand(trimmed);
 
         match head {
+            "incant" => return IncantCommand.execute(rest, ctx).await,
+            "whisper" => return BtwCommand.execute(rest, ctx).await,
+            "handoff" => return CommandResult::Silent,
             // Workspace agent management (absorbed from /agents via /agent).
             "list" | "create" | "edit" | "delete" => {
                 return execute_named_command_from_slash("agents", trimmed, ctx);
@@ -10007,8 +10085,7 @@ impl SlashCommand for CovenCommand {
         let sub = parts.next().unwrap_or("").trim();
         let rest = parts.next().unwrap_or("").trim();
 
-        // /coven goal absorbs the former standalone /goal command
-        // (issue #73); /goal stays as a hidden one-release alias.
+        // /coven goal owns the retained durable-goal implementation.
         if sub == "goal" {
             return GoalCommand.execute(rest, ctx).await;
         }
@@ -10604,6 +10681,9 @@ impl SlashCommand for LinkCommand {
     fn name(&self) -> &str {
         "link"
     }
+    fn hidden(&self) -> bool {
+        true
+    }
     fn aliases(&self) -> Vec<&str> {
         vec!["links"]
     }
@@ -10727,6 +10807,9 @@ impl SlashCommand for LinkCommand {
 impl SlashCommand for AttachCommand {
     fn name(&self) -> &str {
         "attach"
+    }
+    fn hidden(&self) -> bool {
+        true
     }
     fn aliases(&self) -> Vec<&str> {
         vec!["attachments"]
@@ -10886,7 +10969,8 @@ impl SlashCommand for AttachCommand {
 }
 
 static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
-    vec![
+    let mut commands: Vec<Box<dyn SlashCommand>> = vec![
+        Box::new(AccountCommand),
         Box::new(HelpCommand),
         Box::new(ClearCommand),
         Box::new(CompactCommand),
@@ -10897,111 +10981,54 @@ static COMMANDS: Lazy<Vec<Box<dyn SlashCommand>>> = Lazy::new(|| {
         Box::new(VersionCommand),
         Box::new(ReleaseNotesCommand),
         Box::new(ResumeCommand),
-        Box::new(ReloadPluginsCommand),
         Box::new(StatusCommand),
         Box::new(DiffCommand),
         Box::new(MemoryCommand),
         Box::new(BugCommand),
         Box::new(UsageCommand),
-        Box::new(DoctorCommand),
         Box::new(LoginCommand),
         Box::new(LogoutCommand),
         Box::new(AccountsCommand),
-        Box::new(SwitchCommand),
-        Box::new(RefreshCommand),
         Box::new(IncantCommand),
         Box::new(InitCommand),
         Box::new(LearnCommand),
         Box::new(ReviewCommand),
         Box::new(HooksCommand),
-        Box::new(ImportConfigCommand),
         Box::new(McpCommand),
         Box::new(PermissionsCommand),
         Box::new(PlanCommand),
         Box::new(TasksCommand),
         Box::new(SessionCommand),
-        Box::new(ForkCommand),
         Box::new(ThinkingCommand),
-        Box::new(ThemeCommand),
-        Box::new(OutputStyleCommand),
-        Box::new(KeybindingsCommand),
         Box::new(SplashCommand),
-        // New commands
         Box::new(ExportCommand),
-        Box::new(ShareCommand),
         Box::new(SkillsCommand),
         Box::new(RewindCommand),
         Box::new(EffortCommand),
         Box::new(CommitCommand),
-        Box::new(NamedCommandAdapter {
-            slash_name: "add-dir",
-            target_name: "add-dir",
-            slash_aliases: &[],
-            slash_description: "Add a directory to Coven's allowed workspace paths",
-            slash_help: "Usage: /add-dir <path>",
-            slash_hidden: true,
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "agents",
-            target_name: "agents",
-            slash_aliases: &[],
-            slash_description: "Manage and configure sub-agents",
-            slash_help: "Usage: /agents [list|create|edit|delete|reset] [name]\nDeprecated: use /familiar [list|create|edit|delete|reset-roster|managed]",
-            slash_hidden: true,
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "branch",
-            target_name: "branch",
-            slash_aliases: &[],
-            slash_description: "Create a branch of the current conversation at this point",
-            slash_help: "Usage: /branch [create|switch|list] [name]",
-            slash_hidden: true,
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "tag",
-            target_name: "tag",
-            slash_aliases: &[],
-            slash_description: "Toggle a searchable tag on the current session",
-            slash_help: "Usage: /tag [list|add|remove] [tag]",
-            slash_hidden: true,
-        }),
-        Box::new(NamedCommandAdapter {
-            slash_name: "pr-comments",
-            target_name: "pr-comments",
-            slash_aliases: &[],
-            slash_description: "Get comments from a GitHub pull request",
-            slash_help: "Usage: /pr-comments <PR-number>",
-            slash_hidden: true,
-        }),
-        // Batch-1 new commands
-        Box::new(CopyCommand),
         Box::new(ChromeCommand),
         Box::new(UpgradeCommand),
-        Box::new(FastCommand),
-        Box::new(ThinkBackCommand),
-        // /whisper (BtwCommand) and /sandbox (SandboxToggleCommand)
         Box::new(BtwCommand),
         Box::new(SandboxToggleCommand),
-        // Advisor
-        Box::new(AdvisorCommand),
-        // Snapshot / revert system
-        // Multi-provider support
         Box::new(ProvidersCommand),
         Box::new(ConnectCommand),
-        // Unified familiar & agent surface (/familiar, alias /agent)
         Box::new(FamiliarCommand),
-        // Session search (SQLite)
+        Box::new(HandoffCommand),
+        #[cfg(feature = "steer")]
+        Box::new(SteerCommand),
         Box::new(SearchCommand),
-        // Managed agent (manager-executor) architecture
-        Box::new(ManagedAgentsCommand),
-        // Durable long-running goals
-        Box::new(GoalCommand),
-        // Structured link/attachment stash
         Box::new(LinkCommand),
         Box::new(AttachCommand),
-        // Coven daemon control surface (sessions, harness runs, rituals)
         Box::new(CovenCommand),
-    ]
+        Box::new(IntegrationsCommand),
+        Box::new(StashCommand),
+    ];
+    let catalog = catalog::builtin_catalog_template();
+    commands.retain(|command| {
+        !catalog::find_catalog_spec(&catalog, command.name())
+            .is_some_and(|spec| matches!(spec.lifecycle, catalog::CommandLifecycle::Removed { .. }))
+    });
+    commands
 });
 
 /// Return all built-in slash commands.
@@ -11018,18 +11045,211 @@ pub fn find_command(name: &str) -> Option<&'static dyn SlashCommand> {
         .map(|c| c.as_ref())
 }
 
-/// Build `HelpEntry` values for all non-hidden commands, suitable for
-/// populating `HelpOverlay::commands` at startup.
-pub fn build_help_entries() -> Vec<claurst_tui::overlays::HelpEntry> {
-    all_commands()
-        .iter()
-        .filter(|c| !c.hidden())
-        .map(|c| claurst_tui::overlays::HelpEntry {
-            name: c.name().to_string(),
-            aliases: c.aliases().join(", "),
-            description: c.description().to_string(),
-            category: command_category(c.name()).to_string(),
+/// Return built-in catalog metadata with registered primary command summaries.
+pub fn builtin_catalog() -> Vec<catalog::CommandSpec> {
+    let mut catalog = catalog::builtin_catalog_template();
+
+    for spec in &mut catalog {
+        if let Some(command) = all_commands()
+            .iter()
+            .find(|command| command.name() == spec.path)
+        {
+            spec.summary = SlashCommand::description(command.as_ref()).to_string();
+        }
+    }
+
+    catalog
+}
+
+impl From<catalog::CommandSpec> for claurst_tui::CommandPaletteEntry {
+    fn from(spec: catalog::CommandSpec) -> Self {
+        let source = match spec.source {
+            catalog::CommandSource::BuiltIn => "built_in",
+            catalog::CommandSource::User => "user",
+            catalog::CommandSource::Skill => "skill",
+            catalog::CommandSource::Plugin => "plugin",
+        };
+        Self {
+            path: spec.path,
+            aliases: spec.aliases,
+            summary: spec.summary,
+            usage: spec.usage,
+            category: spec.category.label().to_string(),
+            keywords: spec.keywords,
+            source: source.to_string(),
+            suggest_when: spec.suggest_when,
+            children: spec.children.into_iter().map(Self::from).collect(),
+        }
+    }
+}
+
+fn dynamic_catalog_entry(
+    path: String,
+    summary: String,
+    source: catalog::CommandSource,
+) -> catalog::CommandSpec {
+    catalog::CommandSpec::active(
+        &path,
+        &summary,
+        &format!("/{path} [arguments]"),
+        catalog::CommandCategory::Extend,
+        &[&path],
+    )
+    .with_source(source)
+}
+
+fn sort_catalog_for_presentation(catalog: &mut [catalog::CommandSpec]) {
+    for spec in catalog.iter_mut() {
+        sort_catalog_for_presentation(&mut spec.children);
+    }
+    catalog.sort_by(|left, right| {
+        left.category
+            .rank()
+            .cmp(&right.category.rank())
+            .then(left.path.cmp(&right.path))
+    });
+}
+
+fn retain_presentable_children(spec: &mut catalog::CommandSpec) {
+    spec.children.retain(|child| {
+        matches!(
+            &child.lifecycle,
+            catalog::CommandLifecycle::Active | catalog::CommandLifecycle::Advanced
+        )
+    });
+    for child in &mut spec.children {
+        retain_presentable_children(child);
+    }
+}
+
+fn visible_builtin_presentation_catalog() -> Vec<catalog::CommandSpec> {
+    builtin_catalog()
+        .into_iter()
+        .filter(|spec| {
+            matches!(
+                &spec.lifecycle,
+                catalog::CommandLifecycle::Active | catalog::CommandLifecycle::Advanced
+            )
         })
+        .filter_map(|mut spec| {
+            match find_command(&spec.path) {
+                Some(command) if command.hidden() => return None,
+                None if !TUI_ONLY_RESERVED_IDENTIFIERS.contains(&spec.path.as_str()) => {
+                    return None
+                }
+                _ => {}
+            }
+            retain_presentable_children(&mut spec);
+            Some(spec)
+        })
+        .collect()
+}
+
+const TUI_ONLY_RESERVED_IDENTIFIERS: &[&str] = &[
+    "changes", "context", "cost", "find", "rename", "stats", "vim", "voice",
+];
+
+fn builtin_reserved_identifiers() -> BTreeSet<String> {
+    catalog::flatten_catalog(&builtin_catalog())
+        .into_iter()
+        .flat_map(|spec| {
+            std::iter::once(spec.path.as_str()).chain(spec.aliases.iter().map(String::as_str))
+        })
+        .chain(
+            all_commands()
+                .iter()
+                .flat_map(|command| std::iter::once(command.name()).chain(command.aliases())),
+        )
+        .chain(TUI_ONLY_RESERVED_IDENTIFIERS.iter().copied())
+        .map(str::to_string)
+        .collect()
+}
+
+fn filter_dynamic_builtin_collisions(
+    dynamic_entries: Vec<catalog::CommandSpec>,
+) -> Vec<catalog::CommandSpec> {
+    let builtin_identifiers = builtin_reserved_identifiers();
+
+    dynamic_entries
+        .into_iter()
+        .filter(|spec| {
+            spec.flattened().into_iter().all(|entry| {
+                std::iter::once(entry.path.as_str())
+                    .chain(entry.aliases.iter().map(String::as_str))
+                    .all(|identifier| !builtin_identifiers.contains(identifier))
+            })
+        })
+        .collect()
+}
+
+/// Build the catalog presented by the current TUI command discovery surfaces.
+pub fn composed_catalog(
+    config: &claurst_core::config::Config,
+    cwd: &std::path::Path,
+    plugin_command_defs: &[claurst_plugins::PluginCommandDef],
+) -> Vec<claurst_tui::CommandPaletteEntry> {
+    let user_templates = filter_dynamic_builtin_collisions(
+        config
+            .commands
+            .iter()
+            .map(|(name, template)| {
+                dynamic_catalog_entry(
+                    name.clone(),
+                    template
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| "Custom command".to_string()),
+                    catalog::CommandSource::User,
+                )
+            })
+            .collect(),
+    );
+
+    let mut discovered_skills = claurst_core::discover_skills(cwd, &config.skills)
+        .into_values()
+        .collect::<Vec<_>>();
+    discovered_skills.sort_by(|left, right| left.name.cmp(&right.name));
+    let discovered_skills = filter_dynamic_builtin_collisions(
+        discovered_skills
+            .into_iter()
+            .map(|skill| {
+                dynamic_catalog_entry(
+                    skill.name,
+                    if skill.description.is_empty() {
+                        "Discovered skill".to_string()
+                    } else {
+                        skill.description
+                    },
+                    catalog::CommandSource::Skill,
+                )
+            })
+            .collect(),
+    );
+
+    let plugin_commands = filter_dynamic_builtin_collisions(
+        plugin_command_defs
+            .iter()
+            .map(|command| {
+                dynamic_catalog_entry(
+                    command.name.clone(),
+                    command.description.clone(),
+                    catalog::CommandSource::Plugin,
+                )
+            })
+            .collect(),
+    );
+
+    let mut catalog = catalog::compose_catalogs(
+        visible_builtin_presentation_catalog(),
+        user_templates,
+        discovered_skills,
+        plugin_commands,
+    );
+    sort_catalog_for_presentation(&mut catalog);
+
+    catalog
+        .into_iter()
+        .map(claurst_tui::CommandPaletteEntry::from)
         .collect()
 }
 
@@ -11145,6 +11365,85 @@ pub fn commands_from_discovered_skills(
         .collect()
 }
 
+struct CatalogCommandResolution {
+    path: String,
+    input_path: String,
+    lifecycle: catalog::CommandLifecycle,
+    dispatch_name: String,
+    dispatch_args: String,
+}
+
+fn resolve_catalog_command(name: &str, args: &str) -> Option<CatalogCommandResolution> {
+    let name = name.trim_start_matches('/').trim().to_ascii_lowercase();
+    let catalog = catalog::builtin_catalog_template();
+    let (child, remaining_args) = grouped_commands::split_subcommand(args);
+    let child = child.to_ascii_lowercase();
+    let child_input = (!child.is_empty()).then(|| format!("{name} {child}"));
+    let child_spec = child_input
+        .as_deref()
+        .and_then(|path| catalog::find_catalog_spec(&catalog, path))
+        .filter(|spec| spec.path.contains(' '));
+    let direct_spec = catalog::find_catalog_spec(&catalog, &name);
+    let (spec, matched_child_input) = child_spec
+        .map(|spec| (spec, true))
+        .or_else(|| direct_spec.map(|spec| (spec, false)))?;
+
+    let (dispatch_name, dispatch_args) = match spec.path.split_once(' ') {
+        Some((parent, canonical_child)) => {
+            let child_args = if matched_child_input {
+                remaining_args
+            } else {
+                args.trim()
+            };
+            let dispatch_args = if child_args.is_empty() {
+                canonical_child.to_string()
+            } else {
+                format!("{canonical_child} {child_args}")
+            };
+            (parent.to_string(), dispatch_args)
+        }
+        None => (name.to_string(), args.trim().to_string()),
+    };
+
+    Some(CatalogCommandResolution {
+        path: spec.path.clone(),
+        input_path: if matched_child_input {
+            child_input.unwrap_or_else(|| name.to_string())
+        } else {
+            name.to_string()
+        },
+        lifecycle: spec.lifecycle.clone(),
+        dispatch_name,
+        dispatch_args,
+    })
+}
+
+/// Resolve a built-in catalog path to its canonical path.
+pub fn canonical_catalog_path(name: &str, args: &str) -> Option<String> {
+    resolve_catalog_command(name, args).map(|resolution| resolution.path)
+}
+
+/// Validate a parsed interactive slash command before a presentation layer
+/// intercepts it. This prevents removed paths from opening or mutating TUI
+/// surfaces. Removed paths never dispatch to a retained implementation.
+pub fn preflight_interactive_slash_command(
+    name: &str,
+    args: &str,
+    _ctx: &mut CommandContext,
+) -> Result<(), String> {
+    let Some(resolution) = resolve_catalog_command(name, args) else {
+        return Ok(());
+    };
+
+    match &resolution.lifecycle {
+        catalog::CommandLifecycle::Removed { replacement } => Err(format!(
+            "/{} was removed; use /{}",
+            resolution.input_path, replacement
+        )),
+        catalog::CommandLifecycle::Active | catalog::CommandLifecycle::Advanced => Ok(()),
+    }
+}
+
 /// Execute a slash command string (with leading /).
 pub async fn execute_command(input: &str, ctx: &mut CommandContext) -> Option<CommandResult> {
     if !claurst_tui::input::is_slash_command(input) {
@@ -11152,13 +11451,32 @@ pub async fn execute_command(input: &str, ctx: &mut CommandContext) -> Option<Co
     }
     let (name, args) = claurst_tui::input::parse_slash_command(input);
 
-    // First check built-in commands.
-    if let Some(cmd) = find_command(name) {
-        return Some(cmd.execute(args, ctx).await);
+    if let Err(error) = preflight_interactive_slash_command(name, args, ctx) {
+        return Some(CommandResult::Error(error));
+    }
+
+    if let Some(resolution) = resolve_catalog_command(name, args) {
+        if let Some(cmd) = find_command(&resolution.dispatch_name) {
+            return Some(cmd.execute(&resolution.dispatch_args, ctx).await);
+        }
+
+        let tui_route = TUI_ONLY_RESERVED_IDENTIFIERS.contains(&resolution.path.as_str())
+            || matches!(resolution.path.as_str(), "familiar handoff")
+            || cfg!(feature = "steer")
+                && matches!(resolution.path.as_str(), "steer" | "thinking steer");
+        if tui_route {
+            return Some(CommandResult::Silent);
+        }
+    }
+
+    let cmd_name = name.trim_start_matches('/');
+    if builtin_reserved_identifiers().contains(cmd_name) {
+        return Some(CommandResult::Error(format!(
+            "Unknown command: /{cmd_name}"
+        )));
     }
 
     // Check user-defined command templates from settings.
-    let cmd_name = name.trim_start_matches('/');
     if let Some(tmpl) = ctx.config.commands.get(cmd_name).cloned() {
         let tc = TemplateCommand {
             name: cmd_name.to_string(),
@@ -11196,7 +11514,10 @@ pub async fn execute_command(input: &str, ctx: &mut CommandContext) -> Option<Co
 // ---------------------------------------------------------------------------
 // Named commands module (top-level `claude <name>` subcommands)
 // ---------------------------------------------------------------------------
+pub mod catalog;
+mod grouped_commands;
 pub mod named_commands;
+pub use grouped_commands::{AccountCommand, IntegrationsCommand, StashCommand};
 
 // ---------------------------------------------------------------------------
 // Stats analytics (persisted transcript aggregation) — backs `coven-code stats`.
@@ -11325,6 +11646,239 @@ mod tests {
     #[test]
     fn test_all_commands_non_empty() {
         assert!(!all_commands().is_empty());
+    }
+
+    #[test]
+    fn grouped_command_roots_are_registered() {
+        for name in ["account", "integrations", "stash"] {
+            assert!(
+                find_command(name).is_some(),
+                "/{name} should be registered as a canonical grouped command"
+            );
+        }
+    }
+
+    #[test]
+    fn non_hidden_registered_primaries_match_the_canonical_command_set() {
+        let actual = all_commands()
+            .iter()
+            .filter(|command| !command.hidden())
+            .map(|command| command.name())
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "account",
+            "clear",
+            "commit",
+            "compact",
+            "config",
+            "coven",
+            "diff",
+            "effort",
+            "exit",
+            "export",
+            "familiar",
+            "help",
+            "init",
+            "integrations",
+            "learn",
+            "memory",
+            "model",
+            "permissions",
+            "plan",
+            "plugin",
+            "review",
+            "rewind",
+            "search",
+            "session",
+            "skills",
+            "stash",
+            "status",
+            "tasks",
+            "thinking",
+            "update",
+            "usage",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual.len(), 31);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn active_catalog_child_aliases_dispatch_through_their_parent() {
+        for (name, args) in [
+            ("reload", ""),
+            ("plugin", "refresh"),
+            ("plugins", "reload"),
+            ("plugins", "refresh"),
+        ] {
+            let resolution = resolve_catalog_command(name, args)
+                .unwrap_or_else(|| panic!("/{name} {args} should resolve"));
+            assert_eq!(resolution.path, "plugin reload");
+            assert_eq!(resolution.dispatch_name, "plugin");
+            assert_eq!(resolution.dispatch_args, "reload");
+            assert!(matches!(
+                resolution.lifecycle,
+                catalog::CommandLifecycle::Active
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_parents_delegate_and_explain_unknown_children() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        assert!(matches!(
+            execute_command("/account login --codex", &mut ctx).await,
+            Some(CommandResult::StartLoginForProvider { provider, .. })
+                if provider == claurst_core::accounts::PROVIDER_CODEX
+        ));
+        assert!(matches!(
+            execute_command("/account refresh", &mut ctx).await,
+            Some(CommandResult::RefreshProviderState)
+        ));
+        assert!(matches!(
+            execute_command("/account connect", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("connect dialog")
+        ));
+        assert!(matches!(
+            execute_command("/integrations hooks", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("No hooks configured")
+        ));
+        assert!(matches!(
+            execute_command("/integrations chrome", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("Usage: /chrome")
+        ));
+        assert!(matches!(
+            execute_command("/stash link not-a-url", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("Usage:")
+        ));
+
+        for (input, children) in [
+            ("/account mystery", "login, logout, list, dedupe"),
+            ("/integrations mystery", "hooks, mcp, chrome"),
+            ("/stash mystery", "link, links, attach, attachments"),
+        ] {
+            let result = execute_command(input, &mut ctx).await;
+            let Some(CommandResult::Error(message)) = result else {
+                panic!("{input} should reject an unknown child");
+            };
+            assert!(message.contains("Valid children:"), "{message}");
+            assert!(message.contains(children), "{message}");
+            assert!(message.contains("Usage: /"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_parent_subcommands_delegate_to_existing_handlers() {
+        let _guard = CommandEnvGuard::with_coven_home(None);
+        let mut ctx = make_ctx();
+
+        assert!(matches!(
+            execute_command("/config splash show", &mut ctx).await,
+            Some(CommandResult::ConfigChangeMessage(_, _))
+        ));
+        assert!(matches!(
+            execute_command("/permissions sandbox status", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("Sandbox mode")
+        ));
+        assert!(matches!(
+            execute_command("/familiar incant caveman", &mut ctx).await,
+            Some(CommandResult::SpeechMode { .. })
+        ));
+        assert!(matches!(
+            execute_command("/familiar whisper explain this", &mut ctx).await,
+            Some(CommandResult::UserMessage(message)) if message.contains("explain this")
+        ));
+        assert!(matches!(
+            execute_command("/update version", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("Coven v")
+        ));
+        assert!(matches!(
+            execute_command("/update notes", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("What's new")
+        ));
+        assert!(matches!(
+            execute_command("/thinking back", &mut ctx).await,
+            Some(CommandResult::Message(_))
+        ));
+
+        let session_result = execute_command("/session resume", &mut ctx).await;
+        assert!(
+            !matches!(
+                session_result,
+                Some(CommandResult::Error(message)) if message.contains("Unknown subcommand")
+            ),
+            "/session resume should delegate to ResumeCommand"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_paths_return_exact_replacements_before_dynamic_templates() {
+        let mut ctx = make_ctx();
+        let removed = [
+            ("reload-plugins", "plugin reload"),
+            ("doctor", "status doctor"),
+            ("switch", "account switch"),
+            ("refresh", "account refresh"),
+            ("import-config", "config import"),
+            ("fork", "session fork"),
+            ("theme", "config theme"),
+            ("output-style", "config output-style"),
+            ("keybindings", "config keybindings"),
+            ("share", "export share"),
+            ("add-dir", "session add-dir"),
+            ("agents", "familiar list"),
+            ("branch", "session branch"),
+            ("tag", "session tag"),
+            ("pr-comments", "review pr-comments"),
+            ("copy", "export copy"),
+            ("fast", "effort fast"),
+            ("think-back", "thinking back"),
+            ("advisor", "config advisor"),
+            ("managed-agents", "familiar managed"),
+            ("goal", "coven goal"),
+        ];
+
+        for (name, replacement) in removed {
+            assert_eq!(
+                preflight_interactive_slash_command(name, "", &mut ctx),
+                Err(format!("/{name} was removed; use /{replacement}")),
+                "/{name} did not return its exact interactive preflight error"
+            );
+            ctx.config.commands.insert(
+                name.to_string(),
+                claurst_core::CommandTemplate {
+                    template: "dynamic command must not run".to_string(),
+                    ..Default::default()
+                },
+            );
+            let result = execute_command(&format!("/{name}"), &mut ctx).await;
+            assert!(
+                matches!(
+                    result,
+                    Some(CommandResult::Error(message))
+                        if message == format!("/{name} was removed; use /{replacement}")
+                ),
+                "/{name} did not return its exact removal error"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_accounts_dedupe_has_specific_replacement() {
+        let resolution =
+            resolve_catalog_command("accounts", "dedupe").expect("accounts dedupe should resolve");
+        assert_eq!(resolution.path, "accounts dedupe");
+        assert_eq!(resolution.dispatch_name, "accounts");
+        assert_eq!(resolution.dispatch_args, "dedupe");
+        assert!(matches!(
+            resolution.lifecycle,
+            catalog::CommandLifecycle::Removed { ref replacement, .. }
+                if replacement == "account dedupe"
+        ));
     }
 
     // ---- Stash command tests -------------------------------------------------
@@ -11504,6 +12058,305 @@ mod tests {
     }
 
     #[test]
+    fn active_presentation_paths_are_unique() {
+        let mut paths = std::collections::HashSet::new();
+        for spec in catalog::flatten_catalog(&visible_builtin_presentation_catalog()) {
+            assert!(
+                paths.insert(spec.path.as_str()),
+                "duplicate presentation path"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_presentation_includes_all_non_hidden_registered_primaries() {
+        let catalog = visible_builtin_presentation_catalog();
+        let paths = catalog::flatten_catalog(&catalog)
+            .into_iter()
+            .map(|spec| spec.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let registered_primaries = all_commands()
+            .iter()
+            .filter(|command| !command.hidden())
+            .map(|command| command.name())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(
+            registered_primaries.is_subset(&paths),
+            "non-hidden registered commands missing from presentation: {:?}",
+            registered_primaries.difference(&paths).collect::<Vec<_>>()
+        );
+        for path in ["account", "integrations", "stash"] {
+            assert!(
+                paths.contains(path),
+                "canonical grouped root /{path} is missing"
+            );
+        }
+        for path in ["login", "accounts", "mcp", "attach", "resume"] {
+            assert!(
+                !paths.contains(path),
+                "deprecated root /{path} must not be presented"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_presentation_includes_all_active_folded_children() {
+        let catalog = visible_builtin_presentation_catalog();
+        let paths = catalog::flatten_catalog(&catalog)
+            .into_iter()
+            .map(|spec| spec.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        for path in [
+            "account login",
+            "account logout",
+            "account list",
+            "account dedupe",
+            "account providers",
+            "account connect",
+            "account switch",
+            "account refresh",
+            "config theme",
+            "config output-style",
+            "config splash",
+            "usage cost",
+            "usage context",
+            "usage stats",
+            "session rename",
+            "session resume",
+            "session fork",
+            "session branch",
+            "session tag",
+            "session add-dir",
+            "review pr-comments",
+            "review security",
+            "review ultra",
+            "rewind list",
+            "rewind diff",
+            "thinking back",
+            "effort fast",
+            "export copy",
+            "export share",
+            "status doctor",
+            "plugin reload",
+            "integrations hooks",
+            "integrations mcp",
+            "integrations chrome",
+            "stash link",
+            "stash attach",
+            "permissions sandbox",
+            "update version",
+            "update notes",
+            "familiar incant",
+            "familiar whisper",
+            "familiar handoff",
+        ] {
+            assert!(paths.contains(path), "missing visible child path {path}");
+        }
+        #[cfg(feature = "steer")]
+        assert!(paths.contains("thinking steer"));
+    }
+
+    #[test]
+    fn active_catalog_children_have_a_command_or_tui_route() {
+        let command_routes = [
+            "help feedback",
+            "account login",
+            "account logout",
+            "account list",
+            "account dedupe",
+            "account providers",
+            "account switch",
+            "account refresh",
+            "config splash",
+            "config theme",
+            "config output-style",
+            "config keybindings",
+            "config import",
+            "config advisor",
+            "coven goal",
+            "effort fast",
+            "export share",
+            "export copy",
+            "familiar incant",
+            "familiar whisper",
+            "familiar list",
+            "familiar managed",
+            "integrations chrome",
+            "permissions sandbox",
+            "plugin reload",
+            "review pr-comments",
+            "review security",
+            "review ultra",
+            "rewind list",
+            "rewind diff",
+            "session rename",
+            "session resume",
+            "session fork",
+            "session branch",
+            "session tag",
+            "session add-dir",
+            "stash link",
+            "stash attach",
+            "status doctor",
+            "thinking back",
+            "update version",
+            "update notes",
+            "usage cost",
+            "usage context",
+            "usage stats",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let tui_routes = [
+            "account connect",
+            "familiar handoff",
+            "integrations hooks",
+            "integrations mcp",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        #[cfg(feature = "steer")]
+        let tui_routes = {
+            let mut routes = tui_routes;
+            routes.insert("thinking steer");
+            routes
+        };
+
+        for spec in catalog::flatten_catalog(&catalog::builtin_catalog_template()) {
+            if spec.path.contains(' ')
+                && matches!(
+                    &spec.lifecycle,
+                    catalog::CommandLifecycle::Active | catalog::CommandLifecycle::Advanced
+                )
+            {
+                assert!(
+                    command_routes.contains(spec.path.as_str())
+                        || tui_routes.contains(spec.path.as_str()),
+                    "{} has no command or TUI route",
+                    spec.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_catalog_reserves_registered_catalog_and_tui_builtin_surfaces() {
+        assert!(find_command("speed").is_none());
+        assert!(matches!(
+            catalog::find_catalog_spec(&builtin_catalog(), "login")
+                .expect("login catalog metadata")
+                .lifecycle,
+            catalog::CommandLifecycle::Removed { .. }
+        ));
+
+        let entries = filter_dynamic_builtin_collisions(vec![
+            dynamic_catalog_entry(
+                "login".to_string(),
+                "Custom login".to_string(),
+                catalog::CommandSource::User,
+            ),
+            dynamic_catalog_entry(
+                "speed".to_string(),
+                "Custom speed".to_string(),
+                catalog::CommandSource::Skill,
+            ),
+            dynamic_catalog_entry(
+                "survey".to_string(),
+                "Custom survey".to_string(),
+                catalog::CommandSource::Plugin,
+            ),
+            dynamic_catalog_entry(
+                "handoff".to_string(),
+                "Custom handoff".to_string(),
+                catalog::CommandSource::User,
+            ),
+            dynamic_catalog_entry(
+                "stats".to_string(),
+                "Custom stats".to_string(),
+                catalog::CommandSource::Plugin,
+            ),
+        ]);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn composed_catalog_includes_passed_plugin_command_definitions() {
+        let plugin_commands = vec![claurst_plugins::PluginCommandDef {
+            name: "catalog-plugin-fixture".to_string(),
+            description: "Plugin catalog fixture".to_string(),
+            plugin_name: "fixture".to_string(),
+            plugin_source_id: "fixture-source".to_string(),
+            run_action: claurst_plugins::CommandRunAction::StaticResponse(String::new()),
+            plugin_capabilities: None,
+        }];
+
+        let catalog = composed_catalog(
+            &claurst_core::config::Config::default(),
+            std::path::Path::new("."),
+            &plugin_commands,
+        );
+
+        assert!(catalog
+            .iter()
+            .any(|entry| { entry.path == "catalog-plugin-fixture" && entry.source == "plugin" }));
+    }
+
+    #[test]
+    fn composed_catalog_uses_canonical_categories_and_path_order() {
+        let plugin_commands = vec![claurst_plugins::PluginCommandDef {
+            name: "catalog-plugin-fixture".to_string(),
+            description: "Plugin catalog fixture".to_string(),
+            plugin_name: "fixture".to_string(),
+            plugin_source_id: "fixture-source".to_string(),
+            run_action: claurst_plugins::CommandRunAction::StaticResponse(String::new()),
+            plugin_capabilities: None,
+        }];
+        let catalog = composed_catalog(
+            &claurst_core::config::Config::default(),
+            std::path::Path::new("."),
+            &plugin_commands,
+        );
+        let mut sections = Vec::new();
+
+        for entry in &catalog {
+            if sections.last() != Some(&entry.category) {
+                sections.push(entry.category.clone());
+            }
+        }
+
+        assert_eq!(
+            sections,
+            vec![
+                "Start & Navigate",
+                "Work & Review",
+                "Conversation",
+                "Account & Models",
+                "Customize",
+                "Extend",
+                "Coven & Advanced",
+            ]
+        );
+        assert!(catalog
+            .iter()
+            .find(|entry| entry.path == "catalog-plugin-fixture")
+            .is_some_and(|entry| entry.category == "Extend" && entry.source == "plugin"));
+        for entries in catalog.windows(2) {
+            if entries[0].category == entries[1].category {
+                assert!(
+                    entries[0].path <= entries[1].path,
+                    "{} should precede {} in {}",
+                    entries[0].path,
+                    entries[1].path,
+                    entries[0].category,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn structured_review_output_parses_memory_refs() {
         let review = parse_structured_review_output(
             r#"{"findings":[{"title":"Auth check","memory_refs":["mem_auth"],"memory_dependent":true}]}"#,
@@ -11629,8 +12482,8 @@ mod tests {
         assert!(find_command("clear").is_some());
         assert!(find_command("exit").is_some());
         assert!(find_command("model").is_some());
-        assert!(find_command("refresh").is_some());
-        assert!(find_command("version").is_some());
+        assert!(find_command("account").is_some());
+        assert!(find_command("update").is_some());
     }
 
     #[tokio::test]
@@ -11639,8 +12492,8 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.config.show_splash = Some(true);
 
-        let command = find_command("splash").expect("/splash command");
-        let result = command.execute("hide", &mut ctx).await;
+        let command = find_command("config").expect("/config command");
+        let result = command.execute("splash hide", &mut ctx).await;
 
         match result {
             CommandResult::ConfigChangeMessage(config, message) => {
@@ -11660,8 +12513,8 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.config.show_splash = Some(true);
 
-        let command = find_command("splash").expect("/splash command");
-        let result = command.execute("", &mut ctx).await;
+        let command = find_command("config").expect("/config command");
+        let result = command.execute("splash ", &mut ctx).await;
 
         match result {
             CommandResult::ConfigChangeMessage(config, message) => {
@@ -11704,36 +12557,71 @@ mod tests {
     }
 
     #[test]
-    fn phase_three_legacy_commands_are_hidden_but_callable() {
-        let hidden_legacy = [
-            "agents",
-            "managed-agents",
-            "fork",
-            "branch",
-            "tag",
-            "add-dir",
-            "copy",
-            "share",
+    fn expired_roots_are_absent_from_the_registry() {
+        let expired = [
+            "reload-plugins",
+            "doctor",
             "switch",
             "refresh",
-            "think-back",
-            "fast",
-            "keybindings",
+            "import-config",
+            "fork",
             "theme",
             "output-style",
-            "import-config",
-            "advisor",
-            "doctor",
-            "reload-plugins",
+            "keybindings",
+            "share",
+            "add-dir",
+            "agents",
+            "branch",
+            "tag",
             "pr-comments",
+            "copy",
+            "fast",
+            "think-back",
+            "advisor",
+            "managed-agents",
+            "goal",
         ];
 
-        for name in hidden_legacy {
-            let command = find_command(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        assert_eq!(expired.len(), 21);
+        for name in expired {
             assert!(
-                command.hidden(),
-                "{name} should stay callable as a hidden one-release compatibility alias"
+                find_command(name).is_none(),
+                "{name} should be absent after its compatibility window"
             );
+        }
+    }
+
+    #[test]
+    fn retired_roots_are_not_registered() {
+        for name in [
+            "login",
+            "logout",
+            "accounts",
+            "providers",
+            "connect",
+            "hooks",
+            "mcp",
+            "chrome",
+            "link",
+            "attach",
+            "resume",
+            "splash",
+            "sandbox",
+            "incant",
+            "whisper",
+            "version",
+            "release-notes",
+            "feedback",
+            "handoff",
+        ] {
+            assert!(
+                find_command(name).is_none(),
+                "{name} must no longer dispatch"
+            );
+        }
+        #[cfg(feature = "steer")]
+        {
+            assert!(find_command("steer").is_none());
         }
     }
 
@@ -11781,16 +12669,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_thinking_effort_absorb_their_clusters() {
+    async fn account_thinking_effort_absorb_their_clusters() {
         let _guard = CommandEnvGuard::with_coven_home(None);
         let mut ctx = make_ctx();
 
-        // /login refresh routes to the provider-reset path.
-        let login = find_command("login").unwrap();
+        // /account refresh routes to the provider-reset path.
+        let login = find_command("account").unwrap();
         let result = login.execute("refresh", &mut ctx).await;
         assert!(
             matches!(result, CommandResult::RefreshProviderState),
-            "/login refresh should route to the refresh path"
+            "/account refresh should route to the refresh path"
         );
 
         // /thinking back routes to the think-back trace viewer.
@@ -11808,6 +12696,10 @@ mod tests {
             matches!(result, CommandResult::ConfigChangeMessage(_, _)),
             "/effort fast should route to the fast-mode toggle"
         );
+        assert!(matches!(
+            effort.execute("faston", &mut ctx).await,
+            CommandResult::Error(_)
+        ));
     }
 
     #[tokio::test]
@@ -11954,12 +12846,12 @@ mod tests {
         // /clear has alias "c"
         assert!(find_command("c").is_some());
         assert!(find_command("settings").is_some());
-        assert!(find_command("continue").is_some());
-        assert!(find_command("bug").is_some());
+        assert!(find_command("continue").is_none());
+        assert!(find_command("bug").is_none());
         assert!(find_command("bashes").is_some());
         assert!(find_command("remote").is_some());
-        assert!(find_command("sandbox-toggle").is_some());
-        assert!(find_command("btw").is_some());
+        assert!(find_command("sandbox-toggle").is_none());
+        assert!(find_command("btw").is_none());
     }
 
     #[test]
@@ -12000,31 +12892,19 @@ mod tests {
             "exit",
             "model",
             "config",
-            "version",
+            "account",
+            "integrations",
+            "stash",
             "status",
             "diff",
             "memory",
-            "hooks",
             "permissions",
             "plan",
             "tasks",
             "session",
-            "login",
-            "logout",
-            "refresh",
-            "feedback",
             "usage",
+            "update",
             "plugin",
-            "reload-plugins",
-            "add-dir",
-            "agents",
-            "branch",
-            "tag",
-            "pr-comments",
-            "whisper",
-            "incant",
-            "sandbox",
-            "switch",
             "review",
             "coven",
             "familiar",
@@ -12041,6 +12921,54 @@ mod tests {
     // ---- Command execution tests --------------------------------------------
 
     #[tokio::test]
+    async fn help_resolves_grouped_paths_and_preserves_feedback() {
+        let mut ctx = make_ctx();
+        assert!(
+            matches!(execute_command("/help account login", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("/account login") && message.contains("--codex"))
+        );
+        assert!(
+            matches!(execute_command("/help feedback usability report", &mut ctx).await,
+            Some(CommandResult::Message(message)) if message.contains("Suggested report summary: usability report"))
+        );
+    }
+
+    #[tokio::test]
+    async fn help_preserves_argument_rich_command_details() {
+        let mut ctx = make_ctx();
+        for (path, expected) in [
+            ("config", "/config set"),
+            ("export", "--output"),
+            ("effort", "low|normal|high"),
+            ("coven sessions", "sessions"),
+            ("session fork", "[message_index]"),
+        ] {
+            assert!(
+                matches!(execute_command(&format!("/help {path}"), &mut ctx).await,
+                Some(CommandResult::Message(message)) if message.contains(expected)),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_retired_path_and_alias_rejects_execution() {
+        let mut ctx = make_ctx();
+        let catalog = builtin_catalog();
+        for entry in catalog::flatten_catalog(&catalog) {
+            if let catalog::CommandLifecycle::Removed { replacement } = &entry.lifecycle {
+                for path in std::iter::once(&entry.path).chain(entry.aliases.iter()) {
+                    assert!(
+                        matches!(execute_command(&format!("/{path}"), &mut ctx).await,
+                        Some(CommandResult::Error(message)) if message == format!("/{path} was removed; use /{replacement}")),
+                        "retired path /{path} must not execute"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_clear_command_returns_clear_conversation() {
         let mut ctx = make_ctx();
         let cmd = find_command("clear").unwrap();
@@ -12049,10 +12977,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_command_requests_provider_reset() {
+    async fn account_refresh_requests_provider_reset() {
         let mut ctx = make_ctx();
-        let cmd = find_command("refresh").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("account").unwrap();
+        let result = cmd.execute("refresh", &mut ctx).await;
         assert!(matches!(result, CommandResult::RefreshProviderState));
     }
 
@@ -12071,8 +12999,8 @@ mod tests {
         // coverage requirement so future doctor refactors don't accidentally
         // drop the substrate report and silently regress the gap closure.
         let mut ctx = make_ctx();
-        let cmd = find_command("doctor").expect("/doctor must be registered");
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("status").expect("/status must be registered");
+        let result = cmd.execute("doctor", &mut ctx).await;
         match result {
             CommandResult::Message(msg) => {
                 assert!(
@@ -12098,7 +13026,7 @@ mod tests {
     async fn test_doctor_help_mentions_substrate() {
         // The /doctor help text must document the substrate check so users
         // can tell what `/doctor` covers without running it.
-        let cmd = find_command("doctor").expect("/doctor must be registered");
+        let cmd = DoctorCommand;
         assert!(
             cmd.help().contains("Coven Substrate"),
             "/doctor help should mention Coven Substrate, got:\n{}",
@@ -12109,8 +13037,8 @@ mod tests {
     #[tokio::test]
     async fn test_version_command_returns_message() {
         let mut ctx = make_ctx();
-        let cmd = find_command("version").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("update").unwrap();
+        let result = cmd.execute("version", &mut ctx).await;
         assert!(matches!(result, CommandResult::Message(_)));
         if let CommandResult::Message(msg) = result {
             assert!(
@@ -12132,9 +13060,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_command_starts_oauth_flow() {
         let mut ctx = make_ctx();
-        let cmd = find_command("login").unwrap();
+        let cmd = find_command("account").unwrap();
         // Default (no --console) → Anthropic, login_with_claude_ai = true
-        let result = cmd.execute("", &mut ctx).await;
+        let result = cmd.execute("login ", &mut ctx).await;
         match result {
             CommandResult::StartLoginForProvider {
                 provider,
@@ -12152,8 +13080,8 @@ mod tests {
     #[tokio::test]
     async fn test_login_command_console_flag() {
         let mut ctx = make_ctx();
-        let cmd = find_command("login").unwrap();
-        let result = cmd.execute("--console", &mut ctx).await;
+        let cmd = find_command("account").unwrap();
+        let result = cmd.execute("login --console", &mut ctx).await;
         match result {
             CommandResult::StartLoginForProvider {
                 provider,
@@ -12170,8 +13098,8 @@ mod tests {
     #[tokio::test]
     async fn test_login_command_codex_flag() {
         let mut ctx = make_ctx();
-        let cmd = find_command("login").unwrap();
-        let result = cmd.execute("--codex --label work", &mut ctx).await;
+        let cmd = find_command("account").unwrap();
+        let result = cmd.execute("login --codex --label work", &mut ctx).await;
         match result {
             CommandResult::StartLoginForProvider {
                 provider, label, ..
@@ -12186,8 +13114,8 @@ mod tests {
     #[tokio::test]
     async fn test_switch_no_args_lists_accounts() {
         let mut ctx = make_ctx();
-        let cmd = find_command("switch").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("account").unwrap();
+        let result = cmd.execute("switch", &mut ctx).await;
         // /switch with no args lists stored accounts (absorbs old /accounts).
         assert!(matches!(result, CommandResult::Message(_)));
     }
@@ -12337,9 +13265,9 @@ mod tests {
     #[tokio::test]
     async fn test_switch_command_requires_id() {
         let mut ctx = make_ctx();
-        let cmd = find_command("switch").unwrap();
+        let cmd = find_command("account").unwrap();
         // A flag with no profile id is still an error.
-        let result = cmd.execute("--codex", &mut ctx).await;
+        let result = cmd.execute("switch --codex", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
@@ -12348,11 +13276,56 @@ mod tests {
         let mut ctx = make_ctx();
         let cmd = find_command("help").unwrap();
         let result = cmd.execute("", &mut ctx).await;
-        // help returns either Message or Silent
+        let CommandResult::Message(output) = result else {
+            panic!("help should return grouped text output");
+        };
+
+        let headings = [
+            "Start & Navigate",
+            "Work & Review",
+            "Conversation",
+            "Account & Models",
+            "Customize",
+            "Extend",
+            "Coven & Advanced",
+        ];
+        let heading_positions = headings.map(|heading| {
+            output
+                .find(&format!("\n{heading}\n"))
+                .unwrap_or_else(|| panic!("missing help heading {heading}: {output}"))
+        });
         assert!(
-            matches!(result, CommandResult::Message(_) | CommandResult::Silent),
-            "help should return Message or Silent"
+            heading_positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "help headings are not in stable catalog order: {output}"
         );
+
+        for command in ["/account", "/integrations", "/stash"] {
+            assert!(
+                output.contains(command),
+                "help must list canonical grouped command {command}: {output}"
+            );
+        }
+
+        for (command, heading_index) in [
+            ("/clear", 0),
+            ("/commit", 1),
+            ("/compact", 2),
+            ("/model", 3),
+            ("/config", 4),
+            ("/plugin", 5),
+            ("/coven", 6),
+        ] {
+            let group_start = heading_positions[heading_index];
+            let group_end = heading_positions
+                .get(heading_index + 1)
+                .copied()
+                .unwrap_or(output.len());
+            assert!(
+                output[group_start..group_end].contains(command),
+                "{command} is not listed under {}: {output}",
+                headings[heading_index]
+            );
+        }
     }
 
     #[tokio::test]
@@ -12374,8 +13347,8 @@ mod tests {
     #[tokio::test]
     async fn test_import_config_command_opens_overlay() {
         let mut ctx = make_ctx();
-        let cmd = find_command("import-config").unwrap();
-        let result = cmd.execute("", &mut ctx).await;
+        let cmd = find_command("config").unwrap();
+        let result = cmd.execute("import", &mut ctx).await;
         assert!(matches!(result, CommandResult::OpenImportConfigOverlay));
     }
 
@@ -12519,73 +13492,6 @@ mod tests {
             .execute("actions coven.capabilities.refresh not-json", &mut ctx)
             .await;
         assert!(matches!(result, CommandResult::Error(_)));
-    }
-
-    /// The TUI's slash-command autocomplete and `/help` overlay both read
-    /// from `claurst_tui::app::PROMPT_SLASH_COMMANDS`. That list is hand-
-    /// maintained — when a new command is added to the registry but not to
-    /// the list, the TUI silently hides it from autocomplete. This test is
-    /// the safety net.
-    #[test]
-    fn prompt_slash_commands_covers_registry() {
-        use std::collections::HashSet;
-
-        // Names that appear in autocomplete on purpose even though they're
-        // not (or not primarily) registered SlashCommands:
-        //  - quit / settings / survey: user-facing aliases of exit / config /
-        //    feedback.
-        //  - handoff: intercepted directly by the TUI via
-        //    `App::intercept_slash_command_with_args` (sends the current
-        //    session context to a Coven familiar). It is documented in
-        //    docs/familiars.md and lives in tui/src/handoff.rs.
-        //  - stats: intercepted directly by the TUI to open the live stats
-        //    dialog; the named CLI `stats` command handles aggregate saved
-        //    session reports outside the TUI.
-        //  - steer: opt-in feature, intercepted directly in the CLI main loop
-        //    (queues/sends a steering message); only present when built with
-        //    `--features steer`.
-        const ALLOWED_ALIAS_NAMES: &[&str] = &["quit", "settings", "survey", "handoff", "steer"];
-
-        let prompt_names: HashSet<&str> = claurst_tui::app::PROMPT_SLASH_COMMANDS
-            .iter()
-            .map(|(name, _)| *name)
-            .collect();
-
-        // Every non-hidden registered command must show up in autocomplete.
-        let mut missing: Vec<&str> = all_commands()
-            .iter()
-            .filter(|c| !c.hidden())
-            .map(|c| c.name())
-            .filter(|name| !prompt_names.contains(name))
-            .collect();
-        missing.sort();
-        assert!(
-            missing.is_empty(),
-            "PROMPT_SLASH_COMMANDS is missing entries for non-hidden \
-             registered commands: {missing:?}. Add them to \
-             crates/tui/src/app.rs::PROMPT_SLASH_COMMANDS."
-        );
-
-        // No orphans in the prompt list (every entry must either match a
-        // registered command name/alias or be in the allow-list).
-        let known_names_and_aliases: HashSet<&str> = all_commands()
-            .iter()
-            .flat_map(|c| std::iter::once(c.name()).chain(c.aliases()))
-            .collect();
-        let mut orphans: Vec<&str> = prompt_names
-            .iter()
-            .copied()
-            .filter(|name| {
-                !known_names_and_aliases.contains(name) && !ALLOWED_ALIAS_NAMES.contains(name)
-            })
-            .collect();
-        orphans.sort();
-        assert!(
-            orphans.is_empty(),
-            "PROMPT_SLASH_COMMANDS has orphan entries with no matching \
-             command: {orphans:?}. Either register the command or drop \
-             the entry."
-        );
     }
 
     #[tokio::test]

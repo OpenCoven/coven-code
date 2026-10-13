@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 # Pass-through features from cc-core
 ultraplan = ["claurst-core/ultraplan"]
+steer = ["claurst-tui/steer"]
 
 [dependencies]
 claurst-core = { workspace = true }

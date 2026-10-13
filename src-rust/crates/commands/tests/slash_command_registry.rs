@@ -1,14 +1,7 @@
 //! Slash-command registry golden.
 //!
-//! Freezes the three things the TUI, the `/help` text, and the command
-//! palette agree on: the autocomplete list (`PROMPT_SLASH_COMMANDS`), the
-//! category each name maps to (`slash_command_category`), and the registered
-//! `SlashCommand` set (names, aliases, hidden flag). Lives in this crate
-//! because it is the one place both `claurst_commands::all_commands()` and
-//! `claurst_tui::app` are reachable.
-//!
-//! The golden is for the default feature set. The opt-in `steer` entry is
-//! filtered out so a `--features steer` build compares the same text.
+//! Freezes the canonical catalog, including grouped paths, lifecycle, aliases,
+//! category, usage, and descriptions. Feature-gated steering paths are excluded.
 //!
 //! Regenerate after a deliberate registry change (new command, rename,
 //! recategorisation) and review the diff in the PR:
@@ -20,11 +13,13 @@
 use std::fs;
 use std::path::Path;
 
-use claurst_commands::all_commands;
-use claurst_tui::app::{slash_command_category, PROMPT_SLASH_COMMANDS};
+use claurst_commands::{
+    builtin_catalog,
+    catalog::{flatten_catalog, CommandLifecycle},
+};
 
 /// Feature-gated names excluded from the golden so it is build-invariant.
-const FEATURE_GATED: &[&str] = &["steer"];
+const FEATURE_GATED: &[&str] = &["steer", "thinking steer"];
 
 fn assert_golden(path: &Path, actual: &str) {
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
@@ -55,35 +50,34 @@ fn assert_golden(path: &Path, actual: &str) {
 }
 
 fn render_registry() -> String {
-    let mut out = String::new();
-
-    out.push_str("# PROMPT_SLASH_COMMANDS in palette order: name\tcategory\tdescription\n");
-    for (name, description) in PROMPT_SLASH_COMMANDS
-        .iter()
-        .filter(|(name, _)| !FEATURE_GATED.contains(name))
+    let catalog = builtin_catalog();
+    let mut entries = flatten_catalog(&catalog);
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut out = String::from(
+        "# Canonical command catalog: path\tcategory\tstate\taliases\tusage\tsummary\n",
+    );
+    for entry in entries
+        .into_iter()
+        .filter(|entry| !FEATURE_GATED.contains(&entry.path.as_str()))
     {
+        let state = match &entry.lifecycle {
+            CommandLifecycle::Active => "active".to_string(),
+            CommandLifecycle::Advanced => "advanced".to_string(),
+            CommandLifecycle::Removed { replacement } => format!("removed:/{replacement}"),
+        };
+        let aliases = if entry.aliases.is_empty() {
+            "-".to_string()
+        } else {
+            entry.aliases.join(",")
+        };
         out.push_str(&format!(
-            "{name}\t{}\t{description}\n",
-            slash_command_category(name)
-        ));
-    }
-
-    out.push_str("\n# registered SlashCommands sorted by name: name\tcategory\taliases\thidden\n");
-    let mut registered: Vec<(&str, Vec<&str>, bool)> = all_commands()
-        .iter()
-        .filter(|c| !FEATURE_GATED.contains(&c.name()))
-        .map(|c| (c.name(), c.aliases(), c.hidden()))
-        .collect();
-    registered.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, aliases, hidden) in registered {
-        out.push_str(&format!(
-            "{name}\t{}\t{}\t{hidden}\n",
-            slash_command_category(name),
-            if aliases.is_empty() {
-                "-".to_string()
-            } else {
-                aliases.join(",")
-            },
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            entry.path,
+            entry.category.label(),
+            state,
+            aliases,
+            entry.usage.replace("steer|", ""),
+            entry.summary
         ));
     }
     out
@@ -94,4 +88,14 @@ fn slash_command_registry_matches_golden() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/slash_command_registry.txt");
     assert_golden(&path, &render_registry());
+}
+
+#[test]
+#[cfg(not(feature = "steer"))]
+fn generated_command_reference_is_current() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/slash-commands.md");
+    assert_eq!(
+        fs::read_to_string(path).expect("command reference"),
+        claurst_commands::catalog::render_reference()
+    );
 }

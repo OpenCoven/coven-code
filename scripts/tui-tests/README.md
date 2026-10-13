@@ -50,8 +50,8 @@ screen, and runs `run.sh`. No secrets or network access required.
 |---|---|---|
 | `cases/01_headless.sh` | CLI surface (no TTY) | `--version` semver, `--help` usage + flags, unknown flag exits non-zero, `auth status`, `models` catalog, `--dump-system-prompt` |
 | `cases/02_startup.sh` | TUI cold start | title banner, welcome/changelog sections, input glyph, footer keybindings, no panic on boot |
-| `cases/03_command_palette.sh` | Slash palette | `/` opens it, lists `/clear` `/compact` `/config`, typing filters the list, `Ctrl+K` entry point |
-| `cases/04_help_overlay.sh` | Help overlay | `?` opens keybinding + command reference, `Esc` closes it |
+| `cases/03_command_palette.sh` | Slash palette | `/` shows contextual suggestions, typing filters the list, `Ctrl+K` opens grouped navigation, one Enter runs a leaf, retired paths are rejected |
+| `cases/04_help_overlay.sh` | Help overlay | `?` opens keybinding + grouped command reference, search finds `/account login`, `Esc` closes it |
 | `cases/05_input_editing.sh` | Prompt input | typed text echoes into the buffer, `Ctrl+U` clears it |
 | `cases/06_quit.sh` | Shutdown | `Ctrl+C` twice exits cleanly back to the shell |
 | `cases/07_paste_burst.sh` | Paste burst | a line delivered in one write still submits; interior newlines coalesce without submitting |

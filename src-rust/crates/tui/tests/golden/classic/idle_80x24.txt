@@ -1,14 +1,14 @@
 ╭ Coven vX.Y.Z ────────────────────────────────────────────────────────────────╮
 │     Welcome back baseline!     │Tips for getting started                     │
-│                                │Start with small features or bug fixes, tell │
-│                ▄               │Coven to propose a plan, and verify its      │
-│           ▄▄ ▄█▀█▄ ▄▄          │suggested edits                              │
-│           █▀▀█▄ ▄█▀▀█          │──────────────────────────────────────────── │
-│            ▀▄▄███▄▄▀           │What's new                                   │
-│                                │<whats-new-0>                                │
-│            Opus 4.8            │<whats-new-1>                                │
-│       Anthropic · offline      │<whats-new-2>                                │
-│            ~/project           │/release-notes for more                      │
+│                                │Type / to discover commands for this session │
+│                ▄               │──────────────────────────────────────────── │
+│           ▄▄ ▄█▀█▄ ▄▄          │What's new                                   │
+│           █▀▀█▄ ▄█▀▀█          │<whats-new-0>                                │
+│            ▀▄▄███▄▄▀           │<whats-new-1>                                │
+│                                │<whats-new-2>                                │
+│            Opus 4.8            │Type / for commands                          │
+│       Anthropic · offline      │                                             │
+│            ~/project           │                                             │
 │                                │                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 

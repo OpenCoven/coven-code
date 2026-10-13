@@ -1,8 +1,12 @@
 // app.rs — App state struct and main event loop.
 
 use crate::bridge_state::BridgeConnectionState;
+use crate::command_palette::{
+    command_category_order, flatten_command_catalog, rank_commands, CommandPaletteContext,
+    CommandPaletteEntry,
+};
 use crate::context_viz::ContextVizState;
-use crate::dialog_select::{DialogSelectState, SelectItem};
+use crate::dialog_select::{DialogSelectState, SelectItem, SelectItemKind};
 use crate::dialogs::McpApprovalDialogState;
 use crate::dialogs::PermissionRequest;
 use crate::diff_viewer::{build_turn_diff, DiffViewerState};
@@ -35,7 +39,7 @@ use claurst_core::keybindings::{
     KeyContext, KeybindingResolver, KeybindingResult, ParsedKeystroke, UserKeybindings,
 };
 use claurst_core::types::{ContentBlock, Message, Role};
-use claurst_core::{sample_completion_verb, sample_spinner_verb};
+use claurst_core::{sample_completion_verb, sample_spinner_verb, CommandContextSignal};
 use claurst_query::QueryEvent;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
@@ -45,172 +49,6 @@ use std::cell::{Cell, RefCell};
 use std::io::Stdout;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
-
-/// Pairs of (name, one-line description) shown by the slash-command
-/// autocompletion, /help overlay, and the command palette. Must stay in
-/// sync with the non-hidden entries returned by
-/// `claurst_commands::all_commands()`; the
-/// `prompt_slash_commands_covers_registry` test in `claurst-commands`
-/// enforces that.
-pub const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
-    (
-        "accounts",
-        "List stored accounts; `dedupe` collapses duplicate profiles",
-    ),
-    (
-        "attach",
-        "Save and manage file attachments in the structured stash",
-    ),
-    ("chrome", "Browser automation via Chrome DevTools Protocol"),
-    ("clear", "Clear the conversation transcript"),
-    (
-        "commit",
-        "Stage and commit changes (model drafts the message)",
-    ),
-    ("compact", "Compact the conversation context"),
-    (
-        "config",
-        "Open settings (theme, keybindings, advisor, import, UI)",
-    ),
-    ("connect", "Connect an AI provider"),
-    (
-        "coven",
-        "Drive the local Coven daemon (sessions, harness runs, rituals)",
-    ),
-    ("diff", "Inspect the current git diff"),
-    (
-        "effort",
-        "Set effort level (low/normal/high) or toggle fast mode",
-    ),
-    ("exit", "Quit Coven"),
-    ("export", "Export, copy, or share the conversation"),
-    (
-        "familiar",
-        "Your familiar & agents — switch persona, inspect, and manage",
-    ),
-    ("feedback", "Open session feedback survey"),
-    (
-        "handoff",
-        "Hand off current session context to a Coven familiar",
-    ),
-    ("help", "Show help"),
-    ("hooks", "Browse configured hooks (read-only)"),
-    (
-        "incant",
-        "Cast a speech incantation (caveman, rocky) or lift it with off",
-    ),
-    ("init", "Initialize AGENTS.md for this project"),
-    (
-        "learn",
-        "Codify the script/workflow we just built into a reusable skill",
-    ),
-    ("link", "Save and manage links in the structured stash"),
-    ("login", "Log in, switch accounts, or refresh provider auth"),
-    ("logout", "Log out of Coven"),
-    ("mcp", "Browse configured MCP servers"),
-    ("memory", "Browse and open AGENTS.md memory files"),
-    ("model", "Change the AI model"),
-    ("permissions", "Manage tool permission rules"),
-    ("plan", "Enter plan mode (read-only)"),
-    (
-        "plugin",
-        "Manage plugins (list/info/enable/disable/install/reload)",
-    ),
-    ("providers", "List available AI providers and their status"),
-    ("quit", "Exit Coven"),
-    ("resume", "Resume a previous session"),
-    (
-        "review",
-        "Review changes (security/ultra variants, PR comments)",
-    ),
-    (
-        "rewind",
-        "Rewind the conversation or roll back file changes",
-    ),
-    ("sandbox", "Toggle sandboxed shell execution"),
-    ("search", "Search the codebase by natural language or regex"),
-    (
-        "splash",
-        "Show, hide, or toggle the empty-session splash screen",
-    ),
-    ("session", "Browse, rename, fork, branch, and tag sessions"),
-    (
-        "settings",
-        "Open settings (theme, keybindings, advisor, import, UI)",
-    ),
-    ("skills", "List and manage skills"),
-    (
-        "status",
-        "Show session status or run diagnostics (/status doctor)",
-    ),
-    #[cfg(feature = "steer")]
-    (
-        "steer",
-        "Queue a steering message for the running turn (or send it now if idle)",
-    ),
-    ("survey", "Open session feedback survey"),
-    ("tasks", "Manage tracked background tasks"),
-    (
-        "thinking",
-        "Configure extended thinking or view past thinking traces",
-    ),
-    (
-        "update",
-        "Check for updates and upgrade to the latest version",
-    ),
-    ("release-notes", "Show recent Coven highlights"),
-    ("usage", "Detailed per-call token usage breakdown"),
-    ("version", "Display the current Coven version"),
-    (
-        "whisper",
-        "Whisper a side question to your familiar (not kept in history)",
-    ),
-];
-
-/// Canonical category for a slash command. Single source of truth shared by
-/// the F1 help overlay, the command palette, and the `/help` text output in
-/// `claurst-commands` (which delegates here) so every surface groups
-/// commands the same way.
-pub fn slash_command_category(name: &str) -> &'static str {
-    match name {
-        "clear" | "compact" | "rewind" | "undo" | "revert" | "export" | "branch" | "fork" => {
-            "Conversation"
-        }
-        "model" | "config" | "settings" | "theme" | "color" | "vim" | "fast" | "effort"
-        | "voice" | "statusline" | "output-style" | "keybindings" | "splash" | "sandbox" => {
-            "Settings"
-        }
-        "cost" | "usage" | "context" | "stats" => "Usage & Cost",
-        "status" | "doctor" | "terminal-setup" | "version" | "update" | "upgrade" => "System",
-        "login" | "logout" | "switch" | "refresh" | "permissions" | "connect" | "providers" => {
-            "Auth & Permissions"
-        }
-        "memory" | "diff" | "init" | "commit" | "review" | "import-config" | "security-review" => {
-            "Project"
-        }
-        "mcp" | "hooks" | "chrome" => "Integrations",
-        "session" | "resume" | "search" | "share" | "rename" => "Sessions & Remote",
-        "help" | "exit" | "quit" | "feedback" | "survey" | "bug" => "General",
-        "think-back" | "thinking" | "plan" | "goal" | "tasks" | "advisor" => "AI & Thinking",
-        "copy" | "skills" | "learn" | "plugin" | "reload-plugins" | "whisper" | "incant" => {
-            "Tools & Extras"
-        }
-        "coven" | "familiar" | "familiars" | "handoff" => "Coven",
-        _ => "Other",
-    }
-}
-
-fn help_overlay_entries() -> Vec<HelpEntry> {
-    PROMPT_SLASH_COMMANDS
-        .iter()
-        .map(|(name, description)| HelpEntry {
-            name: (*name).to_string(),
-            aliases: String::new(),
-            description: (*description).to_string(),
-            category: slash_command_category(name).to_string(),
-        })
-        .collect()
-}
 
 // ---------------------------------------------------------------------------
 // Voice mode bootstrap
@@ -389,6 +227,8 @@ fn import_config_picker_items() -> Vec<SelectItem> {
             title: "CLAUDE.md".into(),
             description: "Import ~/.claude/CLAUDE.md".into(),
             category: "Import".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: None,
         },
         SelectItem {
@@ -396,6 +236,8 @@ fn import_config_picker_items() -> Vec<SelectItem> {
             title: "settings.json".into(),
             description: "Import ~/.claude/settings.json".into(),
             category: "Import".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: None,
         },
         SelectItem {
@@ -403,6 +245,8 @@ fn import_config_picker_items() -> Vec<SelectItem> {
             title: "Both".into(),
             description: "Import both CLAUDE.md and settings.json".into(),
             category: "Import".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: None,
         },
     ]
@@ -417,6 +261,8 @@ fn provider_picker_items() -> Vec<SelectItem> {
             description: "Run turns through the local claude binary; auth stays in Claude Code"
                 .into(),
             category: "Claude".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: has_claude_cli.then(|| "LOCAL".into()),
         },
         SelectItem {
@@ -424,9 +270,20 @@ fn provider_picker_items() -> Vec<SelectItem> {
             title: "Codex CLI".into(),
             description: "Sign in with Codex CLI login".into(),
             category: "Codex".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: None,
         },
     ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandPalettePage {
+    Top,
+    Category(String),
+    BrowseAll,
+    Custom,
+    Children(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -997,6 +854,12 @@ pub struct App {
     pub import_config_dialog: ImportConfigDialogState,
     /// Ctrl+K command palette overlay.
     pub command_palette: DialogSelectState,
+    /// Shared source of truth for command palette, help, and prompt typeahead.
+    pub command_catalog: Vec<CommandPaletteEntry>,
+    command_palette_pages: Vec<CommandPalettePage>,
+    command_palette_context_snapshot: CommandPaletteContext,
+    /// Successfully executed canonical command paths, newest first.
+    pub recent_command_paths: std::collections::VecDeque<String>,
     /// Whether Coven Code was launched from the user's home directory.
     /// Shown as a startup notice: "Note: You have launched Coven Code in your home directory…"
     pub home_dir_warning: bool,
@@ -1395,11 +1258,7 @@ impl App {
             last_turn_verb: None,
             turn_metadata: Vec::new(),
             transcript_version: Cell::new(0),
-            help_overlay: {
-                let mut overlay = HelpOverlay::new();
-                overlay.populate_from_commands(help_overlay_entries());
-                overlay
-            },
+            help_overlay: HelpOverlay::new(),
             history_search_overlay: HistorySearchOverlay::new(),
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
@@ -1479,19 +1338,11 @@ impl App {
                 import_config_picker_items(),
             ),
             import_config_dialog: ImportConfigDialogState::new(),
-            command_palette: {
-                let items: Vec<SelectItem> = PROMPT_SLASH_COMMANDS
-                    .iter()
-                    .map(|(name, desc)| SelectItem {
-                        id: format!("/{}", name),
-                        title: format!("/{}", name),
-                        description: desc.to_string(),
-                        category: "Commands".to_string(),
-                        badge: None,
-                    })
-                    .collect();
-                DialogSelectState::new("Command Palette", items)
-            },
+            command_palette: DialogSelectState::new("Command Palette", Vec::new()),
+            command_catalog: Vec::new(),
+            command_palette_pages: vec![CommandPalettePage::Top],
+            command_palette_context_snapshot: CommandPaletteContext::default(),
+            recent_command_paths: std::collections::VecDeque::new(),
             home_dir_warning: false,
             output_style: "auto".to_string(),
             pr_number: None,
@@ -2019,6 +1870,8 @@ impl App {
             title: "Codex CLI".into(),
             description: "Sign in with Codex CLI login".into(),
             category: "Codex".into(),
+            kind: SelectItemKind::Action,
+            keywords: Vec::new(),
             badge: None,
         });
     }
@@ -2260,16 +2113,27 @@ impl App {
             None => (args_trimmed, ""),
         };
         match (cmd, sub, sub_rest) {
-            ("usage", "stats", _) => return self.intercept_slash_command("stats"),
-            ("config" | "settings", "theme", "") => return self.intercept_slash_command("theme"),
-            ("config" | "settings", "keybindings", _) => {
-                return self.intercept_slash_command("keybindings")
+            ("session" | "remote", "resume", "") => return self.intercept_slash_command("resume"),
+            ("usage", "cost", "") => return self.intercept_slash_command("cost"),
+            ("usage", "context", "") => return self.intercept_slash_command("context"),
+            ("help", "feedback", "") => return self.intercept_slash_command("feedback"),
+            ("account", "connect", _) => return self.open_connect_dialog(),
+            ("integrations", "hooks", _) => return self.open_hooks_config_menu(),
+            ("integrations", "mcp", "") => return self.open_mcp_view(),
+            ("integrations", "mcp", _) => return false,
+            ("usage", "stats", _) => return self.open_stats_dialog(),
+            ("config" | "settings", "theme", "") => return self.open_theme_screen(),
+            ("config" | "settings", "keybindings", _) => return self.open_keybindings_file(),
+            ("config" | "settings", "import", _) => {
+                return self.open_import_config_picker_surface()
             }
-            ("config" | "settings", "import" | "import-config", _) => {
-                return self.intercept_slash_command("import-config")
+            ("export", "copy", "") => return self.copy_last_assistant_response(),
+            ("effort", "fast", "") => return self.toggle_fast_mode(),
+            ("config" | "settings", "output-style", "") => return self.cycle_output_style(),
+            ("config" | "settings", "splash", _) | ("permissions", "sandbox", _) => return false,
+            ("familiar" | "familiars" | "agent", "handoff", _) => {
+                return self.intercept_handoff(sub_rest)
             }
-            ("export", "copy", "") => return self.intercept_slash_command("copy"),
-            ("effort", "fast", _) => return self.intercept_slash_command("fast"),
             _ => {}
         }
         // `/skills` opens the interactive picker; `/skills <query>` pre-filters.
@@ -2280,15 +2144,14 @@ impl App {
         if !args_trimmed.is_empty() && matches!(cmd, "config" | "settings" | "usage") {
             return false;
         }
+        if cmd == "help" && !args_trimmed.is_empty() {
+            return false;
+        }
         if cmd == "mcp" && !args_trimmed.is_empty() {
             return false;
         }
-        // Destructive roster wipes always go through the confirmation screen
-        // in the TUI: the unified `/familiar reset-roster` and the legacy
-        // `/agents reset` both land on the same dialog.
-        if (matches!(cmd, "familiar" | "familiars" | "agent") && args_trimmed == "reset-roster")
-            || (cmd == "agents" && args_trimmed == "reset")
-        {
+        // Destructive roster wipes always go through the confirmation screen.
+        if matches!(cmd, "familiar" | "familiars" | "agent") && args_trimmed == "reset-roster" {
             self.open_agents_menu();
             self.agents_menu.route = AgentsRoute::ResetConfirm;
             return true;
@@ -2305,7 +2168,6 @@ impl App {
                     | "export"
                     | "review"
                     | "agent"
-                    | "agents"
                     | "familiar"
                     | "familiars"
                     | "status"
@@ -2320,39 +2182,42 @@ impl App {
             return false;
         }
         if cmd == "handoff" {
-            let familiar = args.trim().to_string();
-            if familiar.is_empty() {
-                self.push_notification(
-                    NotificationKind::Warning,
-                    "Usage: /handoff <familiar_name>".to_string(),
-                    Some(4),
-                );
-                return true;
-            }
-
-            let context = crate::handoff::build_handoff_context(&self.messages, &familiar);
-            let root = self.project_root().to_string_lossy().to_string();
-            match crate::handoff::send_handoff(&familiar, context, &root) {
-                Ok(session_id) => {
-                    self.push_notification(
-                        NotificationKind::Info,
-                        format!(
-                            "Handed off to {familiar}. Session created in Coven daemon. (id: {session_id})"
-                        ),
-                        Some(5),
-                    );
-                }
-                Err(err) => {
-                    self.push_notification(
-                        NotificationKind::Warning,
-                        format!("Handoff failed: {err}"),
-                        Some(5),
-                    );
-                }
-            }
-            return true;
+            return self.intercept_handoff(args_trimmed);
         }
         self.intercept_slash_command(cmd)
+    }
+
+    fn intercept_handoff(&mut self, familiar: &str) -> bool {
+        if familiar.is_empty() {
+            self.push_notification(
+                NotificationKind::Warning,
+                "Usage: /familiar handoff <familiar_name>".to_string(),
+                Some(4),
+            );
+            return true;
+        }
+
+        let context = crate::handoff::build_handoff_context(&self.messages, familiar);
+        let root = self.project_root().to_string_lossy().to_string();
+        match crate::handoff::send_handoff(familiar, context, &root) {
+            Ok(session_id) => {
+                self.push_notification(
+                    NotificationKind::Info,
+                    format!(
+                        "Handed off to {familiar}. Session created in Coven daemon. (id: {session_id})"
+                    ),
+                    Some(5),
+                );
+            }
+            Err(err) => {
+                self.push_notification(
+                    NotificationKind::Warning,
+                    format!("Handoff failed: {err}"),
+                    Some(5),
+                );
+            }
+        }
+        true
     }
 
     pub fn intercept_slash_command(&mut self, cmd: &str) -> bool {
@@ -2363,30 +2228,10 @@ impl App {
                 self.settings_screen.open();
                 true
             }
-            "theme" => {
-                let current = match &self.config.theme {
-                    Theme::Dark => "dark",
-                    Theme::Light => "light",
-                    Theme::Default => "default",
-                    Theme::Deuteranopia => "deuteranopia",
-                    Theme::Custom(s) => s.as_str(),
-                };
-                self.theme_screen.open(current);
-                true
-            }
-            "stats" => {
-                self.stats_dialog.open();
-                true
-            }
-            "mcp" => {
-                let servers = self.load_mcp_servers();
-                self.mcp_view.open(servers);
-                true
-            }
-            // One visual surface for familiars and agents: the bare command
-            // (canonical /familiar, alias /agent, deprecated /agents) opens
-            // the interactive menu; argument forms run in the commands crate.
-            "familiar" | "familiars" | "agent" | "agents" => {
+            "stats" => self.open_stats_dialog(),
+            "mcp" => self.open_mcp_view(),
+            // Canonical `/familiar` and its active aliases share this menu.
+            "familiar" | "familiars" | "agent" => {
                 self.open_agents_menu();
                 true
             }
@@ -2414,18 +2259,8 @@ impl App {
                 self.memory_file_selector.open(&root);
                 true
             }
-            "hooks" => {
-                self.hooks_config_menu.open();
-                true
-            }
-            "import-config" => {
-                self.open_import_config_picker();
-                true
-            }
-            "connect" => {
-                self.connect_dialog.open();
-                true
-            }
+            "hooks" => self.open_hooks_config_menu(),
+            "connect" => self.open_connect_dialog(),
             "model" => {
                 if !self.has_credentials {
                     self.connect_dialog.open();
@@ -2475,16 +2310,6 @@ impl App {
                 self.refresh_prompt_input();
                 true
             }
-            "fast" => {
-                self.fast_mode = !self.fast_mode;
-                let status = if self.fast_mode {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                self.status_message = Some(format!("Fast mode {}.", status));
-                true
-            }
             "plan" => {
                 use claurst_core::config::PermissionMode;
                 self.plan_mode = !self.plan_mode;
@@ -2504,51 +2329,6 @@ impl App {
             "compact" => {
                 // Handled by execute_command in the CLI loop (real LLM compaction).
                 false
-            }
-            "copy" => {
-                // Copy last assistant message to clipboard. Attempt arboard; fall back to notification.
-                let last = self
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == Role::Assistant)
-                    .map(|m| m.get_all_text());
-                if let Some(text) = last {
-                    // Try xclip/xsel/pbcopy/clip.exe for clipboard; fall back to notification.
-                    let copied = try_copy_to_clipboard(&text);
-                    if copied {
-                        self.push_notification(
-                            NotificationKind::Info,
-                            "Copied to clipboard.".to_string(),
-                            Some(3),
-                        );
-                    } else {
-                        self.push_notification(
-                            NotificationKind::Info,
-                            format!(
-                                "Last response: {} chars (clipboard unavailable)",
-                                text.len()
-                            ),
-                            Some(5),
-                        );
-                    }
-                } else {
-                    self.push_notification(
-                        NotificationKind::Warning,
-                        "No assistant message to copy.".to_string(),
-                        Some(3),
-                    );
-                }
-                true
-            }
-            "output-style" => {
-                self.output_style = match self.output_style.as_str() {
-                    "auto" => "stream".to_string(),
-                    "stream" => "verbose".to_string(),
-                    _ => "auto".to_string(),
-                };
-                self.status_message = Some(format!("Output style: {}.", self.output_style));
-                true
             }
             "effort" => {
                 // Open the picker dialog so users can pick an effort level
@@ -2589,10 +2369,6 @@ impl App {
                 }
                 true
             }
-            "doctor" => {
-                // Handled by execute_command (DoctorCommand).
-                false
-            }
             "cost" => {
                 self.stats_dialog.open();
                 true
@@ -2619,16 +2395,6 @@ impl App {
                 // Handled by execute_command (CLI-level operations).
                 false
             }
-            "keybindings" => {
-                // Open the keybindings.json file in the external editor
-                let keybindings_path =
-                    claurst_core::config::Settings::config_dir().join("keybindings.json");
-
-                if let Err(e) = open_file_externally(&keybindings_path) {
-                    eprintln!("Failed to open keybindings file: {}", e);
-                }
-                true
-            }
             "help" => {
                 // Open the help overlay (same as pressing `?` or F1).
                 if !self.help_overlay.visible {
@@ -2638,6 +2404,128 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn open_stats_dialog(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.stats_dialog.open();
+        true
+    }
+
+    fn open_mcp_view(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        let servers = self.load_mcp_servers();
+        self.mcp_view.open(servers);
+        true
+    }
+
+    fn open_theme_screen(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        let current = match &self.config.theme {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+            Theme::Default => "default",
+            Theme::Deuteranopia => "deuteranopia",
+            Theme::Custom(s) => s.as_str(),
+        };
+        self.theme_screen.open(current);
+        true
+    }
+
+    fn open_keybindings_file(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        let keybindings_path = Settings::config_dir().join("keybindings.json");
+        if let Err(error) = open_file_externally(&keybindings_path) {
+            eprintln!("Failed to open keybindings file: {error}");
+        }
+        true
+    }
+
+    fn open_import_config_picker_surface(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.open_import_config_picker();
+        true
+    }
+
+    fn open_connect_dialog(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.connect_dialog.open();
+        true
+    }
+
+    fn open_hooks_config_menu(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.hooks_config_menu.open();
+        true
+    }
+
+    fn toggle_fast_mode(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.fast_mode = !self.fast_mode;
+        let status = if self.fast_mode {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.status_message = Some(format!("Fast mode {status}."));
+        true
+    }
+
+    fn copy_last_assistant_response(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        let last = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| m.get_all_text());
+        if let Some(text) = last {
+            let copied = try_copy_to_clipboard(&text);
+            if copied {
+                self.push_notification(
+                    NotificationKind::Info,
+                    "Copied to clipboard.".to_string(),
+                    Some(3),
+                );
+            } else {
+                self.push_notification(
+                    NotificationKind::Info,
+                    format!(
+                        "Last response: {} chars (clipboard unavailable)",
+                        text.len()
+                    ),
+                    Some(5),
+                );
+            }
+        } else {
+            self.push_notification(
+                NotificationKind::Warning,
+                "No assistant message to copy.".to_string(),
+                Some(3),
+            );
+        }
+        true
+    }
+
+    fn cycle_output_style(&mut self) -> bool {
+        self.close_secondary_views();
+        self.dismiss_error_notifications();
+        self.output_style = match self.output_style.as_str() {
+            "auto" => "stream".to_string(),
+            "stream" => "verbose".to_string(),
+            _ => "auto".to_string(),
+        };
+        self.status_message = Some(format!("Output style: {}.", self.output_style));
+        true
     }
 
     fn close_secondary_views(&mut self) {
@@ -3399,12 +3287,386 @@ impl App {
         }
         let file_autocomplete_limit = self.config.file_autocomplete_limit;
         let file_autocomplete_show_hidden = self.config.file_autocomplete_show_hidden_files;
-        self.prompt_input.update_suggestions(
-            PROMPT_SLASH_COMMANDS,
+        let text_before_cursor = &self.prompt_input.text[..self.prompt_input.cursor];
+        if text_before_cursor == "/" {
+            self.command_palette_context_snapshot = self.command_palette_context();
+        }
+        self.prompt_input.update_suggestions_with_context(
+            &self.command_catalog,
+            &self.command_palette_context_snapshot,
             file_autocomplete_limit,
             file_autocomplete_show_hidden,
         );
         self.sync_legacy_prompt_fields();
+    }
+
+    /// Install the live command catalog and refresh every command discovery surface.
+    pub fn install_command_catalog(&mut self, catalog: Vec<CommandPaletteEntry>) {
+        self.command_catalog = catalog;
+        self.rebuild_command_surfaces();
+        self.refresh_prompt_input();
+    }
+
+    /// Use the command catalog for first-session guidance without probing disk during render.
+    pub fn onboarding_commands(&self) -> Vec<&CommandPaletteEntry> {
+        let mut context = CommandPaletteContext::default();
+        context.signals.insert(CommandContextSignal::EmptySession);
+        if !self.has_credentials {
+            context
+                .signals
+                .insert(CommandContextSignal::Unauthenticated);
+        }
+        rank_commands(&self.command_catalog, "", &context, usize::MAX)
+            .into_iter()
+            .filter(|entry| {
+                entry.source == "built_in"
+                    && entry.children.is_empty()
+                    && entry
+                        .suggest_when
+                        .iter()
+                        .any(|signal| context.signals.contains(signal))
+            })
+            .take(3)
+            .collect()
+    }
+
+    fn rebuild_command_surfaces(&mut self) {
+        let visible = flatten_command_catalog(&self.command_catalog)
+            .into_iter()
+            .filter(|entry| !entry.path.is_empty())
+            .collect::<Vec<_>>();
+
+        self.help_overlay
+            .populate_from_commands(visible.into_iter().map(HelpEntry::from).collect());
+        self.command_palette_pages = vec![CommandPalettePage::Top];
+        let items = self.command_palette_page_items();
+        self.command_palette = DialogSelectState::new("Command Palette", items);
+    }
+
+    pub fn command_palette_context(&self) -> CommandPaletteContext {
+        let mut signals = std::collections::HashSet::new();
+        let root = self.project_root();
+        if !self.has_credentials {
+            signals.insert(CommandContextSignal::Unauthenticated);
+        }
+        if self.messages.is_empty() {
+            signals.insert(CommandContextSignal::EmptySession);
+        }
+        if !root.join("AGENTS.md").is_file() {
+            signals.insert(CommandContextSignal::MissingAgentsFile);
+        }
+        if claurst_core::git_utils::is_worktree_dirty(&root) {
+            signals.insert(CommandContextSignal::GitDirty);
+        }
+        if self.diff_viewer.has_turn_diff() {
+            signals.insert(CommandContextSignal::HasCompletedEdits);
+        }
+        if self.is_streaming {
+            signals.insert(CommandContextSignal::RunningTurn);
+        }
+        if self.context_window_size > 0
+            && self.context_used_tokens >= self.context_window_size.saturating_mul(4) / 5
+        {
+            signals.insert(CommandContextSignal::HighContextUsage);
+        }
+        if self.background_task_count > 0 {
+            signals.insert(CommandContextSignal::HasBackgroundTasks);
+        }
+        if self.update_available.is_some() {
+            signals.insert(CommandContextSignal::UpdateAvailable);
+        }
+        if !self.familiar_switcher_list.is_empty() {
+            signals.insert(CommandContextSignal::FamiliarAvailable);
+        }
+        if self.daemon_online {
+            signals.insert(CommandContextSignal::CovenDaemonAvailable);
+        }
+
+        CommandPaletteContext {
+            signals,
+            recent_paths: self.recent_command_paths.iter().cloned().collect(),
+        }
+    }
+
+    pub fn record_recent_command(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if !flatten_command_catalog(&self.command_catalog)
+            .into_iter()
+            .any(|entry| entry.path == path)
+        {
+            return;
+        }
+        self.recent_command_paths.retain(|recent| recent != &path);
+        self.recent_command_paths.push_front(path);
+        self.recent_command_paths.truncate(20);
+        self.command_palette_context_snapshot.recent_paths =
+            self.recent_command_paths.iter().cloned().collect();
+    }
+
+    pub fn unknown_command_suggestions(&self, query: &str) -> Vec<String> {
+        rank_commands(
+            &self.command_catalog,
+            query,
+            &self.command_palette_context_snapshot,
+            3,
+        )
+        .into_iter()
+        .map(|entry| format!("/{}", entry.path))
+        .collect()
+    }
+
+    pub fn canonical_command_path(&self, name: &str, args: &str) -> Option<String> {
+        let name = name.trim().trim_start_matches('/');
+        let first_arg = args.split_whitespace().next();
+        let full_path = first_arg
+            .map(|arg| format!("{name} {arg}"))
+            .unwrap_or_else(|| name.to_string());
+        let entries = flatten_command_catalog(&self.command_catalog);
+        entries
+            .iter()
+            .find(|entry| {
+                entry.path == full_path || entry.aliases.iter().any(|alias| alias == &full_path)
+            })
+            .or_else(|| {
+                entries.iter().find(|entry| {
+                    entry.path == name || entry.aliases.iter().any(|alias| alias == name)
+                })
+            })
+            .map(|entry| entry.path.clone())
+    }
+
+    fn palette_command_item(entry: &CommandPaletteEntry, section: &str) -> SelectItem {
+        let aliases = if entry.aliases.is_empty() {
+            String::new()
+        } else {
+            format!("  aliases: {}", entry.aliases.join(", "))
+        };
+        SelectItem {
+            id: entry.path.clone(),
+            title: format!("/{}", entry.path),
+            description: format!("{}{}", entry.summary, aliases),
+            category: section.to_string(),
+            kind: SelectItemKind::Command,
+            keywords: entry.keywords.clone(),
+            badge: (!entry.children.is_empty()).then(|| "›".to_string()),
+        }
+    }
+
+    fn palette_back_item() -> SelectItem {
+        SelectItem {
+            id: "__back__".to_string(),
+            title: "Back".to_string(),
+            description: "Return to the previous command list".to_string(),
+            category: "Navigation".to_string(),
+            kind: SelectItemKind::Back,
+            keywords: Vec::new(),
+            badge: Some("←".to_string()),
+        }
+    }
+
+    fn command_palette_page_items(&self) -> Vec<SelectItem> {
+        match self
+            .command_palette_pages
+            .last()
+            .unwrap_or(&CommandPalettePage::Top)
+        {
+            CommandPalettePage::Top => {
+                let mut items = rank_commands(
+                    &self.command_catalog,
+                    "",
+                    &self.command_palette_context_snapshot,
+                    usize::MAX,
+                )
+                .into_iter()
+                .filter(|entry| entry.source == "built_in")
+                .take(8)
+                .map(|entry| Self::palette_command_item(entry, "Recommended now"))
+                .collect::<Vec<_>>();
+
+                for category in command_category_order() {
+                    let count = self
+                        .command_catalog
+                        .iter()
+                        .filter(|entry| {
+                            entry.source == "built_in" && entry.category.as_str() == *category
+                        })
+                        .count();
+                    items.push(SelectItem {
+                        id: (*category).to_string(),
+                        title: (*category).to_string(),
+                        description: format!("{count} commands"),
+                        category: "Browse by category".to_string(),
+                        kind: SelectItemKind::Category,
+                        keywords: Vec::new(),
+                        badge: None,
+                    });
+                }
+
+                let builtin_count = self
+                    .command_catalog
+                    .iter()
+                    .filter(|entry| entry.source == "built_in")
+                    .count();
+                items.push(SelectItem {
+                    id: "__browse_all__".to_string(),
+                    title: "Browse all commands".to_string(),
+                    description: format!("{builtin_count} available"),
+                    category: "Browse by category".to_string(),
+                    kind: SelectItemKind::BrowseAll,
+                    keywords: vec!["all".to_string()],
+                    badge: Some(builtin_count.to_string()),
+                });
+
+                let custom_count = self
+                    .command_catalog
+                    .iter()
+                    .filter(|entry| entry.source != "built_in")
+                    .count();
+                if custom_count > 0 {
+                    items.push(SelectItem {
+                        id: "__custom__".to_string(),
+                        title: "Custom commands".to_string(),
+                        description: format!("{custom_count} available"),
+                        category: "Browse by category".to_string(),
+                        kind: SelectItemKind::Category,
+                        keywords: vec!["user skill plugin".to_string()],
+                        badge: Some(custom_count.to_string()),
+                    });
+                }
+                items
+            }
+            CommandPalettePage::Category(category) => std::iter::once(Self::palette_back_item())
+                .chain(
+                    self.command_catalog
+                        .iter()
+                        .filter(|entry| entry.source == "built_in" && entry.category == *category)
+                        .map(|entry| Self::palette_command_item(entry, category)),
+                )
+                .collect(),
+            CommandPalettePage::BrowseAll => std::iter::once(Self::palette_back_item())
+                .chain(
+                    self.command_catalog
+                        .iter()
+                        .filter(|entry| entry.source == "built_in")
+                        .map(|entry| Self::palette_command_item(entry, &entry.category)),
+                )
+                .collect(),
+            CommandPalettePage::Custom => std::iter::once(Self::palette_back_item())
+                .chain(
+                    self.command_catalog
+                        .iter()
+                        .filter(|entry| entry.source != "built_in")
+                        .map(|entry| Self::palette_command_item(entry, "Custom commands")),
+                )
+                .collect(),
+            CommandPalettePage::Children(path) => {
+                let entry = flatten_command_catalog(&self.command_catalog)
+                    .into_iter()
+                    .find(|entry| entry.path == *path);
+                let mut items = vec![Self::palette_back_item()];
+                if let Some(entry) = entry {
+                    let mut parent = Self::palette_command_item(entry, &entry.category);
+                    parent.title = format!("Run /{}", entry.path);
+                    parent.badge = None;
+                    items.push(parent);
+                    items.extend(
+                        entry
+                            .children
+                            .iter()
+                            .map(|child| Self::palette_command_item(child, &child.category)),
+                    );
+                }
+                items
+            }
+        }
+    }
+
+    fn refresh_command_palette_page(&mut self) {
+        let items = self.command_palette_page_items();
+        self.command_palette.set_items(items);
+    }
+
+    fn refresh_command_palette_query(&mut self) {
+        let query = self.command_palette.filter.trim().to_string();
+        if query.is_empty() {
+            self.refresh_command_palette_page();
+            return;
+        }
+        let items = rank_commands(
+            &self.command_catalog,
+            &query,
+            &self.command_palette_context_snapshot,
+            usize::MAX,
+        )
+        .into_iter()
+        .filter(|entry| match self.command_palette_pages.last() {
+            Some(CommandPalettePage::Custom) => entry.source != "built_in",
+            Some(CommandPalettePage::Children(path)) => {
+                flatten_command_catalog(&self.command_catalog)
+                    .into_iter()
+                    .find(|candidate| candidate.path == path.as_str())
+                    .is_some_and(|parent| entry.source == parent.source)
+            }
+            _ => entry.source == "built_in",
+        })
+        .map(|entry| Self::palette_command_item(entry, &entry.category))
+        .collect();
+        self.command_palette.set_items_pre_filtered(items);
+    }
+
+    fn open_command_palette(&mut self) {
+        self.command_palette_context_snapshot = self.command_palette_context();
+        self.command_palette_pages = vec![CommandPalettePage::Top];
+        self.command_palette.open();
+        self.refresh_command_palette_page();
+    }
+
+    fn command_palette_back(&mut self) {
+        if self.command_palette_pages.len() > 1 {
+            self.command_palette_pages.pop();
+            self.command_palette.filter.clear();
+            self.refresh_command_palette_page();
+        } else {
+            self.command_palette.close();
+        }
+    }
+
+    fn command_palette_drill_selected(&mut self) {
+        let Some(selected) = self.command_palette.selected().cloned() else {
+            return;
+        };
+        match selected.kind {
+            SelectItemKind::Command => {
+                let has_children = flatten_command_catalog(&self.command_catalog)
+                    .into_iter()
+                    .find(|entry| entry.path == selected.id)
+                    .is_some_and(|entry| !entry.children.is_empty());
+                if has_children {
+                    self.command_palette_pages
+                        .push(CommandPalettePage::Children(selected.id));
+                } else {
+                    return;
+                }
+            }
+            SelectItemKind::Category => {
+                if selected.id == "__custom__" {
+                    self.command_palette_pages.push(CommandPalettePage::Custom);
+                } else {
+                    self.command_palette_pages
+                        .push(CommandPalettePage::Category(selected.id));
+                }
+            }
+            SelectItemKind::BrowseAll => self
+                .command_palette_pages
+                .push(CommandPalettePage::BrowseAll),
+            SelectItemKind::Back => {
+                self.command_palette_back();
+                return;
+            }
+            SelectItemKind::Action => return,
+        }
+        self.command_palette.filter.clear();
+        self.refresh_command_palette_page();
     }
 
     pub fn set_prompt_text(&mut self, text: String) {
@@ -4112,9 +4374,7 @@ impl App {
         // Command palette (Ctrl+K)
         if self.command_palette.visible {
             match key.code {
-                KeyCode::Esc => {
-                    self.command_palette.close();
-                }
+                KeyCode::Esc => self.command_palette_back(),
                 KeyCode::Home => {
                     self.command_palette.move_home();
                 }
@@ -4141,17 +4401,54 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(selected) = self.command_palette.selected().cloned() {
-                        self.command_palette.close();
-                        // Put the command in the input and signal for execution
-                        self.prompt_input.replace_text(selected.id.clone());
-                        return true; // signal to submit this as input
+                        match selected.kind {
+                            SelectItemKind::Command => {
+                                let in_own_children = matches!(self.command_palette_pages.last(), Some(CommandPalettePage::Children(path)) if path == &selected.id);
+                                let has_children = flatten_command_catalog(&self.command_catalog)
+                                    .into_iter()
+                                    .any(|entry| {
+                                        entry.path == selected.id && !entry.children.is_empty()
+                                    });
+                                if has_children && !in_own_children {
+                                    self.command_palette_drill_selected();
+                                    return false;
+                                }
+                                self.command_palette.close();
+                                self.prompt_input.replace_text(format!("/{}", selected.id));
+                                return true;
+                            }
+                            SelectItemKind::Category => {
+                                if selected.id == "__custom__" {
+                                    self.command_palette_pages.push(CommandPalettePage::Custom);
+                                } else {
+                                    self.command_palette_pages
+                                        .push(CommandPalettePage::Category(selected.id));
+                                }
+                                self.command_palette.filter.clear();
+                                self.refresh_command_palette_page();
+                            }
+                            SelectItemKind::BrowseAll => {
+                                self.command_palette_pages
+                                    .push(CommandPalettePage::BrowseAll);
+                                self.command_palette.filter.clear();
+                                self.refresh_command_palette_page();
+                            }
+                            SelectItemKind::Back => self.command_palette_back(),
+                            SelectItemKind::Action => {}
+                        }
                     }
                 }
                 KeyCode::Backspace => {
-                    self.command_palette.filter_pop();
+                    if self.command_palette.filter.is_empty() {
+                        self.command_palette_back();
+                    } else {
+                        self.command_palette.filter_pop();
+                        self.refresh_command_palette_query();
+                    }
                 }
                 KeyCode::Char(c) => {
                     self.command_palette.filter_push(c);
+                    self.refresh_command_palette_query();
                 }
                 _ => {}
             }
@@ -5835,7 +6132,7 @@ impl App {
             }
             "openCommandPalette" => {
                 if !self.is_streaming {
-                    self.command_palette.open();
+                    self.open_command_palette();
                 }
                 false
             }
@@ -6262,7 +6559,7 @@ impl App {
                 if let ContextMenuKind::Message { message_index } = kind {
                     let branch_point = message_index + 1;
                     self.prompt_input
-                        .replace_text(format!("/fork {}", branch_point));
+                        .replace_text(format!("/session fork {}", branch_point));
                     self.status_message = Some(format!(
                         "Fork at message {} - press Enter to confirm",
                         branch_point
@@ -7487,7 +7784,139 @@ mod tests {
     fn make_app() -> App {
         let config = Config::default();
         let cost_tracker = claurst_core::cost::CostTracker::new();
-        App::new(config, cost_tracker)
+        let mut app = App::new(config, cost_tracker);
+        app.install_command_catalog(test_command_catalog());
+        app
+    }
+
+    fn test_command_catalog() -> Vec<CommandPaletteEntry> {
+        ["account", "clear", "help", "model"]
+            .into_iter()
+            .map(|path| CommandPaletteEntry {
+                path: path.to_string(),
+                aliases: Vec::new(),
+                summary: format!("{path} summary"),
+                usage: format!("/{path}"),
+                category: "Test".to_string(),
+                keywords: vec![path.to_string()],
+                source: "test".to_string(),
+                suggest_when: Vec::new(),
+                children: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn palette_entry(
+        path: &str,
+        category: &str,
+        source: &str,
+        keywords: &[&str],
+        children: Vec<CommandPaletteEntry>,
+    ) -> CommandPaletteEntry {
+        CommandPaletteEntry {
+            path: path.to_string(),
+            aliases: Vec::new(),
+            summary: format!("{path} summary"),
+            usage: format!("/{path}"),
+            category: category.to_string(),
+            keywords: keywords
+                .iter()
+                .map(|keyword| (*keyword).to_string())
+                .collect(),
+            source: source.to_string(),
+            suggest_when: Vec::new(),
+            children,
+        }
+    }
+
+    fn progressive_palette_catalog() -> Vec<CommandPaletteEntry> {
+        vec![
+            palette_entry(
+                "session",
+                "Start & Navigate",
+                "built_in",
+                &["session"],
+                vec![palette_entry(
+                    "session resume",
+                    "Start & Navigate",
+                    "built_in",
+                    &["resume"],
+                    Vec::new(),
+                )],
+            ),
+            palette_entry(
+                "review",
+                "Work & Review",
+                "built_in",
+                &["review"],
+                Vec::new(),
+            ),
+            palette_entry(
+                "thinking",
+                "Conversation",
+                "built_in",
+                &["thinking"],
+                Vec::new(),
+            ),
+            palette_entry(
+                "account",
+                "Account & Models",
+                "built_in",
+                &["account"],
+                Vec::new(),
+            ),
+            palette_entry(
+                "config",
+                "Customize",
+                "built_in",
+                &["settings"],
+                vec![palette_entry(
+                    "config theme",
+                    "Customize",
+                    "built_in",
+                    &["change theme"],
+                    Vec::new(),
+                )],
+            ),
+            palette_entry("skills", "Extend", "built_in", &["skills"], Vec::new()),
+            palette_entry(
+                "status",
+                "Coven & Advanced",
+                "built_in",
+                &["status"],
+                Vec::new(),
+            ),
+            palette_entry("deploy", "Extend", "user", &["ship"], Vec::new()),
+        ]
+    }
+
+    fn full_progressive_palette_catalog() -> Vec<CommandPaletteEntry> {
+        let mut catalog = progressive_palette_catalog();
+        catalog.pop();
+        catalog.extend((0..24).map(|index| {
+            palette_entry(
+                &format!("builtin-{index:02}"),
+                "Extend",
+                "built_in",
+                &["builtin"],
+                Vec::new(),
+            )
+        }));
+        catalog.push(palette_entry(
+            "deploy",
+            "Extend",
+            "user",
+            &["ship"],
+            Vec::new(),
+        ));
+        catalog.push(palette_entry(
+            "audit",
+            "Extend",
+            "plugin",
+            &["audit"],
+            Vec::new(),
+        ));
+        catalog
     }
 
     fn press_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -8122,19 +8551,39 @@ role = "Research"
         assert!(!app.intercept_slash_command_with_args("review", "security"));
         assert!(!app.intercept_slash_command_with_args("status", "doctor"));
         assert!(!app.intercept_slash_command_with_args("thinking", "back"));
+        assert!(!app.intercept_slash_command_with_args("integrations", "mcp auth mcphub"));
+        assert!(!app.intercept_slash_command_with_args("config", "splash hide"));
+        assert!(!app.intercept_slash_command_with_args("permissions", "sandbox on"));
         // Bare forms keep their overlays.
         assert!(app.intercept_slash_command_with_args("rewind", ""));
         assert!(app.rewind_flow.visible);
     }
 
     #[test]
-    fn folded_subcommands_open_legacy_tui_surfaces() {
+    fn canonical_parent_subcommands_open_their_tui_surfaces() {
         let mut app = make_app();
         assert!(app.intercept_slash_command_with_args("usage", "stats"));
         assert!(app.stats_dialog.visible);
         app.stats_dialog.close();
         assert!(app.intercept_slash_command_with_args("config", "theme"));
         assert!(app.theme_screen.visible);
+        assert!(app.intercept_slash_command_with_args("account", "connect"));
+        assert!(app.connect_dialog.visible);
+        assert!(app.intercept_slash_command_with_args("integrations", "hooks"));
+        assert!(app.hooks_config_menu.visible);
+        assert!(app.intercept_slash_command_with_args("integrations", "mcp"));
+        assert!(app.mcp_view.visible);
+        assert!(app.intercept_slash_command_with_args("familiar", "handoff"));
+        assert!(app.intercept_slash_command_with_args("config", "import"));
+        assert!(app.import_config_picker.visible);
+
+        assert_eq!(app.output_style, "auto");
+        assert!(app.intercept_slash_command_with_args("config", "output-style"));
+        assert_eq!(app.output_style, "stream");
+
+        assert!(!app.fast_mode);
+        assert!(app.intercept_slash_command_with_args("effort", "fast"));
+        assert!(app.fast_mode);
     }
 
     #[test]
@@ -8294,25 +8743,63 @@ role = "Research"
     }
 
     #[test]
-    fn test_fast_slash_command_toggles_fast_mode() {
+    fn effort_fast_toggles_fast_mode() {
         let mut app = make_app();
         assert!(!app.fast_mode);
-        assert!(app.intercept_slash_command("fast"));
+        assert!(app.intercept_slash_command_with_args("effort", "fast"));
         assert!(app.fast_mode);
-        assert!(app.intercept_slash_command("fast"));
+        assert!(app.intercept_slash_command_with_args("effort", "fast"));
         assert!(!app.fast_mode);
     }
 
     #[test]
-    fn test_output_style_cycles() {
+    fn config_output_style_cycles() {
         let mut app = make_app();
         assert_eq!(app.output_style, "auto");
-        assert!(app.intercept_slash_command("output-style"));
+        assert!(app.intercept_slash_command_with_args("config", "output-style"));
         assert_eq!(app.output_style, "stream");
-        assert!(app.intercept_slash_command("output-style"));
+        assert!(app.intercept_slash_command_with_args("config", "output-style"));
         assert_eq!(app.output_style, "verbose");
-        assert!(app.intercept_slash_command("output-style"));
+        assert!(app.intercept_slash_command_with_args("config", "output-style"));
         assert_eq!(app.output_style, "auto");
+    }
+
+    #[test]
+    fn removed_roots_do_not_open_or_mutate_tui_surfaces() {
+        let removed = [
+            "add-dir",
+            "advisor",
+            "agents",
+            "branch",
+            "copy",
+            "doctor",
+            "fast",
+            "fork",
+            "goal",
+            "import-config",
+            "keybindings",
+            "managed-agents",
+            "output-style",
+            "pr-comments",
+            "refresh",
+            "reload-plugins",
+            "share",
+            "switch",
+            "tag",
+            "theme",
+            "think-back",
+        ];
+
+        for command in removed {
+            let mut app = make_app();
+            assert!(
+                !app.intercept_slash_command_with_args(command, ""),
+                "/{command} must not be intercepted"
+            );
+            assert!(!app.any_modal_open(), "/{command} opened a TUI surface");
+            assert!(!app.fast_mode, "/{command} mutated fast mode");
+            assert_eq!(app.output_style, "auto", "/{command} mutated output style");
+        }
     }
 
     #[test]
@@ -8327,7 +8814,7 @@ role = "Research"
             ContextMenuKind::Message { message_index: 1 },
         );
 
-        assert_eq!(app.prompt_input.text, "/fork 2");
+        assert_eq!(app.prompt_input.text, "/session fork 2");
         assert_eq!(
             app.status_message.as_deref(),
             Some("Fork at message 2 - press Enter to confirm")
@@ -8430,6 +8917,358 @@ role = "Research"
     }
 
     #[test]
+    fn install_command_catalog_rebuilds_help_palette_and_typeahead() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        assert!(app.command_catalog.is_empty());
+        assert!(app.help_overlay.commands.is_empty());
+
+        let mut catalog = test_command_catalog();
+        catalog[0].aliases = vec!["accounts".to_string()];
+        app.install_command_catalog(catalog);
+        app.set_prompt_text("/acc".to_string());
+
+        assert!(app
+            .command_palette
+            .items
+            .iter()
+            .any(|item| item.kind == SelectItemKind::BrowseAll));
+        assert_eq!(app.help_overlay.commands[0].aliases, "accounts");
+        assert_eq!(app.prompt_input.suggestions[0].text, "/account");
+    }
+
+    #[test]
+    fn onboarding_uses_installed_catalog_and_auth_context() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        let mut connect = palette_entry(
+            "account connect",
+            "Account & Models",
+            "built_in",
+            &[],
+            Vec::new(),
+        );
+        connect.summary = "Connect from the live catalog".to_string();
+        connect.suggest_when = vec![CommandContextSignal::Unauthenticated];
+        app.install_command_catalog(vec![connect]);
+        app.has_credentials = false;
+        assert_eq!(
+            app.onboarding_commands()[0].summary,
+            "Connect from the live catalog"
+        );
+        app.has_credentials = true;
+        assert!(app.onboarding_commands().is_empty());
+    }
+
+    #[test]
+    fn command_palette_top_level_is_progressive_and_uses_builtin_counts() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(full_progressive_palette_catalog());
+
+        app.open_command_palette();
+
+        let recommended = app
+            .command_palette
+            .items
+            .iter()
+            .filter(|item| item.kind == SelectItemKind::Command)
+            .count();
+        let categories = app
+            .command_palette
+            .items
+            .iter()
+            .filter(|item| item.kind == SelectItemKind::Category && item.id != "__custom__")
+            .map(|item| item.title.as_str())
+            .collect::<Vec<_>>();
+        let browse = app
+            .command_palette
+            .items
+            .iter()
+            .find(|item| item.kind == SelectItemKind::BrowseAll)
+            .expect("browse all row");
+        let custom = app
+            .command_palette
+            .items
+            .iter()
+            .find(|item| item.id == "__custom__")
+            .expect("custom commands row");
+
+        assert!(recommended <= 8);
+        assert_eq!(categories, command_category_order());
+        assert_eq!(browse.badge.as_deref(), Some("31"));
+        assert_eq!(browse.description, "31 available");
+        assert_eq!(custom.badge.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn command_palette_omits_custom_navigation_without_dynamic_commands() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        let mut catalog = progressive_palette_catalog();
+        catalog.pop();
+        app.install_command_catalog(catalog);
+
+        app.open_command_palette();
+
+        assert!(!app
+            .command_palette
+            .items
+            .iter()
+            .any(|item| item.id == "__custom__"));
+    }
+
+    #[test]
+    fn command_palette_drill_keys_handle_navigation_rows_and_command_parents() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(full_progressive_palette_catalog());
+        app.open_command_palette();
+
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "Customize")
+            .expect("customize category");
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert_eq!(app.command_palette.items[0].kind, SelectItemKind::Back);
+
+        app.command_palette.selected_index = 0;
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert!(app
+            .command_palette
+            .items
+            .iter()
+            .any(|item| item.kind == SelectItemKind::BrowseAll));
+
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.kind == SelectItemKind::BrowseAll)
+            .expect("browse all row");
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert_eq!(
+            app.command_palette
+                .items
+                .iter()
+                .filter(|item| item.kind == SelectItemKind::Command)
+                .count(),
+            31
+        );
+        assert!(!app
+            .command_palette
+            .items
+            .iter()
+            .any(|item| matches!(item.id.as_str(), "deploy" | "audit")));
+
+        app.command_palette.selected_index = 0;
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "__custom__")
+            .expect("custom commands row");
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert_eq!(
+            app.command_palette
+                .items
+                .iter()
+                .filter(|item| item.kind == SelectItemKind::Command)
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deploy", "audit"]
+        );
+
+        app.command_palette_back();
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "Customize")
+            .expect("customize category");
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "config")
+            .expect("config command");
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert_eq!(app.command_palette.items[0].kind, SelectItemKind::Back);
+        assert!(app
+            .command_palette
+            .items
+            .iter()
+            .any(|item| item.id == "config theme"));
+    }
+
+    #[test]
+    fn command_palette_enter_executes_parent_command() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(progressive_palette_catalog());
+        app.open_command_palette();
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "config")
+            .expect("recommended config command");
+
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        app.command_palette.selected_index = app
+            .command_palette
+            .items
+            .iter()
+            .position(|item| item.id == "config")
+            .expect("run parent row");
+        assert!(app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::empty())));
+        assert_eq!(app.prompt_input.text, "/config");
+        assert!(!app.command_palette.visible);
+    }
+
+    #[test]
+    fn command_palette_intent_query_searches_all_canonical_entries() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(progressive_palette_catalog());
+        app.open_command_palette();
+
+        for c in "change theme".chars() {
+            app.handle_key_event(press_key(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+
+        assert_eq!(
+            app.command_palette.selected().map(|item| item.id.as_str()),
+            Some("config theme")
+        );
+    }
+
+    #[test]
+    fn command_palette_context_computes_all_runtime_signals() {
+        let temp = tempfile::tempdir().expect("project dir");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        std::fs::write(temp.path().join("dirty.txt"), "dirty").expect("dirty file");
+
+        let mut app = make_app();
+        app.config.project_dir = Some(temp.path().to_path_buf());
+        app.has_credentials = false;
+        app.is_streaming = true;
+        app.context_window_size = 100;
+        app.context_used_tokens = 80;
+        app.background_task_count = 1;
+        app.update_available = Some("9.9.9".to_string());
+        app.familiar_switcher_list = vec!["ember".to_string()];
+        app.daemon_online = true;
+        app.diff_viewer
+            .turn_files
+            .push(crate::diff_viewer::FileDiffStats {
+                path: "src/main.rs".to_string(),
+                added: 1,
+                removed: 0,
+                binary: false,
+                is_new_file: false,
+                hunks: Vec::new(),
+            });
+
+        let context = app.command_palette_context();
+
+        for signal in [
+            CommandContextSignal::Unauthenticated,
+            CommandContextSignal::EmptySession,
+            CommandContextSignal::MissingAgentsFile,
+            CommandContextSignal::GitDirty,
+            CommandContextSignal::HasCompletedEdits,
+            CommandContextSignal::RunningTurn,
+            CommandContextSignal::HighContextUsage,
+            CommandContextSignal::HasBackgroundTasks,
+            CommandContextSignal::UpdateAvailable,
+            CommandContextSignal::FamiliarAvailable,
+            CommandContextSignal::CovenDaemonAvailable,
+        ] {
+            assert!(context.signals.contains(&signal), "missing {signal:?}");
+        }
+    }
+
+    #[test]
+    fn recent_commands_reject_unknown_paths_and_remain_unique_and_capped_at_twenty() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(
+            (0..25)
+                .map(|index| {
+                    palette_entry(
+                        &format!("command-{index}"),
+                        "Extend",
+                        "built_in",
+                        &["command"],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        );
+        app.record_recent_command("unknown");
+        for index in 0..25 {
+            app.record_recent_command(format!("command-{index}"));
+        }
+        app.record_recent_command("command-10");
+
+        assert_eq!(app.recent_command_paths.len(), 20);
+        assert!(!app
+            .recent_command_paths
+            .iter()
+            .any(|path| path == "unknown"));
+        assert_eq!(
+            app.recent_command_paths.front().map(String::as_str),
+            Some("command-10")
+        );
+        assert_eq!(
+            app.recent_command_paths
+                .iter()
+                .filter(|path| path.as_str() == "command-10")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_command_suggestions_use_catalog_ranker() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(vec![palette_entry(
+            "account login",
+            "Account & Models",
+            "built_in",
+            &["sign in"],
+            Vec::new(),
+        )]);
+
+        assert_eq!(
+            app.unknown_command_suggestions("logn"),
+            vec!["/account login"]
+        );
+    }
+
+    #[test]
+    fn unknown_command_suggestions_are_capped_at_three() {
+        let mut app = App::new(Config::default(), claurst_core::cost::CostTracker::new());
+        app.install_command_catalog(
+            (0..6)
+                .map(|index| {
+                    palette_entry(
+                        &format!("login-{index}"),
+                        "Account & Models",
+                        "built_in",
+                        &["login"],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        );
+
+        assert_eq!(app.unknown_command_suggestions("login").len(), 3);
+    }
+
+    #[test]
     fn test_help_slash_command_is_idempotent_when_already_open() {
         let mut app = make_app();
         // First call opens it.
@@ -8470,6 +9309,18 @@ role = "Research"
 
         assert!(!app.help_overlay.visible);
         assert_eq!(app.prompt_input.text, "why?");
+    }
+
+    #[test]
+    fn help_filter_keeps_the_letter_f() {
+        let mut app = make_app();
+        app.help_overlay.toggle();
+
+        app.handle_key_event(press_key(KeyCode::Char('f'), KeyModifiers::empty()));
+
+        assert!(app.help_overlay.visible);
+        assert!(!app.feedback_survey.visible);
+        assert_eq!(app.help_overlay.filter, "f");
     }
 
     #[test]

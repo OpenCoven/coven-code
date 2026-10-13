@@ -109,6 +109,20 @@ pub fn list_modified_files(repo_root: &Path) -> Vec<PathBuf> {
     output.lines().map(|l| repo_root.join(l)).collect()
 }
 
+/// Return whether tracked or untracked worktree changes are present.
+///
+/// Non-repositories and command failures are treated as clean so contextual
+/// command discovery never blocks on git availability.
+pub fn is_worktree_dirty(cwd: &Path) -> bool {
+    Command::new("git")
+        .current_dir(cwd)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Diff
 // ---------------------------------------------------------------------------
@@ -250,7 +264,35 @@ pub fn is_ignored(repo_root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
+    use tempfile::TempDir;
+
+    fn new_repo() -> TempDir {
+        let dir = TempDir::new().expect("temp repo");
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        dir
+    }
+
+    #[test]
+    fn worktree_dirty_detects_clean_and_dirty_repositories() {
+        let repo = new_repo();
+        assert!(!is_worktree_dirty(repo.path()));
+
+        fs::write(repo.path().join("untracked.txt"), "dirty").expect("write untracked file");
+        assert!(is_worktree_dirty(repo.path()));
+    }
+
+    #[test]
+    fn worktree_dirty_is_false_outside_git_repository() {
+        let dir = TempDir::new().expect("temp non-repo");
+        assert!(!is_worktree_dirty(dir.path()));
+    }
 
     #[test]
     fn get_repo_root_finds_git() {

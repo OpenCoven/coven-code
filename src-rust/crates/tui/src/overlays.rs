@@ -12,6 +12,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use crate::command_palette::CommandPaletteEntry;
+
 pub const COVEN_CODE_ACCENT: Color = Color::Rgb(139, 92, 246);
 pub const COVEN_CODE_APP_BG: Color = Color::Rgb(10, 10, 14);
 pub const COVEN_CODE_PANEL_BG: Color = Color::Rgb(20, 20, 28);
@@ -302,18 +304,25 @@ pub struct HelpEntry {
     pub category: String,
 }
 
+impl From<&CommandPaletteEntry> for HelpEntry {
+    fn from(entry: &CommandPaletteEntry) -> Self {
+        Self {
+            name: entry.path.clone(),
+            aliases: entry.aliases.join(", "),
+            description: entry.summary.clone(),
+            category: entry.category.clone(),
+        }
+    }
+}
+
 impl HelpOverlay {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Populate (or replace) the command entries from the command registry.
-    /// Entries are sorted by category then name.
+    /// Populate (or replace) command entries in the catalog's canonical order.
     pub fn populate_from_commands(&mut self, entries: Vec<HelpEntry>) {
         self.commands = entries;
-        // Sort stable by category, then name for consistent display.
-        self.commands
-            .sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
     }
 
     pub fn toggle(&mut self) {
@@ -1992,6 +2001,40 @@ mod tests {
         assert_eq!(h.filter, "he");
         h.pop_filter_char();
         assert_eq!(h.filter, "h");
+    }
+
+    #[test]
+    fn help_overlay_preserves_canonical_catalog_order() {
+        let categories = [
+            "Start & Navigate",
+            "Work & Review",
+            "Conversation",
+            "Account & Models",
+            "Customize",
+            "Extend",
+            "Coven & Advanced",
+        ];
+        let entries = categories
+            .iter()
+            .map(|category| HelpEntry {
+                name: format!("{} command", category.to_lowercase()),
+                aliases: String::new(),
+                description: String::new(),
+                category: (*category).to_string(),
+            })
+            .collect();
+
+        let mut overlay = HelpOverlay::new();
+        overlay.populate_from_commands(entries);
+
+        assert_eq!(
+            overlay
+                .commands
+                .iter()
+                .map(|entry| entry.category.as_str())
+                .collect::<Vec<_>>(),
+            categories.to_vec()
+        );
     }
 
     #[test]

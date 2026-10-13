@@ -20,12 +20,24 @@ use crate::overlays::{
 // ---------------------------------------------------------------------------
 
 /// A single selectable item in the dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectItemKind {
+    Command,
+    Category,
+    BrowseAll,
+    Back,
+    Action,
+}
+
+/// A single selectable item in the dialog.
 #[derive(Debug, Clone)]
 pub struct SelectItem {
     pub id: String,
     pub title: String,
     pub description: String,
     pub category: String,
+    pub kind: SelectItemKind,
+    pub keywords: Vec<String>,
     pub badge: Option<String>, // e.g., "FREE", "LOCAL", "NEW"
 }
 
@@ -75,6 +87,18 @@ impl DialogSelectState {
 
     pub fn close(&mut self) {
         self.visible = false;
+    }
+
+    pub fn set_items(&mut self, items: Vec<SelectItem>) {
+        self.items = items;
+        self.selected_index = 0;
+        self.refilter();
+    }
+
+    pub fn set_items_pre_filtered(&mut self, items: Vec<SelectItem>) {
+        self.items = items;
+        self.selected_index = 0;
+        self.filtered_indices = (0..self.items.len()).collect();
     }
 
     pub fn move_up(&mut self) {
@@ -171,6 +195,10 @@ impl DialogSelectState {
                     item.title.to_lowercase().contains(&query)
                         || item.description.to_lowercase().contains(&query)
                         || item.category.to_lowercase().contains(&query)
+                        || item
+                            .keywords
+                            .iter()
+                            .any(|keyword| keyword.to_lowercase().contains(&query))
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -440,6 +468,8 @@ mod tests {
                 title: "Anthropic".into(),
                 description: "Claude models".into(),
                 category: "Recommended".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: None,
             },
             SelectItem {
@@ -447,6 +477,8 @@ mod tests {
                 title: "Codex".into(),
                 description: "gpt-5.6 via ChatGPT".into(),
                 category: "Recommended".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: None,
             },
             SelectItem {
@@ -454,6 +486,8 @@ mod tests {
                 title: "Custom".into(),
                 description: "Custom endpoint".into(),
                 category: "Other".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: None,
             },
         ]
@@ -538,6 +572,18 @@ mod tests {
     }
 
     #[test]
+    fn filter_matches_typed_keywords() {
+        let mut items = sample_items();
+        items[2].keywords = vec!["bring your own endpoint".to_string()];
+        let mut state = DialogSelectState::new("Test", items);
+        state.open();
+        for c in "endpoint".chars() {
+            state.filter_push(c);
+        }
+        assert_eq!(state.selected().unwrap().id, "custom");
+    }
+
+    #[test]
     fn page_up_and_down() {
         let mut state = DialogSelectState::new("Test", sample_items());
         state.open();
@@ -578,6 +624,8 @@ mod tests {
                 title: "CLAUDE.md".into(),
                 description: "Import ~/.claude/CLAUDE.md".into(),
                 category: "Import".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: None,
             },
             SelectItem {
@@ -585,6 +633,8 @@ mod tests {
                 title: "settings.json".into(),
                 description: "Import ~/.claude/settings.json".into(),
                 category: "Import".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: None,
             },
             SelectItem {
@@ -592,6 +642,8 @@ mod tests {
                 title: "Both".into(),
                 description: "Import both CLAUDE.md and settings.json".into(),
                 category: "Import".into(),
+                kind: SelectItemKind::Action,
+                keywords: Vec::new(),
                 badge: Some("SAFE".into()),
             },
         ];

@@ -12,7 +12,7 @@ default = ["voice"]
 voice = ["claurst-core/voice", "claurst-tui/voice"]
 
 # Opt-in `/steer` command (see crates/tui). Build with `--features steer`.
-steer = ["claurst-tui/steer"]
+steer = ["claurst-commands/steer", "claurst-tui/steer"]
 
 [dependencies]
 claurst-core = { workspace = true }

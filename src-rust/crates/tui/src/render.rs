@@ -2003,31 +2003,31 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
 
     // --- Right column: Tips + What's new, left-aligned like the image ---
     let right_w_usize = right_w.saturating_sub(1).max(1) as usize;
-    // The tip for a session is stable; selecting it re-reads tip history from
-    // disk, so do that once per process instead of on every frame.
-    static WELCOME_TIP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let tip_text = WELCOME_TIP.get_or_init(|| {
-        claurst_core::tips::select_tip(0)
-            .map(|t| t.content.to_string())
-            .unwrap_or_else(|| "Edit AGENTS.md to add instructions for Coven".to_string())
-    });
+    let onboarding = app.onboarding_commands();
+    let tip_text = onboarding
+        .first()
+        .map(|entry| format!("{} — {}", entry.usage, entry.summary))
+        .unwrap_or_else(|| "Type / to discover commands for this session".to_string());
 
     let mut right_lines: Vec<Line> = Vec::new();
     // When unauthenticated, lead the right column with a prominent /connect
     // call-to-action so a brand-new user has an obvious next step. The tips and
     // what's-new sections still render below (kept for the startup chrome).
-    if !app.has_credentials {
+    if let Some(connect) = crate::command_palette::flatten_command_catalog(&app.command_catalog)
+        .into_iter()
+        .find(|entry| !app.has_credentials && entry.path == "account connect")
+    {
         let pink = crate::overlays::COVEN_CODE_ACCENT;
         right_lines.push(Line::from(vec![
             Span::styled(
-                " /connect ",
+                format!(" {} ", connect.usage),
                 Style::default()
                     .fg(readable_fg_on(pink))
                     .bg(pink)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " connect a provider to begin",
+                format!(" {}", connect.summary),
                 Style::default().fg(pink).add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -2038,7 +2038,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     )));
     // Word-wrap the tip on word boundaries; when the CTA is also shown, keep it
     // to a single line so the fixed-height box doesn't clip What's new.
-    let tip_lines = crate::dialogs::word_wrap(tip_text, right_w_usize);
+    let tip_lines = crate::dialogs::word_wrap(&tip_text, right_w_usize);
     let tip_take = if app.has_credentials {
         tip_lines.len()
     } else {
@@ -2072,7 +2072,11 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
     right_lines.push(Line::from(Span::styled(
-        "/release-notes for more",
+        crate::command_palette::flatten_command_catalog(&app.command_catalog)
+            .into_iter()
+            .find(|entry| entry.path == "update notes")
+            .map(|entry| format!("{} for more", entry.usage))
+            .unwrap_or_else(|| "Type / for commands".to_string()),
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
@@ -4071,7 +4075,7 @@ mod welcome_tests {
         );
         assert!(text.contains("What's new"), "missing what's new:\n{text}");
         assert!(
-            text.contains("/release-notes for more"),
+            text.contains("Type / for commands"),
             "missing release-notes footer:\n{text}"
         );
     }
