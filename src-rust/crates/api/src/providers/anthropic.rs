@@ -215,7 +215,7 @@ impl AnthropicProvider {
                 error_type,
                 message,
             }),
-            AnthropicStreamEvent::Ping => None,
+            AnthropicStreamEvent::Ping => Some(StreamEvent::Ping),
         }
     }
 
@@ -365,6 +365,14 @@ mod tests {
         events: Vec<StreamEvent>,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> {
         Box::pin(stream::iter(events.into_iter().map(Ok)))
+    }
+
+    #[test]
+    fn keepalive_ping_reaches_the_stream_consumer() {
+        assert!(
+            AnthropicProvider::map_stream_event(AnthropicStreamEvent::Ping).is_some(),
+            "keepalive pings must reach the consumer's stall timer"
+        );
     }
 
     #[tokio::test]

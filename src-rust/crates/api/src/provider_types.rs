@@ -163,6 +163,9 @@ pub enum StreamEvent {
 
     /// Incremental reasoning / scratchpad delta (alias used by some providers).
     ReasoningDelta { index: usize, reasoning: String },
+
+    /// Content-free keepalive that resets the consuming stream stall timer.
+    Ping,
 }
 
 // ---------------------------------------------------------------------------
