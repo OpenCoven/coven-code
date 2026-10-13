@@ -5,7 +5,7 @@
   "description": "Tokenless read-context payload the adapter writes for coven-code --headless --context. Contract version 3.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["trigger", "repo", "task", "familiar", "workspace"],
+  "required": ["contract_version", "trigger", "repo", "task", "familiar", "workspace"],
   "properties": {
     "contract_version": {
       "type": "string",

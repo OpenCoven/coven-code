@@ -1,27 +1,31 @@
-# Vendored headless-contract fixtures
+# Runtime headless-contract fixtures
 
-These four files are **verbatim copies** of the locked headless execution
-contract artifacts owned by the `coven-github` repository:
+These fixtures describe Coven Code's version 3 headless interface:
 
 - `session-brief.schema.json`
 - `result.schema.json`
 - `session-brief.example.json`
 - `result.example.json`
 
-Canonical source (single source of truth):
-`OpenCoven/coven-github` → `docs/headless-contract.md` + `docs/contracts/`.
+Run the JSON Schema regression tests from the repository root:
 
-**Contract version: `1`.**
+```sh
+uv run scripts/test-headless-schemas.py
+```
 
-`coven-code` is the *consumer* of the session brief and the *producer* of the
-result envelope. The conformance tests in `crates/cli/src/headless.rs` round-trip
-these golden fixtures through the runtime types and assert that:
+The script pins its validator dependency and tests both golden fixtures,
+required version declarations, review evidence, and result exit reasons.
+Rust tests in `crates/cli/src/headless.rs` separately exercise runtime parsing,
+serialization, and selected schema properties.
 
-- every brief that validates against `session-brief.schema.json` is accepted,
-- every `result.json` the runtime emits validates against `result.schema.json`.
+The [upstream adapter contract](https://github.com/OpenCoven/coven-github/blob/main/docs/headless-contract.md)
+and its `docs/contracts/` fixtures currently use version 2. These runtime
+fixtures use version 3 and include `review.memory` provenance. They are not
+verbatim copies. The runtime still accepts v2 briefs and echoes that version,
+but its extra review provenance needs reconciliation with the strict adapter-v2
+schema before claiming cross-repository conformance.
 
-If a test here fails, the runtime drifted from the contract **or** the contract
-changed. Do not "bless" the fixtures — re-copy them from `coven-github` only as
-part of a deliberate, version-bumped contract change (see the contract doc's
-Versioning section). A breaking change MUST bump `contract_version` on both
-sides.
+See the [runtime contract](../../../../../docs/headless-contract.md) for the
+normative v3 behavior. Coordinate breaking changes and version bumps with
+both repositories; do not overwrite these fixtures with an older upstream
+schema.
