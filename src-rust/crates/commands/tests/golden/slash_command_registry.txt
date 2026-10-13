@@ -1,120 +1,130 @@
-# PROMPT_SLASH_COMMANDS in palette order: name	category	description
-accounts	Other	List stored accounts; `dedupe` collapses duplicate profiles
-attach	Other	Save and manage file attachments in the structured stash
-chrome	Integrations	Browser automation via Chrome DevTools Protocol
-clear	Conversation	Clear the conversation transcript
-commit	Project	Stage and commit changes (model drafts the message)
-compact	Conversation	Compact the conversation context
-config	Settings	Open settings (theme, keybindings, advisor, import, UI)
-connect	Auth & Permissions	Connect an AI provider
-coven	Coven	Drive the local Coven daemon (sessions, harness runs, rituals)
-diff	Project	Inspect the current git diff
-effort	Settings	Set effort level (low/normal/high) or toggle fast mode
-exit	General	Quit Coven
-export	Conversation	Export, copy, or share the conversation
-familiar	Coven	Your familiar & agents — switch persona, inspect, and manage
-feedback	General	Open session feedback survey
-handoff	Coven	Hand off current session context to a Coven familiar
-help	General	Show help
-hooks	Integrations	Browse configured hooks (read-only)
-incant	Tools & Extras	Cast a speech incantation (caveman, rocky) or lift it with off
-init	Project	Initialize AGENTS.md for this project
-learn	Tools & Extras	Codify the script/workflow we just built into a reusable skill
-link	Other	Save and manage links in the structured stash
-login	Auth & Permissions	Log in, switch accounts, or refresh provider auth
-logout	Auth & Permissions	Log out of Coven
-mcp	Integrations	Browse configured MCP servers
-memory	Project	Browse and open AGENTS.md memory files
-model	Settings	Change the AI model
-permissions	Auth & Permissions	Manage tool permission rules
-plan	AI & Thinking	Enter plan mode (read-only)
-plugin	Tools & Extras	Manage plugins (list/info/enable/disable/install/reload)
-providers	Auth & Permissions	List available AI providers and their status
-quit	General	Exit Coven
-resume	Sessions & Remote	Resume a previous session
-review	Project	Review changes (security/ultra variants, PR comments)
-rewind	Conversation	Rewind the conversation or roll back file changes
-sandbox	Settings	Toggle sandboxed shell execution
-search	Sessions & Remote	Search the codebase by natural language or regex
-splash	Settings	Show, hide, or toggle the empty-session splash screen
-session	Sessions & Remote	Browse, rename, fork, branch, and tag sessions
-settings	Settings	Open settings (theme, keybindings, advisor, import, UI)
-skills	Tools & Extras	List and manage skills
-status	System	Show session status or run diagnostics (/status doctor)
-survey	General	Open session feedback survey
-tasks	AI & Thinking	Manage tracked background tasks
-thinking	AI & Thinking	Configure extended thinking or view past thinking traces
-update	System	Check for updates and upgrade to the latest version
-release-notes	Other	Show recent Coven highlights
-usage	Usage & Cost	Detailed per-call token usage breakdown
-version	System	Display the current Coven version
-whisper	Tools & Extras	Whisper a side question to your familiar (not kept in history)
-
-# registered SlashCommands sorted by name: name	category	aliases	hidden
-accounts	Other	-	false
-add-dir	Other	-	true
-advisor	AI & Thinking	-	true
-agents	Other	-	true
-attach	Other	attachments	false
-branch	Conversation	-	true
-chrome	Integrations	-	false
-clear	Conversation	c,reset,new	false
-commit	Project	-	false
-compact	Conversation	-	false
-config	Settings	settings	false
-connect	Auth & Permissions	-	false
-copy	Tools & Extras	-	true
-coven	Coven	-	false
-diff	Project	-	false
-doctor	System	-	true
-effort	Settings	-	false
-exit	General	quit,q	false
-export	Conversation	-	false
-familiar	Coven	familiars,agent	false
-fast	Settings	speed	true
-feedback	General	bug	false
-fork	Conversation	-	true
-goal	AI & Thinking	-	true
-help	General	h,?	false
-hooks	Integrations	-	false
-import-config	Project	-	true
-incant	Tools & Extras	-	false
-init	Project	-	false
-keybindings	Settings	-	true
-learn	Tools & Extras	scribe	false
-link	Other	links	false
-login	Auth & Permissions	-	false
-logout	Auth & Permissions	-	false
-managed-agents	Other	-	true
-mcp	Integrations	-	false
-memory	Project	-	false
-model	Settings	-	false
-output-style	Settings	-	true
-permissions	Auth & Permissions	-	false
-plan	AI & Thinking	-	false
-plugin	Tools & Extras	plugins	false
-pr-comments	Other	-	true
-providers	Auth & Permissions	-	false
-refresh	Auth & Permissions	-	true
-release-notes	Other	whats-new,changelog	false
-reload-plugins	Tools & Extras	-	true
-resume	Sessions & Remote	r,continue	false
-review	Project	-	false
-rewind	Conversation	-	false
-sandbox	Settings	sandbox-toggle	false
-search	Sessions & Remote	-	false
-session	Sessions & Remote	remote	false
-share	Sessions & Remote	-	true
-skills	Tools & Extras	skill	false
-splash	Settings	welcome-screen	false
-status	System	-	false
-switch	Auth & Permissions	-	true
-tag	Other	-	true
-tasks	AI & Thinking	bashes	false
-theme	Settings	-	true
-think-back	AI & Thinking	thinkback	true
-thinking	AI & Thinking	think	false
-update	System	upgrade	false
-usage	Usage & Cost	-	false
-version	System	v	false
-whisper	Tools & Extras	btw	false
+# Canonical command catalog: path	category	state	aliases	usage	summary
+account	Account & Models	active	-	/account <login|logout|list|dedupe|providers|connect|switch|refresh>	Manage accounts and provider connections
+account connect	Account & Models	active	-	/account connect	Connect a provider account
+account dedupe	Account & Models	active	-	/account dedupe	Remove duplicate credentials
+account list	Account & Models	active	-	/account list	List configured accounts
+account login	Account & Models	active	-	/account login [--console] [--codex] [--label <name>]	Sign in to a provider
+account logout	Account & Models	active	-	/account logout	Sign out of a provider
+account providers	Account & Models	active	-	/account providers	List available providers
+account refresh	Account & Models	active	-	/account refresh	Refresh provider authentication
+account switch	Account & Models	active	-	/account switch [name]	Switch the active account
+accounts	Account & Models	removed:/account list	-	/accounts	List configured accounts
+accounts dedupe	Account & Models	removed:/account dedupe	-	/accounts dedupe	Remove duplicate account profiles
+add-dir	Start & Navigate	removed:/session add-dir	-	Use /session add-dir	Removed compatibility command
+advisor	Customize	removed:/config advisor	-	Use /config advisor	Removed compatibility command
+agents	Coven & Advanced	removed:/familiar list	-	Use /familiar list	Removed compatibility command
+attach	Coven & Advanced	removed:/stash attach	attachments	/attach	Store and manage attachments
+branch	Start & Navigate	removed:/session branch	-	Use /session branch	Removed compatibility command
+changes	Work & Review	removed:/diff	-	Use /diff	Removed compatibility command
+chrome	Extend	removed:/integrations chrome	-	/chrome	Connect Chrome integration
+clear	Start & Navigate	active	c,reset,new	/clear	Clear the conversation history
+commit	Work & Review	active	-	/commit [message]	Ask Coven to commit staged changes
+compact	Conversation	active	-	/compact	Compact the conversation to reduce token usage
+config	Customize	active	settings	/config [show|get|set|unset|<area>] ...	Show or modify configuration settings
+config advisor	Customize	active	-	/config advisor [model|off]	Configure the advisor model
+config import	Customize	active	-	/config import	Import configuration from another tool
+config keybindings	Customize	active	-	/config keybindings	Open keybinding configuration
+config output-style	Customize	active	-	/config output-style [style]	Select the response output style
+config splash	Customize	active	-	/config splash [show|hide|toggle]	Configure the empty-session splash screen
+config theme	Customize	active	-	/config theme [name]	Select the display theme
+connect	Account & Models	removed:/account connect	-	/connect	Connect a provider account
+context	Account & Models	removed:/usage context	-	Use /usage context	Removed compatibility command
+copy	Conversation	removed:/export copy	-	Use /export copy	Removed compatibility command
+cost	Account & Models	removed:/usage cost	-	Use /usage cost	Removed compatibility command
+coven	Coven & Advanced	active	-	/coven [status|sessions|familiars|log|run|daemon|goal|help] ...	Drive the local Coven daemon (sessions, harness runs, rituals)
+coven goal	Coven & Advanced	active	-	/coven goal [objective|status|pause|resume|clear|complete]	Manage durable session goals
+diff	Work & Review	active	-	/diff	Show git diff of changes in the working directory
+doctor	Coven & Advanced	removed:/status doctor	-	Use /status doctor	Removed compatibility command
+effort	Customize	active	-	/effort [low|normal|high|fast [on|off]]	Set the model's thinking effort (low | normal | high)
+effort fast	Customize	active	-	/effort fast [on|off]	Enable fast response mode
+exit	Start & Navigate	active	quit,q	/exit	Exit Coven
+export	Conversation	active	-	/export [copy [n]|share] [--format markdown|json] [--output <file>]	Export conversation to markdown or JSON
+export copy	Conversation	active	-	/export copy	Copy the session export to the clipboard
+export share	Conversation	active	-	/export share	Create a shareable session export
+familiar	Coven & Advanced	active	familiars,agent	/familiar <incant|whisper|handoff|list|managed>	Your familiar & agents — switch persona, inspect, and manage
+familiar handoff	Coven & Advanced	active	-	/familiar handoff <name>	Hand work to a familiar
+familiar incant	Coven & Advanced	active	-	/familiar incant [arguments]	Run a familiar incantation
+familiar list	Coven & Advanced	active	-	/familiar list	List available familiars
+familiar managed	Coven & Advanced	active	-	/familiar managed [arguments]	Manage familiar execution
+familiar whisper	Coven & Advanced	active	-	/familiar whisper <message>	Ask a familiar side question
+fast	Customize	removed:/effort fast	speed	Use /effort fast	Removed compatibility command
+feedback	Extend	removed:/help feedback	bug,survey	/feedback [report]	Submit feedback about Coven
+find	Conversation	advanced	-	/find	Search the current transcript
+fork	Start & Navigate	removed:/session fork	-	Use /session fork	Removed compatibility command
+goal	Coven & Advanced	removed:/coven goal	-	Use /coven goal	Removed compatibility command
+handoff	Coven & Advanced	removed:/familiar handoff	-	/handoff	Hand work to a familiar
+help	Start & Navigate	active	h,?	/help [command]	Show available commands and usage information
+help feedback	Extend	active	-	/help feedback [report]	Submit feedback about Coven
+hooks	Extend	removed:/integrations hooks	-	/hooks	Configure lifecycle hooks
+import-config	Customize	removed:/config import	-	Use /config import	Removed compatibility command
+incant	Coven & Advanced	removed:/familiar incant	-	/incant	Run a familiar incantation
+init	Start & Navigate	active	-	/init	Initialize a new project with AGENTS.md
+integrations	Extend	active	-	/integrations <hooks|mcp|chrome>	Configure external integrations
+integrations chrome	Extend	active	-	/integrations chrome	Connect Chrome integration
+integrations hooks	Extend	active	-	/integrations hooks	Configure lifecycle hooks
+integrations mcp	Extend	active	-	/integrations mcp [arguments]	Manage MCP servers
+keybindings	Customize	removed:/config keybindings	-	Use /config keybindings	Removed compatibility command
+learn	Extend	active	scribe	/learn	Codify a script or workflow we just built into a reusable skill (Hermes)
+link	Coven & Advanced	removed:/stash link	links	/link	Store and manage links
+login	Account & Models	removed:/account login	-	/login	Sign in to a provider
+logout	Account & Models	removed:/account logout	-	/logout	Sign out of a provider
+managed-agents	Coven & Advanced	removed:/familiar managed	-	Use /familiar managed	Removed compatibility command
+mcp	Extend	removed:/integrations mcp	-	/mcp	Manage MCP servers
+memory	Work & Review	active	-	/memory [edit|clear]	View, edit, or clear AGENTS.md memory files
+model	Account & Models	active	-	/model [name]	Show or change the current model
+output-style	Customize	removed:/config output-style	-	Use /config output-style	Removed compatibility command
+permissions	Account & Models	active	-	/permissions [sandbox]	View or change tool permission settings
+permissions sandbox	Account & Models	active	-	/permissions sandbox	Configure sandbox permissions
+plan	Conversation	active	-	/plan [prompt]	Enter plan mode – model outputs a plan for approval before acting
+plugin	Extend	active	plugins	/plugin [reload]	Manage plugins
+plugin reload	Extend	active	reload,plugin refresh,plugins reload,plugins refresh	/plugin reload	Reload installed plugins
+pr-comments	Work & Review	removed:/review pr-comments	-	Use /review pr-comments	Removed compatibility command
+providers	Account & Models	removed:/account providers	-	/providers	List available providers
+refresh	Account & Models	removed:/account refresh	-	Use /account refresh	Removed compatibility command
+release-notes	Coven & Advanced	removed:/update notes	whats-new,changelog	/release-notes	Show recent Coven highlights
+reload-plugins	Extend	removed:/plugin reload	-	Use /plugin reload	Removed compatibility command
+rename	Start & Navigate	removed:/session rename	-	Use /session rename	Removed compatibility command
+resume	Start & Navigate	removed:/session resume	r,continue	/resume	Resume a saved session
+review	Work & Review	active	-	/review [pr-comments]	Review code changes via LLM and optionally post to GitHub PR
+review pr-comments	Work & Review	active	-	/review pr-comments	Read pull request comments
+review security	Work & Review	active	-	/review security [path]	Run a security-focused review
+review ultra	Work & Review	active	-	/review ultra [path]	Run an exhaustive review
+rewind	Work & Review	active	-	/rewind [list|diff|last]	Rewind the conversation or roll back a turn's file changes
+rewind diff	Work & Review	active	-	/rewind diff [checkpoint]	Preview a recorded file-change diff
+rewind list	Work & Review	active	-	/rewind list	List recorded file-change checkpoints
+sandbox	Account & Models	removed:/permissions sandbox	sandbox-toggle	/sandbox	Configure sandbox permissions
+search	Start & Navigate	active	-	/search <query>	Search across all sessions
+session	Start & Navigate	active	remote	/session <resume|fork|branch|tag|add-dir>	Show or manage conversation sessions
+session add-dir	Start & Navigate	active	-	/session add-dir <path>	Add an allowed workspace directory
+session branch	Start & Navigate	active	-	/session branch [arguments]	Create a session branch
+session fork	Start & Navigate	active	-	/session fork [message_index]	Fork the current session
+session rename	Start & Navigate	active	-	/session rename <name>	Rename the current session
+session resume	Start & Navigate	active	-	/session resume [id]	Resume a saved session
+session tag	Start & Navigate	active	-	/session tag [arguments]	Tag the current session
+share	Conversation	removed:/export share	-	Use /export share	Removed compatibility command
+skills	Extend	active	skill	/skills	List available skills in .coven-code/commands/
+splash	Customize	removed:/config splash	welcome-screen	/splash	Configure splash screen
+stash	Coven & Advanced	active	-	/stash <link|attach>	Store useful links and attachments
+stash attach	Coven & Advanced	active	-	/stash attach [arguments]	Store and manage attachments
+stash link	Coven & Advanced	active	-	/stash link [arguments]	Store and manage links
+stats	Account & Models	removed:/usage stats	-	Use /usage stats	Removed compatibility command
+status	Coven & Advanced	active	-	/status [doctor]	Show comprehensive system and session status
+status doctor	Coven & Advanced	active	-	/status doctor	Run diagnostic checks
+switch	Account & Models	removed:/account switch	-	Use /account switch	Removed compatibility command
+tag	Start & Navigate	removed:/session tag	-	Use /session tag	Removed compatibility command
+tasks	Conversation	active	bashes	/tasks	List and manage background tasks
+theme	Customize	removed:/config theme	-	Use /config theme	Removed compatibility command
+think-back	Conversation	removed:/thinking back	thinkback	Use /thinking back	Removed compatibility command
+thinking	Conversation	active	think	/thinking <back>	Toggle extended thinking mode
+thinking back	Conversation	active	-	/thinking back	View earlier thinking traces
+update	Coven & Advanced	active	upgrade	/update <version|notes>	Check for updates and download the latest release
+update notes	Coven & Advanced	active	-	/update notes	Show recent Coven release notes
+update version	Coven & Advanced	active	-	/update version	Show the installed Coven version
+usage	Account & Models	active	-	/usage [cost|context|stats]	Show API usage, quotas, and rate limit status
+usage context	Account & Models	active	-	/usage context	Show context window usage
+usage cost	Account & Models	active	-	/usage cost	Show session cost details
+usage stats	Account & Models	active	-	/usage stats	Show detailed session statistics
+version	Coven & Advanced	removed:/update version	v	/version	Show the installed Coven version
+vim	Customize	advanced	-	/vim	Toggle Vim input mode
+voice	Customize	advanced	-	/voice	Toggle voice input
+whisper	Coven & Advanced	removed:/familiar whisper	btw	/whisper	Ask a familiar side question

@@ -18,6 +18,8 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::command_palette::{rank_commands, CommandPaletteContext, CommandPaletteEntry};
+
 const CLAUDE_ORANGE: Color = crate::overlays::COVEN_CODE_ACCENT;
 const PROMPT_POINTER: &str = "\u{276f}";
 
@@ -1507,13 +1509,29 @@ pub struct TypeaheadSuggestion {
 /// - `@` file references (e.g. `@src/`, `@~/Documents/`)
 pub fn compute_typeahead(
     input: &str,
-    slash_commands: &[(&str, &str)],
+    command_catalog: &[CommandPaletteEntry],
+    file_autocomplete_limit: usize,
+    file_autocomplete_show_hidden: bool,
+) -> Vec<TypeaheadSuggestion> {
+    compute_typeahead_with_context(
+        input,
+        command_catalog,
+        &CommandPaletteContext::default(),
+        file_autocomplete_limit,
+        file_autocomplete_show_hidden,
+    )
+}
+
+pub fn compute_typeahead_with_context(
+    input: &str,
+    command_catalog: &[CommandPaletteEntry],
+    command_context: &CommandPaletteContext,
     file_autocomplete_limit: usize,
     file_autocomplete_show_hidden: bool,
 ) -> Vec<TypeaheadSuggestion> {
     // Handle slash commands: /help, /clear, etc.
     if input.starts_with('/') {
-        return compute_slash_suggestions(input, slash_commands);
+        return compute_slash_suggestions_with_context(input, command_catalog, command_context);
     }
 
     // Handle file references: @, @/, @~/, @src/, etc.
@@ -1525,26 +1543,52 @@ pub fn compute_typeahead(
 }
 
 /// Compute typeahead suggestions for slash commands only (e.g., `/help`).
+#[cfg(test)]
 pub(crate) fn compute_slash_suggestions(
     input: &str,
-    slash_commands: &[(&str, &str)],
+    command_catalog: &[CommandPaletteEntry],
 ) -> Vec<TypeaheadSuggestion> {
-    let mut suggestions = Vec::new();
+    compute_slash_suggestions_with_context(
+        input,
+        command_catalog,
+        &CommandPaletteContext::default(),
+    )
+}
 
-    if let Some(cmd_prefix) = input.strip_prefix('/') {
-        let prefix_lower = cmd_prefix.to_lowercase();
-        for (name, desc) in slash_commands {
-            if name.to_lowercase().starts_with(&prefix_lower) {
-                suggestions.push(TypeaheadSuggestion {
-                    text: format!("/{}", name),
-                    description: desc.to_string(),
-                    source: TypeaheadSource::SlashCommand,
-                });
-            }
-        }
+pub(crate) fn compute_slash_suggestions_with_context(
+    input: &str,
+    command_catalog: &[CommandPaletteEntry],
+    command_context: &CommandPaletteContext,
+) -> Vec<TypeaheadSuggestion> {
+    let query = input.strip_prefix('/').unwrap_or(input);
+    let normalized = query.to_lowercase();
+    let entries = crate::command_palette::flatten_command_catalog(command_catalog);
+    let identifiers = entries
+        .iter()
+        .flat_map(|entry| {
+            std::iter::once(entry.path.as_str()).chain(entry.aliases.iter().map(String::as_str))
+        })
+        .collect::<Vec<_>>();
+    let has_command_prefix = identifiers.iter().any(|identifier| {
+        normalized
+            .strip_prefix(&identifier.to_lowercase())
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    });
+    if has_command_prefix
+        && !identifiers
+            .iter()
+            .any(|identifier| identifier.to_lowercase().starts_with(&normalized))
+    {
+        return Vec::new();
     }
-
-    suggestions
+    rank_commands(command_catalog, query, command_context, 8)
+        .into_iter()
+        .map(|entry| TypeaheadSuggestion {
+            text: format!("/{}", entry.path),
+            description: entry.summary.clone(),
+            source: TypeaheadSource::SlashCommand,
+        })
+        .collect()
 }
 
 /// Compute typeahead suggestions for file references (e.g., `@src/main.rs`).
@@ -3199,16 +3243,32 @@ impl PromptInputState {
     /// (for plain text) matching prompt-history entries.
     pub fn update_suggestions(
         &mut self,
-        slash_commands: &[(&str, &str)],
+        command_catalog: &[CommandPaletteEntry],
+        file_autocomplete_limit: usize,
+        file_autocomplete_show_hidden: bool,
+    ) {
+        self.update_suggestions_with_context(
+            command_catalog,
+            &CommandPaletteContext::default(),
+            file_autocomplete_limit,
+            file_autocomplete_show_hidden,
+        );
+    }
+
+    pub fn update_suggestions_with_context(
+        &mut self,
+        command_catalog: &[CommandPaletteEntry],
+        command_context: &CommandPaletteContext,
         file_autocomplete_limit: usize,
         file_autocomplete_show_hidden: bool,
     ) {
         // Only look at text up to the cursor — text after the cursor belongs to a
         // different editing position and would confuse rfind('@') / rfind('/').
         let text_before_cursor = &self.text[..self.cursor];
-        self.suggestions = compute_typeahead(
+        self.suggestions = compute_typeahead_with_context(
             text_before_cursor,
-            slash_commands,
+            command_catalog,
+            command_context,
             file_autocomplete_limit,
             file_autocomplete_show_hidden,
         );
@@ -3296,8 +3356,34 @@ impl PromptInputState {
         if let Some(idx) = self.suggestion_index {
             if let Some(s) = self.suggestions.get(idx) {
                 let new_cursor = match s.source {
-                    TypeaheadSource::SlashCommand | TypeaheadSource::History => {
-                        // Replace entire text; discard anything after cursor too.
+                    TypeaheadSource::SlashCommand => {
+                        // Replace the command token under the cursor, preserving
+                        // arguments when completion happens in the middle of input.
+                        let token_end = self.text[self.cursor..]
+                            .find(char::is_whitespace)
+                            .map_or(self.text.len(), |offset| self.cursor + offset);
+                        let mut tail = &self.text[token_end..];
+                        // If completion supplies grouped path words that already
+                        // follow the cursor, consume those once before the arguments.
+                        let prefix_words = self.text[..self.cursor].split_whitespace().count();
+                        for word in s.text.split_whitespace().skip(prefix_words) {
+                            let remaining = tail.trim_start();
+                            match remaining.strip_prefix(word) {
+                                Some(rest)
+                                    if rest.is_empty() || rest.starts_with(char::is_whitespace) =>
+                                {
+                                    tail = rest
+                                }
+                                _ => break,
+                            }
+                        }
+                        let tail = tail.to_string();
+                        self.text = s.text.clone();
+                        let cursor = self.text.len();
+                        self.text.push_str(&tail);
+                        cursor
+                    }
+                    TypeaheadSource::History => {
                         self.text = s.text.clone();
                         self.text.len()
                     }
@@ -4356,12 +4442,62 @@ mod tests {
     const TEST_FILE_AUTOCOMPLETE_SHOW_HIDDEN: bool = false;
 
     #[test]
+    fn slash_completion_preserves_resolved_command_arguments() {
+        let catalog = test_catalog(&[("model", "Select model"), ("session rename", "Rename")]);
+        for input in ["/model x", "/session rename a"] {
+            let mut state = PromptInputState::new();
+            state.replace_text(input.to_string());
+            state.suggestions = compute_slash_suggestions(input, &catalog);
+            state.suggestion_index = Some(0);
+            state.accept_suggestion();
+            assert_eq!(state.text, input);
+        }
+        assert!(!compute_slash_suggestions("/session r", &catalog).is_empty());
+    }
+
+    #[test]
+    fn slash_completion_preserves_arguments_after_cursor() {
+        let catalog = test_catalog(&[("model", "Select model"), ("session rename", "Rename")]);
+        for (input, cursor, expected) in [
+            ("/model opus", 3, "/model opus"),
+            ("/session rename a", 10, "/session rename a"),
+            ("/session rename a", 3, "/session rename a"),
+        ] {
+            let mut state = PromptInputState::new();
+            state.replace_text(input.to_string());
+            state.cursor = cursor;
+            state.suggestions = compute_slash_suggestions(&input[..cursor], &catalog);
+            assert!(!state.suggestions.is_empty());
+            state.suggestion_index = Some(0);
+            state.accept_suggestion();
+            assert_eq!(state.text, expected);
+        }
+    }
+
+    fn test_catalog(commands: &[(&str, &str)]) -> Vec<CommandPaletteEntry> {
+        commands
+            .iter()
+            .map(|(path, summary)| CommandPaletteEntry {
+                path: (*path).to_string(),
+                aliases: Vec::new(),
+                summary: (*summary).to_string(),
+                usage: format!("/{path}"),
+                category: "Test".to_string(),
+                keywords: Vec::new(),
+                source: "test".to_string(),
+                suggest_when: Vec::new(),
+                children: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
     fn typeahead_slash_prefix_matches() {
-        let cmds = [
+        let cmds = test_catalog(&[
             ("help", "Show help"),
             ("history", "Show history"),
             ("compact", "Compact"),
-        ];
+        ]);
         let suggestions = compute_slash_suggestions("/h", &cmds);
         assert_eq!(suggestions.len(), 2);
         assert_eq!(suggestions[0].text, "/help");
@@ -4370,7 +4506,7 @@ mod tests {
 
     #[test]
     fn typeahead_full_match() {
-        let cmds = [("compact", "Compact conversation")];
+        let cmds = test_catalog(&[("compact", "Compact conversation")]);
         let suggestions = compute_slash_suggestions("/compact", &cmds);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].text, "/compact");
@@ -4379,10 +4515,122 @@ mod tests {
 
     #[test]
     fn typeahead_case_insensitive() {
-        let cmds = [("Help", "Show help")];
+        let cmds = test_catalog(&[("Help", "Show help")]);
         let suggestions = compute_slash_suggestions("/H", &cmds);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].text, "/Help");
+    }
+
+    #[test]
+    fn typeahead_matches_aliases_and_active_child_paths_without_duplicates() {
+        let mut cmds = test_catalog(&[("review", "Review changes")]);
+        cmds[0].aliases = vec!["inspect".to_string()];
+        cmds[0].children = test_catalog(&[("review security", "Review security")]);
+        cmds[0].children[0].aliases = vec![
+            "review safe".to_string(),
+            "safe review".to_string(),
+            "security".to_string(),
+        ];
+
+        assert_eq!(
+            compute_slash_suggestions("/ins", &cmds)
+                .into_iter()
+                .map(|suggestion| suggestion.text)
+                .collect::<Vec<_>>(),
+            vec!["/review"]
+        );
+        assert_eq!(
+            compute_slash_suggestions("/review s", &cmds)
+                .into_iter()
+                .map(|suggestion| suggestion.text)
+                .collect::<Vec<_>>(),
+            vec!["/review security"]
+        );
+        assert_eq!(
+            compute_slash_suggestions("/safe", &cmds)
+                .into_iter()
+                .map(|suggestion| suggestion.text)
+                .collect::<Vec<_>>(),
+            vec!["/review security"]
+        );
+        assert_eq!(
+            compute_slash_suggestions("/sec", &cmds)
+                .into_iter()
+                .map(|suggestion| suggestion.text)
+                .collect::<Vec<_>>(),
+            vec!["/review security"]
+        );
+    }
+
+    #[test]
+    fn top_level_slash_uses_contextual_recommendations_and_caps_results() {
+        use claurst_core::CommandContextSignal::Unauthenticated;
+        use std::collections::HashSet;
+
+        let mut cmds = test_catalog(&[("account", "Manage accounts")]);
+        cmds[0].children = test_catalog(&[("account connect", "Connect a provider")]);
+        cmds[0].children[0].suggest_when = vec![Unauthenticated];
+        for index in 0..12 {
+            cmds.push(CommandPaletteEntry {
+                path: format!("command-{index}"),
+                aliases: Vec::new(),
+                summary: "Other".to_string(),
+                usage: format!("/command-{index}"),
+                category: "Test".to_string(),
+                keywords: Vec::new(),
+                source: "test".to_string(),
+                suggest_when: Vec::new(),
+                children: Vec::new(),
+            });
+        }
+        let context = CommandPaletteContext {
+            signals: HashSet::from([Unauthenticated]),
+            recent_paths: Vec::new(),
+        };
+
+        let suggestions = compute_slash_suggestions_with_context("/", &cmds, &context);
+
+        assert!(suggestions.len() <= 8);
+        assert_eq!(suggestions[0].text, "/account connect");
+    }
+
+    #[test]
+    fn slash_typeahead_matches_intent_words() {
+        let mut cmds = test_catalog(&[("config theme", "Select the display theme")]);
+        cmds[0].keywords = vec!["change theme".to_string()];
+
+        let suggestions = compute_slash_suggestions("/change theme", &cmds);
+
+        assert_eq!(suggestions[0].text, "/config theme");
+    }
+
+    #[test]
+    fn typeahead_folded_plugin_aliases_insert_canonical_reload_command() {
+        let mut cmds = test_catalog(&[("plugin", "Manage plugins")]);
+        cmds[0].aliases = vec!["plugins".to_string()];
+        cmds[0].children = test_catalog(&[("plugin reload", "Reload installed plugins")]);
+        cmds[0].children[0].aliases = vec![
+            "reload".to_string(),
+            "plugin refresh".to_string(),
+            "plugins reload".to_string(),
+            "plugins refresh".to_string(),
+        ];
+
+        for input in [
+            "/reload",
+            "/plugin refresh",
+            "/plugins reload",
+            "/plugins refresh",
+        ] {
+            assert_eq!(
+                compute_slash_suggestions(input, &cmds)
+                    .into_iter()
+                    .map(|suggestion| suggestion.text)
+                    .collect::<Vec<_>>(),
+                vec!["/plugin reload"],
+                "{input} should insert the canonical folded command"
+            );
+        }
     }
 
     // ---- suggestion navigation -----------------------------------------
@@ -4390,11 +4638,11 @@ mod tests {
     #[test]
     fn suggestion_next_cycles() {
         let mut s = PromptInputState::new();
-        let cmds = [
+        let cmds = test_catalog(&[
             ("help", "Help"),
             ("history", "History"),
             ("compact", "Compact"),
-        ];
+        ]);
         s.text = "/h".to_string();
         s.cursor = s.text.len();
         s.update_suggestions(&cmds, 15, false);
@@ -4409,7 +4657,7 @@ mod tests {
     #[test]
     fn accept_suggestion_fills_text() {
         let mut s = PromptInputState::new();
-        let cmds = [("help", "Show help")];
+        let cmds = test_catalog(&[("help", "Show help")]);
         s.text = "/he".to_string();
         s.cursor = s.text.len();
         s.update_suggestions(&cmds, 15, false);
@@ -5463,7 +5711,7 @@ mod tests {
 
     #[test]
     fn file_autocomplete_slash_commands_still_work() {
-        let cmds = vec![("help", "Show help"), ("clear", "Clear messages")];
+        let cmds = test_catalog(&[("help", "Show help"), ("clear", "Clear messages")]);
         let suggestions = compute_slash_suggestions("/he", &cmds);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].text, "/help");

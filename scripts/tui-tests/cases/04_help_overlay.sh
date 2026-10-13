@@ -14,8 +14,8 @@ tc_help() {
   # The overlay is tall; under load the lower rows render a beat after the
   # top. Poll for a late item before snapshotting so the assertions don't
   # race the draw.
-  if ! wait_for "/permissions"; then
-    _fail "help overlay rendered (/permissions never appeared)" "$(tui_capture)"
+  if ! wait_for "/session resume"; then
+    _fail "help overlay rendered (/session resume never appeared)" "$(tui_capture)"
     tui_stop; return 0
   fi
   local s; s="$(tui_capture)"
@@ -23,8 +23,13 @@ tc_help() {
   assert_contains "$s" "Command palette" "help overlay documents the command palette"
   assert_contains "$s" "Model picker"    "help overlay documents the model picker"
   # Command reference section.
-  assert_contains "$s" "/login"          "help overlay lists /login"
-  assert_contains "$s" "/permissions"    "help overlay lists /permissions"
+  assert_contains "$s" "/session resume" "help overlay lists grouped session commands"
+  tui_type "account login"
+  if wait_for "/account login" 5; then
+    _pass "help filter finds canonical /account login"
+  else
+    _fail "help filter finds canonical /account login" "$(tui_capture)"
+  fi
 
   # Esc closes the overlay.
   tui_keys Escape

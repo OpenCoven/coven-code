@@ -29,7 +29,7 @@ tc_paste_burst() {
   tui_paste "/help"$'\r'
   # The overlay is tall; poll for a late-rendered item so the assertion does
   # not race the draw (same guard as the help-overlay case).
-  if wait_for "/permissions"; then
+  if wait_for "/session resume"; then
     _pass "burst-delivered line submits (help overlay opened)"
     local s; s="$(tui_capture)"
     assert_contains "$s" "Toggle help" "burst submit reached the slash-command path"

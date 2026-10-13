@@ -79,6 +79,8 @@ pub mod ask_user_dialog;
 pub mod bridge_state;
 /// Startup confirmation dialog for --dangerously-skip-permissions mode.
 pub mod bypass_permissions_dialog;
+/// Presentation-only metadata for command discovery surfaces.
+pub mod command_palette;
 /// Context window and rate-limit visualization overlay (/context).
 pub mod context_viz;
 
@@ -197,7 +199,11 @@ pub use app::{try_copy_to_clipboard, App};
 pub use bypass_permissions_dialog::{
     render_bypass_permissions_dialog, BypassPermissionsDialogState,
 };
-pub use dialog_select::{render_dialog_select, DialogSelectState, SelectItem};
+pub use command_palette::{
+    command_category_order, flatten_command_catalog, rank_commands, CommandPaletteContext,
+    CommandPaletteEntry,
+};
+pub use dialog_select::{render_dialog_select, DialogSelectState, SelectItem, SelectItemKind};
 pub use diff_viewer::{
     load_git_diff, parse_unified_diff, render_diff_dialog, DiffPane, DiffType, DiffViewerState,
 };
@@ -394,7 +400,24 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_app() -> App {
-        App::new(Config::default(), CostTracker::new())
+        let mut app = App::new(Config::default(), CostTracker::new());
+        app.install_command_catalog(
+            ["account", "clear", "help", "model"]
+                .into_iter()
+                .map(|path| CommandPaletteEntry {
+                    path: path.to_string(),
+                    aliases: Vec::new(),
+                    summary: format!("{path} summary"),
+                    usage: format!("/{path}"),
+                    category: "Test".to_string(),
+                    keywords: vec![path.to_string()],
+                    source: "test".to_string(),
+                    suggest_when: Vec::new(),
+                    children: Vec::new(),
+                })
+                .collect(),
+        );
+        app
     }
 
     // ---- terminal capability policy --------------------------------------
@@ -513,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agents_slash_command_populates_active_agents() {
+    fn test_familiar_slash_command_populates_active_agents() {
         let mut app = make_app();
         app.agent_status = vec![
             ("Mendel".to_string(), "running".to_string()),
@@ -521,7 +544,7 @@ mod tests {
             ("Plato".to_string(), "done".to_string()),
         ];
 
-        assert!(app.intercept_slash_command("agents"));
+        assert!(app.intercept_slash_command("familiar"));
         assert!(app.agents_menu.visible);
         assert_eq!(app.agents_menu.active_agents.len(), 3);
         assert_eq!(
@@ -640,7 +663,7 @@ mod tests {
 
         let mut app = make_app();
         app.config.project_dir = Some(temp.path().to_path_buf());
-        assert!(app.intercept_slash_command("agents"));
+        assert!(app.intercept_slash_command("familiar"));
         app.agents_menu.selected_row = 2;
 
         app.handle_key_event(key(KeyCode::Char('d')));
@@ -849,20 +872,12 @@ mod tests {
 
     #[test]
     fn test_tab_accepts_slash_suggestion() {
-        // The first `/a*` suggestion is whichever command comes alphabetically
-        // first in PROMPT_SLASH_COMMANDS. We don't pin a specific name here
-        // because the list grows over time; instead we assert that Tab
-        // completes to *some* `/a*` command — which is the real UX invariant.
         let mut app = make_app();
         app.handle_key_event(key(KeyCode::Char('/')));
         app.handle_key_event(key(KeyCode::Char('a')));
         app.handle_key_event(key(KeyCode::Tab));
 
-        assert!(
-            app.input.starts_with("/a"),
-            "expected Tab to complete to a /a* command, got {:?}",
-            app.input
-        );
+        assert_eq!(app.input, "/account");
         assert_eq!(app.input, app.prompt_input.text);
         assert_eq!(app.cursor_pos, app.input.len());
     }

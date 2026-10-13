@@ -243,6 +243,10 @@ impl DiffViewerState {
         }
     }
 
+    pub fn has_turn_diff(&self) -> bool {
+        !self.turn_files.is_empty()
+    }
+
     fn open_for_type(&mut self, diff_type: DiffType, project_root: &std::path::Path) {
         self.diff_type = diff_type;
         self.reload_files(project_root);

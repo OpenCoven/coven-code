@@ -2075,6 +2075,17 @@ fn decide_goal_turn_accounting(
     }
 }
 
+fn refresh_command_discovery(app: &mut claurst_tui::App, config: &Config, cwd: &std::path::Path) {
+    let plugin_commands = claurst_plugins::global_plugin_registry()
+        .map(|registry| registry.all_command_defs())
+        .unwrap_or_default();
+    app.install_command_catalog(claurst_commands::composed_catalog(
+        config,
+        cwd,
+        &plugin_commands,
+    ));
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -2182,6 +2193,8 @@ async fn run_interactive(
     // Set up terminal
     let mut terminal = setup_terminal()?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
+    app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    refresh_command_discovery(&mut app, &live_config, &tool_ctx.working_dir);
     if let Some(warning) = resume_warning {
         app.status_message = Some(warning);
     }
@@ -2298,7 +2311,7 @@ async fn run_interactive(
                 app.onboarding_dialog.show_provider_setup();
             } else {
                 app.status_message =
-                    Some("No provider configured. Run /connect to set one up.".to_string());
+                    Some("No provider configured. Run /account connect to set one up.".to_string());
             }
         } else if !settings.has_completed_onboarding {
             // User has credentials but hasn't formally completed onboarding — mark it done
@@ -2629,6 +2642,17 @@ async fn run_interactive(
                             app.refresh_prompt_input();
                             continue;
                         }
+                        // Retired input must reach the lifecycle gate before completion
+                        // can replace it with a suggested canonical command.
+                        if app.prompt_input.text.starts_with('/') {
+                            let (name, args) = claurst_tui::input::parse_slash_command(&app.prompt_input.text);
+                            if let Err(error) = claurst_commands::preflight_interactive_slash_command(name, args, &mut cmd_ctx) {
+                                app.take_input();
+                                app.status_message = Some(error);
+                                continue;
+                            }
+                        }
+
                         // If a slash-command suggestion is active, accept and execute immediately.
                         if !app.prompt_input.suggestions.is_empty()
                             && app.prompt_input.suggestion_index.is_some()
@@ -2647,20 +2671,27 @@ async fn run_interactive(
                         if input.starts_with('/') {
                             let (cmd_name, cmd_args) =
                                 claurst_tui::input::parse_slash_command(&input);
-                            let cmd_name = cmd_name.to_string();
+                            let cmd_name = cmd_name.to_ascii_lowercase();
                             let cmd_args = cmd_args.to_string();
+                            if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
+                                app.status_message = Some(error);
+                                continue;
+                            }
+                            let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
+                                .or_else(|| app.canonical_command_path(&cmd_name, &cmd_args));
+
 
                             // ── /steer <message> (opt-in feature) ─────────────────────
                             // Explicit steering: queue the message when a turn is in
                             // flight (it auto-runs after the current turn, mirroring
                             // Enter-while-busy), or submit it immediately when idle.
                             #[cfg(feature = "steer")]
-                            if cmd_name == "steer" {
-                                let msg = cmd_args.trim().to_string();
+                            if canonical_path.as_deref() == Some("thinking steer") {
+                                let msg = cmd_args.split_once(char::is_whitespace).map(|(_, message)| message.trim()).unwrap_or_default().to_string();
                                 if msg.is_empty() {
                                     app.notifications.push(
                                         claurst_tui::NotificationKind::Info,
-                                        "Usage: /steer <message> — steer the running turn"
+                                        "Usage: /thinking steer <message> — steer the running turn"
                                             .to_string(),
                                         Some(4),
                                     );
@@ -2700,7 +2731,6 @@ async fn run_interactive(
                                     "model"
                                         | "theme"
                                         | "resume"
-                                        | "session"
                                         | "vim"
                                         | "vi"
                                         | "voice"
@@ -2743,7 +2773,16 @@ async fn run_interactive(
                             // Always runs — some commands need BOTH (e.g. /clear clears
                             // app state via TUI AND the messages vec via CLI).
                             cmd_ctx.messages = messages.clone();
-                            let cli_result = execute_command(&input, &mut cmd_ctx).await;
+                            let picker_only = canonical_path.as_deref() == Some("session resume")
+                                && cmd_args.split_whitespace().count() == 1;
+                            let cli_result = if handled_by_tui && (canonical_path.is_none() || picker_only) {
+                                None
+                            } else {
+                                execute_command(&input, &mut cmd_ctx).await
+                            };
+                            let command_succeeded = !matches!(&cli_result, Some(CommandResult::Error(_))) && (handled_by_tui || cli_result.is_some());
+                            let refresh_catalog = matches!(&cli_result, Some(CommandResult::ResumeSession(_) | CommandResult::ConfigChange(_) | CommandResult::ConfigChangeMessage(_, _)))
+                                || command_succeeded && canonical_path.as_deref() == Some("plugin reload");
                             // Start optimistically true; set false for Silent/None below.
                             let mut handled_by_cli = cli_result.is_some();
 
@@ -2867,7 +2906,7 @@ async fn run_interactive(
                                                     Some(refreshed.provider_registry),
                                                     refreshed.auth_store,
                                                     false,
-                                                    "Saved provider state cleared. Run /connect to reconnect."
+                                                    "Saved provider state cleared. Run /account connect to reconnect."
                                                         .to_string(),
                                                 );
                                             }
@@ -3066,7 +3105,7 @@ async fn run_interactive(
 
                             // Sync effort visual + API level when CLI handled
                             // /effort with explicit args (/effort high).
-                            if handled_by_cli && cmd_name == "effort" && !cmd_args.is_empty() {
+                            if handled_by_cli && canonical_path.as_deref() == Some("effort") && !cmd_args.is_empty() {
                                 if let Some(level) =
                                     claurst_core::effort::EffortLevel::parse(&cmd_args)
                                 {
@@ -3104,8 +3143,21 @@ async fn run_interactive(
                             }
 
                             if !handled_by_cli && !handled_by_tui {
-                                app.status_message =
-                                    Some(format!("Unknown command: /{}", cmd_name));
+                                let suggestions = app.unknown_command_suggestions(&cmd_name);
+                                let mut message = format!("Unknown command: /{cmd_name}");
+                                if !suggestions.is_empty() {
+                                    message.push_str(&format!(". Try {}", suggestions.join(", ")));
+                                }
+                                app.status_message = Some(message);
+                            }
+
+                            if refresh_catalog {
+                                refresh_command_discovery(&mut app, &cmd_ctx.config, &cmd_ctx.working_dir);
+                            }
+                            if command_succeeded {
+                                if let Some(path) = canonical_path {
+                                    app.record_recent_command(path);
+                                }
                             }
 
                             // If a UserMessage was queued (e.g. /compact), submit it.
@@ -3498,7 +3550,9 @@ async fn run_interactive(
                         continue;
                     }
 
-                    app.handle_key_event(key);
+                    if app.handle_key_event(key) {
+                        app.pending_auto_submit = true;
+                    }
                     cmd_ctx.config = app.config.clone();
                     tool_ctx.config = app.config.clone();
                     if let Some(manager) = tool_ctx.permission_manager.as_ref() {

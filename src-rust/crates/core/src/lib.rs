@@ -3,6 +3,9 @@
 //
 // All sub-modules are defined inline below.
 
+pub mod command_context;
+pub use command_context::CommandContextSignal;
+
 // Branded provider / model identifier newtypes.
 pub mod provider_id;
 pub use provider_id::{ModelId, ProviderId};
