@@ -3941,7 +3941,7 @@ mod welcome_tests {
     #[test]
     fn footer_exposes_hidden_keybinding_hints() {
         let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
         terminal
             .draw(|frame| render_footer(frame, &app, frame.area()))
             .expect("draw footer");
@@ -3977,7 +3977,7 @@ mod welcome_tests {
     #[test]
     fn welcome_box_width_is_capped_on_large_terminals() {
         let mut terminal = Terminal::new(TestBackend::new(180, 14)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
             .draw(|frame| render_welcome_box(frame, &app, frame.area()))
@@ -3998,7 +3998,7 @@ mod welcome_tests {
     #[test]
     fn welcome_screen_can_be_hidden_by_config() {
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.config.show_splash = Some(false);
 
         terminal
@@ -4054,7 +4054,7 @@ mod welcome_tests {
     #[test]
     fn welcome_box_shows_whats_new_and_release_notes() {
         let mut terminal = Terminal::new(TestBackend::new(120, 14)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
             .draw(|frame| render_welcome_box(frame, &app, frame.area()))

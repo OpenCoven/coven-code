@@ -7170,6 +7170,111 @@ impl App {
         self.on_new_message();
     }
 
+    fn tool_result_preview(result: &str) -> String {
+        let mut preview = result.lines().take(3).collect::<Vec<_>>().join("\n");
+        let remaining = result.lines().count().saturating_sub(3);
+        if remaining > 0 {
+            preview.push_str(&format!("\n\u{2026} {} more lines", remaining));
+        }
+        preview
+    }
+
+    fn reconcile_durable_message(&mut self, message: Message) {
+        if message.role == Role::Assistant {
+            let existing = message.uuid.as_deref().and_then(|uuid| {
+                self.messages
+                    .iter()
+                    .position(|stored| stored.uuid.as_deref() == Some(uuid))
+            });
+            if let Some(index) = existing {
+                // A snapshot update for an older attempt must not erase a
+                // newer attempt's live output.
+                self.messages[index] = message;
+                self.invalidate_transcript();
+            } else {
+                self.streaming_text.clear();
+                self.streaming_thinking.clear();
+                self.stall_start = None;
+                self.push_message(message);
+            }
+            return;
+        }
+
+        // Tool-result carriers use Role::User on the provider wire, but are
+        // not human turns in the transcript. Project them onto tool cards.
+        for block in message.content_blocks() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            else {
+                continue;
+            };
+            let result = match content {
+                claurst_core::types::ToolResultContent::Text(text) => text,
+                claurst_core::types::ToolResultContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            let existing = self
+                .tool_use_blocks
+                .iter()
+                .position(|card| card.id == tool_use_id);
+            let index = match existing {
+                Some(index) => index,
+                None => {
+                    let origin =
+                        self.messages
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(index, message)| {
+                                message.get_tool_use_blocks().into_iter().find_map(|block| {
+                                    match block {
+                                        ContentBlock::ToolUse { id, name, input }
+                                            if id == &tool_use_id =>
+                                        {
+                                            Some((index, name.clone(), input.to_string()))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            });
+                    let Some((message_index, name, input_json)) = origin else {
+                        continue;
+                    };
+                    let turn_index = self.messages[..=message_index]
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .count()
+                        .checked_sub(1);
+                    self.tool_use_blocks.push(ToolUseBlock {
+                        id: tool_use_id,
+                        name,
+                        turn_index,
+                        input_json,
+                        status: ToolStatus::Running,
+                        output_preview: None,
+                    });
+                    self.tool_use_blocks.len() - 1
+                }
+            };
+            self.tool_use_blocks[index].status = if is_error.unwrap_or(false) {
+                ToolStatus::Error
+            } else {
+                ToolStatus::Done
+            };
+            self.tool_use_blocks[index].output_preview = Some(Self::tool_result_preview(&result));
+        }
+        self.invalidate_transcript();
+    }
+
     /// Process a query event from the agentic loop.
     pub fn handle_query_event(&mut self, event: QueryEvent) {
         // Auto-dismiss error modal when assistant responds
@@ -7217,7 +7322,8 @@ impl App {
                         self.is_streaming = false;
                         self.spinner_verb = None;
                         self.stall_start = None;
-                        self.flush_streamed_assistant_message();
+                        // Keep live output visible until DurableMessage supplies
+                        // the complete typed content and attempt identity.
                     }
                     _ => {
                         // Any other stream event: if we have no stall_start yet,
@@ -7266,13 +7372,7 @@ impl App {
                 is_error,
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
-                let all_lines: Vec<&str> = result.lines().collect();
-                let preview_lines = all_lines.len().min(3);
-                let mut preview = all_lines[..preview_lines].join("\n");
-                let remaining = all_lines.len().saturating_sub(preview_lines);
-                if remaining > 0 {
-                    preview.push_str(&format!("\n\u{2026} {} more lines", remaining));
-                }
+                let preview = Self::tool_result_preview(&result);
                 if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
@@ -7396,7 +7496,7 @@ impl App {
                     _ => {}
                 }
             }
-            QueryEvent::DurableMessage { .. } => {}
+            QueryEvent::DurableMessage { message } => self.reconcile_durable_message(message),
         }
 
         // Update token count from tracker.
@@ -9658,5 +9758,137 @@ role = "Research"
 
         assert!(app.permission_request.is_none());
         assert!(!app.bash_command_allowed_by_prefix("npm test"));
+    }
+    #[test]
+    fn durable_assistant_replaces_live_buffers_without_a_provisional_duplicate() {
+        use claurst_api::{streaming::ContentDelta, AnthropicStreamEvent};
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        app.handle_query_event(QueryEvent::Stream(
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::TextDelta {
+                    text: "answer".into(),
+                },
+            },
+        ));
+        app.handle_query_event(QueryEvent::Stream(AnthropicStreamEvent::MessageStop));
+        assert_eq!(
+            app.messages.len(),
+            1,
+            "wait for the typed durable assistant"
+        );
+        assert_eq!(app.streaming_text, "answer");
+        let mut message = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "thought".into(),
+                signature: "signed".into(),
+            },
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+        ]);
+        message.uuid = Some("attempt-1".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message });
+        app.handle_query_event(QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".into(),
+            usage: None,
+        });
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[1].uuid.as_deref(), Some("attempt-1"));
+        assert_eq!(app.messages[1].content_blocks().len(), 2);
+        assert!(app.streaming_text.is_empty());
+        assert!(app.streaming_thinking.is_empty());
+    }
+
+    #[test]
+    fn durable_retries_stay_separate_and_late_updates_preserve_new_streaming_text() {
+        use claurst_api::{streaming::ContentDelta, AnthropicStreamEvent};
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        app.streaming_text = "first partial".into();
+        app.is_streaming = true;
+        let mut first = Message::assistant("first partial");
+        first.uuid = Some("attempt-1".into());
+        app.handle_query_event(QueryEvent::DurableMessage {
+            message: first.clone(),
+        });
+        assert!(app.streaming_text.is_empty());
+        app.handle_query_event(QueryEvent::Stream(
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "retry partial".into(),
+                },
+            },
+        ));
+        app.handle_query_event(QueryEvent::DurableMessage { message: first });
+        assert_eq!(app.streaming_text, "retry partial");
+        let mut retry = Message::assistant("retry partial");
+        retry.uuid = Some("attempt-2".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message: retry });
+        app.handle_query_event(QueryEvent::Error("cancelled".into()));
+        assert_eq!(app.messages[1].get_all_text(), "first partial");
+        assert_eq!(app.messages[2].get_all_text(), "retry partial");
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| m.uuid.as_deref() == Some("attempt-1"))
+                .count(),
+            1
+        );
+        assert_eq!(app.current_user_turn_index(), Some(0));
+    }
+
+    #[test]
+    fn durable_tool_results_close_cards_without_creating_human_turns() {
+        use claurst_core::types::ToolResultContent;
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        let mut assistant = Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "unexecuted".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path":"file"}),
+        }]);
+        assistant.uuid = Some("attempt".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message: assistant });
+        app.handle_query_event(QueryEvent::ToolStart {
+            tool_id: "other".into(),
+            tool_name: "Bash".into(),
+            input_json: "{}".into(),
+        });
+        let result = Message::user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "unexecuted".into(),
+            content: ToolResultContent::Text("cancelled before execution".into()),
+            is_error: Some(true),
+        }]);
+        app.handle_query_event(QueryEvent::DurableMessage {
+            message: result.clone(),
+        });
+        app.handle_query_event(QueryEvent::DurableMessage { message: result });
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.current_user_turn_index(), Some(0));
+        assert_eq!(app.tool_use_blocks.len(), 2);
+        let closed = app
+            .tool_use_blocks
+            .iter()
+            .find(|b| b.id == "unexecuted")
+            .unwrap();
+        assert_eq!(closed.status, ToolStatus::Error);
+        assert_eq!(closed.name, "Read");
+        assert_eq!(closed.turn_index, Some(0));
+        assert_eq!(
+            closed.output_preview.as_deref(),
+            Some("cancelled before execution")
+        );
+        assert_eq!(
+            app.tool_use_blocks
+                .iter()
+                .find(|b| b.id == "other")
+                .unwrap()
+                .status,
+            ToolStatus::Running
+        );
     }
 }
