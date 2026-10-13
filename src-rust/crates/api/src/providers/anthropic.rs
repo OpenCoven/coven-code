@@ -11,7 +11,6 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use claurst_core::provider_id::{ModelId, ProviderId};
-use claurst_core::types::{ContentBlock, UsageInfo};
 use futures::Stream;
 
 use crate::client::{AnthropicClient, ClientConfig};
@@ -23,6 +22,7 @@ use crate::provider_types::{
 };
 use crate::streaming::{AnthropicStreamEvent, ContentDelta, NullStreamHandler};
 use crate::types::{ApiMessage, ApiToolDefinition, CreateMessageRequest, ThinkingConfig};
+use crate::StreamAccumulator;
 
 use super::message_normalization::normalize_anthropic_messages;
 
@@ -218,6 +218,61 @@ impl AnthropicProvider {
             AnthropicStreamEvent::Ping => None,
         }
     }
+
+    async fn collect_stream_response(
+        provider_id: &ProviderId,
+        mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+    ) -> Result<ProviderResponse, ProviderError> {
+        use futures::StreamExt;
+
+        let mut accumulator = StreamAccumulator::new();
+        while let Some(event) = stream.next().await {
+            let event = event?;
+            if let StreamEvent::Error {
+                error_type,
+                message,
+            } = &event
+            {
+                let (partial, _, _) = accumulator.finish();
+                let partial_response = partial.get_all_text();
+                return Err(ProviderError::StreamError {
+                    provider: provider_id.clone(),
+                    message: format!("[{error_type}] {message}"),
+                    partial_response: (!partial_response.is_empty()).then_some(partial_response),
+                });
+            }
+
+            accumulator.on_provider_event(&event);
+            if matches!(event, StreamEvent::MessageStop) {
+                break;
+            }
+        }
+
+        if !accumulator.received_message_stop() {
+            let (partial, _, _) = accumulator.finish();
+            let partial_response = partial.get_all_text();
+            return Err(ProviderError::StreamError {
+                provider: provider_id.clone(),
+                message: "stream ended before MessageStop".to_string(),
+                partial_response: (!partial_response.is_empty()).then_some(partial_response),
+            });
+        }
+
+        let id = accumulator.message_id().unwrap_or("unknown").to_string();
+        let model = accumulator.model().unwrap_or_default().to_string();
+        let (message, usage, stop_reason) = accumulator.finish();
+
+        Ok(ProviderResponse {
+            id,
+            content: message.content_blocks(),
+            stop_reason: stop_reason
+                .as_deref()
+                .map(Self::map_stop_reason)
+                .unwrap_or(StopReason::EndTurn),
+            usage,
+            model,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,125 +293,8 @@ impl LlmProvider for AnthropicProvider {
         &self,
         request: ProviderRequest,
     ) -> Result<ProviderResponse, ProviderError> {
-        // Collect stream events to build a complete response.
-        let mut stream = self.create_message_stream(request).await?;
-
-        let mut id = String::from("unknown");
-        let mut model = String::new();
-        let mut text_parts: Vec<(usize, String)> = Vec::new();
-        let mut content_blocks: Vec<ContentBlock> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = UsageInfo::default();
-
-        // We need to track tool use blocks being assembled from partial JSON.
-        // Use a simple per-index buffer.
-        let mut tool_buffers: std::collections::HashMap<usize, (String, String, String)> =
-            std::collections::HashMap::new(); // index -> (id, name, json_buf)
-
-        use futures::StreamExt;
-        while let Some(result) = stream.next().await {
-            match result {
-                Err(e) => return Err(e),
-                Ok(evt) => match evt {
-                    StreamEvent::MessageStart {
-                        id: msg_id,
-                        model: msg_model,
-                        usage: msg_usage,
-                    } => {
-                        id = msg_id;
-                        model = msg_model;
-                        usage = msg_usage;
-                    }
-                    StreamEvent::ContentBlockStart {
-                        index,
-                        content_block,
-                    } => match content_block {
-                        ContentBlock::Text { text } => {
-                            text_parts.push((index, text));
-                        }
-                        ContentBlock::ToolUse {
-                            id: tool_id,
-                            name,
-                            input: _,
-                        } => {
-                            tool_buffers.insert(index, (tool_id, name, String::new()));
-                        }
-                        other => {
-                            content_blocks.push(other);
-                        }
-                    },
-                    StreamEvent::TextDelta { index, text } => {
-                        if let Some(entry) = text_parts.iter_mut().find(|(i, _)| *i == index) {
-                            entry.1.push_str(&text);
-                        }
-                    }
-                    StreamEvent::InputJsonDelta {
-                        index,
-                        partial_json,
-                    } => {
-                        if let Some((_, _, buf)) = tool_buffers.get_mut(&index) {
-                            buf.push_str(&partial_json);
-                        }
-                    }
-                    StreamEvent::ContentBlockStop { index } => {
-                        // Finalize any tool use block at this index.
-                        if let Some((tool_id, name, json_buf)) = tool_buffers.remove(&index) {
-                            let input = serde_json::from_str(&json_buf)
-                                .unwrap_or(serde_json::Value::Object(Default::default()));
-                            content_blocks.push(ContentBlock::ToolUse {
-                                id: tool_id,
-                                name,
-                                input,
-                            });
-                        }
-                    }
-                    StreamEvent::MessageDelta {
-                        stop_reason: sr,
-                        usage: delta_usage,
-                    } => {
-                        if let Some(r) = sr {
-                            stop_reason = r;
-                        }
-                        if let Some(u) = delta_usage {
-                            usage.output_tokens += u.output_tokens;
-                        }
-                    }
-                    StreamEvent::MessageStop => break,
-                    StreamEvent::Error {
-                        error_type,
-                        message,
-                    } => {
-                        return Err(ProviderError::StreamError {
-                            provider: self.id.clone(),
-                            message: format!("[{}] {}", error_type, message),
-                            partial_response: None,
-                        });
-                    }
-                    _ => {}
-                },
-            }
-        }
-
-        // Assemble text blocks into content, sorted by index.
-        text_parts.sort_by_key(|(i, _)| *i);
-        let mut all_blocks: Vec<(usize, ContentBlock)> = text_parts
-            .into_iter()
-            .map(|(i, text)| (i, ContentBlock::Text { text }))
-            .collect();
-        // We don't have indices for the non-text blocks — just append them.
-        // In practice content blocks are already in-order from the stream.
-        for block in content_blocks {
-            all_blocks.push((usize::MAX, block));
-        }
-        let final_content: Vec<ContentBlock> = all_blocks.into_iter().map(|(_, b)| b).collect();
-
-        Ok(ProviderResponse {
-            id,
-            content: final_content,
-            stop_reason,
-            usage,
-            model,
-        })
+        let stream = self.create_message_stream(request).await?;
+        Self::collect_stream_response(&self.id, stream).await
     }
 
     async fn create_message_stream(
@@ -413,5 +351,151 @@ impl LlmProvider for AnthropicProvider {
             structured_output: true,
             system_prompt_style: SystemPromptStyle::TopLevel,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use claurst_core::types::{ContentBlock, UsageInfo};
+    use futures::stream;
+
+    use super::*;
+
+    fn response_stream(
+        events: Vec<StreamEvent>,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> {
+        Box::pin(stream::iter(events.into_iter().map(Ok)))
+    }
+
+    #[tokio::test]
+    async fn collected_response_rejects_eof_without_message_stop() {
+        let provider_id = ProviderId::new(ProviderId::ANTHROPIC);
+        let error = AnthropicProvider::collect_stream_response(
+            &provider_id,
+            response_stream(vec![
+                StreamEvent::MessageStart {
+                    id: "premature-eof".to_string(),
+                    model: "claude-test".to_string(),
+                    usage: UsageInfo::default(),
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlock::Text {
+                        text: String::new(),
+                    },
+                },
+                StreamEvent::TextDelta {
+                    index: 0,
+                    text: "partial".to_string(),
+                },
+            ]),
+        )
+        .await
+        .expect_err("EOF before MessageStop must not be treated as a complete response");
+
+        assert!(matches!(
+            error,
+            ProviderError::StreamError {
+                message,
+                partial_response: Some(partial_response),
+                ..
+            } if message.contains("MessageStop") && partial_response == "partial"
+        ));
+    }
+
+    #[tokio::test]
+    async fn collected_response_preserves_interleaved_and_open_indexed_blocks() {
+        let provider_id = ProviderId::new(ProviderId::ANTHROPIC);
+        let response = AnthropicProvider::collect_stream_response(
+            &provider_id,
+            response_stream(vec![
+                StreamEvent::MessageStart {
+                    id: "indexed-response".to_string(),
+                    model: "claude-test".to_string(),
+                    usage: UsageInfo {
+                        input_tokens: 10,
+                        cache_creation_input_tokens: 2,
+                        cache_read_input_tokens: 3,
+                        ..UsageInfo::default()
+                    },
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 2,
+                    content_block: ContentBlock::Text {
+                        text: "partial ".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlock::Thinking {
+                        thinking: "thought ".to_string(),
+                        signature: "sig-".to_string(),
+                    },
+                },
+                StreamEvent::ThinkingDelta {
+                    index: 0,
+                    thinking: "one".to_string(),
+                },
+                StreamEvent::SignatureDelta {
+                    index: 0,
+                    signature: "one".to_string(),
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: ContentBlock::ToolUse {
+                        id: "open-tool".to_string(),
+                        name: "Write".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                },
+                StreamEvent::InputJsonDelta {
+                    index: 1,
+                    partial_json: r#"{"path":"unfinished"#.to_string(),
+                },
+                StreamEvent::TextDelta {
+                    index: 2,
+                    text: "text".to_string(),
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 3,
+                    content_block: ContentBlock::Text {
+                        text: "complete".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 3 },
+                StreamEvent::MessageDelta {
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Some(UsageInfo {
+                        output_tokens: 4,
+                        ..UsageInfo::default()
+                    }),
+                },
+                StreamEvent::MessageStop,
+            ]),
+        )
+        .await
+        .expect("an explicit MessageStop completes the response");
+
+        assert_eq!(response.id, "indexed-response");
+        assert_eq!(response.model, "claude-test");
+        assert_eq!(response.usage.input_tokens, 10);
+        assert_eq!(response.usage.cache_creation_input_tokens, 2);
+        assert_eq!(response.usage.cache_read_input_tokens, 3);
+        assert_eq!(response.usage.output_tokens, 4);
+        assert!(matches!(
+            response.content.as_slice(),
+            [
+                ContentBlock::Thinking { thinking, signature },
+                ContentBlock::ToolUse { id, name, input },
+                ContentBlock::Text { text: partial_text },
+                ContentBlock::Text { text: completed_text },
+            ] if thinking == "thought one"
+                && signature == "sig-one"
+                && id == "open-tool"
+                && name == "Write"
+                && input == &serde_json::Value::String(r#"{"path":"unfinished"#.to_string())
+                && partial_text == "partial text"
+                && completed_text == "complete"
+        ));
     }
 }
