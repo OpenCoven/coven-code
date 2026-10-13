@@ -2311,7 +2311,7 @@ async fn run_interactive(
                 app.onboarding_dialog.show_provider_setup();
             } else {
                 app.status_message =
-                    Some("No provider configured. Run /connect to set one up.".to_string());
+                    Some("No provider configured. Run /account connect to set one up.".to_string());
             }
         } else if !settings.has_completed_onboarding {
             // User has credentials but hasn't formally completed onboarding — mark it done
@@ -2906,7 +2906,7 @@ async fn run_interactive(
                                                     Some(refreshed.provider_registry),
                                                     refreshed.auth_store,
                                                     false,
-                                                    "Saved provider state cleared. Run /connect to reconnect."
+                                                    "Saved provider state cleared. Run /account connect to reconnect."
                                                         .to_string(),
                                                 );
                                             }

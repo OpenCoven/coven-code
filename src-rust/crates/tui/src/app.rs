@@ -4033,8 +4033,9 @@ impl App {
                         // the affordance visible.
                         self.onboarding_dialog.dismiss();
                         let _ = Self::persist_onboarding_complete();
-                        self.status_message =
-                            Some("Run /connect when you're ready to add a provider.".to_string());
+                        self.status_message = Some(
+                            "Run /account connect when you're ready to add a provider.".to_string(),
+                        );
                     }
                     KeyCode::Enter | KeyCode::Right => {
                         self.onboarding_dialog.dismiss();

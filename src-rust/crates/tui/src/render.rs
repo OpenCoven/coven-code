@@ -2352,15 +2352,27 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
             }
             Line::from(spans)
         } else {
+            let connect = crate::command_palette::flatten_command_catalog(&app.command_catalog)
+                .into_iter()
+                .find(|entry| entry.path == "account connect");
             Line::from(vec![
                 Span::styled(
-                    " /connect ",
+                    format!(
+                        " {} ",
+                        connect.map_or("Provider setup", |entry| entry.usage.as_str())
+                    ),
                     Style::default()
                         .fg(readable_fg_on(pink))
                         .bg(pink)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" connect a provider", Style::default().fg(dim)),
+                Span::styled(
+                    format!(
+                        " {}",
+                        connect.map_or("Type / for commands", |entry| entry.summary.as_str())
+                    ),
+                    Style::default().fg(dim),
+                ),
             ])
         };
 

@@ -24,8 +24,9 @@ tc_palette() {
 
   # Filtering narrows the list: "/config" should surface /config, drop /clear.
   tui_type "config"
-  # Wait for the filter to take effect (a non-matching entry disappears).
-  wait_absent "/clear" 5
+  # The contextual starting list may already omit /clear. Wait for the
+  # requested result instead, proving the new filtered frame has rendered.
+  wait_for "/config" 5
   s="$(tui_capture)"
   assert_contains "$s" "/config" "filter '/config' keeps /config"
   assert_absent   "$s" "/clear"  "filter '/config' drops /clear"
