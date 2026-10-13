@@ -1400,6 +1400,7 @@ impl StreamAccumulator {
                 }
             }
             StreamEvent::MessageStop => AnthropicStreamEvent::MessageStop,
+            StreamEvent::Ping => AnthropicStreamEvent::Ping,
             StreamEvent::Error {
                 error_type,
                 message,

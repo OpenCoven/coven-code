@@ -3615,6 +3615,8 @@ fn map_to_anthropic_event(
             })
         }
         StreamEvent::MessageStop => Some(AnthropicStreamEvent::MessageStop),
+        // The consumer already reset its stall deadline before mapping this event.
+        StreamEvent::Ping => None,
         StreamEvent::Error {
             error_type,
             message,
@@ -5116,6 +5118,50 @@ mod tests {
             event_rx.recv().await,
             Some(QueryEvent::DurableMessage { message }) if is_tool_result_carrier(&message)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_keepalives_extend_liveness_without_transcript_content() {
+        let (sender, receiver) = mpsc::channel(8);
+        let stream = futures::stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|event| (event, receiver))
+        });
+        let producer = tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                sender.send(Ok(StreamEvent::Ping)).await.unwrap();
+            }
+            sender.send(Ok(StreamEvent::MessageStop)).await.unwrap();
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut accumulator = StreamAccumulator::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut terminal_error = None;
+        let outcome = consume_provider_stream(
+            Box::pin(stream),
+            &mut ProviderStreamContext {
+                cancel_token: &cancel,
+                accumulator: &mut accumulator,
+                event_tx: Some(&event_tx),
+                provider_id: "anthropic",
+                model_id: "test",
+                terminal_stream_error: &mut terminal_error,
+            },
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+        producer.await.unwrap();
+        assert_eq!(outcome, ProviderStreamOutcome::Completed);
+        assert!(terminal_error.is_none());
+        assert!(accumulator.received_message_stop());
+        let (message, usage, _) = accumulator.finish();
+        assert!(message.content_blocks().is_empty());
+        assert_eq!(usage.output_tokens, 0);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(QueryEvent::Stream(AnthropicStreamEvent::MessageStop))
+        ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
