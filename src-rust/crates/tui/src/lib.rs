@@ -158,6 +158,8 @@ pub mod prompt_input;
 pub mod rate_limit_recovery;
 /// All ratatui rendering logic.
 pub mod render;
+/// Full-response reader for completed assistant messages.
+pub mod response_reader;
 /// Session branching overlay (Ctrl+B) — create and switch between conversation branches.
 pub mod session_branching;
 /// Session browser overlay (/session, /resume, /rename, /export).

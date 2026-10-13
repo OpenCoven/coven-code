@@ -8,11 +8,11 @@
 > npm install -g @opencoven/cli
 > ```
 >
-> This repository is the **Coven engine** — `coven-code` **v0.7.0**, which `coven` (**`@opencoven/cli` v0.1.1**) auto-installs and checksum-verifies on first run. You no longer install `coven-code` from npm directly. See the [release notes](https://github.com/OpenCoven/coven/blob/main/docs/release-notes-unified-cli.md) and the [merge guide](docs/unification.md).
+> This repository is the **Coven engine** — `coven-code` **v0.8.0**, which `coven` (**`@opencoven/cli` v0.1.1**) auto-installs and checksum-verifies on first run. You no longer install `coven-code` from npm directly. See the [release notes](https://github.com/OpenCoven/coven/blob/main/docs/release-notes-unified-cli.md) and the [merge guide](docs/unification.md).
 
 **Coven Code** is an open-source agentic coding TUI built in Rust. It is maintained by [OpenCoven](https://opencoven.ai) as a GPL-3.0 fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta.
 
-> **Attribution:** Coven Code is derived from Claurst v0.7.0 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
+> **Attribution:** Coven Code is derived from Claurst v0.8.0 under the GNU General Public License v3.0. The full license is in [`LICENSE.md`](LICENSE.md) and upstream attribution is in [`ATTRIBUTION.md`](ATTRIBUTION.md).
 
 ---
 
@@ -26,7 +26,7 @@ Terminal coding agent with a rich ratatui TUI: chat forking, memory consolidatio
 
 ## Status
 
-> **Beta (v0.7.0).** Core agent, provider routing, and TUI are stable for daily use. Experimental features are flagged below.
+> **Beta (v0.8.0).** Core agent, provider routing, and TUI are stable for daily use. Experimental features are flagged below.
 
 Recent highlights:
 - **/share** — share sessions via unlisted GitHub Gists `[EXPERIMENTAL]`

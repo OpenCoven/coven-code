@@ -2560,7 +2560,7 @@ async fn run_interactive(
                         crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
                     ) {
                         if let KeyCode::Char(c) = key.code {
-                            if app.prompt_is_accepting_text() && !app.any_modal_open() {
+                            if app.prompt_is_accepting_text() {
                                 if let Some(burst) = app.try_detect_paste_burst(c) {
                                     app.handle_paste_data(burst);
                                     app.refresh_prompt_input();
@@ -2579,9 +2579,13 @@ async fn run_interactive(
                         continue;
                     }
 
-                    // Enter => submit input (but NOT when ANY dialog/overlay is open —
-                    // dialogs handle their own Enter in handle_key_event).
-                    let any_dialog_open = app.any_modal_open();
+                    // Enter => submit input (but NOT when a dialog/overlay that
+                    // captures input is open — those handle their own Enter in
+                    // handle_key_event). Gate on the *blocking* predicate:
+                    // `any_modal_open` also counts passive banners that render
+                    // as overlays but never take a keystroke, and those would
+                    // silently eat Enter and strand the conversation.
+                    let any_dialog_open = app.any_blocking_modal_open();
                     if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
@@ -2599,6 +2603,15 @@ async fn run_interactive(
                         continue;
                     }
                     if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                        // A plain Enter on an empty prompt opens the latest completed
+                        // response reader. Route it through App before take_input(),
+                        // which would otherwise consume the key as a no-op.
+                        if app.prompt_input.text.is_empty()
+                            && app.prompt_input.suggestion_index.is_none()
+                        {
+                            app.handle_key_event(key);
+                            continue;
+                        }
                         // If a file-ref suggestion is active, accept it instead of submitting.
                         if !app.prompt_input.suggestions.is_empty()
                             && app.prompt_input.suggestion_index.is_some()
@@ -3281,6 +3294,7 @@ async fn run_interactive(
                         }
 
                         // Start async query
+                        app.close_response_reader();
                         app.is_streaming = true;
                         app.streaming_text.clear();
 

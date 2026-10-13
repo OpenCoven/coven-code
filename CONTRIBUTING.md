@@ -1,6 +1,6 @@
 # Contributing to OpenCoven
 
-Thank you for your interest in contributing. OpenCoven is MIT licensed and community-driven. We want contributing to be easy, open, and safe for everyone.
+Thank you for your interest in contributing. Coven Code is licensed under GPL-3.0 (see [LICENSE.md](./LICENSE.md)) and is community-driven. We want contributing to be easy, open, and safe for everyone.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -34,7 +34,7 @@ Signed-off-by: Your Name <your.email@example.com>
 
 ### Patent Non-Assertion
 
-By contributing, you additionally agree not to assert any patent claims — now held or later acquired — against this project or its users that arise from your contribution. See [PATENTS](./PATENTS) for the full non-assertion pledge.
+By contributing, you additionally agree not to assert any patent claims — now held or later acquired — against this project or its users that arise from your contribution. This is in addition to the patent license that section 11 of GPL-3.0 requires from every contributor.
 
 ## What We're Looking For
 

@@ -43,6 +43,7 @@ use crate::overlays::{
 };
 use crate::plugin_views::render_plugin_hints;
 use crate::prompt_input::{input_height, render_prompt_input, InputMode, TypeaheadSource, VimMode};
+use crate::response_reader::{render_response_reader, response_reader_text};
 use crate::session_branching::render_session_branching;
 use crate::session_browser::render_session_browser;
 use crate::settings_screen::render_settings_screen;
@@ -53,7 +54,7 @@ use crate::transcript_turn::{build_transcript_turns, TranscriptTurn};
 use crate::virtual_list::{VirtualItem, VirtualList};
 use crate::voice_mode_notice::render_voice_mode_notice;
 use claurst_core::constants::APP_VERSION;
-use claurst_core::types::Role;
+use claurst_core::types::{ContentBlock, Message, Role};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -525,6 +526,14 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     render_footer(frame, app, chunks[5]);
 
     // Overlays (rendered on top in Z-order)
+
+    if let Some(message) = app
+        .response_reader
+        .message_index
+        .and_then(|index| app.messages.get(index))
+    {
+        render_response_reader(frame, &app.response_reader, message, size);
+    }
 
     // Rewind flow (takes over screen)
     if app.rewind_flow.visible {
@@ -1329,6 +1338,52 @@ fn render_live_thinking_lines(
     lines
 }
 
+/// Build the reader affordance for a completed assistant message with visible text.
+/// The line count follows the normal tagged assistant renderer's text-section
+/// boundaries, which flush around thinking and tool blocks.
+fn response_reader_footer(message: &Message, width: u16) -> Option<Line<'static>> {
+    if response_reader_text(message).trim().is_empty() {
+        return None;
+    }
+
+    let line_count = rendered_assistant_text_line_count(message, width);
+    Some(Line::from(Span::styled(
+        format!("  Response · {line_count} lines  ·  Enter to read"),
+        Style::default().fg(COVEN_CODE_MUTED),
+    )))
+}
+
+/// Count only text lines exactly as `render_transcript_assistant_message_tagged`
+/// renders them: adjacent text blocks are joined, while every non-text block
+/// flushes the pending text section first.
+fn rendered_assistant_text_line_count(message: &Message, width: u16) -> usize {
+    let mut pending_text = String::new();
+    let mut line_count = 0;
+
+    let flush = |pending_text: &mut String, line_count: &mut usize| {
+        if pending_text.is_empty() {
+            return;
+        }
+        *line_count += render_transcript_live_text(pending_text, width).len();
+        pending_text.clear();
+    };
+
+    for block in message.content_blocks() {
+        match block {
+            ContentBlock::Text { text } => {
+                if !pending_text.is_empty() {
+                    pending_text.push('\n');
+                }
+                pending_text.push_str(&text);
+            }
+            _ => flush(&mut pending_text, &mut line_count),
+        }
+    }
+    flush(&mut pending_text, &mut line_count);
+
+    line_count
+}
+
 fn append_turn_items(
     items: &mut Vec<RenderedLineItem>,
     turn: &TranscriptTurn<'_>,
@@ -1421,6 +1476,12 @@ fn append_turn_items(
                     SectionContent::Plain(vec![meta_line]),
                     Some(turn.primary_message_index()),
                 ));
+            }
+        }
+
+        for (message_index, message) in &turn.assistant_messages {
+            if let Some(footer) = response_reader_footer(message, width) {
+                sections.push((SectionContent::Plain(vec![footer]), Some(*message_index)));
             }
         }
     }
@@ -1721,6 +1782,57 @@ fn truncate_meta(s: &str, max: usize) -> String {
     }
 }
 
+/// The OpenCoven crown, downsampled from `brand/logo/opencoven-mark.svg` to
+/// the same 11x4 half-block slot the familiar sigils occupy.
+const COVEN_CROWN: [&str; 4] = [
+    "     \u{2584}     ",
+    "\u{2584}\u{2584} \u{2584}\u{2588}\u{2580}\u{2588}\u{2584} \u{2584}\u{2584}",
+    "\u{2588}\u{2580}\u{2580}\u{2588}\u{2584} \u{2584}\u{2588}\u{2580}\u{2580}\u{2588}",
+    " \u{2580}\u{2584}\u{2584}\u{2588}\u{2588}\u{2588}\u{2584}\u{2584}\u{2580} ",
+];
+
+/// Dim end of the crown's vertical ramp. The sigils already read as
+/// `primary` climbing to `accent`; the crown borrows that grammar rather than
+/// inventing a second one, ramping a dimmed violet up to `COVEN_CODE_ACCENT`.
+const COVEN_CROWN_DIM: Color = Color::Rgb(86, 57, 152);
+
+fn ramp_channel(from: u8, to: u8, t: f32) -> u8 {
+    let from = f32::from(from);
+    let to = f32::from(to);
+    (from + (to - from) * t).round().clamp(0.0, 255.0) as u8
+}
+
+fn coven_crown_lines() -> Vec<Line<'static>> {
+    let (Color::Rgb(dr, dg, db), Color::Rgb(br, bg, bb)) = (COVEN_CROWN_DIM, COVEN_CODE_ACCENT)
+    else {
+        // Both ends are Rgb literals; this arm is unreachable in practice and
+        // degrades to a flat mark rather than panicking if that ever changes.
+        return COVEN_CROWN
+            .iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    (*row).to_string(),
+                    Style::default().fg(COVEN_CODE_ACCENT),
+                ))
+            })
+            .collect();
+    };
+    let last = COVEN_CROWN.len().saturating_sub(1).max(1) as f32;
+    COVEN_CROWN
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let t = index as f32 / last;
+            let tint = Color::Rgb(
+                ramp_channel(dr, br, t),
+                ramp_channel(dg, bg, t),
+                ramp_channel(db, bb, t),
+            );
+            Line::from(Span::styled((*row).to_string(), Style::default().fg(tint)))
+        })
+        .collect()
+}
+
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     // --- Box dimensions ---
     // Fixed height; width capped so the box doesn't stretch edge-to-edge on
@@ -1844,6 +1956,13 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
                 &app.companion_current_pose,
             ));
         }
+        left_lines.push(Line::from(""));
+    } else {
+        // Nobody's familiar to show, so the identity slot carries Coven's own
+        // mark rather than sitting empty. Same slot, same width, same
+        // half-block vocabulary as the sigils it stands in for -- a familiar
+        // always wins it back.
+        left_lines.extend(coven_crown_lines());
         left_lines.push(Line::from(""));
     }
     // Gray metadata block mirroring the reference layout: model, provider ·
@@ -2394,6 +2513,17 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 
         s.push(Span::raw(" "));
         s.extend(shimmer_spans(&label, app.frame_count));
+        // Elapsed time for the turn in flight. The spinner and the shimmer
+        // both say "alive"; neither answers the question someone waiting
+        // actually has, which is whether this has been running four seconds
+        // or four minutes. Until now that number only appeared once the turn
+        // was already over.
+        if let Some(elapsed) = app.turn_start.map(|start| start.elapsed()) {
+            s.push(Span::styled(
+                format!(" · {}", crate::app::format_elapsed_ms(elapsed.as_millis())),
+                Style::default().fg(COVEN_CODE_MUTED),
+            ));
+        }
         s
     } else if let (Some(verb), Some(elapsed)) =
         (app.last_turn_verb, app.last_turn_elapsed.as_deref())
@@ -3686,10 +3816,128 @@ mod welcome_tests {
         assert_ne!(spinner_char(1), spinner_char(2));
     }
 
+    fn status_row_text(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
+        terminal
+            .draw(|frame| render_status_row(frame, app, frame.area()))
+            .expect("draw status row");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn streaming_status_row_shows_elapsed_time_for_the_turn_in_flight() {
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = true;
+        app.turn_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+
+        let row = status_row_text(&app);
+
+        assert!(
+            row.contains("12s"),
+            "a running turn reports how long it has been running: {row:?}"
+        );
+        assert!(
+            row.contains("Waiting on network"),
+            "the existing status label survives: {row:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_status_row_omits_elapsed_when_no_turn_is_timed() {
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = true;
+        app.turn_start = None;
+
+        let row = status_row_text(&app);
+
+        assert!(
+            !row.contains(" · "),
+            "no separator without a timed turn: {row:?}"
+        );
+    }
+
+    #[test]
+    fn idle_status_row_keeps_the_completed_turn_summary() {
+        // The live counter must not displace the post-turn line, which is a
+        // different branch and reads "Worked for 2m 5s · done".
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        app.is_streaming = false;
+        app.turn_start = Some(std::time::Instant::now());
+        app.last_turn_verb = Some("Worked");
+        app.last_turn_elapsed = Some("2m 5s".to_string());
+
+        let row = status_row_text(&app);
+
+        assert!(row.contains("Worked for 2m 5s"), "got {row:?}");
+        assert!(row.contains("done"), "got {row:?}");
+    }
+
+    #[test]
+    fn coven_crown_fits_the_sigil_slot_and_ramps() {
+        let lines = coven_crown_lines();
+        assert_eq!(lines.len(), 4, "the crown occupies the 4-row sigil slot");
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(text.as_str()),
+                11,
+                "every crown row is the sigil slot's 11 columns: {text:?}"
+            );
+        }
+
+        // The ramp must actually ramp, dim at the base of the mark to the
+        // app accent at its crown.
+        let first = lines[0].spans[0].style.fg.expect("tinted");
+        let last = lines[3].spans[0].style.fg.expect("tinted");
+        assert_eq!(first, COVEN_CROWN_DIM);
+        assert_eq!(last, COVEN_CODE_ACCENT);
+        assert_ne!(first, last, "a flat mark is not a ramp");
+    }
+
+    #[test]
+    fn welcome_box_shows_the_crown_when_no_familiar_is_configured() {
+        let (app, _guard, _tmp) = make_isolated_status_app();
+        assert!(
+            visible_familiar(&app).is_none(),
+            "this fixture configures no familiar"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).expect("terminal");
+        terminal
+            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .expect("draw welcome box");
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            content.contains('\u{2588}'),
+            "the identity slot carries the crown rather than sitting empty"
+        );
+        // The slot is borrowed, not stolen: the surrounding welcome content
+        // that scripts/tui-tests/cases/02_startup.sh pins must survive.
+        assert!(content.contains("Coven v"), "version title survives");
+        assert!(
+            content.contains("Tips for getting started"),
+            "tips section survives"
+        );
+        assert!(content.contains("What's new"), "changelog section survives");
+    }
+
     #[test]
     fn footer_exposes_hidden_keybinding_hints() {
         let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
         terminal
             .draw(|frame| render_footer(frame, &app, frame.area()))
             .expect("draw footer");
@@ -3725,7 +3973,7 @@ mod welcome_tests {
     #[test]
     fn welcome_box_width_is_capped_on_large_terminals() {
         let mut terminal = Terminal::new(TestBackend::new(180, 14)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
             .draw(|frame| render_welcome_box(frame, &app, frame.area()))
@@ -3746,7 +3994,7 @@ mod welcome_tests {
     #[test]
     fn welcome_screen_can_be_hidden_by_config() {
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
-        let mut app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
         app.config.show_splash = Some(false);
 
         terminal
@@ -3802,7 +4050,7 @@ mod welcome_tests {
     #[test]
     fn welcome_box_shows_whats_new_and_release_notes() {
         let mut terminal = Terminal::new(TestBackend::new(120, 14)).expect("terminal");
-        let app = make_test_app_with_model_and_familiar(None, None, None, None);
+        let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
             .draw(|frame| render_welcome_box(frame, &app, frame.area()))
@@ -3868,5 +4116,150 @@ mod welcome_tests {
                 "suggestion list should include {expected} badge, got {content:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transcript_response_reader_tests {
+    use super::*;
+    use claurst_core::{
+        config::Config,
+        cost::CostTracker,
+        types::{ContentBlock, Message},
+    };
+
+    fn make_app() -> App {
+        App::new(Config::default(), CostTracker::new())
+    }
+
+    fn rendered_transcript(app: &App, width: u16) -> String {
+        render_message_items(app, width)
+            .iter()
+            .map(|item| item.search_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn completed_text_response_keeps_all_lines_and_gets_reader_footer() {
+        let mut app = make_app();
+        app.push_message(Message::user("show the complete result"));
+        let response = (0..1_500)
+            .map(|line| format!("response line {line:04}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.push_message(Message::assistant(response));
+
+        let items = render_message_items(&app, 120);
+        let rendered = items
+            .iter()
+            .map(|item| item.search_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(rendered.matches("response line ").count(), 1_500);
+        for expected in [
+            "response line 0000",
+            "response line 0750",
+            "response line 1499",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}");
+        }
+        assert!(
+            rendered.contains("Response · 1500 lines  ·  Enter to read"),
+            "missing reader footer: {rendered}"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.search_text.contains("Enter to read"))
+                .and_then(|item| item.message_index),
+            Some(1),
+            "reader footer must target the final assistant message"
+        );
+    }
+
+    #[test]
+    fn completed_tool_only_and_empty_responses_do_not_get_reader_footer() {
+        let mut tool_only = make_app();
+        tool_only.push_message(Message::user("run a tool"));
+        tool_only.push_message(Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command": "true"}),
+        }]));
+        assert!(
+            !rendered_transcript(&tool_only, 120).contains("Enter to read"),
+            "tool-only responses must not advertise the reader"
+        );
+
+        let mut empty = make_app();
+        empty.push_message(Message::user("respond with nothing"));
+        empty.push_message(Message::assistant("   \n\t"));
+        assert!(
+            !rendered_transcript(&empty, 120).contains("Enter to read"),
+            "empty responses must not advertise the reader"
+        );
+    }
+
+    #[test]
+    fn completed_multiblock_response_counts_normal_text_sections() {
+        let mut app = make_app();
+        app.push_message(Message::user("separate the response sections"));
+        app.push_message(Message::assistant_blocks(vec![
+            ContentBlock::Text {
+                text: "one".to_string(),
+            },
+            ContentBlock::Thinking {
+                thinking: "work through it".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "two".to_string(),
+            },
+        ]));
+
+        let rendered = rendered_transcript(&app, 120);
+
+        assert!(rendered.contains("Response · 2 lines  ·  Enter to read"));
+    }
+
+    #[test]
+    fn every_completed_assistant_message_gets_a_tagged_reader_footer() {
+        let mut app = make_app();
+        app.push_message(Message::user("show two responses"));
+        app.push_message(Message::assistant("first completed response"));
+        app.push_message(Message::assistant("second completed response"));
+
+        let footer_targets = render_message_items(&app, 120)
+            .iter()
+            .filter(|item| item.search_text.contains("Enter to read"))
+            .filter_map(|item| item.message_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(footer_targets, vec![1, 2]);
+    }
+
+    #[test]
+    fn active_and_thinking_only_responses_do_not_get_reader_footer() {
+        let mut active = make_app();
+        active.push_message(Message::user("keep working"));
+        active.push_message(Message::assistant("partial response"));
+        active.is_streaming = true;
+        assert!(
+            !rendered_transcript(&active, 120).contains("Enter to read"),
+            "active responses must not advertise the reader"
+        );
+
+        let mut thinking_only = make_app();
+        thinking_only.push_message(Message::user("think privately"));
+        thinking_only.push_message(Message::assistant_blocks(vec![ContentBlock::Thinking {
+            thinking: "private reasoning".to_string(),
+            signature: String::new(),
+        }]));
+        assert!(
+            !rendered_transcript(&thinking_only, 120).contains("Enter to read"),
+            "thinking-only responses must not advertise the reader"
+        );
     }
 }

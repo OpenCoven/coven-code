@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["OpenCoven (based on Claurst by Kuber Mehta)"]
 license = "GPL-3.0"
@@ -26,7 +26,7 @@ license = "GPL-3.0"
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
-async-trait = "0.1"
+async-trait = "0.1.92"
 async-stream = "0.3"
 
 # HTTP

@@ -138,6 +138,8 @@ mod tests {
 
     #[test]
     fn invalidate_clears_cached_roster() {
+        let temp = tempfile::tempdir().expect("temporary roster home");
+        let _env = crate::app::test_env::EnvGuard::set(temp.path(), temp.path());
         {
             let mut guard = roster_cache().lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some((Instant::now(), Vec::new()));

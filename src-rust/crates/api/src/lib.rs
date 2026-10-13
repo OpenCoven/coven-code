@@ -950,9 +950,25 @@ pub mod client {
                         .get("stop_reason")
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
+                    // Message deltas can omit input/cache counters. Keep this
+                    // wire shape separate from complete usage records.
+                    #[derive(Default, Deserialize)]
+                    #[serde(default)]
+                    struct DeltaUsage {
+                        input_tokens: u64,
+                        output_tokens: u64,
+                        cache_creation_input_tokens: u64,
+                        cache_read_input_tokens: u64,
+                    }
                     let usage = v
                         .get("usage")
-                        .and_then(|u| serde_json::from_value::<UsageInfo>(u.clone()).ok());
+                        .and_then(|u| serde_json::from_value::<DeltaUsage>(u.clone()).ok())
+                        .map(|u| UsageInfo {
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cache_creation_input_tokens: u.cache_creation_input_tokens,
+                            cache_read_input_tokens: u.cache_read_input_tokens,
+                        });
                     Some(streaming::AnthropicStreamEvent::MessageDelta { stop_reason, usage })
                 }
 
@@ -982,6 +998,31 @@ pub mod client {
                     None
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn message_delta_preserves_output_only_usage() {
+            let event = AnthropicClient::frame_to_event(
+                &Some("message_delta".into()),
+                r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+            )
+            .expect("message delta");
+            assert!(matches!(
+                event,
+                streaming::AnthropicStreamEvent::MessageDelta {
+                    usage: Some(UsageInfo {
+                        input_tokens: 0,
+                        output_tokens: 7,
+                        ..
+                    }),
+                    ..
+                }
+            ));
         }
     }
 }
@@ -1124,7 +1165,8 @@ enum PartialBlock {
     ToolUse {
         id: String,
         name: String,
-        json_buf: String,
+        initial_input: Value,
+        json_buf: Option<String>,
     },
     Thinking {
         thinking_buf: String,
@@ -1137,8 +1179,16 @@ impl PartialBlock {
     fn into_content_block(self) -> ContentBlock {
         match self {
             Self::Text(text) => ContentBlock::Text { text },
-            Self::ToolUse { id, name, json_buf } => {
-                let input = serde_json::from_str(&json_buf).unwrap_or(Value::String(json_buf));
+            Self::ToolUse {
+                id,
+                name,
+                initial_input,
+                json_buf,
+            } => {
+                let input = match json_buf {
+                    Some(json) => serde_json::from_str(&json).unwrap_or(Value::String(json)),
+                    None => initial_input,
+                };
                 ContentBlock::ToolUse { id, name, input }
             }
             Self::Thinking {
@@ -1188,10 +1238,11 @@ impl StreamAccumulator {
             } => {
                 let partial = match content_block {
                     ContentBlock::Text { text } => PartialBlock::Text(text.clone()),
-                    ContentBlock::ToolUse { id, name, .. } => PartialBlock::ToolUse {
+                    ContentBlock::ToolUse { id, name, input } => PartialBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
-                        json_buf: String::new(),
+                        initial_input: input.clone(),
+                        json_buf: None,
                     },
                     ContentBlock::Thinking {
                         thinking,
@@ -1232,7 +1283,9 @@ impl StreamAccumulator {
                             PartialBlock::ToolUse { json_buf, .. },
                             streaming::ContentDelta::InputJsonDelta { partial_json },
                         ) => {
-                            json_buf.push_str(partial_json);
+                            json_buf
+                                .get_or_insert_with(String::new)
+                                .push_str(partial_json);
                         }
                         (
                             PartialBlock::Thinking { thinking_buf, .. },
@@ -1770,5 +1823,88 @@ mod tests {
                     ContentBlock::ToolUse { input, .. } if input == &Value::String(raw_json.into())
                 )
         ));
+    }
+
+    #[test]
+    fn stream_accumulator_preserves_tool_start_input_without_deltas() {
+        for input in [serde_json::json!({}), serde_json::json!({"path": "ready"})] {
+            for stopped in [false, true] {
+                let mut acc = StreamAccumulator::new();
+                acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlock::ToolUse {
+                        id: "tool".into(),
+                        name: "Read".into(),
+                        input: input.clone(),
+                    },
+                });
+                if stopped {
+                    acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStop { index: 0 });
+                }
+                let (message, _, _) = acc.finish();
+                assert!(matches!(message.content_blocks().as_slice(),
+                    [ContentBlock::ToolUse { input: actual, .. }] if actual == &input));
+            }
+        }
+    }
+
+    #[test]
+    fn stream_accumulator_json_deltas_replace_tool_start_input() {
+        for (delta, expected) in [
+            (r#"{"path":"delta"}"#, serde_json::json!({"path": "delta"})),
+            (
+                r#"{"path":"unfinished"#,
+                Value::String(r#"{"path":"unfinished"#.into()),
+            ),
+            ("", Value::String(String::new())),
+        ] {
+            let mut acc = StreamAccumulator::new();
+            acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::ToolUse {
+                    id: "tool".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"path":"start"}),
+                },
+            });
+            acc.on_event(&streaming::AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: streaming::ContentDelta::InputJsonDelta {
+                    partial_json: delta.into(),
+                },
+            });
+            let (message, _, _) = acc.finish();
+            assert!(matches!(message.content_blocks().as_slice(),
+                [ContentBlock::ToolUse { input, .. }] if input == &expected));
+        }
+    }
+
+    #[test]
+    fn stream_accumulator_usage_is_cumulative_not_additive() {
+        let mut acc = StreamAccumulator::new();
+        acc.on_event(&streaming::AnthropicStreamEvent::MessageStart {
+            id: "message".into(),
+            model: "model".into(),
+            usage: UsageInfo {
+                input_tokens: 10,
+                output_tokens: 1,
+                cache_creation_input_tokens: 2,
+                cache_read_input_tokens: 3,
+            },
+        });
+        for output_tokens in [4, 7, 7] {
+            acc.on_event(&streaming::AnthropicStreamEvent::MessageDelta {
+                stop_reason: None,
+                usage: Some(UsageInfo {
+                    output_tokens,
+                    ..UsageInfo::default()
+                }),
+            });
+        }
+        let (_, usage, _) = acc.finish();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_creation_input_tokens, 2);
+        assert_eq!(usage.cache_read_input_tokens, 3);
     }
 }

@@ -21,6 +21,7 @@ The original Claurst license is preserved in full in `LICENSE.md`.
 - `CNAME` file removed (upstream pointed to `claurst.kuber.studio`)
 - `.gitignore` entry updated from `.claurst/` to `.coven-code/`
 - Devcontainer updated to `coven-code` volume names
+- Removed upstream `spec/` behavioral documentation of Claude Code; only the OpenCoven runtime manifest remains.
 
 ## Internal Crate Name Boundary
 

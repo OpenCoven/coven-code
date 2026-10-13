@@ -18,6 +18,7 @@ use crate::overlays::{
 use crate::plugin_views::PluginHintBanner;
 use crate::prompt_input::{InputMode, PromptInputState, VimMode};
 use crate::render;
+use crate::response_reader::{response_reader_text, ResponseReaderState};
 use crate::session_browser::SessionBrowserState;
 use crate::settings_screen::SettingsScreen;
 use crate::stats_dialog::StatsDialogState;
@@ -762,6 +763,8 @@ pub struct App {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub scroll_offset: usize,
+    /// Transcript message selected by a pointer interaction, when any.
+    pub selected_transcript_message: Option<usize>,
     pub is_streaming: bool,
     pub streaming_text: String,
     pub streaming_thinking: String,
@@ -852,6 +855,8 @@ pub struct App {
     pub message_selector: MessageSelectorOverlay,
     /// Multi-step rewind flow overlay.
     pub rewind_flow: RewindFlowOverlay,
+    /// Full-screen reader for a completed assistant response.
+    pub response_reader: ResponseReaderState,
     /// Bridge connection state.
     pub bridge_state: BridgeConnectionState,
     /// Active notification queue.
@@ -1036,10 +1041,10 @@ pub struct App {
     pub voice_recording: bool,
     /// Receiver for VoiceEvent messages produced by the recorder task.
     pub voice_event_rx: Option<tokio::sync::mpsc::Receiver<claurst_core::voice::VoiceEvent>>,
-    /// A single key event that was drained from the queue during paste-burst
-    /// detection but wasn't part of the burst (e.g. a modifier key that stopped
-    /// the burst). Replayed at the top of the next loop iteration.
-    pending_key: Option<crossterm::event::KeyEvent>,
+    /// Key events drained from the queue during paste-burst detection that were
+    /// not part of the burst. Replayed in FIFO order at the top of later event
+    /// loop iterations so lookahead never drops submission or navigation keys.
+    pending_keys: std::collections::VecDeque<crossterm::event::KeyEvent>,
     /// Receiver for model-list results fetched in the background when the
     /// /model picker opens.  Drained each frame so models appear as soon as
     /// the fetch completes.
@@ -1295,7 +1300,7 @@ pub fn readable_fg_on(bg: Color) -> Color {
     }
 }
 
-fn format_elapsed_ms(ms: u128) -> String {
+pub(crate) fn format_elapsed_ms(ms: u128) -> String {
     let total_secs = ((ms + 500) / 1000) as u64; // round to nearest second
     if total_secs < 60 {
         format!("{}s", total_secs)
@@ -1354,6 +1359,7 @@ impl App {
             input_history: Vec::new(),
             history_index: None,
             scroll_offset: 0,
+            selected_transcript_message: None,
             is_streaming: false,
             streaming_text: String::new(),
             streaming_thinking: String::new(),
@@ -1398,6 +1404,7 @@ impl App {
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
             rewind_flow: RewindFlowOverlay::new(),
+            response_reader: ResponseReaderState::default(),
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
             error_modal_scroll_offset: 0,
@@ -1511,7 +1518,7 @@ impl App {
             voice_recorder: voice_recorder_from_env_and_settings(),
             voice_recording: false,
             voice_event_rx: None,
-            pending_key: None,
+            pending_keys: std::collections::VecDeque::new(),
             model_fetch_rx: None,
             user_question_rx: None,
             ask_user_dialog: crate::ask_user_dialog::AskUserDialogState::new(),
@@ -2439,7 +2446,9 @@ impl App {
                 true
             }
             "clear" => {
+                self.close_response_reader();
                 self.messages.clear();
+                self.selected_transcript_message = None;
                 self.system_annotations.clear();
                 self.display_messages.clear();
                 self.streaming_text.clear();
@@ -2665,7 +2674,8 @@ impl App {
     /// (overage / voice / memory), which render as overlays but let the user
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
-        self.permission_request.is_some()
+        self.response_reader.visible
+            || self.permission_request.is_some()
             || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2958,6 +2968,20 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+
+        let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
+            self.messages
+                .get(index)
+                .map(|m| response_reader_text(m).trim().is_empty())
+                .unwrap_or(true)
+        });
+        if reader_message_gone {
+            self.close_response_reader();
+        }
+
+        self.selected_transcript_message = self
+            .selected_transcript_message
+            .filter(|&index| index < self.messages.len());
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
     }
@@ -2970,6 +2994,148 @@ impl App {
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
         self.on_new_message();
+    }
+
+    /// Open the most recent completed assistant message with text in the response reader.
+    pub fn open_latest_response_reader(&mut self) -> bool {
+        let is_eligible = |message: &Message| {
+            message.role == Role::Assistant && !response_reader_text(message).trim().is_empty()
+        };
+        let selected = self
+            .selected_transcript_message
+            .filter(|&index| self.messages.get(index).is_some_and(is_eligible));
+        let Some(message_index) = selected.or_else(|| {
+            self.messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, message)| is_eligible(message))
+                .map(|(index, _)| index)
+        }) else {
+            return false;
+        };
+
+        self.response_reader.open(message_index, self.scroll_offset);
+        true
+    }
+
+    /// Close the reader and restore the exact transcript position captured when it opened.
+    pub fn close_response_reader(&mut self) {
+        if let Some(offset) = self.response_reader.close() {
+            self.scroll_offset = offset;
+        }
+    }
+
+    fn response_reader_text(&self) -> Option<String> {
+        self.response_reader
+            .message_index
+            .and_then(|index| self.messages.get(index))
+            .map(response_reader_text)
+    }
+
+    fn response_reader_match(&self, start: usize) -> Option<usize> {
+        let query = self.response_reader.search_query.to_lowercase();
+        if query.is_empty() {
+            return None;
+        }
+
+        let area = self.last_selectable_area.get();
+        let content_width = area.width.saturating_sub(6);
+        let text = self.response_reader_text()?;
+        let lines = crate::messages::render_markdown(&text, content_width);
+        let line_matches = |line: &ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .to_lowercase()
+                .contains(&query)
+        };
+
+        lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .chain(lines.iter().enumerate().take(start))
+            .find_map(|(index, line)| line_matches(line).then_some(index))
+    }
+
+    fn update_response_reader_search(&mut self) {
+        if let Some(match_offset) = self.response_reader_match(0) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn advance_response_reader_search(&mut self) {
+        let start = self.response_reader.scroll_offset.saturating_add(1);
+        if let Some(match_offset) = self.response_reader_match(start) {
+            self.response_reader.scroll_offset = match_offset;
+        }
+    }
+
+    fn copy_response_reader_text(&mut self) {
+        let Some(text) = self.response_reader_text() else {
+            self.push_notification(
+                NotificationKind::Warning,
+                "No response text to copy.".to_string(),
+                Some(3),
+            );
+            return;
+        };
+
+        if try_copy_to_clipboard(&text) {
+            self.push_notification(
+                NotificationKind::Info,
+                "Copied response to clipboard.".to_string(),
+                Some(3),
+            );
+        } else {
+            self.push_notification(
+                NotificationKind::Info,
+                format!("Response: {} chars (clipboard unavailable)", text.len()),
+                Some(5),
+            );
+        }
+    }
+
+    fn handle_response_reader_key(&mut self, key: KeyEvent) {
+        let area = self.last_selectable_area.get();
+        let viewport_height = usize::from(area.height.saturating_sub(8)).max(1);
+        let content_width = area.width.saturating_sub(6);
+        let line_count = self
+            .response_reader_text()
+            .map(|text| crate::messages::render_markdown(&text, content_width).len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc => self.close_response_reader(),
+            KeyCode::Char('/') if !self.response_reader.search_active => {
+                if self.response_reader.search_query.is_empty() {
+                    self.response_reader.search_active = true;
+                } else {
+                    self.advance_response_reader_search();
+                }
+            }
+            KeyCode::Enter if self.response_reader.search_active => {
+                self.response_reader.search_active = false;
+            }
+            KeyCode::Backspace if self.response_reader.search_active => {
+                self.response_reader.search_query.pop();
+                self.update_response_reader_search();
+            }
+            KeyCode::Char(ch) if self.response_reader.search_active => {
+                self.response_reader.search_query.push(ch);
+                self.update_response_reader_search();
+            }
+            KeyCode::Char('y') => self.copy_response_reader_text(),
+            KeyCode::PageUp | KeyCode::Char('k') => self.response_reader.page_up(viewport_height),
+            KeyCode::PageDown | KeyCode::Char('j') => {
+                self.response_reader.page_down(viewport_height, line_count)
+            }
+            KeyCode::Home => self.response_reader.home(),
+            KeyCode::End => self.response_reader.end(viewport_height, line_count),
+            _ => {}
+        }
     }
 
     /// Push a synthetic system annotation into the conversation pane.
@@ -3420,6 +3586,12 @@ impl App {
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // The reader owns its visible keys before any normal TUI interaction.
+        if self.response_reader.visible {
+            self.handle_response_reader_key(key);
+            return false;
+        }
+
         // Permission requests render above other overlays, so they own input.
         if self.permission_request.is_some() {
             self.handle_permission_key(key);
@@ -4398,6 +4570,18 @@ impl App {
                 }
                 _ => return false,
             }
+        }
+
+        // Plain Enter opens the latest completed response when the prompt is
+        // empty and no typeahead item is selected. This must run before the
+        // user keybinding resolver, which normally claims Enter as submit.
+        if key.code == KeyCode::Enter
+            && !self.is_streaming
+            && self.prompt_input.text.is_empty()
+            && self.prompt_input.suggestion_index.is_none()
+            && self.open_latest_response_reader()
+        {
+            return false;
         }
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
@@ -6179,11 +6363,79 @@ impl App {
             && self.prompt_input.vim_mode == crate::prompt_input::VimMode::Insert
     }
 
-    /// Take any key event saved by `try_detect_paste_burst` when a non-character
-    /// key terminated a paste burst.  The caller should replay it as the next
-    /// event at the top of its event loop.
+    /// Take the next key event saved by `try_detect_paste_burst` when
+    /// lookahead reached a submission or non-text key. Events are replayed in
+    /// FIFO order at the top of later event-loop iterations.
     pub fn take_pending_key(&mut self) -> Option<crossterm::event::KeyEvent> {
-        self.pending_key.take()
+        self.pending_keys.pop_front()
+    }
+
+    fn is_paste_text_key(key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+
+        let text_modifiers =
+            key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
+        text_modifiers && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+    }
+
+    /// Classify already-drained key events without depending on the terminal
+    /// event queue. Release/repeat events are ignored because both interactive
+    /// loops process press events only. Any meaningful key that does not belong
+    /// to the paste is retained for ordered replay.
+    fn classify_paste_burst_events(
+        first: char,
+        events: impl IntoIterator<Item = crossterm::event::KeyEvent>,
+    ) -> (
+        String,
+        std::collections::VecDeque<crossterm::event::KeyEvent>,
+    ) {
+        use crossterm::event::{KeyCode, KeyEventKind};
+        use std::collections::VecDeque;
+
+        let mut remaining = events
+            .into_iter()
+            .filter(|key| key.kind == KeyEventKind::Press)
+            .collect::<VecDeque<_>>();
+        let mut pending = VecDeque::new();
+        let mut buffer = String::new();
+        buffer.push(first);
+
+        while let Some(key) = remaining.pop_front() {
+            if !Self::is_paste_text_key(&key) {
+                pending.push_back(key);
+                pending.extend(remaining);
+                break;
+            }
+
+            match key.code {
+                KeyCode::Char(character) => buffer.push(character),
+                KeyCode::Enter => {
+                    // Enter is an interior line break only when the next
+                    // meaningful press is also paste text. Terminal keyboard
+                    // protocols commonly place a Release event immediately
+                    // after Enter; those releases were filtered above and must
+                    // not make a final submit key look like interior text.
+                    let has_following_text = remaining
+                        .front()
+                        .map(Self::is_paste_text_key)
+                        .unwrap_or(false);
+                    if has_following_text {
+                        buffer.push('\n');
+                    } else {
+                        pending.push_back(key);
+                        pending.extend(remaining);
+                        break;
+                    }
+                }
+                _ => unreachable!("paste text predicate admitted a non-text key"),
+            }
+        }
+
+        (buffer, pending)
     }
 
     /// Drain any immediately-available key events from the crossterm event
@@ -6193,19 +6445,17 @@ impl App {
     /// On Windows Terminal, Ctrl+V causes the terminal emulator to write the
     /// clipboard content directly to stdin as raw character events — every
     /// newline becomes an Enter keypress and stray `v` characters trigger
-    /// voice PTT.  Because a paste dumps ALL characters into the queue at
-    /// once, a zero-timeout drain immediately after the first character
-    /// reliably yields 3+ chars for any non-trivial paste, while normal
-    /// keyboard typing (even at 120 WPM) almost never queues more than one
-    /// char in the same 50 ms window.
+    /// voice PTT. Because a paste dumps its events into the queue together, a
+    /// zero-timeout drain immediately after the first character reliably finds
+    /// the rest of a non-trivial paste, while normal keyboard typing almost
+    /// never queues a second press in the same drain.
     ///
-    /// Returns `Some(text)` when a paste burst is detected (caller should
-    /// route through `handle_paste_data`).  Returns `None` for a normal
-    /// single keystroke.  If a non-character key is encountered while
-    /// draining, it is stored in `self.pending_key` and will be replayed at
-    /// the top of the next event-loop iteration.
+    /// Returns `Some(text)` when a paste burst is detected (caller should route
+    /// through `handle_paste_data`). Returns `None` for a normal single
+    /// keystroke. Submission and non-text press events reached during lookahead
+    /// are retained in `self.pending_keys` and replayed in FIFO order.
     pub fn try_detect_paste_burst(&mut self, first: char) -> Option<String> {
-        use crossterm::event::{Event, KeyCode, KeyEventKind};
+        use crossterm::event::{Event, KeyEventKind};
 
         // Minimum number of chars (including `first`) to classify as a paste.
         // Two or more is enough: at 120 WPM the inter-key interval is ~60 ms,
@@ -6213,35 +6463,32 @@ impl App {
         // from a human typist but guaranteed from a clipboard paste.
         const BURST_THRESHOLD: usize = 2;
 
-        // Quick exit: don't bother if nothing is queued immediately.
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            return None;
-        }
-
-        let mut buf = String::new();
-        buf.push(first);
-
-        while let Ok(true) = crossterm::event::poll(std::time::Duration::ZERO) {
-            match crossterm::event::read() {
-                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Char(c) => buf.push(c),
-                    KeyCode::Enter => buf.push('\n'),
-                    _ => {
-                        // Non-character key — save it for replay.
-                        self.pending_key = Some(k);
-                        break;
+        // A replayed character must finish its original burst before looking
+        // at newer terminal input, otherwise text can jump ahead of saved keys.
+        let mut drained = std::mem::take(&mut self.pending_keys);
+        if drained.is_empty() {
+            while let Ok(true) = crossterm::event::poll(std::time::Duration::ZERO) {
+                match crossterm::event::read() {
+                    Ok(Event::Key(key)) => {
+                        drained.push_back(key);
+                        // Keep the boundary key for replay, but leave later
+                        // events (including bracketed paste) for the event loop.
+                        if key.kind == KeyEventKind::Press && !Self::is_paste_text_key(&key) {
+                            break;
+                        }
                     }
-                },
-                // Non-key event (mouse, resize, …) — leave in queue by
-                // not reading it; we already checked poll() so it will
-                // be re-read next iteration. But we already read it, so
-                // we just break (the event is consumed but benign).
-                _ => break,
+                    // Preserve the existing contract for mouse/resize events:
+                    // the first non-key event ends detection after consumption.
+                    _ => break,
+                }
             }
         }
 
-        if buf.chars().count() >= BURST_THRESHOLD {
-            Some(buf)
+        let (buffer, pending) = Self::classify_paste_burst_events(first, drained);
+        self.pending_keys = pending;
+
+        if buffer.chars().count() >= BURST_THRESHOLD {
+            Some(buffer)
         } else {
             None
         }
@@ -6513,6 +6760,7 @@ impl App {
                     self.click_count = 0;
                 } else if in_selectable {
                     self.focus = FocusTarget::Transcript;
+                    self.selected_transcript_message = self.message_index_at_row(mouse_event.row);
 
                     let current_pos = (mouse_event.column, mouse_event.row);
                     let now = std::time::Instant::now();
@@ -6625,6 +6873,111 @@ impl App {
         self.on_new_message();
     }
 
+    fn tool_result_preview(result: &str) -> String {
+        let mut preview = result.lines().take(3).collect::<Vec<_>>().join("\n");
+        let remaining = result.lines().count().saturating_sub(3);
+        if remaining > 0 {
+            preview.push_str(&format!("\n\u{2026} {} more lines", remaining));
+        }
+        preview
+    }
+
+    fn reconcile_durable_message(&mut self, message: Message) {
+        if message.role == Role::Assistant {
+            let existing = message.uuid.as_deref().and_then(|uuid| {
+                self.messages
+                    .iter()
+                    .position(|stored| stored.uuid.as_deref() == Some(uuid))
+            });
+            if let Some(index) = existing {
+                // A snapshot update for an older attempt must not erase a
+                // newer attempt's live output.
+                self.messages[index] = message;
+                self.invalidate_transcript();
+            } else {
+                self.streaming_text.clear();
+                self.streaming_thinking.clear();
+                self.stall_start = None;
+                self.push_message(message);
+            }
+            return;
+        }
+
+        // Tool-result carriers use Role::User on the provider wire, but are
+        // not human turns in the transcript. Project them onto tool cards.
+        for block in message.content_blocks() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            else {
+                continue;
+            };
+            let result = match content {
+                claurst_core::types::ToolResultContent::Text(text) => text,
+                claurst_core::types::ToolResultContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            let existing = self
+                .tool_use_blocks
+                .iter()
+                .position(|card| card.id == tool_use_id);
+            let index = match existing {
+                Some(index) => index,
+                None => {
+                    let origin =
+                        self.messages
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(index, message)| {
+                                message.get_tool_use_blocks().into_iter().find_map(|block| {
+                                    match block {
+                                        ContentBlock::ToolUse { id, name, input }
+                                            if id == &tool_use_id =>
+                                        {
+                                            Some((index, name.clone(), input.to_string()))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            });
+                    let Some((message_index, name, input_json)) = origin else {
+                        continue;
+                    };
+                    let turn_index = self.messages[..=message_index]
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .count()
+                        .checked_sub(1);
+                    self.tool_use_blocks.push(ToolUseBlock {
+                        id: tool_use_id,
+                        name,
+                        turn_index,
+                        input_json,
+                        status: ToolStatus::Running,
+                        output_preview: None,
+                    });
+                    self.tool_use_blocks.len() - 1
+                }
+            };
+            self.tool_use_blocks[index].status = if is_error.unwrap_or(false) {
+                ToolStatus::Error
+            } else {
+                ToolStatus::Done
+            };
+            self.tool_use_blocks[index].output_preview = Some(Self::tool_result_preview(&result));
+        }
+        self.invalidate_transcript();
+    }
+
     /// Process a query event from the agentic loop.
     pub fn handle_query_event(&mut self, event: QueryEvent) {
         // Auto-dismiss error modal when assistant responds
@@ -6637,6 +6990,7 @@ impl App {
 
         match event {
             QueryEvent::Stream(stream_evt) => {
+                self.close_response_reader();
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
@@ -6671,7 +7025,8 @@ impl App {
                         self.is_streaming = false;
                         self.spinner_verb = None;
                         self.stall_start = None;
-                        self.flush_streamed_assistant_message();
+                        // Keep live output visible until DurableMessage supplies
+                        // the complete typed content and attempt identity.
                     }
                     _ => {
                         // Any other stream event: if we have no stall_start yet,
@@ -6720,13 +7075,7 @@ impl App {
                 is_error,
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
-                let all_lines: Vec<&str> = result.lines().collect();
-                let preview_lines = all_lines.len().min(3);
-                let mut preview = all_lines[..preview_lines].join("\n");
-                let remaining = all_lines.len().saturating_sub(preview_lines);
-                if remaining > 0 {
-                    preview.push_str(&format!("\n\u{2026} {} more lines", remaining));
-                }
+                let preview = Self::tool_result_preview(&result);
                 if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
@@ -6850,7 +7199,7 @@ impl App {
                     _ => {}
                 }
             }
-            QueryEvent::DurableMessage { .. } => {}
+            QueryEvent::DurableMessage { message } => self.reconcile_durable_message(message),
         }
 
         // Update token count from tracker.
@@ -6998,9 +7347,10 @@ impl App {
                 tracing::debug!(target: "osc8", "hyperlink overlay write failed: {err}");
             }
 
-            // Replay a key that was saved by try_detect_paste_burst in a
-            // previous iteration (e.g. a modifier key that terminated a burst).
-            let pending = self.pending_key.take();
+            // Replay the next key saved by try_detect_paste_burst. A FIFO is
+            // required because lookahead can encounter a final Enter followed
+            // by another meaningful key after terminal release events.
+            let pending = self.take_pending_key();
 
             // Poll for events with a short timeout so we can redraw for animation
             let got_event = pending.is_some() || event::poll(std::time::Duration::from_millis(50))?;
@@ -7247,6 +7597,151 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    fn release_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn paste_burst_release_after_interior_enter_does_not_stop_multiline_text() {
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                release_key(KeyCode::Enter, KeyModifiers::NONE),
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                release_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                release_key(KeyCode::Enter, KeyModifiers::NONE),
+            ],
+        );
+
+        assert_eq!(text, "a\nb");
+        assert_eq!(
+            pending.into_iter().map(|key| key.code).collect::<Vec<_>>(),
+            vec![KeyCode::Enter]
+        );
+    }
+
+    #[test]
+    fn paste_burst_final_enter_survives_kitty_release_event() {
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                release_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                release_key(KeyCode::Enter, KeyModifiers::NONE),
+            ],
+        );
+
+        assert_eq!(text, "ab");
+        assert_eq!(
+            pending.into_iter().map(|key| key.code).collect::<Vec<_>>(),
+            vec![KeyCode::Enter]
+        );
+    }
+
+    #[test]
+    fn paste_burst_replays_submit_before_following_non_text_key() {
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                release_key(KeyCode::Enter, KeyModifiers::NONE),
+                press_key(KeyCode::Left, KeyModifiers::NONE),
+                release_key(KeyCode::Left, KeyModifiers::NONE),
+            ],
+        );
+
+        assert_eq!(text, "ab");
+        assert_eq!(
+            pending.into_iter().map(|key| key.code).collect::<Vec<_>>(),
+            vec![KeyCode::Enter, KeyCode::Left]
+        );
+    }
+
+    #[test]
+    fn paste_burst_release_events_do_not_count_as_text() {
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [release_key(KeyCode::Char('a'), KeyModifiers::NONE)],
+        );
+
+        assert_eq!(text, "a");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn paste_burst_replayed_text_keeps_interior_newlines() {
+        let mut app = make_app();
+        let (text, pending) = App::classify_paste_burst_events(
+            'x',
+            [
+                press_key(KeyCode::Left, KeyModifiers::NONE),
+                press_key(KeyCode::Char('a'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+            ],
+        );
+        assert_eq!(text, "x");
+        app.pending_keys = pending;
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Left);
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Char('a'));
+
+        assert_eq!(app.try_detect_paste_burst('a').as_deref(), Some("a\nb"));
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Enter);
+        assert!(app.take_pending_key().is_none());
+    }
+
+    #[test]
+    fn paste_burst_replayed_text_preserves_submit_and_navigation_order() {
+        let mut app = make_app();
+        app.pending_keys.extend([
+            press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+            press_key(KeyCode::Enter, KeyModifiers::NONE),
+            press_key(KeyCode::Left, KeyModifiers::NONE),
+        ]);
+
+        assert_eq!(app.try_detect_paste_burst('a').as_deref(), Some("ab"));
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Enter);
+        assert_eq!(app.take_pending_key().unwrap().code, KeyCode::Left);
+        assert!(app.take_pending_key().is_none());
+    }
+
+    #[test]
+    fn paste_burst_ignores_repeat_and_replays_modified_keys() {
+        let modified = press_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let (text, pending) = App::classify_paste_burst_events(
+            'a',
+            [
+                KeyEvent {
+                    kind: KeyEventKind::Repeat,
+                    ..press_key(KeyCode::Char('a'), KeyModifiers::NONE)
+                },
+                press_key(KeyCode::Char('b'), KeyModifiers::NONE),
+                press_key(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent {
+                    kind: KeyEventKind::Repeat,
+                    ..press_key(KeyCode::Char('b'), KeyModifiers::NONE)
+                },
+                modified,
+            ],
+        );
+
+        assert_eq!(text, "ab");
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            vec![press_key(KeyCode::Enter, KeyModifiers::NONE), modified]
+        );
     }
 
     fn test_agent_definition() -> claurst_core::AgentDefinition {
@@ -7750,6 +8245,118 @@ role = "Research"
         assert_eq!(app.messages.len(), 2);
         assert!(app.intercept_slash_command("clear"));
         assert_eq!(app.messages.len(), 0);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_latest_completed_text_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "first response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.scroll_offset = 37;
+
+        assert!(app.prompt_input.text.is_empty());
+        assert!(app.prompt_input.suggestion_index.is_none());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.response_reader.message_index, Some(2));
+        assert_eq!(app.response_reader.restore_transcript_offset, 37);
+    }
+
+    #[test]
+    fn empty_plain_enter_opens_the_selected_completed_response() {
+        let mut app = make_app();
+        app.add_message(Role::User, "hello".to_string());
+        app.add_message(Role::Assistant, "selected response".to_string());
+        app.add_message(Role::Assistant, "latest response".to_string());
+        app.selected_transcript_message = Some(1);
+
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.response_reader.message_index, Some(1));
+    }
+
+    #[test]
+    fn reader_escape_restores_exact_transcript_offset_and_preserves_prompt() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft prompt".to_string());
+        app.scroll_offset = 19;
+        assert!(app.open_latest_response_reader());
+
+        app.scroll_offset = 0;
+        assert!(!app.handle_key_event(press_key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.scroll_offset, 19);
+        assert_eq!(app.prompt_input.text, "draft prompt");
+    }
+
+    #[test]
+    fn plain_enter_with_prompt_still_submits_without_opening_reader() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("send this".to_string());
+
+        assert!(app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "send this");
+    }
+
+    #[test]
+    fn reader_search_enters_query_and_repeats_to_the_next_match() {
+        let mut app = make_app();
+        app.add_message(
+            Role::Assistant,
+            "intro\nneedle first\nspacing\nneedle second".to_string(),
+        );
+        app.last_selectable_area
+            .set(ratatui::layout::Rect::new(0, 0, 80, 20));
+        assert!(app.open_latest_response_reader());
+
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for ch in "needle".chars() {
+            app.handle_key_event(press_key(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.response_reader.search_active);
+        assert_eq!(app.response_reader.search_query, "needle");
+        let first_match = app.response_reader.scroll_offset;
+
+        app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.response_reader.search_active);
+        app.handle_key_event(press_key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.response_reader.scroll_offset > first_match);
+    }
+
+    #[test]
+    fn reader_y_copies_its_target_response_and_notifies() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "copy this completed response".to_string());
+        assert!(app.open_latest_response_reader());
+        assert_eq!(
+            app.response_reader_text().as_deref(),
+            Some("copy this completed response")
+        );
+
+        app.handle_key_event(press_key(KeyCode::Char('y'), KeyModifiers::NONE));
+        let notification = app.notifications.current().expect("copy should notify");
+        assert!(
+            notification.message.contains("Copied")
+                || notification.message.contains("clipboard unavailable"),
+            "unexpected copy notification: {}",
+            notification.message
+        );
+    }
+
+    #[test]
+    fn reader_blocks_cli_submit_and_retains_a_preserved_draft() {
+        let mut app = make_app();
+        app.add_message(Role::Assistant, "completed response".to_string());
+        app.set_prompt_text("draft that must not submit".to_string());
+        assert!(app.open_latest_response_reader());
+
+        assert!(app.any_blocking_modal_open());
+        assert!(!app.handle_key_event(press_key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.response_reader.visible);
+        assert_eq!(app.prompt_input.text, "draft that must not submit");
     }
 
     #[test]
@@ -8300,5 +8907,137 @@ role = "Research"
 
         assert!(app.permission_request.is_none());
         assert!(!app.bash_command_allowed_by_prefix("npm test"));
+    }
+    #[test]
+    fn durable_assistant_replaces_live_buffers_without_a_provisional_duplicate() {
+        use claurst_api::{streaming::ContentDelta, AnthropicStreamEvent};
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        app.handle_query_event(QueryEvent::Stream(
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::TextDelta {
+                    text: "answer".into(),
+                },
+            },
+        ));
+        app.handle_query_event(QueryEvent::Stream(AnthropicStreamEvent::MessageStop));
+        assert_eq!(
+            app.messages.len(),
+            1,
+            "wait for the typed durable assistant"
+        );
+        assert_eq!(app.streaming_text, "answer");
+        let mut message = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "thought".into(),
+                signature: "signed".into(),
+            },
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+        ]);
+        message.uuid = Some("attempt-1".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message });
+        app.handle_query_event(QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".into(),
+            usage: None,
+        });
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[1].uuid.as_deref(), Some("attempt-1"));
+        assert_eq!(app.messages[1].content_blocks().len(), 2);
+        assert!(app.streaming_text.is_empty());
+        assert!(app.streaming_thinking.is_empty());
+    }
+
+    #[test]
+    fn durable_retries_stay_separate_and_late_updates_preserve_new_streaming_text() {
+        use claurst_api::{streaming::ContentDelta, AnthropicStreamEvent};
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        app.streaming_text = "first partial".into();
+        app.is_streaming = true;
+        let mut first = Message::assistant("first partial");
+        first.uuid = Some("attempt-1".into());
+        app.handle_query_event(QueryEvent::DurableMessage {
+            message: first.clone(),
+        });
+        assert!(app.streaming_text.is_empty());
+        app.handle_query_event(QueryEvent::Stream(
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "retry partial".into(),
+                },
+            },
+        ));
+        app.handle_query_event(QueryEvent::DurableMessage { message: first });
+        assert_eq!(app.streaming_text, "retry partial");
+        let mut retry = Message::assistant("retry partial");
+        retry.uuid = Some("attempt-2".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message: retry });
+        app.handle_query_event(QueryEvent::Error("cancelled".into()));
+        assert_eq!(app.messages[1].get_all_text(), "first partial");
+        assert_eq!(app.messages[2].get_all_text(), "retry partial");
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| m.uuid.as_deref() == Some("attempt-1"))
+                .count(),
+            1
+        );
+        assert_eq!(app.current_user_turn_index(), Some(0));
+    }
+
+    #[test]
+    fn durable_tool_results_close_cards_without_creating_human_turns() {
+        use claurst_core::types::ToolResultContent;
+        let mut app = make_app();
+        app.push_message(Message::user("prompt"));
+        let mut assistant = Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "unexecuted".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path":"file"}),
+        }]);
+        assistant.uuid = Some("attempt".into());
+        app.handle_query_event(QueryEvent::DurableMessage { message: assistant });
+        app.handle_query_event(QueryEvent::ToolStart {
+            tool_id: "other".into(),
+            tool_name: "Bash".into(),
+            input_json: "{}".into(),
+        });
+        let result = Message::user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "unexecuted".into(),
+            content: ToolResultContent::Text("cancelled before execution".into()),
+            is_error: Some(true),
+        }]);
+        app.handle_query_event(QueryEvent::DurableMessage {
+            message: result.clone(),
+        });
+        app.handle_query_event(QueryEvent::DurableMessage { message: result });
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.current_user_turn_index(), Some(0));
+        assert_eq!(app.tool_use_blocks.len(), 2);
+        let closed = app
+            .tool_use_blocks
+            .iter()
+            .find(|b| b.id == "unexecuted")
+            .unwrap();
+        assert_eq!(closed.status, ToolStatus::Error);
+        assert_eq!(closed.name, "Read");
+        assert_eq!(closed.turn_index, Some(0));
+        assert_eq!(
+            closed.output_preview.as_deref(),
+            Some("cancelled before execution")
+        );
+        assert_eq!(
+            app.tool_use_blocks
+                .iter()
+                .find(|b| b.id == "other")
+                .unwrap()
+                .status,
+            ToolStatus::Running
+        );
     }
 }

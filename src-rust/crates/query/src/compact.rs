@@ -535,6 +535,39 @@ pub fn should_auto_compact(input_tokens: u64, model: &str, state: &AutoCompactSt
 // Core compaction logic
 // ---------------------------------------------------------------------------
 
+/// A partial summary must never replace the history it was meant to summarize.
+async fn collect_complete_summary(
+    mut rx: tokio::sync::mpsc::Receiver<AnthropicStreamEvent>,
+) -> Result<String, ClaudeError> {
+    let mut accumulator = StreamAccumulator::new();
+    while let Some(event) = rx.recv().await {
+        if let AnthropicStreamEvent::Error {
+            error_type,
+            message,
+        } = &event
+        {
+            return Err(ClaudeError::Api(format!(
+                "Compaction stream failed [{error_type}]: {message}"
+            )));
+        }
+        accumulator.on_event(&event);
+        if matches!(event, AnthropicStreamEvent::MessageStop) {
+            break;
+        }
+    }
+    if !accumulator.received_message_stop() {
+        return Err(ClaudeError::Api(
+            "Compaction stream ended before MessageStop".to_string(),
+        ));
+    }
+    let (message, _, _) = accumulator.finish();
+    let summary = message.get_all_text();
+    if summary.trim().is_empty() {
+        return Err(ClaudeError::Other("Compact summary was empty".to_string()));
+    }
+    Ok(summary)
+}
+
 /// Summarise `messages[..split_at]` using the Anthropic API using the
 /// carefully crafted compaction prompt from TypeScript prompt.ts.
 /// Returns a new conversation: [summary user msg] + messages[split_at..].
@@ -631,22 +664,8 @@ async fn summarise_head(
 
     // Use a null handler since we just want the final accumulated message.
     let handler: Arc<dyn StreamHandler> = Arc::new(claurst_api::streaming::NullStreamHandler);
-    let mut rx = client.create_message_stream(request, handler).await?;
-    let mut acc = StreamAccumulator::new();
-
-    while let Some(evt) = rx.recv().await {
-        acc.on_event(&evt);
-        if matches!(evt, AnthropicStreamEvent::MessageStop) {
-            break;
-        }
-    }
-
-    let (summary_msg, _usage, _stop) = acc.finish();
-    let raw_summary = summary_msg.get_all_text();
-
-    if raw_summary.is_empty() {
-        return Err(ClaudeError::Other("Compact summary was empty".to_string()));
-    }
+    let rx = client.create_message_stream(request, handler).await?;
+    let raw_summary = collect_complete_summary(rx).await?;
 
     let formatted_summary = format_compact_summary(&raw_summary);
 
@@ -992,10 +1011,7 @@ pub async fn context_collapse(
     client: &claurst_api::AnthropicClient,
     config: &crate::QueryConfig,
 ) -> Result<CompactResult, claurst_core::error::ClaudeError> {
-    use claurst_api::{
-        AnthropicStreamEvent, ApiMessage, CreateMessageRequest, StreamAccumulator, StreamHandler,
-        SystemPrompt,
-    };
+    use claurst_api::{ApiMessage, CreateMessageRequest, StreamHandler, SystemPrompt};
     use serde_json::Value;
     use std::sync::Arc;
 
@@ -1050,24 +1066,8 @@ pub async fn context_collapse(
         .build();
 
     let handler: Arc<dyn StreamHandler> = Arc::new(claurst_api::streaming::NullStreamHandler);
-    let mut rx = client.create_message_stream(request, handler).await?;
-    let mut acc = StreamAccumulator::new();
-
-    while let Some(evt) = rx.recv().await {
-        acc.on_event(&evt);
-        if matches!(evt, AnthropicStreamEvent::MessageStop) {
-            break;
-        }
-    }
-
-    let (summary_msg, _usage, _stop) = acc.finish();
-    let summary_text = summary_msg.get_all_text();
-
-    if summary_text.is_empty() {
-        return Err(claurst_core::error::ClaudeError::Other(
-            "Context-collapse summary was empty".to_string(),
-        ));
-    }
+    let rx = client.create_message_stream(request, handler).await?;
+    let summary_text = collect_complete_summary(rx).await?;
 
     // Keep only: the synthetic summary + the most recent user turn.
     let collapse_notice = claurst_core::types::Message::user(format!(
@@ -1439,5 +1439,91 @@ mod tests {
         let est = estimate_tokens_for_messages(&msgs);
         // "Hello, world!" = 13 chars → 13/4 = 3 rough tokens → 3*4/3 = 4 padded
         assert!(est > 0);
+    }
+    async fn summary_client(ending: &str) -> claurst_api::AnthropicClient {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = format!(
+            "event: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"partial summary\"}}}}\n\n{ending}"
+        );
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            let header_end = loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(index) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let length: usize = std::str::from_utf8(&request[..header_end])
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            while request.len() < header_end + length {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".into(),
+            api_base: format!("http://{address}"),
+            max_retries: 0,
+            request_timeout: std::time::Duration::from_secs(5),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn compaction_requires_complete_summary_before_replacing_history() {
+        for ending in [
+            "",
+            "event: error\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n",
+            "event: message_stop\ndata: {}\n\n",
+        ] {
+            let completed = ending.contains("message_stop");
+            for flow in ["proactive", "reactive", "emergency"] {
+                let client = summary_client(ending).await;
+                let messages: Vec<_> = (0..12)
+                    .map(|i| Message::user(format!("original {i}")))
+                    .collect();
+                let config = crate::QueryConfig::default();
+                let result = match flow {
+                    "proactive" => compact_conversation(&client, &messages, &config.model).await,
+                    "reactive" => reactive_compact(
+                        messages.clone(),
+                        &client,
+                        &config,
+                        tokio_util::sync::CancellationToken::new(),
+                        &[],
+                    )
+                    .await
+                    .map(|r| r.messages),
+                    _ => context_collapse(messages.clone(), &client, &config)
+                        .await
+                        .map(|r| r.messages),
+                };
+                assert_eq!(
+                    result.is_ok(),
+                    completed,
+                    "{flow}, ending={ending:?}, result={result:?}"
+                );
+                assert_eq!(messages.len(), 12);
+                assert_eq!(messages[0].get_all_text(), "original 0");
+            }
+        }
     }
 }

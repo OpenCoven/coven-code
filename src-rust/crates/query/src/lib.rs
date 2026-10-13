@@ -903,14 +903,26 @@ fn sync_finalized_assistant_message(messages: &mut Vec<Message>, finalized: &Mes
 fn finish_stream_accumulator(
     accumulator: StreamAccumulator,
 ) -> (Message, UsageInfo, Option<String>) {
-    let message_id = accumulator.message_id().map(str::to_owned);
     let (mut assistant_msg, usage, stop_reason) = accumulator.finish();
-    assistant_msg.uuid = Some(message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+    // Provider message IDs may be reused across transport retries or sessions.
+    // Durable transcript identity belongs to this individual sampling attempt.
+    assistant_msg.uuid = Some(uuid::Uuid::new_v4().to_string());
     (assistant_msg, usage, stop_reason)
 }
 
-fn sampled_attempt_has_material(assistant_msg: &Message, usage: &UsageInfo) -> bool {
-    !assistant_msg.content_blocks().is_empty() || usage.total() != 0
+fn sampled_attempt_has_material(assistant_msg: &Message) -> bool {
+    assistant_msg
+        .content_blocks()
+        .iter()
+        .any(|block| match block {
+            ContentBlock::Text { text } => !text.trim().is_empty(),
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => !thinking.trim().is_empty() || !signature.is_empty(),
+            ContentBlock::RedactedThinking { data } => !data.is_empty(),
+            _ => true,
+        })
 }
 
 async fn finalize_terminal_assistant_message(
@@ -1040,16 +1052,15 @@ async fn finalize_stalled_attempt_before_retry(
     initial_snapshot: Option<&str>,
     event_tx: Option<&mpsc::UnboundedSender<QueryEvent>>,
 ) {
-    if !sampled_attempt_has_material(assistant_msg, usage) {
-        return;
-    }
-
     cost_tracker.add_usage(
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_creation_input_tokens,
         usage.cache_read_input_tokens,
     );
+    if !sampled_attempt_has_material(assistant_msg) {
+        return;
+    }
     finalize_terminal_assistant_with_unexecuted_tool_results(
         messages,
         assistant_msg,
@@ -2194,6 +2205,13 @@ pub async fn run_query_loop(
                         )));
                     }
 
+                    cost_tracker.add_usage(
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                    );
+
                     if provider_stream_cancelled {
                         finalize_terminal_assistant_with_unexecuted_tool_results(
                             messages,
@@ -2206,13 +2224,6 @@ pub async fn run_query_loop(
                         .await;
                         return QueryOutcome::Cancelled;
                     }
-
-                    cost_tracker.add_usage(
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_creation_input_tokens,
-                        usage.cache_read_input_tokens,
-                    );
 
                     if let Some(error) = terminal_stream_error {
                         finalize_terminal_assistant_with_unexecuted_tool_results(
@@ -2416,7 +2427,11 @@ pub async fn run_query_loop(
                                 stall_recovery_count, STALL_RECOVERY_LIMIT
                             )));
                         }
-                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        if sampled_attempt_has_material(&assistant_msg) {
+                            emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        } else {
+                            messages.retain(|message| message.uuid != assistant_msg.uuid);
+                        }
                         messages.push(Message::user(STALL_RECOVERY_MSG));
                         continue;
                     }
@@ -2590,6 +2605,13 @@ pub async fn run_query_loop(
             continue;
         }
 
+        cost_tracker.add_usage(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+
         if stream_cancelled {
             finalize_terminal_assistant_with_unexecuted_tool_results(
                 messages,
@@ -2604,12 +2626,6 @@ pub async fn run_query_loop(
         }
 
         if stream_stalled {
-            cost_tracker.add_usage(
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-            );
             return finish_anthropic_stall(
                 messages,
                 &mut assistant_msg,
@@ -2619,14 +2635,6 @@ pub async fn run_query_loop(
             )
             .await;
         }
-
-        // Track costs
-        cost_tracker.add_usage(
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-        );
 
         if let Some(error) = terminal_stream_error {
             finalize_terminal_assistant_with_unexecuted_tool_results(
@@ -2974,7 +2982,11 @@ pub async fn run_query_loop(
                     // so the nudge reads in context. Stop hooks are not fired:
                     // the turn is not over.
                     sync_finalized_assistant_message(messages, &assistant_msg);
-                    emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                    if sampled_attempt_has_material(&assistant_msg) {
+                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                    } else {
+                        messages.retain(|message| message.uuid != assistant_msg.uuid);
+                    }
                     messages.push(Message::user(STALL_RECOVERY_MSG));
                     continue;
                 }
@@ -3146,18 +3158,24 @@ pub async fn run_query_loop(
                             max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
                         )));
                     }
-                    // The partial assistant message must be in the history so
-                    // the continuation makes sense to the model.
-                    let assistant_index =
-                        sync_finalized_assistant_message(messages, &assistant_msg);
-                    emit_durable_message(event_tx.as_ref(), &assistant_msg);
-                    if let Some(tool_result_message) = insert_unexecuted_tool_result_after_assistant(
-                        messages,
-                        assistant_index,
-                        &assistant_msg,
-                        "maximum output tokens were reached",
-                    ) {
-                        emit_durable_message(event_tx.as_ref(), &tool_result_message);
+                    // Preserve sampled material for the continuation without
+                    // manufacturing an empty durable assistant for a retry.
+                    if sampled_attempt_has_material(&assistant_msg) {
+                        let assistant_index =
+                            sync_finalized_assistant_message(messages, &assistant_msg);
+                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        if let Some(tool_result_message) =
+                            insert_unexecuted_tool_result_after_assistant(
+                                messages,
+                                assistant_index,
+                                &assistant_msg,
+                                "maximum output tokens were reached",
+                            )
+                        {
+                            emit_durable_message(event_tx.as_ref(), &tool_result_message);
+                        }
+                    } else {
+                        messages.retain(|message| message.uuid != assistant_msg.uuid);
                     }
                     messages.push(Message::user(MAX_TOKENS_RECOVERY_MSG));
                     continue;
@@ -4134,7 +4152,12 @@ mod tests {
     async fn run_scripted_provider_until_partial_then_cancel(
         provider: ScriptedProvider,
         queued_events: Option<QueuedScriptedEvents>,
-    ) -> (QueryOutcome, Vec<QueryEvent>, Vec<Message>) {
+    ) -> (
+        QueryOutcome,
+        Vec<QueryEvent>,
+        Vec<Message>,
+        Arc<CostTracker>,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let mut registry = claurst_api::ProviderRegistry::new();
         registry.register(Arc::new(provider));
@@ -4182,7 +4205,7 @@ mod tests {
                 &[],
                 &tool_ctx,
                 &config,
-                cost_tracker,
+                cost_tracker.clone(),
                 Some(event_tx),
                 cancel_token.clone(),
                 None,
@@ -4218,7 +4241,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        (outcome, events, messages)
+        (outcome, events, messages, cost_tracker)
     }
 
     async fn serve_anthropic_sse_sequence(bodies: Vec<&'static str>) -> String {
@@ -4520,7 +4543,12 @@ mod tests {
     async fn run_anthropic_until_partial_then_cancel(
         body: &'static str,
         cancel_on_input_json: bool,
-    ) -> (QueryOutcome, Vec<QueryEvent>, Vec<Message>) {
+    ) -> (
+        QueryOutcome,
+        Vec<QueryEvent>,
+        Vec<Message>,
+        Arc<CostTracker>,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let api_base = serve_anthropic_partial_sse(body).await;
         let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
@@ -4562,7 +4590,7 @@ mod tests {
                 &[],
                 &tool_ctx,
                 &query_config,
-                cost_tracker,
+                cost_tracker.clone(),
                 Some(event_tx),
                 cancel_token.clone(),
                 None,
@@ -4594,7 +4622,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        (outcome, events, messages)
+        (outcome, events, messages, cost_tracker)
     }
 
     async fn run_anthropic_sse_sequence_in_worktree(
@@ -4653,6 +4681,20 @@ mod tests {
         (outcome, events, messages)
     }
 
+    fn durable_uuid<'a>(events: &'a [QueryEvent], selector: &str) -> &'a str {
+        let message = events.iter().find_map(|event| match event {
+            QueryEvent::DurableMessage { message } if message.role == Role::Assistant => {
+                (message.get_all_text() == selector || message.get_tool_use_blocks().iter().any(|block| {
+                    matches!(block, ContentBlock::ToolUse { id, .. } if id == selector)
+                })).then_some(message)
+            }
+            _ => None,
+        }).expect("expected semantic assistant in durable events");
+        let id = message.uuid.as_deref().expect("durable attempt UUID");
+        uuid::Uuid::parse_str(id).expect("attempt UUID must be independent of provider ID");
+        id
+    }
+
     fn make_config(sys: Option<&str>, append: Option<&str>) -> QueryConfig {
         QueryConfig {
             model: "claude-sonnet-4-6".to_string(),
@@ -4678,6 +4720,57 @@ mod tests {
             managed_agents: None,
             preserve_selected_model: false,
         }
+    }
+
+    #[tokio::test]
+    async fn empty_max_tokens_retry_does_not_persist_an_empty_assistant() {
+        const EMPTY_LIMIT: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"same-provider-id\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        const COMPLETE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"same-provider-id\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"All tests pass.\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let (outcome, events, messages) = run_anthropic_sse_sequence_in_worktree(
+            vec![EMPTY_LIMIT, COMPLETE],
+            temp.path(),
+            Config::default(),
+            make_config(None, None),
+            &[],
+        )
+        .await;
+        assert!(matches!(outcome, QueryOutcome::EndTurn { .. }));
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert_eq!(assistants.len(), 1);
+        assert_eq!(assistants[0].get_all_text(), "All tests pass.");
+        let durable: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::DurableMessage { message } if message.role == Role::Assistant => {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].uuid, assistants[0].uuid);
     }
 
     #[tokio::test]
@@ -4791,7 +4884,9 @@ mod tests {
         }));
         let assistant_index = messages
             .iter()
-            .position(|message| message.uuid.as_deref() == Some("provider-premature-eof"))
+            .position(|message| {
+                message.uuid.as_deref() == Some(durable_uuid(&events, "provider-incomplete-tool"))
+            })
             .expect("partial assistant must be durable");
         assert!(matches!(
             &messages[assistant_index].content,
@@ -4856,7 +4951,9 @@ mod tests {
         }));
         let assistant_index = messages
             .iter()
-            .position(|message| message.uuid.as_deref() == Some("provider-stream-event-error"))
+            .position(|message| {
+                message.uuid.as_deref() == Some(durable_uuid(&events, "provider-event-error-tool"))
+            })
             .expect("erroring assistant must be durable");
         assert!(is_tool_result_carrier(&messages[assistant_index + 1]));
     }
@@ -5052,7 +5149,10 @@ mod tests {
                 _ => None,
             })
             .expect("stream error must publish its finalized partial assistant");
-        assert_eq!(durable.uuid.as_deref(), Some("stream-error"));
+        assert_eq!(
+            durable.uuid.as_deref(),
+            Some(durable_uuid(&events, "partial"))
+        );
         assert_eq!(durable.get_all_text(), "partial");
         assert!(messages.iter().any(|message| {
             message.uuid == durable.uuid && message.get_all_text() == "partial"
@@ -5065,7 +5165,10 @@ mod tests {
             StreamEvent::MessageStart {
                 id: "provider-cancelled-partial".to_string(),
                 model: "scripted".to_string(),
-                usage: UsageInfo::default(),
+                usage: UsageInfo {
+                    input_tokens: 1,
+                    ..UsageInfo::default()
+                },
             },
             StreamEvent::TextDelta {
                 index: 0,
@@ -5073,15 +5176,16 @@ mod tests {
             },
         ]);
 
-        let (outcome, events, messages) =
+        let (outcome, events, messages, costs) =
             run_scripted_provider_until_partial_then_cancel(provider, None).await;
 
         assert!(matches!(outcome, QueryOutcome::Cancelled));
+        assert_eq!(costs.input_tokens(), 1);
         let durable_index = events
             .iter()
             .position(|event| {
                 matches!(event, QueryEvent::DurableMessage { message }
-                    if message.uuid.as_deref() == Some("provider-cancelled-partial")
+                    if message.uuid.as_deref() == Some(durable_uuid(&events, "partial before cancellation"))
                         && message.get_all_text() == "partial before cancellation")
             })
             .expect("cancelled provider response must be durable");
@@ -5090,13 +5194,13 @@ mod tests {
                 .iter()
                 .filter(|event| {
                     matches!(event, QueryEvent::DurableMessage { message }
-                        if message.uuid.as_deref() == Some("provider-cancelled-partial"))
+                        if message.uuid.as_deref() == Some(durable_uuid(&events, "partial before cancellation")))
                 })
                 .count(),
             1
         );
         assert!(messages.iter().any(|message| {
-            message.uuid.as_deref() == Some("provider-cancelled-partial")
+            message.uuid.as_deref() == Some(durable_uuid(&events, "partial before cancellation"))
                 && message.get_all_text() == "partial before cancellation"
         }));
         assert!(events[durable_index + 1..]
@@ -5112,6 +5216,8 @@ mod tests {
                 model: "scripted".to_string(),
                 usage: UsageInfo {
                     input_tokens: 7,
+                    cache_creation_input_tokens: 2,
+                    cache_read_input_tokens: 3,
                     ..UsageInfo::default()
                 },
             },
@@ -5175,16 +5281,20 @@ mod tests {
             StreamEvent::MessageStop,
         ];
 
-        let (outcome, events, messages) = run_scripted_provider_until_partial_then_cancel(
+        let (outcome, events, messages, costs) = run_scripted_provider_until_partial_then_cancel(
             provider,
             Some((queued_sender, queued_events)),
         )
         .await;
 
         assert!(matches!(outcome, QueryOutcome::Cancelled));
+        assert_eq!(costs.input_tokens(), 7);
+        assert_eq!(costs.output_tokens(), 5);
+        assert_eq!(costs.cache_creation_tokens(), 2);
+        assert_eq!(costs.cache_read_tokens(), 3);
         let assistant = messages
             .iter()
-            .find(|message| message.uuid.as_deref() == Some("queued-provider-cancellation"))
+            .find(|message| message.uuid.as_deref() == Some(durable_uuid(&events, "queued-tool")))
             .expect("queued provider events must be finalized into durable history");
         let MessageContent::Blocks(blocks) = &assistant.content else {
             panic!("queued provider response must keep block content");
@@ -5260,7 +5370,7 @@ mod tests {
                 },
             ],
             scripted_round(
-                "provider-retry-success",
+                "provider-stalled-attempt",
                 vec![ContentBlock::Text {
                     text: "fresh successful response".to_string(),
                 }],
@@ -5290,6 +5400,10 @@ mod tests {
             QueryOutcome::EndTurn { ref message, .. }
                 if message.get_all_text() == "fresh successful response"
         ));
+        assert_ne!(
+            durable_uuid(&events, "partial provider output"),
+            durable_uuid(&events, "fresh successful response")
+        );
         assert_eq!(cost_tracker.input_tokens(), 4);
         assert_eq!(cost_tracker.output_tokens(), 3);
         assert_eq!(cost_tracker.total_tokens(), 7);
@@ -5297,7 +5411,8 @@ mod tests {
             messages
                 .iter()
                 .filter(|message| {
-                    message.uuid.as_deref() == Some("provider-stalled-attempt")
+                    message.uuid.as_deref()
+                        == Some(durable_uuid(&events, "partial provider output"))
                         && message.get_all_text() == "partial provider output"
                 })
                 .count(),
@@ -5306,7 +5421,9 @@ mod tests {
         );
         let partial_index = messages
             .iter()
-            .position(|message| message.uuid.as_deref() == Some("provider-stalled-attempt"))
+            .position(|message| {
+                message.uuid.as_deref() == Some(durable_uuid(&events, "partial provider output"))
+            })
             .expect("the stalled partial assistant must remain in history");
         assert!(is_tool_result_carrier(&messages[partial_index + 1]));
         assert_eq!(
@@ -5333,7 +5450,7 @@ mod tests {
                     matches!(
                         event,
                         QueryEvent::DurableMessage { message }
-                            if message.uuid.as_deref() == Some("provider-stalled-attempt")
+                            if message.uuid.as_deref() == Some(durable_uuid(&events, "partial provider output"))
                     )
                 })
                 .count(),
@@ -5447,13 +5564,16 @@ mod tests {
         assert_eq!(cost_tracker.total_tokens(), 9);
         let partial_index = messages
             .iter()
-            .position(|message| message.uuid.as_deref() == Some("anthropic-stalled-attempt"))
+            .position(|message| {
+                message.uuid.as_deref() == Some(durable_uuid(&events, "partial anthropic output"))
+            })
             .expect("the stalled Anthropic attempt must remain in history");
         assert_eq!(
             messages
                 .iter()
                 .filter(|message| {
-                    message.uuid.as_deref() == Some("anthropic-stalled-attempt")
+                    message.uuid.as_deref()
+                        == Some(durable_uuid(&events, "partial anthropic output"))
                         && message.get_all_text() == "partial anthropic output"
                 })
                 .count(),
@@ -5484,7 +5604,7 @@ mod tests {
                     matches!(
                         event,
                         QueryEvent::DurableMessage { message }
-                            if message.uuid.as_deref() == Some("anthropic-stalled-attempt")
+                            if message.uuid.as_deref() == Some(durable_uuid(&events, "partial anthropic output"))
                     )
                 })
                 .count(),
@@ -5536,7 +5656,7 @@ mod tests {
     async fn anthropic_cancellation_after_partial_sampling_finalizes_exactly_once() {
         const PARTIAL_SSE: &str = concat!(
             "event: message_start\n",
-            "data: {\"message\":{\"id\":\"anthropic-cancelled-partial\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "data: {\"message\":{\"id\":\"anthropic-cancelled-partial\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4}}}\n\n",
             "event: content_block_start\n",
             "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             "event: content_block_delta\n",
@@ -5545,10 +5665,14 @@ mod tests {
             "data: {\"index\":0}\n\n",
         );
 
-        let (outcome, events, messages) =
+        let (outcome, events, messages, costs) =
             run_anthropic_until_partial_then_cancel(PARTIAL_SSE, false).await;
 
         assert!(matches!(outcome, QueryOutcome::Cancelled));
+        assert_eq!(costs.input_tokens(), 1);
+        assert_eq!(costs.output_tokens(), 2);
+        assert_eq!(costs.cache_creation_tokens(), 3);
+        assert_eq!(costs.cache_read_tokens(), 4);
         let durable_index = events
             .iter()
             .position(|event| {
@@ -5597,10 +5721,11 @@ mod tests {
             "data: {\"index\":0}\n\n",
         );
 
-        let (outcome, events, messages) =
+        let (outcome, events, messages, costs) =
             run_anthropic_until_partial_then_cancel(TOOL_USE_SSE, false).await;
 
         assert!(matches!(outcome, QueryOutcome::Cancelled));
+        assert_eq!(costs.input_tokens(), 1);
         assert_unexecuted_tool_result_is_durable_once(&events, &messages, "cancelled-tool");
     }
 
@@ -5615,10 +5740,11 @@ mod tests {
             "data: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"fixture.txt\\\"}\"}}\n\n",
         );
 
-        let (outcome, events, messages) =
+        let (outcome, events, messages, costs) =
             run_anthropic_until_partial_then_cancel(OPEN_TOOL_USE_SSE, true).await;
 
         assert!(matches!(outcome, QueryOutcome::Cancelled));
+        assert_eq!(costs.input_tokens(), 1);
         assert_unexecuted_tool_result_is_durable_once(&events, &messages, "open-tool");
     }
 
@@ -5895,7 +6021,11 @@ mod tests {
             messages
                 .iter()
                 .filter(|message| {
-                    message.uuid.as_deref() == Some("proactive-compaction-cancelled")
+                    message.uuid.as_deref()
+                        == Some(durable_uuid(
+                            &events,
+                            "sampled before proactive compaction cancellation",
+                        ))
                         && message.get_all_text()
                             == "sampled before proactive compaction cancellation"
                 })
@@ -5909,7 +6039,7 @@ mod tests {
                     matches!(
                         event,
                         QueryEvent::DurableMessage { message }
-                            if message.uuid.as_deref() == Some("proactive-compaction-cancelled")
+                            if message.uuid.as_deref() == Some(durable_uuid(&events, "sampled before proactive compaction cancellation"))
                     )
                 })
                 .count(),
@@ -6211,7 +6341,10 @@ mod tests {
             })
             .collect();
         assert_eq!(durable.len(), 1);
-        assert_eq!(durable[0].uuid.as_deref(), Some("max-tokens"));
+        assert_eq!(
+            durable[0].uuid.as_deref(),
+            Some(durable_uuid(&events, "partial response"))
+        );
         let _durable_index = events
             .iter()
             .position(|event| matches!(event, QueryEvent::DurableMessage { .. }))
@@ -6267,7 +6400,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("max-tokens-tool")))
+                .filter(|event| matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "write-fixture"))))
                 .count(),
             1
         );
@@ -6318,7 +6451,7 @@ mod tests {
         let _durable_index = events
             .iter()
             .position(|event| {
-                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("max-tokens-veto"))
+                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "write-fixture")))
             })
             .expect("vetoed max_tokens response must be durable");
         assert!(events
@@ -6353,7 +6486,7 @@ mod tests {
             let _durable_index = events
                 .iter()
                 .position(|event| {
-                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(id))
+                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "sampled terminal text")))
                 })
                 .expect("terminal provider response must be durable");
             assert!(events
@@ -6362,7 +6495,8 @@ mod tests {
             assert_eq!(
                 messages
                     .iter()
-                    .filter(|message| message.uuid.as_deref() == Some(id))
+                    .filter(|message| message.uuid.as_deref()
+                        == Some(durable_uuid(&events, "sampled terminal text")))
                     .count(),
                 1
             );
@@ -6417,7 +6551,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("over-budget-tool")))
+                .filter(|event| matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "write-fixture"))))
                 .count(),
             1
         );
@@ -6438,7 +6572,7 @@ mod tests {
         let _durable_index = events
             .iter()
             .position(|event| {
-                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("malformed-tool-use"))
+                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "")))
             })
             .expect("malformed provider terminal must be durable");
         assert!(events
@@ -6479,7 +6613,7 @@ mod tests {
             events
                 .iter()
                 .filter(|event| {
-                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("max-turn-tool-round"))
+                    matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "write-fixture")))
                 })
                 .count(),
             1
@@ -6497,7 +6631,8 @@ mod tests {
         assert_eq!(
             messages
                 .iter()
-                .filter(|message| message.uuid.as_deref() == Some("max-turn-tool-round"))
+                .filter(|message| message.uuid.as_deref()
+                    == Some(durable_uuid(&events, "write-fixture")))
                 .count(),
             1
         );
@@ -6556,7 +6691,7 @@ mod tests {
         let _durable_index = events
             .iter()
             .position(|event| {
-                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some("vetoed-tool-round"))
+                matches!(event, QueryEvent::DurableMessage { message } if message.uuid.as_deref() == Some(durable_uuid(&events, "write-fixture")))
             })
             .expect("vetoed provider response must be durable");
         assert!(events
@@ -6925,30 +7060,24 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(durable.len(), 5);
+        assert_eq!(durable.len(), 3);
         let assistant_ids: Vec<_> = durable
             .iter()
             .filter(|message| matches!(message.role, Role::Assistant))
             .map(|message| message.uuid.as_deref().unwrap())
             .collect();
-        assert_eq!(
-            assistant_ids,
-            [
-                "tool-round",
-                "stall-round-1",
-                "stall-round-2",
-                "final-round"
-            ]
-        );
+        assert_eq!(assistant_ids.len(), 2);
+        assert_ne!(assistant_ids[0], assistant_ids[1]);
+        for id in &assistant_ids {
+            uuid::Uuid::parse_str(id).expect("attempt UUID");
+        }
         assert!(!durable[0].get_tool_use_blocks().is_empty());
         assert!(is_tool_result_carrier(&durable[1]));
-        assert_eq!(durable[2].get_all_text(), "");
-        assert_eq!(durable[3].get_all_text(), "");
         assert_eq!(
-            durable[4].get_all_text(),
+            durable[2].get_all_text(),
             "(no response — model ended the turn with stop_reason \"end_turn\")"
         );
-        assert!(durable[4].snapshot_patch.is_some());
+        assert!(durable[2].snapshot_patch.is_some());
         assert_eq!(unique_message_fingerprints(&durable).len(), durable.len());
         let _final_durable_index = events
             .iter()
@@ -7441,5 +7570,67 @@ mod tests {
     fn stall_recovery_disable_env_is_read() {
         // Not set in the test environment → enabled by default.
         assert!(stall_recovery_enabled());
+    }
+    #[test]
+    fn repeated_provider_ids_keep_independent_attempt_uuids() {
+        let mut messages = Vec::new();
+        for text in ["first partial", "retry result"] {
+            let mut accumulator = StreamAccumulator::new();
+            accumulator.on_event(&AnthropicStreamEvent::MessageStart {
+                id: "reused-provider-session".into(),
+                model: "model".into(),
+                usage: UsageInfo::default(),
+            });
+            accumulator.on_event(&AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text { text: text.into() },
+            });
+            let (assistant, _, _) = finish_stream_accumulator(accumulator);
+            sync_finalized_assistant_message(&mut messages, &assistant);
+        }
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].uuid, messages[1].uuid);
+        for message in &messages {
+            uuid::Uuid::parse_str(message.uuid.as_deref().unwrap()).expect("attempt UUID");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_retry_attempts_keep_usage_without_durable_assistants() {
+        for content in [
+            vec![],
+            vec![ContentBlock::Text {
+                text: String::new(),
+            }],
+            vec![ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: String::new(),
+            }],
+        ] {
+            let mut messages = vec![Message::user("prompt")];
+            let mut assistant = Message::assistant_blocks(content);
+            assistant.uuid = Some("empty-attempt".into());
+            let usage = UsageInfo {
+                input_tokens: 7,
+                output_tokens: 5,
+                cache_creation_input_tokens: 2,
+                cache_read_input_tokens: 3,
+            };
+            let costs = CostTracker::new();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            finalize_stalled_attempt_before_retry(
+                &mut messages,
+                &mut assistant,
+                &usage,
+                &costs,
+                None,
+                None,
+                Some(&tx),
+            )
+            .await;
+            assert_eq!(costs.total_tokens(), 17);
+            assert_eq!(messages.len(), 1);
+            assert!(rx.try_recv().is_err());
+        }
     }
 }
