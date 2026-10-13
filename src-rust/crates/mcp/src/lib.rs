@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 pub use client::McpClient;
@@ -827,6 +828,11 @@ pub mod client {
                 backend: None,
             }
         }
+
+        #[cfg(test)]
+        pub(crate) fn from_test_backend(backend: Arc<dyn backend::McpClientBackend>) -> Self {
+            Self::from_backend(backend)
+        }
     }
 
     fn apply_resource_templates(resources: &mut [McpResource]) {
@@ -875,13 +881,16 @@ pub enum McpAuthState {
 /// Manages a pool of MCP server connections.
 pub struct McpManager {
     clients: HashMap<String, Arc<McpClient>>,
+    /// Sticky signal that stops background notification tasks before this
+    /// manager is replaced. Request handling remains available to Arc holders.
+    notification_shutdown: watch::Sender<bool>,
     /// Servers that failed to connect during `connect_all`.
     failed_servers: Vec<(String, String)>, // (name, error)
     /// Original (unexpanded) server configs — needed for OAuth initiation.
     server_configs: HashMap<String, McpServerConfig>,
     /// Active resource subscriptions: (server_name, uri) → change event sender.
     pub resource_subscriptions:
-        DashMap<(String, String), tokio::sync::mpsc::Sender<ResourceChangedEvent>>,
+        Arc<DashMap<(String, String), tokio::sync::mpsc::Sender<ResourceChangedEvent>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -895,11 +904,13 @@ pub struct McpServerCatalog {
 
 impl McpManager {
     pub fn new() -> Self {
+        let (notification_shutdown, _) = watch::channel(false);
         Self {
             clients: HashMap::new(),
+            notification_shutdown,
             failed_servers: Vec::new(),
             server_configs: HashMap::new(),
-            resource_subscriptions: DashMap::new(),
+            resource_subscriptions: Arc::new(DashMap::new()),
         }
     }
 
@@ -1322,6 +1333,15 @@ impl McpManager {
     // Notification dispatch loop
     // -----------------------------------------------------------------------
 
+    /// Stop all notification polling tasks owned by this manager.
+    ///
+    /// This is intentionally idempotent: replacement paths may share the same
+    /// manager through several runtime handles. `send_replace` is infallible
+    /// and preserves the shutdown value even when no polling tasks remain.
+    pub fn shutdown_notification_poll_loops(&self) {
+        self.notification_shutdown.send_replace(true);
+    }
+
     /// Spawn background Tokio tasks for each connected MCP client to handle
     /// server-initiated notifications via async streams. Uses native push notifications
     /// when available (e.g., WebSocket) and falls back to polling for other transports (e.g., stdio).
@@ -1330,8 +1350,8 @@ impl McpManager {
     /// `self.resource_subscriptions`.
     ///
     /// Call this once after constructing an `Arc<McpManager>` (e.g. immediately
-    /// after `McpManager::connect_all`).  Each notification handler task exits
-    /// when the transport closes or the manager is dropped.
+    /// after `McpManager::connect_all`). Each notification handler task exits
+    /// when shutdown is requested, the transport closes, or the manager is dropped.
     pub fn spawn_notification_poll_loop(self: Arc<Self>) {
         let clients = self.clients.clone();
 
@@ -1339,24 +1359,65 @@ impl McpManager {
         for client in clients.values() {
             let client_clone = Arc::clone(client);
             let manager_weak = Arc::downgrade(&self);
+            let mut notification_shutdown = self.notification_shutdown.subscribe();
 
             tokio::spawn(async move {
                 // Subscribe to the transport's notification stream
                 let mut notification_stream = client_clone.subscribe_to_notifications();
 
                 // Process notifications from the stream
-                while let Some(result) = notification_stream.next().await {
-                    // Check if the manager is still alive
-                    let manager = match manager_weak.upgrade() {
-                        Some(m) => m,
-                        None => break, // Manager dropped — shut down
+                'poll: loop {
+                    if *notification_shutdown.borrow() {
+                        break;
+                    }
+
+                    let result = tokio::select! {
+                        changed = notification_shutdown.changed() => {
+                            match changed {
+                                Ok(()) if *notification_shutdown.borrow() => break,
+                                Ok(()) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                        result = notification_stream.next() => result,
+                    };
+
+                    let Some(result) = result else {
+                        break;
                     };
 
                     match result {
                         Ok(raw) => {
-                            client_clone
-                                .process_notification(raw, &manager.resource_subscriptions)
-                                .await;
+                            // Keep the subscription registry alive for delivery, but do not
+                            // retain the manager across the await below. Its Drop impl must
+                            // remain able to signal cancellation if delivery is blocked.
+                            let resource_subscriptions = match manager_weak.upgrade() {
+                                Some(manager) => {
+                                    let resource_subscriptions =
+                                        Arc::clone(&manager.resource_subscriptions);
+                                    drop(manager);
+                                    resource_subscriptions
+                                }
+                                None => break, // Manager dropped — shut down
+                            };
+                            let notification_delivery =
+                                client_clone.process_notification(raw, &resource_subscriptions);
+
+                            tokio::pin!(notification_delivery);
+                            loop {
+                                tokio::select! {
+                                    biased;
+
+                                    changed = notification_shutdown.changed() => {
+                                        match changed {
+                                            Ok(()) if *notification_shutdown.borrow() => break 'poll,
+                                            Ok(()) => continue,
+                                            Err(_) => break 'poll,
+                                        }
+                                    }
+                                    () = &mut notification_delivery => break,
+                                }
+                            }
                         }
                         Err(e) => {
                             debug!(
@@ -1370,6 +1431,12 @@ impl McpManager {
                 }
             });
         }
+    }
+}
+
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        self.shutdown_notification_poll_loops();
     }
 }
 
@@ -1431,6 +1498,284 @@ pub fn mcp_result_to_string(result: &CallToolResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        sync::Mutex,
+        task::{Context, Poll},
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+
+    struct QuietNotificationStream {
+        started: Option<oneshot::Sender<()>>,
+        stopped: Option<oneshot::Sender<()>>,
+    }
+
+    impl futures::Stream for QuietNotificationStream {
+        type Item = anyhow::Result<Value>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            Poll::Pending
+        }
+    }
+
+    struct SingleNotificationStream {
+        notification: Option<Value>,
+        delivered: Option<oneshot::Sender<()>>,
+    }
+
+    impl futures::Stream for SingleNotificationStream {
+        type Item = anyhow::Result<Value>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let Some(notification) = self.notification.take() else {
+                return Poll::Pending;
+            };
+            if let Some(delivered) = self.delivered.take() {
+                let _ = delivered.send(());
+            }
+            Poll::Ready(Some(Ok(notification)))
+        }
+    }
+
+    impl Drop for QuietNotificationStream {
+        fn drop(&mut self) {
+            if let Some(stopped) = self.stopped.take() {
+                let _ = stopped.send(());
+            }
+        }
+    }
+
+    struct QuietNotificationBackend {
+        notification_stream: Mutex<Option<BoxStream<'static, anyhow::Result<Value>>>>,
+    }
+
+    #[async_trait]
+    impl backend::McpClientBackend for QuietNotificationBackend {
+        fn kind(&self) -> backend::McpBackendKind {
+            backend::McpBackendKind::Rmcp
+        }
+
+        fn snapshot(&self) -> backend::McpClientSnapshot {
+            backend::McpClientSnapshot::empty("quiet")
+        }
+
+        async fn list_tools(&self) -> anyhow::Result<Vec<McpTool>> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: Option<Value>,
+        ) -> anyhow::Result<CallToolResult> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn list_resources(&self) -> anyhow::Result<Vec<McpResource>> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn read_resource(&self, _uri: &str) -> anyhow::Result<ResourceContents> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn list_prompts(&self) -> anyhow::Result<Vec<McpPrompt>> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn get_prompt(
+            &self,
+            _name: &str,
+            _arguments: Option<HashMap<String, String>>,
+        ) -> anyhow::Result<GetPromptResult> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn subscribe_resource(&self, _uri: &str) -> anyhow::Result<()> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        async fn unsubscribe_resource(&self, _uri: &str) -> anyhow::Result<()> {
+            unreachable!("quiet notification test does not make requests")
+        }
+
+        fn subscribe_to_notifications(&self) -> BoxStream<'static, anyhow::Result<Value>> {
+            self.notification_stream
+                .lock()
+                .expect("notification stream lock")
+                .take()
+                .expect("notification stream subscribed once")
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_poll_loop_drops_quiet_stream_with_manager() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let backend = Arc::new(QuietNotificationBackend {
+            notification_stream: Mutex::new(Some(Box::pin(QuietNotificationStream {
+                started: Some(started_tx),
+                stopped: Some(stopped_tx),
+            }))),
+        });
+        let client = Arc::new(McpClient::from_test_backend(backend));
+        let mut manager = McpManager::new();
+        manager.clients.insert("quiet".to_string(), client);
+        let manager = Arc::new(manager);
+        manager.clone().spawn_notification_poll_loop();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("notification task should start")
+            .unwrap();
+        drop(manager);
+        tokio::time::timeout(Duration::from_secs(2), stopped_rx)
+            .await
+            .expect("dropping manager must wake an idle notification stream")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_poll_loop_stops_quiet_stream_idempotently() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let backend = Arc::new(QuietNotificationBackend {
+            notification_stream: Mutex::new(Some(Box::pin(QuietNotificationStream {
+                started: Some(started_tx),
+                stopped: Some(stopped_tx),
+            }))),
+        });
+        let client = Arc::new(McpClient::from_test_backend(backend));
+        let mut manager = McpManager::new();
+        manager.clients.insert("quiet".to_string(), client);
+        let manager = Arc::new(manager);
+
+        manager.clone().spawn_notification_poll_loop();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("quiet notification task should start")
+            .expect("quiet notification task start sender");
+
+        manager.shutdown_notification_poll_loops();
+        manager.shutdown_notification_poll_loops();
+
+        tokio::time::timeout(Duration::from_secs(2), stopped_rx)
+            .await
+            .expect("quiet notification task should stop promptly")
+            .expect("quiet notification stream should be dropped");
+    }
+
+    #[tokio::test]
+    async fn notification_poll_loop_cancels_blocked_resource_delivery() {
+        let (delivered_tx, delivered_rx) = oneshot::channel();
+        let backend = Arc::new(QuietNotificationBackend {
+            notification_stream: Mutex::new(Some(Box::pin(SingleNotificationStream {
+                notification: Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": "file:///blocked.txt" }
+                })),
+                delivered: Some(delivered_tx),
+            }))),
+        });
+        let client = Arc::new(McpClient::from_test_backend(backend));
+        let client_weak = Arc::downgrade(&client);
+        let mut manager = McpManager::new();
+        manager.clients.insert("quiet".to_string(), client);
+
+        let (subscription_tx, _subscription_rx) = tokio::sync::mpsc::channel(1);
+        subscription_tx
+            .try_send(ResourceChangedEvent {
+                server_name: "quiet".to_string(),
+                uri: "file:///blocked.txt".to_string(),
+            })
+            .expect("resource subscription channel should be saturated");
+        manager.resource_subscriptions.insert(
+            ("quiet".to_string(), "file:///blocked.txt".to_string()),
+            subscription_tx,
+        );
+
+        let manager = Arc::new(manager);
+        let manager_weak = Arc::downgrade(&manager);
+        manager.clone().spawn_notification_poll_loop();
+
+        tokio::time::timeout(Duration::from_secs(2), delivered_rx)
+            .await
+            .expect("notification should reach the poll loop")
+            .expect("notification delivery signal sender");
+
+        manager.shutdown_notification_poll_loops();
+        drop(manager);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager_weak.upgrade().is_some() || client_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("poll task should release the client and manager after shutdown");
+    }
+
+    #[tokio::test]
+    async fn notification_poll_loop_releases_client_and_manager_when_dropped_during_delivery() {
+        let (delivered_tx, delivered_rx) = oneshot::channel();
+        let backend = Arc::new(QuietNotificationBackend {
+            notification_stream: Mutex::new(Some(Box::pin(SingleNotificationStream {
+                notification: Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": "file:///blocked.txt" }
+                })),
+                delivered: Some(delivered_tx),
+            }))),
+        });
+        let client = Arc::new(McpClient::from_test_backend(backend));
+        let client_weak = Arc::downgrade(&client);
+        let mut manager = McpManager::new();
+        manager.clients.insert("quiet".to_string(), client);
+
+        let (subscription_tx, _subscription_rx) = tokio::sync::mpsc::channel(1);
+        subscription_tx
+            .try_send(ResourceChangedEvent {
+                server_name: "quiet".to_string(),
+                uri: "file:///blocked.txt".to_string(),
+            })
+            .expect("resource subscription channel should be saturated");
+        manager.resource_subscriptions.insert(
+            ("quiet".to_string(), "file:///blocked.txt".to_string()),
+            subscription_tx,
+        );
+
+        let manager = Arc::new(manager);
+        let resource_subscriptions = Arc::clone(&manager.resource_subscriptions);
+        let manager_weak = Arc::downgrade(&manager);
+        manager.clone().spawn_notification_poll_loop();
+
+        tokio::time::timeout(Duration::from_secs(2), delivered_rx)
+            .await
+            .expect("notification should reach the poll loop")
+            .expect("notification delivery signal sender");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&resource_subscriptions) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("poll task should clone the subscription registry before delivery");
+
+        drop(manager);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager_weak.upgrade().is_some() || client_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the manager should cancel blocked delivery promptly");
+    }
 
     // ---- env expansion -----------------------------------------------------
 
