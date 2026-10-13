@@ -6,22 +6,26 @@ The runtime also accepts version `2` briefs during the coven-github migration
 and echoes `"2"` in their result envelopes. Version `3` remains the normative
 schema; all other major versions are rejected.
 
-This document is the single source of truth for the interface between
-`coven-github` (the GitHub ingress adapter) and `coven-code` (the execution
-runtime) when the runtime is invoked in headless mode.
+This document specifies the runtime's version 3 interface. The adapter's
+[upstream contract](https://github.com/OpenCoven/coven-github/blob/main/docs/headless-contract.md)
+and fixtures currently describe version 2. The local fixtures include v3
+review-memory provenance and are not verbatim upstream copies.
 
-It is normative. Where the prose in [`COVEN-GITHUB.md`](../COVEN-GITHUB.md) or any
-other doc disagrees with this file, **this file wins**. Both repositories MUST
-implement exactly what is specified here, and changes require a contract version
-bump (see [Versioning](#versioning)).
+Where [`COVEN-GITHUB.md`](../COVEN-GITHUB.md) disagrees with this runtime
+specification, this file wins. Coordinate breaking changes with the adapter
+and bump the contract version (see [Versioning](#6-versioning)).
 
-The contract is enforced on the `coven-github` side by golden fixtures in
-[`docs/contracts/`](contracts/) and a conformance test
-(`crates/github/tests/contract.rs`) that round-trips those fixtures through the
-Rust types. `coven-code` MUST validate its emitted `result.json` against
-[`docs/contracts/result.schema.json`](contracts/result.schema.json) and its
-accepted `session-brief.json` against
-[`docs/contracts/session-brief.schema.json`](contracts/session-brief.schema.json).
+The runtime fixtures live in
+[`src-rust/crates/cli/tests/headless_contract/`](../src-rust/crates/cli/tests/headless_contract/).
+Rust tests round-trip those fixtures through runtime types. Run
+`uv run scripts/test-headless-schemas.py` to validate the v3 fixtures and
+cross-field constraints with a Draft 2020-12 JSON Schema validator.
+
+Accepting a v2 brief and echoing its version does not prove strict adapter-v2
+schema conformance: the runtime also emits `review.memory`, which the current
+adapter-v2 schema does not accept. That migration requires coordinated work
+in both repositories. This document does not claim adapter memory-grant or
+memory-write governance support.
 
 The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119.
 
@@ -197,7 +201,7 @@ the file MAY be absent.
 | `summary` | string | One-line familiar-voice summary. Used in the Check Run and PR title. |
 | `pr_body` | string | Full PR body, **authored by the familiar** in its own voice — not a template. |
 | `review` | object | Structured review evidence and findings. Required even when `mode` is `none`. See [3.2](#32-review). |
-| `exit_reason` | string enum \| null | `null` on success; otherwise the terminal cause. See [3.4](#34-exit_reason). |
+| `exit_reason` | string enum \| null | `null` or absent on success; required for `failure` and `needs_input`; optional for `partial`. See [3.4](#34-exit_reason). |
 
 > **Drift note (supersedes `COVEN-GITHUB.md`):** the prose result envelope listed
 > an `events` array. Progress/event streaming is **not** part of the v3 result
@@ -241,7 +245,9 @@ and `needs_input` do not open a PR by themselves.
 
 ### 3.4 `exit_reason`
 
-`null` on success. Otherwise one of:
+For `success`, omit this field or set it to `null`. For `failure` and
+`needs_input`, provide one of the causes below. A `partial` result may omit
+the field, set it to `null`, or provide a cause when one is known.
 
 | Value | Meaning |
 |---|---|
@@ -319,11 +325,11 @@ must accept the new required nullable provenance fields and `provenance` arrays.
 
 | Artifact | Purpose |
 |---|---|
-| [`docs/contracts/session-brief.schema.json`](contracts/session-brief.schema.json) | JSON Schema for the input brief. |
-| [`docs/contracts/result.schema.json`](contracts/result.schema.json) | JSON Schema for the output envelope. |
-| [`docs/contracts/session-brief.example.json`](contracts/session-brief.example.json) | Golden input fixture. |
-| [`docs/contracts/result.example.json`](contracts/result.example.json) | Golden output fixture. |
-| `crates/github/tests/contract.rs` | Round-trips the golden fixtures through the Rust types — fails the build if the adapter drifts from this contract. |
+| [`session-brief.schema.json`](../src-rust/crates/cli/tests/headless_contract/session-brief.schema.json) | JSON Schema for the input brief. |
+| [`result.schema.json`](../src-rust/crates/cli/tests/headless_contract/result.schema.json) | JSON Schema for the output envelope. |
+| [`session-brief.example.json`](../src-rust/crates/cli/tests/headless_contract/session-brief.example.json) | Golden input fixture. |
+| [`result.example.json`](../src-rust/crates/cli/tests/headless_contract/result.example.json) | Golden output fixture. |
+| `scripts/test-headless-schemas.py` | Validates runtime fixtures and cross-field schema constraints. |
 
 A `coven-code` change is contract-conformant when its emitted `result.json`
 validates against `result.schema.json` and it accepts any brief that validates

@@ -165,10 +165,22 @@
             "required": ["mode"]
           },
           "then": {
+            "properties": {
+              "evidence_status": { "enum": ["complete", "partial", "missing"] }
+            },
             "anyOf": [
               { "properties": { "reviewed_files": { "minItems": 1 } }, "required": ["reviewed_files"] },
               { "properties": { "evidence_status": { "const": "missing" } }, "required": ["evidence_status"] }
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": { "mode": { "const": "none" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": { "evidence_status": { "const": "not_applicable" } }
           }
         }
       ]
@@ -177,5 +189,33 @@
       "type": ["string", "null"],
       "enum": ["test_failure", "ambiguous_spec", "git_conflict", "infra_error", null]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "success" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "exit_reason": { "const": null }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "enum": ["failure", "needs_input"] } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "exit_reason": {
+            "type": "string",
+            "enum": ["test_failure", "ambiguous_spec", "git_conflict", "infra_error"]
+          }
+        },
+        "required": ["exit_reason"]
+      }
+    }
+  ]
 }

@@ -546,7 +546,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // --context loads a coven-github session brief (headless contract v1). It
+    // --context loads a coven-github session brief (headless contract v3). It
     // implies full headless + skip-permissions and overrides model/cwd from the
     // brief. A brief with an unsupported major version is rejected here.
     let github_context = SessionBrief::load(cli.context.as_ref())?;
