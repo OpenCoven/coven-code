@@ -960,11 +960,34 @@ pub fn load_companion_soul(config_dir: &Path) -> Option<CompanionSoul> {
 }
 
 /// Persist a companion soul to `{config_dir}/companion.json`.
+/// Existing files are replaced through a staged write, preserving permission bits
+/// and following live symlinks. Missing targets retain direct-write creation.
 pub fn save_companion_soul(config_dir: &Path, soul: &CompanionSoul) -> anyhow::Result<()> {
     let stored = StoredCompanion::from(soul);
     let json = serde_json::to_string_pretty(&stored)?;
     std::fs::create_dir_all(config_dir)?;
-    std::fs::write(config_dir.join("companion.json"), json)?;
+    let path = config_dir.join("companion.json");
+    let target = match std::fs::canonicalize(&path) {
+        Ok(target) => target,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Preserve creation through missing paths, including dangling symlinks.
+            std::fs::write(path, json)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    // Preserve write-access checks without truncating the existing companion.
+    let original = std::fs::OpenOptions::new().write(true).open(&target)?;
+    let permissions = original.metadata()?.permissions();
+    drop(original);
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "companion has no parent")
+    })?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut staged, json.as_bytes())?;
+    staged.as_file().set_permissions(permissions)?;
+    staged.as_file().sync_all()?;
+    staged.persist(target).map_err(|error| error.error)?;
     Ok(())
 }
 
