@@ -105,5 +105,62 @@ class ReleaseVersion(unittest.TestCase):
             CHECK['check_release'](self.root, 'v0.9.0', [])
 
 
+
+class ForwardOnly(unittest.TestCase):
+    """Auto-release ordering check, run before any stamp exists."""
+
+    def remote(self, *tags):
+        import subprocess
+        refs = ''.join(f'0000000000000000000000000000000000000000\trefs/tags/{t}\n' for t in tags)
+        return mock.patch('subprocess.run', return_value=subprocess.CompletedProcess(
+            ['git'], 0, stdout=refs, stderr=''))
+
+    def run_cli(self, *args):
+        with mock.patch('sys.argv', ['check-release-version.py', *args]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return CHECK['main']()
+
+    def test_first_release_and_unrelated_tags(self):
+        CHECK['check_forward']('v0.1.0', [])
+        CHECK['check_forward']('v0.1.0', ['nightly', 'latest'])
+
+    def test_malformed_version_shaped_tags_fail_closed(self):
+        for tag in ['v1.0', 'v9.0.0-01']:
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                CHECK['check_forward']('v0.1.0', [tag])
+
+    def test_stable_order_equal_lower_and_numeric_components(self):
+        for candidate, accepted in [('v1.9.9', False), ('v1.0.0', False),
+                                    ('v1.10.0', True), ('v2.0.0', True)]:
+            with self.subTest(candidate=candidate):
+                if accepted:
+                    CHECK['check_forward'](candidate, ['v1.9.9'])
+                else:
+                    with self.assertRaises(ValueError):
+                        CHECK['check_forward'](candidate, ['v1.9.9'])
+
+    def test_semver_prerelease_sequence(self):
+        # SemVer 2.0.0 section 11 example, including numeric vs lexical IDs.
+        sequence = ['alpha', 'alpha.1', 'alpha.beta', 'beta', 'beta.2', 'beta.11', 'rc.1']
+        tags = [f'v1.0.0-{suffix}' for suffix in sequence] + ['v1.0.0']
+        for previous, candidate in zip(tags, tags[1:]):
+            with self.subTest(previous=previous, candidate=candidate):
+                CHECK['check_forward'](candidate, [previous])
+                with self.assertRaises(ValueError):
+                    CHECK['check_forward'](previous, [candidate])
+
+    def test_cli_forward_only_skips_unwritten_stamps(self):
+        # The checkout is still stamped with the previous version, as it is in
+        # auto-release before bump-version.py runs.
+        with self.remote('v0.8.0', 'v0.8.0^{}'):
+            self.assertEqual(self.run_cli('--forward-only', 'v0.9.0'), 0)
+            self.assertEqual(self.run_cli('v0.9.0'), 1)
+            self.assertEqual(self.run_cli('--forward-only', 'v0.8.0'), 1)
+
+    def test_cli_forward_only_remote_failure_rejects(self):
+        import subprocess
+        with mock.patch('subprocess.run', side_effect=subprocess.CalledProcessError(128, 'git')):
+            self.assertEqual(self.run_cli('--forward-only', 'v0.9.0'), 1)
+
 if __name__ == '__main__':
     unittest.main()
