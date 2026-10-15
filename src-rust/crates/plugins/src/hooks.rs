@@ -350,8 +350,8 @@ fn run_post_tool_hook(
     Ok(stdout.trim().to_string())
 }
 
-/// Simple glob pattern matching: `*` matches any sequence of chars.
-fn glob_match(pattern: &str, text: &str) -> bool {
+/// Match exact names, `*`, or a single leading or trailing `*`.
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     if pattern == "*" {
         return true;
     }
