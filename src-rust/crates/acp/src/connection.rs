@@ -17,6 +17,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -40,14 +41,25 @@ pub enum Inbound {
 
 /// Bidirectional connection over newline-delimited JSON-RPC.
 ///
-/// Cloneable senders are obtained via `Connection::sender()`. The receive
-/// loop is driven by `Connection::run_reader()` which yields parsed inbound
-/// requests / notifications to the caller via the `mpsc::Receiver` returned
-/// by `Connection::new`.
+/// Clone the returned `Arc` to share a sender. Drive exactly one reader with
+/// [`run_reader`]; its exit closes the response path for outbound requests.
 pub struct Connection {
     writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
     pending: DashMap<String, oneshot::Sender<Result<Value, acp::Error>>>,
     next_outbound_id: AtomicI64,
+    reader_closed: CancellationToken,
+}
+
+/// Remove registration on every request exit, including future cancellation.
+struct PendingRequest<'a> {
+    connection: &'a Connection,
+    id: String,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.connection.pending.remove(&self.id);
+    }
 }
 
 impl Connection {
@@ -61,6 +73,7 @@ impl Connection {
             writer: Mutex::new(Box::new(writer)),
             pending: DashMap::new(),
             next_outbound_id: AtomicI64::new(1),
+            reader_closed: CancellationToken::new(),
         })
     }
 
@@ -117,30 +130,50 @@ impl Connection {
         method: &str,
         params: P,
     ) -> anyhow::Result<Result<R, acp::Error>> {
+        if self.reader_closed.is_cancelled() {
+            anyhow::bail!("connection closed before sending request '{}'", method);
+        }
+        let params_value = serde_json::to_value(params)?;
         let raw_id = self.next_outbound_id.fetch_add(1, Ordering::Relaxed);
         let id_key = format!("n:{}", raw_id);
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         self.pending.insert(id_key.clone(), tx);
+        let _pending = PendingRequest {
+            connection: self,
+            id: id_key,
+        };
 
-        let params_value = serde_json::to_value(params)?;
         let msg = serde_json::json!({
             "jsonrpc": JSONRPC_VERSION,
             "id": raw_id,
             "method": method,
             "params": params_value,
         });
-        if let Err(e) = self.write_line(&msg).await {
-            self.pending.remove(&id_key);
-            return Err(e);
-        }
+        let write = self.write_line(&msg);
+        tokio::pin!(write);
+        let mut written = false;
+        let response = loop {
+            tokio::select! {
+                biased;
+                // A delivered reply wins over simultaneous EOF, even if the
+                // writer is still flushing. Reader exit also interrupts writes
+                // blocked on backpressure or the writer mutex.
+                response = &mut rx => break response.ok(),
+                result = &mut write, if !written => {
+                    result?;
+                    written = true;
+                }
+                _ = self.reader_closed.cancelled() => break None,
+            }
+        };
 
-        match rx.await {
-            Ok(Ok(value)) => {
+        match response {
+            Some(Ok(value)) => {
                 let typed: R = serde_json::from_value(value)?;
                 Ok(Ok(typed))
             }
-            Ok(Err(err)) => Ok(Err(err)),
-            Err(_) => Err(anyhow::anyhow!(
+            Some(Err(err)) => Ok(Err(err)),
+            None => Err(anyhow::anyhow!(
                 "connection closed while awaiting response to '{}'",
                 method
             )),
@@ -179,92 +212,98 @@ fn id_to_key(id: &acp::RequestId) -> String {
 /// Spawn the reader loop. Inbound requests and notifications are forwarded
 /// to `tx`. Responses are matched against `connection.pending` internally.
 /// The future completes when stdin reaches EOF.
-pub async fn run_reader<R>(
+pub fn run_reader<R>(
     connection: Arc<Connection>,
     reader: R,
     tx: mpsc::UnboundedSender<Inbound>,
-) -> anyhow::Result<()>
+) -> impl std::future::Future<Output = anyhow::Result<()>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut buffered = BufReader::new(reader);
-    let mut line = String::new();
+    // Create the guard before the first poll so dropping an unpolled reader
+    // future also closes the response path.
+    let close_on_exit = connection.reader_closed.clone().drop_guard();
+    async move {
+        let _close_on_exit = close_on_exit;
+        let mut buffered = BufReader::new(reader);
+        let mut line = String::new();
 
-    loop {
-        line.clear();
-        let n = buffered.read_line(&mut line).await?;
-        if n == 0 {
-            debug!("ACP: stdin EOF, shutting down reader");
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let v: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(e) => {
-                // Spec says: if the message can't be parsed, send a parse-error
-                // response with id=null. Best-effort here since we may not even
-                // know if it was a request or notification.
-                error!(error = %e, "ACP: parse error");
-                let _ = connection
-                    .send_error_response(acp::RequestId::Null, acp::Error::parse_error())
-                    .await;
+        loop {
+            line.clear();
+            let n = buffered.read_line(&mut line).await?;
+            if n == 0 {
+                debug!("ACP: stdin EOF, shutting down reader");
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-        };
+            let v: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Spec says: if the message can't be parsed, send a parse-error
+                    // response with id=null. Best-effort here since we may not even
+                    // know if it was a request or notification.
+                    error!(error = %e, "ACP: parse error");
+                    let _ = connection
+                        .send_error_response(acp::RequestId::Null, acp::Error::parse_error())
+                        .await;
+                    continue;
+                }
+            };
 
-        // Distinguish response (has id + (result|error)) from request (has id + method)
-        // from notification (no id, has method).
-        let has_id = v.get("id").is_some();
-        let has_method = v.get("method").is_some();
-        let has_result = v.get("result").is_some();
-        let has_error = v.get("error").is_some();
+            // Distinguish response (has id + (result|error)) from request (has id + method)
+            // from notification (no id, has method).
+            let has_id = v.get("id").is_some();
+            let has_method = v.get("method").is_some();
+            let has_result = v.get("result").is_some();
+            let has_error = v.get("error").is_some();
 
-        if has_id && (has_result || has_error) && !has_method {
-            // Response — route to pending.
-            let id: acp::RequestId =
-                serde_json::from_value(v["id"].clone()).unwrap_or(acp::RequestId::Null);
-            if has_result {
-                let value = v["result"].clone();
-                connection.complete_pending(&id, Ok(value));
+            if has_id && (has_result || has_error) && !has_method {
+                // Response — route to pending.
+                let id: acp::RequestId =
+                    serde_json::from_value(v["id"].clone()).unwrap_or(acp::RequestId::Null);
+                if has_result {
+                    let value = v["result"].clone();
+                    connection.complete_pending(&id, Ok(value));
+                } else {
+                    let err: acp::Error = match serde_json::from_value(v["error"].clone()) {
+                        Ok(e) => e,
+                        Err(_) => acp::Error::internal_error().data(Some(v["error"].clone())),
+                    };
+                    connection.complete_pending(&id, Err(err));
+                }
+            } else if has_id && has_method {
+                // Request.
+                let id: acp::RequestId =
+                    serde_json::from_value(v["id"].clone()).unwrap_or(acp::RequestId::Null);
+                let method = v
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let params = v.get("params").cloned();
+                if tx.send(Inbound::Request { id, method, params }).is_err() {
+                    break;
+                }
+            } else if has_method {
+                // Notification.
+                let method = v
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let params = v.get("params").cloned();
+                if tx.send(Inbound::Notification { method, params }).is_err() {
+                    break;
+                }
             } else {
-                let err: acp::Error = match serde_json::from_value(v["error"].clone()) {
-                    Ok(e) => e,
-                    Err(_) => acp::Error::internal_error().data(Some(v["error"].clone())),
-                };
-                connection.complete_pending(&id, Err(err));
+                warn!(line = %trimmed, "ACP: unrecognized JSON-RPC message shape");
             }
-        } else if has_id && has_method {
-            // Request.
-            let id: acp::RequestId =
-                serde_json::from_value(v["id"].clone()).unwrap_or(acp::RequestId::Null);
-            let method = v
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let params = v.get("params").cloned();
-            if tx.send(Inbound::Request { id, method, params }).is_err() {
-                break;
-            }
-        } else if has_method {
-            // Notification.
-            let method = v
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let params = v.get("params").cloned();
-            if tx.send(Inbound::Notification { method, params }).is_err() {
-                break;
-            }
-        } else {
-            warn!(line = %trimmed, "ACP: unrecognized JSON-RPC message shape");
         }
+        Ok(())
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +314,218 @@ where
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncReadExt};
+
+    #[tokio::test]
+    async fn dropping_unpolled_reader_closes_requests() {
+        let connection = Connection::new(tokio::io::sink());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        drop(run_reader(connection.clone(), tokio::io::empty(), tx));
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connection.send_request::<_, Value>("test", ()),
+        )
+        .await
+        .expect("unpolled reader drop must close requests")
+        .is_err());
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_failure_removes_pending_entry() {
+        let (client, writer) = duplex(1);
+        drop(client);
+        let connection = Connection::new(writer);
+        assert!(connection
+            .send_request::<_, Value>("test", ())
+            .await
+            .is_err());
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_blocked_write_removes_pending_entry() {
+        let (_client, writer) = duplex(1);
+        let connection = Connection::new(writer);
+        let mut request = Box::pin(connection.send_request::<_, Value>("test", ()));
+        tokio::select! {
+            biased;
+            _ = &mut request => panic!("write should be blocked"),
+            _ = std::future::ready(()) => {}
+        }
+        assert_eq!(connection.pending.len(), 1);
+        drop(request);
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivered_response_wins_over_eof_while_flush_is_blocked() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct BlockedFlush;
+        impl AsyncWrite for BlockedFlush {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                data: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Ready(Ok(data.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Pending
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let connection = Connection::new(BlockedFlush);
+        let request = connection.send_request::<_, Value>("test", ());
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            _ = &mut request => panic!("flush should be blocked"),
+            _ = std::future::ready(()) => {}
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
+        run_reader(connection.clone(), response.as_slice(), tx)
+            .await
+            .unwrap();
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(value["ok"], true);
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reader_exit_releases_pending_requests() {
+        for mode in ["eof", "read_error", "abort"] {
+            let (mut client_input, server_input) = duplex(8192);
+            let (client_output, server_output) = duplex(8192);
+            let connection = Connection::new(server_output);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let reader = tokio::spawn(run_reader(connection.clone(), server_input, tx));
+            let request_connection = connection.clone();
+            let request = tokio::spawn(async move {
+                request_connection
+                    .send_request::<_, Value>("session/request_permission", ())
+                    .await
+            });
+            let mut client_output = BufReader::new(client_output);
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client_output.read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            if mode == "read_error" {
+                client_input.write_all(b"\xff\n").await.unwrap();
+            } else if mode == "abort" {
+                reader.abort();
+            }
+            drop(client_input);
+            let result = reader.await;
+            match mode {
+                "eof" => assert!(result.unwrap().is_ok()),
+                "read_error" => assert!(result.unwrap().is_err()),
+                _ => assert!(result.unwrap_err().is_cancelled()),
+            }
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), request)
+                .await
+                .expect("reader exit must wake pending requests")
+                .unwrap()
+                .unwrap_err();
+            assert!(error.to_string().contains("session/request_permission"));
+            assert!(connection.pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn requests_after_eof_fail_without_waiting_for_a_response() {
+        let connection = Connection::new(tokio::io::sink());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        run_reader(connection.clone(), tokio::io::empty(), tx)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connection.send_request::<_, Value>("fs/read_text_file", ()),
+        )
+        .await
+        .expect("request after EOF must not hang");
+        assert!(result.is_err());
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_removes_pending_entry() {
+        let (client_output, server_output) = duplex(8192);
+        let connection = Connection::new(server_output);
+        let request_connection = connection.clone();
+        let request = tokio::spawn(async move {
+            request_connection
+                .send_request::<_, Value>("test", ())
+                .await
+        });
+        let mut output = BufReader::new(client_output);
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            output.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn serialization_failure_does_not_leave_pending_entry() {
+        let connection = Connection::new(tokio::io::sink());
+        let params = std::collections::HashMap::from([(vec![1, 2], "invalid JSON key")]);
+        assert!(connection
+            .send_request::<_, Value>("test", params)
+            .await
+            .is_err());
+        assert!(connection.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reader_exit_interrupts_a_blocked_request_write() {
+        let (_client_output, server_output) = duplex(1);
+        let connection = Connection::new(server_output);
+        let request = connection.send_request::<_, Value>("test", ());
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            _ = &mut request => panic!("write should be blocked by the full pipe"),
+            _ = std::future::ready(()) => {}
+        }
+        assert_eq!(connection.pending.len(), 1);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        run_reader(connection.clone(), tokio::io::empty(), tx)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), request)
+                .await
+                .expect("EOF must interrupt blocked writes")
+                .is_err()
+        );
+        assert!(connection.pending.is_empty());
+    }
 
     /// `send_response` must emit a newline-delimited JSON object containing
     /// `jsonrpc: "2.0"`, the request id, and the result payload.
