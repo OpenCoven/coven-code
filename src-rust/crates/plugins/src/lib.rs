@@ -202,16 +202,6 @@ pub async fn load_plugins(
     extra_paths: &[std::path::PathBuf],
 ) -> PluginRegistry {
     let mut registry = PluginRegistry::new();
-    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
-
-    // 1. User-global plugins directory.
-    search_dirs.push(default_user_plugins_dir());
-
-    // 2. Project-local plugins directory.
-    search_dirs.push(project_plugins_dir(project_dir));
-
-    // 3. Extra paths (from --plugin-dir or settings).
-    search_dirs.extend_from_slice(extra_paths);
 
     // User plugins.
     {
