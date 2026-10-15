@@ -484,7 +484,11 @@ impl Tool for CronListTool {
                     t.recurring,
                     t.durable,
                     if t.prompt.len() > 60 {
-                        format!("{}…", &t.prompt[..60])
+                        let mut end = 60;
+                        while !t.prompt.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}…", &t.prompt[..end])
                     } else {
                         t.prompt.clone()
                     }
