@@ -471,7 +471,10 @@ fn within_window(s: &SessionStats, days: Option<u32>) -> bool {
     let Some(days) = days else {
         return true;
     };
-    let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+    // Every u32 day count fits Duration; the timestamp may underflow instead.
+    let cutoff = Utc::now()
+        .checked_sub_signed(chrono::Duration::days(i64::from(days)))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
     if let Some(last) = s.last_ts {
         return last >= cutoff;
     }
@@ -1457,6 +1460,47 @@ mod tests {
         assert_eq!(truncate("hello", 4), "hel…");
         // "héllo" = 5 chars → take 3 ("hél") + "…" = "hél…"
         assert_eq!(truncate("héllo", 4), "hél…");
+    }
+
+    #[test]
+    fn stats_window_accepts_full_days_range() {
+        let max_days = u32::MAX.to_string();
+        let args = parse_args(&["--days", &max_days]).unwrap();
+        let dated = SessionStats {
+            last_ts: Some(DateTime::<Utc>::MIN_UTC),
+            ..Default::default()
+        };
+        assert!(within_window(&dated, args.days));
+        let modified = SessionStats {
+            mtime: Some(SystemTime::UNIX_EPOCH),
+            ..Default::default()
+        };
+        assert!(within_window(&modified, args.days));
+        assert!(!within_window(&SessionStats::default(), args.days));
+    }
+
+    #[test]
+    fn stats_window_preserves_normal_filters_and_timestamp_priority() {
+        let now = Utc::now();
+        let recent = SessionStats {
+            last_ts: Some(now - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        assert!(within_window(&recent, Some(7)));
+        assert!(!within_window(&recent, Some(0)));
+        let old = SessionStats {
+            last_ts: Some(now - chrono::Duration::days(30)),
+            mtime: Some(SystemTime::now()),
+            ..Default::default()
+        };
+        assert!(!within_window(&old, Some(7)));
+        let modified = SessionStats {
+            mtime: Some(SystemTime::now()),
+            ..Default::default()
+        };
+        assert!(within_window(&modified, Some(7)));
+        assert!(within_window(&SessionStats::default(), None));
+        assert!(!within_window(&SessionStats::default(), Some(7)));
     }
 
     #[test]
