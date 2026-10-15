@@ -33,6 +33,7 @@ pub mod provider_types;
 // Provider abstraction traits (Phase 1B).
 pub mod auth;
 pub mod provider;
+mod sse_lines;
 pub mod stream_parser;
 pub mod transform;
 
@@ -652,7 +653,7 @@ pub mod client {
                 let result = tokio::select! {
                     biased;
                     _ = tx.closed() => return,
-                    result = Self::process_sse_stream(resp, handler, tx.clone()) => result,
+                    result = Self::process_sse_stream(resp.bytes_stream(), handler, tx.clone()) => result,
                 };
                 if let Err(e) = result {
                     let _ = tx
@@ -850,15 +851,14 @@ pub mod client {
 
         /// Read an SSE byte stream, parse frames, and emit `AnthropicStreamEvent`s.
         async fn process_sse_stream(
-            resp: reqwest::Response,
+            mut byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
             handler: Arc<dyn StreamHandler>,
             tx: mpsc::Sender<streaming::AnthropicStreamEvent>,
         ) -> Result<(), ClaudeError> {
             use sse_parser::SseLineParser;
 
             let mut parser = SseLineParser::new();
-            let mut byte_stream = resp.bytes_stream();
-            let mut leftover = String::new();
+            let mut lines = crate::sse_lines::SseLines::default();
 
             loop {
                 let Some(chunk_result) = (tokio::select! {
@@ -868,25 +868,7 @@ pub mod client {
                     break;
                 };
                 let chunk = chunk_result.map_err(ClaudeError::Http)?;
-                let text = String::from_utf8_lossy(&chunk);
-
-                // Prepend any leftover from the previous chunk
-                let combined = if leftover.is_empty() {
-                    text.to_string()
-                } else {
-                    let mut s = std::mem::take(&mut leftover);
-                    s.push_str(&text);
-                    s
-                };
-
-                // Split into lines.  If the chunk doesn't end with a newline
-                // the last piece is an incomplete line – stash it.
-                let mut lines: Vec<&str> = combined.split('\n').collect();
-                if !combined.ends_with('\n') {
-                    leftover = lines.pop().unwrap_or("").to_string();
-                }
-
-                for line in lines {
+                for line in lines.feed(&chunk) {
                     let line = line.trim_end_matches('\r');
                     if let Some(frame) = parser.feed_line(line) {
                         if let Some(event) = Self::frame_to_event(&frame.event, &frame.data) {
@@ -1033,6 +1015,133 @@ pub mod client {
                     ..
                 }
             ));
+        }
+    }
+
+    #[cfg(test)]
+    mod byte_boundary_tests {
+        use super::*;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<String>>);
+        impl StreamHandler for Recorder {
+            fn on_event(&self, event: &streaming::AnthropicStreamEvent) {
+                self.0.lock().unwrap().push(format!("{event:?}"));
+            }
+        }
+
+        async fn events(chunks: Vec<bytes::Bytes>) -> Vec<String> {
+            let recorder = Arc::new(Recorder::default());
+            let (tx, mut rx) = mpsc::channel(32);
+            AnthropicClient::process_sse_stream(
+                futures::stream::iter(chunks.into_iter().map(Ok)),
+                recorder.clone(),
+                tx,
+            )
+            .await
+            .unwrap();
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(format!("{event:?}"));
+            }
+            assert_eq!(
+                events,
+                *recorder.0.lock().unwrap(),
+                "callbacks and channel must match"
+            );
+            events
+        }
+
+        #[tokio::test]
+        async fn raw_sse_keeps_lossy_decoding_and_discards_unterminated_frames() {
+            let malformed = b"event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\xff\"}}\n\n";
+            let actual = events(
+                malformed
+                    .iter()
+                    .map(|byte| bytes::Bytes::from(vec![*byte]))
+                    .collect(),
+            )
+            .await;
+            assert_eq!(actual.len(), 1);
+            assert!(actual[0].contains('\u{fffd}'));
+            for wire in [
+                b"event: ping\ndata: {}".as_slice(),
+                b"event: ping\ndata: {}\n",
+            ] {
+                assert!(events(vec![bytes::Bytes::copy_from_slice(wire)])
+                    .await
+                    .is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn raw_sse_preserves_unicode_at_every_byte_split() {
+            let text = "é中\u{10000}";
+            let wire = format!(
+                "event: content_block_delta\r\ndata: {}\r\n\r\nevent: content_block_delta\r\ndata: {}\r\n\r\nevent: error\r\ndata: {}\r\n\r\n",
+                serde_json::json!({"index":0,"delta":{"type":"text_delta","text":text}}),
+                serde_json::json!({"index":1,"delta":{"type":"input_json_delta","partial_json":format!("{{\"name\":\"{text}\"}}")}}),
+                serde_json::json!({"error":{"type":"fixture","message":text}}),
+            );
+            let expected = events(vec![bytes::Bytes::copy_from_slice(wire.as_bytes())]).await;
+            assert_eq!(expected.len(), 3);
+            assert!(expected.iter().all(|event| event.contains(text)));
+            for split in std::iter::once(wire.find('é').unwrap() + 1).chain(0..=wire.len()) {
+                let actual = events(vec![
+                    bytes::Bytes::copy_from_slice(&wire.as_bytes()[..split]),
+                    bytes::Bytes::copy_from_slice(&wire.as_bytes()[split..]),
+                ])
+                .await;
+                assert_eq!(actual, expected, "split at byte {split}");
+            }
+            assert_eq!(
+                events(
+                    wire.bytes()
+                        .map(|byte| bytes::Bytes::from(vec![byte]))
+                        .collect()
+                )
+                .await,
+                expected
+            );
+        }
+
+        #[tokio::test]
+        async fn raw_sse_waits_for_real_blank_line_and_preserves_multiline_data() {
+            let (input, stream) = futures::channel::mpsc::unbounded();
+            let recorder = Arc::new(Recorder::default());
+            let (tx, mut rx) = mpsc::channel(32);
+            let work = AnthropicClient::process_sse_stream(stream, recorder.clone(), tx);
+            tokio::pin!(work);
+            input
+                .unbounded_send(Ok(bytes::Bytes::from_static(
+                    b"event: content_block_delta\n",
+                )))
+                .unwrap();
+            assert!(futures::poll!(&mut work).is_pending());
+            input
+                .unbounded_send(Ok(bytes::Bytes::from_static(b"data: {\"index\":0,\n")))
+                .unwrap();
+            assert!(futures::poll!(&mut work).is_pending());
+            input
+                .unbounded_send(Ok(bytes::Bytes::from_static(
+                    b"data: \"delta\":{\"type\":\"text_delta\",\"text\":\"kept\"}}\n",
+                )))
+                .unwrap();
+            assert!(futures::poll!(&mut work).is_pending());
+            assert!(
+                recorder.0.lock().unwrap().is_empty(),
+                "frame dispatched without a blank line"
+            );
+            input
+                .unbounded_send(Ok(bytes::Bytes::from_static(b"\n")))
+                .unwrap();
+            drop(input);
+            work.await.unwrap();
+            assert!(
+                matches!(rx.recv().await, Some(streaming::AnthropicStreamEvent::ContentBlockDelta { delta: streaming::ContentDelta::TextDelta { text }, .. }) if text == "kept")
+            );
+            assert!(rx.recv().await.is_none());
         }
     }
 }
