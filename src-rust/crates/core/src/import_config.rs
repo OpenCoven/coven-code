@@ -269,7 +269,12 @@ fn prepare_import(selection: ImportSelection) -> Result<PreparedImport> {
             )
         })?;
 
-        let mut current_settings = Settings::load_sync().unwrap_or_default();
+        let mut current_settings = Settings::load_sync().with_context(|| {
+            format!(
+                "Failed to load target settings before import: {}",
+                paths.target_settings_json.display()
+            )
+        })?;
         let current_value = serde_json::to_value(&current_settings).unwrap_or(Value::Null);
         let settings_outcome =
             map_settings_preview(&source_value, &current_value, &mut current_settings)?;
