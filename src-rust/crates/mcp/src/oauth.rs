@@ -236,63 +236,67 @@ async fn wait_for_authorization_code(
     host: &str,
     callback_path: &str,
     expected_state: Option<&str>,
+    timeout: Duration,
 ) -> anyhow::Result<String> {
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(180), listener.accept())
-        .await
-        .map_err(|_| anyhow::anyhow!("Timeout waiting for OAuth callback"))?
-        .map_err(|e| anyhow::anyhow!("Failed to accept OAuth callback connection: {}", e))?;
-
-    let (reader, mut writer) = socket.split();
-    let mut reader = BufReader::new(reader);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read OAuth callback request: {}", e))?;
-    loop {
-        let mut header = String::new();
-        reader
-            .read_line(&mut header)
+    tokio::time::timeout(timeout, async {
+        let (mut socket, _) = listener.accept()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read OAuth callback headers: {}", e))?;
-        if header.trim().is_empty() {
-            break;
+            .map_err(|e| anyhow::anyhow!("Failed to accept OAuth callback connection: {}", e))?;
+
+        let (reader, mut writer) = socket.split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read OAuth callback request: {}", e))?;
+        loop {
+            let mut header = String::new();
+            reader
+                .read_line(&mut header)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read OAuth callback headers: {}", e))?;
+            if header.trim().is_empty() {
+                break;
+            }
         }
-    }
 
-    let path = request_line.split_whitespace().nth(1).unwrap_or("");
-    let parsed_url = url::Url::parse(&format!("http://{}{}", host, path))
-        .map_err(|e| anyhow::anyhow!("Failed to parse OAuth callback URL '{}': {}", path, e))?;
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+        let parsed_url = url::Url::parse(&format!("http://{}{}", host, path))
+            .map_err(|e| anyhow::anyhow!("Failed to parse OAuth callback URL '{}': {}", path, e))?;
 
-    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nMCP OAuth authentication finished. You can close this tab.\r\n";
-    writer
-        .write_all(response.as_bytes())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to write OAuth callback response: {}", e))?;
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nMCP OAuth authentication finished. You can close this tab.\r\n";
+        writer
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write OAuth callback response: {}", e))?;
 
-    if parsed_url.path() != callback_path {
-        anyhow::bail!(
-            "OAuth callback path mismatch: expected '{}', got '{}'",
-            callback_path,
-            parsed_url.path()
-        );
-    }
+        if parsed_url.path() != callback_path {
+            anyhow::bail!(
+                "OAuth callback path mismatch: expected '{}', got '{}'",
+                callback_path,
+                parsed_url.path()
+            );
+        }
 
-    if let Some(expected_state) = expected_state {
-        let received_state = parsed_url
+        if let Some(expected_state) = expected_state {
+            let received_state = parsed_url
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value.to_string());
+            if received_state.as_deref() != Some(expected_state) {
+                anyhow::bail!("OAuth state mismatch — possible CSRF attack");
+            }
+        }
+
+        parsed_url
             .query_pairs()
-            .find(|(key, _)| key == "state")
-            .map(|(_, value)| value.to_string());
-        if received_state.as_deref() != Some(expected_state) {
-            anyhow::bail!("OAuth state mismatch — possible CSRF attack");
-        }
-    }
-
-    parsed_url
-        .query_pairs()
-        .find(|(key, _)| key == "code")
-        .map(|(_, value)| value.to_string())
-        .ok_or_else(|| anyhow::anyhow!("OAuth callback did not contain an authorization code"))
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.to_string())
+            .ok_or_else(|| anyhow::anyhow!("OAuth callback did not contain an authorization code"))
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timeout waiting for OAuth callback"))?
 }
 
 pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<McpAuthResult> {
@@ -300,7 +304,14 @@ pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<Mcp
     open::that(&session.auth_url)
         .map_err(|e| anyhow::anyhow!("Failed to open browser for OAuth: {}", e))?;
 
-    let code = wait_for_authorization_code(listener, &host, &callback_path, None).await?;
+    let code = wait_for_authorization_code(
+        listener,
+        &host,
+        &callback_path,
+        None,
+        Duration::from_secs(180),
+    )
+    .await?;
     let mut token = exchange_code(
         &session.metadata.token_endpoint,
         &code,
@@ -816,6 +827,127 @@ mod tests {
         assert_eq!(callback_path, "/callback");
         assert_eq!(port, 14555);
         drop(listener);
+    }
+
+    async fn assert_callback_timeout(partial_request: Option<&[u8]>) {
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Queue the connection and bytes before starting the deadline.
+        let mut peer = if let Some(request) = partial_request {
+            let mut peer = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            peer.write_all(request).await.unwrap();
+            Some(peer)
+        } else {
+            None
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_authorization_code(
+                listener,
+                "127.0.0.1",
+                "/callback",
+                None,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("callback must enforce its own deadline");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Timeout waiting for OAuth callback"
+        );
+        if let Some(peer) = peer.as_mut() {
+            let mut byte = [0];
+            let read = tokio::time::timeout(Duration::from_secs(2), peer.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(read, 0, "timed-out callback must close the accepted socket");
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_without_peer() {
+        assert_callback_timeout(None).await;
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_after_idle_connection() {
+        assert_callback_timeout(Some(b"")).await;
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_during_partial_headers() {
+        assert_callback_timeout(Some(
+            b"GET /callback?code=fixture HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Partial:",
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn callback_preserves_code_response_and_validation() {
+        use tokio::io::AsyncReadExt;
+        for (path, state, expected) in [
+            (
+                "/callback?code=a%2Bb%20c&state=expected",
+                Some("expected"),
+                Ok("a+b c"),
+            ),
+            ("/callback?code=fixture&state=ignored", None, Ok("fixture")),
+            (
+                "/wrong?code=fixture",
+                None,
+                Err("OAuth callback path mismatch: expected '/callback', got '/wrong'"),
+            ),
+            (
+                "/callback?code=fixture&state=wrong",
+                Some("expected"),
+                Err("OAuth state mismatch — possible CSRF attack"),
+            ),
+            (
+                "/callback?code=fixture",
+                Some("expected"),
+                Err("OAuth state mismatch — possible CSRF attack"),
+            ),
+            (
+                "/callback?state=expected",
+                Some("expected"),
+                Err("OAuth callback did not contain an authorization code"),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            peer.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_authorization_code(
+                    listener,
+                    "127.0.0.1",
+                    "/callback",
+                    state,
+                    Duration::from_secs(5),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.as_deref().map_err(|error| error.to_string()),
+                expected.map_err(str::to_owned)
+            );
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(2), peer.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            // The existing handshake acknowledges HTTP before validating path/state/code.
+            assert_eq!(response, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nMCP OAuth authentication finished. You can close this tab.\r\n");
+        }
     }
 }
 
