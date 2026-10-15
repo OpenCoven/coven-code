@@ -159,7 +159,7 @@ marketplace_id = "you/my-plugin"
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Plugin name. Must be non-empty and contain no spaces (use kebab-case). |
+| `name` | string | A single directory name: non-empty, not entirely dots, and containing no spaces, `/`, `\`, `:`, or NUL characters. Kebab-case is recommended. Use `marketplace_id` for scoped identifiers such as `author/plugin-name`. |
 
 ### Metadata (optional)
 
