@@ -4453,11 +4453,20 @@ pub mod history {
         crate::config::Settings::config_dir().join("sessions")
     }
 
+    // Keep custom Unicode/space IDs, but never interpret an ID as a path.
+    // This is a lexical boundary; it does not defend against filesystem symlinks.
+    fn session_path(dir: &std::path::Path, id: &str) -> anyhow::Result<std::path::PathBuf> {
+        if id.is_empty() || matches!(id, "." | "..") || id.contains(['/', '\\', ':', '\0']) {
+            anyhow::bail!("invalid history session id: expected a single filename component");
+        }
+        Ok(dir.join(format!("{id}.json")))
+    }
+
     /// Save a session to `~/.coven-code/sessions/<id>.json`.
     pub async fn save_session(session: &ConversationSession) -> anyhow::Result<()> {
         let dir = sessions_dir();
+        let path = session_path(&dir, &session.id)?;
         tokio::fs::create_dir_all(&dir).await?;
-        let path = dir.join(format!("{}.json", session.id));
         let content = serde_json::to_string_pretty(session)?;
         tokio::fs::write(&path, content).await?;
         Ok(())
@@ -4465,7 +4474,7 @@ pub mod history {
 
     /// Load a specific session by ID.
     pub async fn load_session(id: &str) -> anyhow::Result<ConversationSession> {
-        let path = sessions_dir().join(format!("{}.json", id));
+        let path = session_path(&sessions_dir(), id)?;
         let content = tokio::fs::read_to_string(&path).await?;
         Ok(serde_json::from_str(&content)?)
     }
@@ -4497,7 +4506,7 @@ pub mod history {
 
     /// Delete a session by ID.
     pub async fn delete_session(id: &str) -> anyhow::Result<()> {
-        let path = sessions_dir().join(format!("{}.json", id));
+        let path = session_path(&sessions_dir(), id)?;
         if path.exists() {
             tokio::fs::remove_file(&path).await?;
         }
