@@ -1,0 +1,29 @@
+name: npm launcher tests
+
+on:
+  pull_request:
+    paths:
+      - 'npm/bin/coven-code'
+      - 'scripts/npm-launcher.test.mjs'
+      - '.github/workflows/npm-launcher-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node scripts/npm-launcher.test.mjs

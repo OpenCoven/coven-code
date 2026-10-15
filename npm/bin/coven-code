@@ -23,4 +23,8 @@ const result = spawnSync(binary, process.argv.slice(2), {
   env: process.env,
 });
 
+if (result.error) {
+  console.error(`coven-code: failed to launch native binary: ${result.error.message}`);
+}
+
 process.exit(result.status ?? 1);
