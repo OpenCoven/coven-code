@@ -103,7 +103,10 @@ function parseArgs(argv) {
   };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] && fs.existsSync(process.argv[1]) &&
+  fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   const { packageName, version, rootDir } = parseArgs(process.argv.slice(2));
   prepareNpmPackage({
     rootDir: rootDir || path.dirname(path.dirname(fileURLToPath(import.meta.url))),
