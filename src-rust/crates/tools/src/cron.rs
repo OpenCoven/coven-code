@@ -118,14 +118,14 @@ pub fn cron_matches(expr: &str, dt: &DateTime<Local>) -> bool {
     let month = dt.month();
     let dow = dt.weekday().num_days_from_sunday(); // 0=Sun .. 6=Sat
 
-    cron_field_matches(fields[0], minute)
-        && cron_field_matches(fields[1], hour)
-        && cron_field_matches(fields[2], day)
-        && cron_field_matches(fields[3], month)
-        && cron_field_matches(fields[4], dow)
+    cron_field_matches(fields[0], minute, false)
+        && cron_field_matches(fields[1], hour, false)
+        && cron_field_matches(fields[2], day, false)
+        && cron_field_matches(fields[3], month, false)
+        && cron_field_matches(fields[4], dow, true)
 }
 
-fn cron_field_matches(field: &str, value: u32) -> bool {
+fn cron_field_matches(field: &str, value: u32, sunday_alias: bool) -> bool {
     if field == "*" {
         return true;
     }
@@ -137,21 +137,22 @@ fn cron_field_matches(field: &str, value: u32) -> bool {
     }
     // Comma-separated list of values or ranges
     for part in field.split(',') {
-        if cron_range_matches(part, value) {
+        if cron_range_matches(part, value, sunday_alias) {
             return true;
         }
     }
     false
 }
 
-fn cron_range_matches(part: &str, value: u32) -> bool {
+fn cron_range_matches(part: &str, value: u32, sunday_alias: bool) -> bool {
     if let Some(dash) = part.find('-') {
         let lo: u32 = part[..dash].parse().unwrap_or(u32::MAX);
         let hi: u32 = part[dash + 1..].parse().unwrap_or(0);
         value >= lo && value <= hi
     } else {
+        // 7 is a Sunday alias only in the day-of-week field.
         part.parse::<u32>()
-            .is_ok_and(|n| n == value || (n == 7 && value == 0)) // 7 = Sunday alias
+            .is_ok_and(|n| n == value || (sunday_alias && n == 7 && value == 0))
     }
 }
 
@@ -520,4 +521,70 @@ async fn persist_tasks_to_disk(store: &HashMap<String, CronTask>) -> Result<(), 
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn literal_seven_is_not_zero_in_minute_or_hour() {
+        let midnight = Local
+            .with_ymd_and_hms(2026, 1, 4, 0, 0, 0)
+            .single()
+            .unwrap();
+        let seven = Local
+            .with_ymd_and_hms(2026, 1, 4, 7, 7, 0)
+            .single()
+            .unwrap();
+        assert!(!cron_matches("7 * * * *", &midnight));
+        assert!(!cron_matches("* 7 * * *", &midnight));
+        assert!(cron_matches("7 * * * *", &seven));
+        assert!(cron_matches("* 7 * * *", &seven));
+    }
+
+    #[test]
+    fn sunday_alias_is_retained_in_day_of_week_literals() {
+        let sunday = Local
+            .with_ymd_and_hms(2026, 1, 4, 12, 0, 0)
+            .single()
+            .unwrap();
+        let monday = Local
+            .with_ymd_and_hms(2026, 1, 5, 12, 0, 0)
+            .single()
+            .unwrap();
+        for expression in ["* * * * 0", "* * * * 7", "* * * * 0,7"] {
+            assert!(cron_matches(expression, &sunday), "{expression}");
+            assert!(!cron_matches(expression, &monday), "{expression}");
+        }
+        assert!(cron_matches("* * * * 1", &monday));
+    }
+
+    #[test]
+    fn existing_wildcard_step_list_and_range_matching_is_preserved() {
+        let date = Local
+            .with_ymd_and_hms(2026, 1, 4, 12, 10, 0)
+            .single()
+            .unwrap();
+        for expression in [
+            "* * * * *",
+            "*/5 * * * *",
+            "9,10 * * * *",
+            "10-12 * * * *",
+            "* * * * 0-6",
+        ] {
+            assert!(cron_matches(expression, &date), "{expression}");
+        }
+        for expression in [
+            "*/3 * * * *",
+            "*/0 * * * *",
+            "8,9 * * * *",
+            "11-12 * * * *",
+            "* * * * 6-7",
+            "* * * *",
+        ] {
+            assert!(!cron_matches(expression, &date), "{expression}");
+        }
+    }
 }
