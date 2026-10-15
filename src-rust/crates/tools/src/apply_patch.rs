@@ -293,15 +293,37 @@ impl Tool for ApplyPatchTool {
             );
         }
 
-        // Permission check.
-        if !params.dry_run {
-            if let Err(e) = ctx.check_permission(
+        // Approve every resolved target before reading any content. Dry runs
+        // inspect the same files and must not bypass path-scoped permission rules.
+        let mut paths = Vec::with_capacity(file_patches.len());
+        for fp in &file_patches {
+            let path = ctx.resolve_path(&fp.path);
+            if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
+                return ToolResult::error(e.to_string());
+            }
+            let path = match crate::canonicalize_path_allow_missing(&path) {
+                Ok(path) => path,
+                Err(e) => {
+                    return ToolResult::error(format!(
+                        "Failed to resolve {}: {}",
+                        path.display(),
+                        e
+                    ))
+                }
+            };
+            if let Err(e) = ctx.check_permission_for_path(
                 self.name(),
-                &format!("ApplyPatch to {} file(s)", file_patches.len()),
+                &format!(
+                    "ApplyPatch to {} (dry_run={})",
+                    path.display(),
+                    params.dry_run
+                ),
+                path.clone(),
                 false,
             ) {
                 return ToolResult::error(e.to_string());
             }
+            paths.push(path);
         }
 
         // ----------------------------------------------------------------
@@ -314,13 +336,8 @@ impl Tool for ApplyPatchTool {
         // (path, original, new_content) — built during validation, used for writes
         let mut to_write: Vec<(std::path::PathBuf, Vec<u8>, String)> = Vec::new();
 
-        for fp in &file_patches {
-            let path = ctx.resolve_path(&fp.path);
+        for (fp, path) in file_patches.iter().zip(paths) {
             debug!(path = %path.display(), "ApplyPatch processing file");
-
-            if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
-                return ToolResult::error(e.to_string());
-            }
 
             // Read current content (or empty string for new files).
             let original_content = if path.exists() {
