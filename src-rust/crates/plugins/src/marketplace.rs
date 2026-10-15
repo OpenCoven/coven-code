@@ -107,6 +107,8 @@ pub async fn marketplace_check_updates_all() -> Vec<(String, String, String)> {
 }
 
 /// Install a plugin by name from the marketplace, or from a URL directly.
+/// ZIP extraction failures are returned without treating the archive as YAML.
+/// Extraction is not atomic: failed installs may leave the archive and partial files.
 pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, String> {
     let entry = if name_or_url.starts_with("http") {
         // Direct URL install
@@ -166,7 +168,7 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
     std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write: {e}"))?;
 
     // Try to unzip; if not a zip, treat as manifest YAML
-    if try_unzip(&archive_path, &install_dir).is_err() {
+    if !try_unzip(&archive_path, &install_dir)? {
         // Not a zip — assume it's the manifest directly
         let manifest_path = install_dir.join("manifest.yaml");
         std::fs::copy(&archive_path, &manifest_path).map_err(|e| format!("Copy: {e}"))?;
@@ -183,11 +185,15 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
     })
 }
 
-/// Try to unzip `archive` into `dest`. Returns Err if not a valid zip.
-fn try_unzip(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    zip.extract(dest).map_err(|e| e.to_string())
+/// Return false if ZIP parsing fails; opening and extraction failures are errors.
+fn try_unzip(archive: &std::path::Path, dest: &std::path::Path) -> Result<bool, String> {
+    let file = std::fs::File::open(archive).map_err(|e| format!("Open archive: {e}"))?;
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return Ok(false);
+    };
+    zip.extract(dest)
+        .map_err(|e| format!("Extract archive: {e}"))?;
+    Ok(true)
 }
 
 /// Check for an update to `name` and download if newer.
