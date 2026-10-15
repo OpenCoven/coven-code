@@ -137,12 +137,14 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
     };
 
     let install_dir = plugin_install_dir(&entry.name)?;
-    std::fs::create_dir_all(&install_dir).map_err(|e| format!("Create dir: {e}"))?;
 
     // Download archive
     let resp = reqwest::get(&entry.download_url)
         .await
         .map_err(|e| format!("Download error: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Download returned {}", resp.status()));
+    }
     let bytes = resp.bytes().await.map_err(|e| format!("Read bytes: {e}"))?;
 
     // Verify hash if provided
@@ -156,6 +158,8 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
             ));
         }
     }
+
+    std::fs::create_dir_all(&install_dir).map_err(|e| format!("Create dir: {e}"))?;
 
     // Write to disk (assume .zip or direct .yaml file)
     let archive_path = install_dir.join("plugin.zip");
