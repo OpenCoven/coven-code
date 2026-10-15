@@ -607,6 +607,9 @@ pub mod client {
         /// Send a streaming `POST /v1/messages`.  Events are dispatched to the
         /// provided `handler` in real time, and also forwarded into the returned
         /// channel so the caller can drive a select loop.
+        /// Closing or dropping that receiver requests cancellation of the HTTP
+        /// reader and callbacks. Shutdown is cooperative; it does not interrupt
+        /// synchronous callback execution.
         pub async fn create_message_stream(
             &self,
             mut request: CreateMessageRequest,
@@ -644,7 +647,14 @@ pub mod client {
 
             // Spawn a task that reads the SSE byte stream and emits events.
             tokio::spawn(async move {
-                if let Err(e) = Self::process_sse_stream(resp, handler, tx.clone()).await {
+                // The returned receiver owns demand for both callbacks and bytes.
+                // Stop even if the server never sends another chunk after cancellation.
+                let result = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    result = Self::process_sse_stream(resp, handler, tx.clone()) => result,
+                };
+                if let Err(e) = result {
                     let _ = tx
                         .send(streaming::AnthropicStreamEvent::Error {
                             error_type: "stream_error".into(),
