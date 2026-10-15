@@ -374,6 +374,22 @@ pub async fn load_transcript(path: &Path) -> crate::Result<Vec<TranscriptEntry>>
 
     let raw = tokio::fs::read_to_string(path).await?;
 
+    Ok(parse_transcript_entries(&raw))
+}
+
+/// Parse JSONL entries, excluding tombstones, deleted UUIDs, and malformed lines.
+///
+/// Preserves surviving entry order, including metadata. This pure parser does not
+/// enforce a size limit; callers must bound input before reading it into memory.
+/// Two passes avoid retaining deleted message payloads in the result vector.
+pub fn parse_transcript_entries(raw: &str) -> Vec<TranscriptEntry> {
+    // Unknown fields are skipped without buffering full message payloads.
+    #[derive(Deserialize)]
+    struct EntryHeader {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
     // First pass: collect tombstoned UUIDs.
     let mut tombstoned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -382,9 +398,14 @@ pub async fn load_transcript(path: &Path) -> crate::Result<Vec<TranscriptEntry>>
         if trimmed.is_empty() {
             continue;
         }
-        // Cheap structural check before full parse.
-        if trimmed.contains("\"type\":\"tombstone\"") || trimmed.contains("\"type\": \"tombstone\"")
-        {
+        // Struct deserialization also accepts arrays; transcript entries must be objects.
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let Ok(header) = serde_json::from_str::<EntryHeader>(trimmed) else {
+            continue;
+        };
+        if header.kind == "tombstone" {
             if let Ok(TranscriptEntry::Tombstone(t)) =
                 serde_json::from_str::<TranscriptEntry>(trimmed)
             {
@@ -422,7 +443,7 @@ pub async fn load_transcript(path: &Path) -> crate::Result<Vec<TranscriptEntry>>
         entries.push(entry);
     }
 
-    Ok(entries)
+    entries
 }
 
 /// List all `.jsonl` session files under the project's transcript directory,
@@ -998,5 +1019,62 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
 
         assert!(json.contains("\"hostedReview\":true"));
+    }
+    #[tokio::test]
+    async fn transcript_tombstones_accept_json_spellings_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spellings.jsonl");
+        let removed = make_user_entry(Message::user("removed"), "gone", None, "s", "/p");
+        let kept = make_user_entry(Message::user("kept"), "keep", None, "s", "/p");
+        let removed = serde_json::to_string(&removed).unwrap();
+        let kept = serde_json::to_string(&kept).unwrap();
+        let metadata = r#"{"type":"custom-title","sessionId":"s","customTitle":"title"}"#;
+        for tombstone in [
+            r#"{"type":"tombstone","deletedUuid":"gone"}"#,
+            r#"{"type": "tombstone","deletedUuid":"gone"}"#,
+            r#"{"type" : "tombstone","deletedUuid":"gone"}"#,
+            "{\"deletedUuid\":\"gone\",\"type\":\t\"tombstone\"}",
+            r#"{"ty\u0070e":"tom\u0062stone","deletedUuid":"gone"}"#,
+        ] {
+            for before in [true, false] {
+                let entries = format!("{removed}\n{kept}\n{removed}\n{metadata}\n");
+                let raw = if before {
+                    format!("{tombstone}\n{entries}")
+                } else {
+                    format!("{entries}{tombstone}\n")
+                };
+                let raw = format!("\n{raw}not json\n{{\"type\":\"future-entry\"}}\n");
+                std::fs::write(&path, raw).unwrap();
+                let loaded = load_transcript(&path).await.unwrap();
+                assert_eq!(loaded.len(), 2, "before={before}, tombstone={tombstone}");
+                assert_eq!(loaded[0].uuid(), Some("keep"));
+                assert!(
+                    matches!(&loaded[1], TranscriptEntry::CustomTitle(t) if t.custom_title == "title")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_malformed_tombstones_do_not_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed.jsonl");
+        let kept = make_user_entry(Message::user("kept"), "keep", None, "s", "/p");
+        let kept = serde_json::to_string(&kept).unwrap();
+        for invalid in [
+            r#"["tombstone"]"#,
+            r#"["tombstone","keep"]"#,
+            r#"{"type":"tombstone"}"#,
+            r#"{"type":"tombstone","deletedUuid":null}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep","extra":1e999}"#,
+            r#"{"type":"tombstone","type":"tombstone","deletedUuid":"keep"}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep","deletedUuid":"keep"}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep"} trailing"#,
+        ] {
+            std::fs::write(&path, format!("{kept}\n{invalid}\n")).unwrap();
+            let loaded = load_transcript(&path).await.unwrap();
+            assert_eq!(loaded.len(), 1, "invalid={invalid}");
+            assert_eq!(loaded[0].uuid(), Some("keep"));
+        }
     }
 }

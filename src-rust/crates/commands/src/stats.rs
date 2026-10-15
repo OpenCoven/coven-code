@@ -292,47 +292,7 @@ fn parse_jsonl_sync(path: &Path) -> Vec<TranscriptEntry> {
         Err(_) => return Vec::new(),
     };
 
-    // First pass: collect tombstoned uuids.
-    let mut tombstoned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !trimmed.contains("\"type\":\"tombstone\"")
-            && !trimmed.contains("\"type\": \"tombstone\"")
-        {
-            continue;
-        }
-        if let Ok(TranscriptEntry::Tombstone(t)) = serde_json::from_str::<TranscriptEntry>(trimmed)
-        {
-            tombstoned.insert(t.deleted_uuid);
-        }
-    }
-
-    // Second pass: keep useful entries.
-    let mut entries = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let entry: TranscriptEntry = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        match &entry {
-            TranscriptEntry::Tombstone(_) | TranscriptEntry::Unknown => continue,
-            _ => {}
-        }
-        if let Some(uuid) = entry.uuid() {
-            if tombstoned.contains(uuid) {
-                continue;
-            }
-        }
-        entries.push(entry);
-    }
-    entries
+    claurst_core::session_storage::parse_transcript_entries(&raw)
 }
 
 /// Cheap tail read to pull `last-prompt` and `custom-title` without a full parse —
@@ -1542,5 +1502,80 @@ mod tests {
     fn parse_args_help_returns_help_text() {
         let err = parse_args(&["--help"]).unwrap_err();
         assert!(err.contains("Subcommands"));
+    }
+    #[tokio::test]
+    async fn transcript_tombstones_accept_json_spellings_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spellings.jsonl");
+        let removed = claurst_core::session_storage::make_user_entry(
+            Message::user("removed"),
+            "gone",
+            None,
+            "s",
+            "/p",
+        );
+        let kept = claurst_core::session_storage::make_user_entry(
+            Message::user("kept"),
+            "keep",
+            None,
+            "s",
+            "/p",
+        );
+        let removed = serde_json::to_string(&removed).unwrap();
+        let kept = serde_json::to_string(&kept).unwrap();
+        let metadata = r#"{"type":"custom-title","sessionId":"s","customTitle":"title"}"#;
+        for tombstone in [
+            r#"{"type":"tombstone","deletedUuid":"gone"}"#,
+            r#"{"type": "tombstone","deletedUuid":"gone"}"#,
+            r#"{"type" : "tombstone","deletedUuid":"gone"}"#,
+            "{\"deletedUuid\":\"gone\",\"type\":\t\"tombstone\"}",
+            r#"{"ty\u0070e":"tom\u0062stone","deletedUuid":"gone"}"#,
+        ] {
+            for before in [true, false] {
+                let entries = format!("{removed}\n{kept}\n{removed}\n{metadata}\n");
+                let raw = if before {
+                    format!("{tombstone}\n{entries}")
+                } else {
+                    format!("{entries}{tombstone}\n")
+                };
+                let raw = format!("\n{raw}not json\n{{\"type\":\"future-entry\"}}\n");
+                std::fs::write(&path, raw).unwrap();
+                let loaded = parse_jsonl_sync(&path);
+                assert_eq!(loaded.len(), 2, "before={before}, tombstone={tombstone}");
+                assert_eq!(loaded[0].uuid(), Some("keep"));
+                assert!(
+                    matches!(&loaded[1], TranscriptEntry::CustomTitle(t) if t.custom_title == "title")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_malformed_tombstones_do_not_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed.jsonl");
+        let kept = claurst_core::session_storage::make_user_entry(
+            Message::user("kept"),
+            "keep",
+            None,
+            "s",
+            "/p",
+        );
+        let kept = serde_json::to_string(&kept).unwrap();
+        for invalid in [
+            r#"["tombstone"]"#,
+            r#"["tombstone","keep"]"#,
+            r#"{"type":"tombstone"}"#,
+            r#"{"type":"tombstone","deletedUuid":null}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep","extra":1e999}"#,
+            r#"{"type":"tombstone","type":"tombstone","deletedUuid":"keep"}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep","deletedUuid":"keep"}"#,
+            r#"{"type":"tombstone","deletedUuid":"keep"} trailing"#,
+        ] {
+            std::fs::write(&path, format!("{kept}\n{invalid}\n")).unwrap();
+            let loaded = parse_jsonl_sync(&path);
+            assert_eq!(loaded.len(), 1, "invalid={invalid}");
+            assert_eq!(loaded[0].uuid(), Some("keep"));
+        }
     }
 }
