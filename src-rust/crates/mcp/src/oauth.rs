@@ -851,7 +851,25 @@ fn token_expiry_from_lifetime(expires_in: Option<u64>) -> anyhow::Result<Option<
         .ok_or_else(|| anyhow::anyhow!("OAuth token expires_in overflows the Unix timestamp range"))
 }
 
+// One total deadline includes connecting, response headers and the complete body.
+const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn token_request_error(context: &str, error: reqwest::Error) -> anyhow::Error {
+    // Token endpoints can carry credentials in their URLs; never echo them.
+    let error = error.without_url();
+    let message = if error.is_timeout() {
+        format!(
+            "{context}: token request timed out after {} seconds: {error}",
+            TOKEN_REQUEST_TIMEOUT.as_secs()
+        )
+    } else {
+        format!("{context}: {error}")
+    };
+    anyhow::Error::new(error).context(message)
+}
+
 /// Exchange an authorization code for an access token.
+/// The HTTP request has a 30-second total deadline, including response-body reads.
 pub async fn exchange_code(
     token_endpoint: &str,
     code: &str,
@@ -868,10 +886,11 @@ pub async fn exchange_code(
 
     let resp = client
         .post(token_endpoint)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .form(&params)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("exchange_code: request failed: {}", e.without_url()))?;
+        .map_err(|e| token_request_error("exchange_code: request failed", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -887,10 +906,13 @@ pub async fn exchange_code(
         scope: Option<String>,
     }
 
-    let tr: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|_| anyhow::anyhow!("exchange_code: invalid token response"))?;
+    let tr: TokenResponse = resp.json().await.map_err(|e| {
+        if e.is_timeout() {
+            token_request_error("exchange_code: invalid token response", e)
+        } else {
+            anyhow::anyhow!("exchange_code: invalid token response")
+        }
+    })?;
 
     let expires_at = token_expiry_from_lifetime(tr.expires_in)?;
 
@@ -905,6 +927,7 @@ pub async fn exchange_code(
 }
 
 /// Refresh an existing MCP token using the stored refresh token.
+/// The HTTP request has a 30-second total deadline, including response-body reads.
 pub async fn refresh_mcp_token(
     server_name: &str,
     server_url: &str,
@@ -953,10 +976,11 @@ async fn refresh_mcp_token_for(
 
     let resp = client
         .post(token_endpoint)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .form(&params)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("refresh: request failed: {}", e.without_url()))?;
+        .map_err(|e| token_request_error("refresh: request failed", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -971,10 +995,13 @@ async fn refresh_mcp_token_for(
         expires_in: Option<u64>,
     }
 
-    let tr: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|_| anyhow::anyhow!("refresh: invalid token response"))?;
+    let tr: TokenResponse = resp.json().await.map_err(|e| {
+        if e.is_timeout() {
+            token_request_error("refresh: invalid token response", e)
+        } else {
+            anyhow::anyhow!("refresh: invalid token response")
+        }
+    })?;
     let expires_at = token_expiry_from_lifetime(tr.expires_in)?;
 
     let new_token = McpToken {
