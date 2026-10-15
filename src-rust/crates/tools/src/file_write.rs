@@ -60,10 +60,20 @@ impl Tool for FileWriteTool {
             return ToolResult::error(e.to_string());
         }
 
-        // Permission check
-        if let Err(e) =
-            ctx.check_permission(self.name(), &format!("Write {}", path.display()), false)
-        {
+        // Resolve existing symlinks before policy evaluation, retaining missing
+        // suffixes for new files. Use the same target for approval and mutation.
+        let path = match crate::canonicalize_path_allow_missing(&path) {
+            Ok(path) => path,
+            Err(e) => {
+                return ToolResult::error(format!("Failed to resolve {}: {}", path.display(), e))
+            }
+        };
+        if let Err(e) = ctx.check_permission_for_path(
+            self.name(),
+            &format!("Write {}", path.display()),
+            path.clone(),
+            false,
+        ) {
             return ToolResult::error(e.to_string());
         }
 
