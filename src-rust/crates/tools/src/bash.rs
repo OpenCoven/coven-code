@@ -164,29 +164,32 @@ async fn run_in_background(
     let command_clone = command.clone();
 
     tokio::spawn(async move {
-        let result = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-            let child = if cfg!(windows) {
-                Command::new("cmd")
-                    .arg("/C")
-                    .arg(&command_clone)
-                    .current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .stdin(Stdio::null())
-                    .spawn()
-            } else {
-                Command::new("bash")
-                    .arg("-c")
-                    .arg(&command_clone)
-                    .current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .stdin(Stdio::null())
-                    .spawn()
-            };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let child = if cfg!(windows) {
+            Command::new("cmd")
+                .arg("/C")
+                .arg(&command_clone)
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+        } else {
+            Command::new("bash")
+                .arg("-c")
+                .arg(&command_clone)
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+        };
 
-            match child {
-                Ok(mut c) => {
+        match child {
+            Ok(mut c) => {
+                let result = tokio::time::timeout_at(deadline, async {
                     // Record PID in the registry.
                     if let Some(pid) = c.id() {
                         global_registry().set_pid(&task_id_clone, pid);
@@ -218,25 +221,26 @@ async fn run_in_background(
                             );
                         }
                     }
-                }
-                Err(e) => {
+                })
+                .await;
+                if result.is_err() {
+                    let mut message = format!("timed out after {}ms", timeout_ms);
+                    // kill() also waits for the owned child to be reaped.
+                    if let Err(error) = c.kill().await {
+                        message.push_str(&format!("; failed to kill/reap child: {}", error));
+                    }
                     global_registry().update_status(
                         &task_id_clone,
-                        claurst_core::tasks::TaskStatus::Failed(e.to_string()),
+                        claurst_core::tasks::TaskStatus::Failed(message),
                     );
                 }
             }
-        })
-        .await;
-
-        if result.is_err() {
-            global_registry().update_status(
-                &task_id_clone,
-                claurst_core::tasks::TaskStatus::Failed(format!(
-                    "timed out after {}ms",
-                    timeout_ms
-                )),
-            );
+            Err(e) => {
+                global_registry().update_status(
+                    &task_id_clone,
+                    claurst_core::tasks::TaskStatus::Failed(e.to_string()),
+                );
+            }
         }
     });
 
