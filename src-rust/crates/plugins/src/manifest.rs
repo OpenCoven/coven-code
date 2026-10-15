@@ -338,7 +338,7 @@ impl PluginManifest {
         Ok(manifest)
     }
 
-    /// Basic validation matching the TS schema checks.
+    /// Validate metadata before using the name as an installation directory.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.name.is_empty() {
             anyhow::bail!("Plugin name cannot be empty");
@@ -347,6 +347,12 @@ impl PluginManifest {
             anyhow::bail!(
                 "Plugin name '{}' cannot contain spaces. Use kebab-case.",
                 self.name
+            );
+        }
+        // Validate both platform separators so a manifest stays portable.
+        if self.name.trim_matches('.').is_empty() || self.name.contains(['/', '\\', ':', '\0']) {
+            anyhow::bail!(
+                "Plugin name must be a single directory name, not a path or drive-qualified name"
             );
         }
         Ok(())
