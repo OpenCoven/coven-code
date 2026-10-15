@@ -106,10 +106,6 @@ impl Tool for EnterWorktreeTool {
             }
         }
 
-        if let Err(e) = ctx.check_permission(self.name(), "Create a git worktree", false) {
-            return ToolResult::error(e.to_string());
-        }
-
         // Determine branch name — use a human-readable timestamp if none supplied
         let branch = params.branch.clone().unwrap_or_else(|| {
             // Format: coven-code-YYYYMMDD-HHMMSS
@@ -140,6 +136,27 @@ impl Tool for EnterWorktreeTool {
         } else {
             ctx.working_dir.join(".worktrees").join(&branch)
         };
+
+        if let Err(e) = ctx.check_permission(self.name(), "Create a git worktree", false) {
+            return ToolResult::error(e.to_string());
+        }
+
+        if let Some(command) = params.post_create_command.as_deref() {
+            let details = format!(
+                "Execute this exact post-create command in '{}':\n{}",
+                worktree_path.display(),
+                command
+            );
+            if let Err(e) = ctx.check_permission_with_details_and_path(
+                "Bash",
+                "Execute a post-create command in the new worktree",
+                &details,
+                PathBuf::from(command),
+                false,
+            ) {
+                return ToolResult::error(e.to_string());
+            }
+        }
 
         // Verify we are inside a git repository before attempting worktree creation
         let head_result = run_git(&ctx.working_dir, &["rev-parse", "HEAD"]).await;
