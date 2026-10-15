@@ -657,93 +657,80 @@ impl BridgeSession {
             std::time::Duration::from_millis(self.config.polling_interval_ms.max(500));
         let max_backoff = std::time::Duration::from_secs(60);
 
-        loop {
-            // Respect cancellation at the top of every iteration.
-            if cancel.is_cancelled() {
-                info!(session_id = %self.session_id, "Bridge poll loop cancelled");
-                break;
-            }
-
-            // --- Drain and upload pending events ---
-            let mut events: Vec<BridgeEvent> = Vec::new();
-            while let Ok(ev) = event_rx.try_recv() {
-                events.push(ev);
-            }
-            if !events.is_empty() {
-                if let Err(e) = self.upload_events(events).await {
-                    warn!(session_id = %self.session_id, error = %e, "Event upload error");
+        // Cancel the whole forwarding operation, including HTTP and channel waits.
+        // Drop that future before deregistering so every normal exit reaches cleanup.
+        let forwarding = async {
+            loop {
+                // --- Drain and upload pending events ---
+                let mut events: Vec<BridgeEvent> = Vec::new();
+                while let Ok(ev) = event_rx.try_recv() {
+                    events.push(ev);
                 }
-            }
+                if !events.is_empty() {
+                    if let Err(e) = self.upload_events(events).await {
+                        warn!(session_id = %self.session_id, error = %e, "Event upload error");
+                    }
+                }
 
-            // --- Poll for incoming messages ---
-            match self.poll_messages().await {
-                Ok(messages) => {
-                    // Successful poll — reset reconnect counter.
-                    self.reconnect_count = 0;
+                // --- Poll for incoming messages ---
+                match self.poll_messages().await {
+                    Ok(messages) => {
+                        // Successful poll — reset reconnect counter.
+                        self.reconnect_count = 0;
 
-                    for msg in messages {
-                        if msg_tx.send(msg).await.is_err() {
-                            debug!(
-                                session_id = %self.session_id,
-                                "Incoming message channel closed; stopping poll loop"
-                            );
-                            return;
+                        for msg in messages {
+                            if msg_tx.send(msg).await.is_err() {
+                                debug!(
+                                    session_id = %self.session_id,
+                                    "Incoming message channel closed; stopping poll loop"
+                                );
+                                return;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(
-                        session_id = %self.session_id,
-                        error = %e,
-                        reconnect_count = self.reconnect_count,
-                        "Bridge poll error"
-                    );
-
-                    self.reconnect_count += 1;
-
-                    if self.config.max_reconnect_attempts > 0
-                        && self.reconnect_count >= self.config.max_reconnect_attempts
-                    {
-                        error!(
+                    Err(e) => {
+                        warn!(
                             session_id = %self.session_id,
-                            "Max bridge reconnect attempts ({}) reached; stopping",
-                            self.config.max_reconnect_attempts
+                            error = %e,
+                            reconnect_count = self.reconnect_count,
+                            "Bridge poll error"
                         );
-                        self.set_state(BridgeState::Error("max reconnects exceeded".into()));
-                        break;
-                    }
 
-                    // Exponential backoff capped at `max_backoff`.
-                    let backoff = (base_interval
-                        * 2u32.pow(self.reconnect_count.saturating_sub(1).min(5)))
-                    .min(max_backoff);
+                        self.reconnect_count += 1;
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = cancel.cancelled() => {
-                            info!(
+                        if self.config.max_reconnect_attempts > 0
+                            && self.reconnect_count >= self.config.max_reconnect_attempts
+                        {
+                            error!(
                                 session_id = %self.session_id,
-                                "Bridge cancelled during backoff sleep"
+                                "Max bridge reconnect attempts ({}) reached; stopping",
+                                self.config.max_reconnect_attempts
                             );
+                            self.set_state(BridgeState::Error("max reconnects exceeded".into()));
                             break;
                         }
-                    }
-                    continue;
-                }
-            }
 
-            // --- Wait for the next poll cycle ---
-            tokio::select! {
-                _ = tokio::time::sleep(base_interval) => {}
-                _ = cancel.cancelled() => {
-                    info!(
-                        session_id = %self.session_id,
-                        "Bridge cancelled during idle sleep"
-                    );
-                    break;
+                        // Exponential backoff capped at `max_backoff`.
+                        let backoff = (base_interval
+                            * 2u32.pow(self.reconnect_count.saturating_sub(1).min(5)))
+                        .min(max_backoff);
+
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
                 }
+
+                // --- Wait for the next poll cycle ---
+                tokio::time::sleep(base_interval).await;
             }
-        }
+        };
+        let reason = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => "cancelled",
+            _ = msg_tx.closed() => "incoming receiver closed",
+            _ = forwarding => "forwarding stopped",
+        };
+        info!(session_id = %self.session_id, reason, "Bridge poll loop stopping");
 
         // Best-effort deregister on shutdown.
         self.deregister().await;
@@ -1355,231 +1342,233 @@ pub async fn run_bridge_loop(
         );
     }
 
-    // Build a BridgeSession and register with the server.
-    let mut session = BridgeSession::new(config.clone());
+    let poll_cancel = cancel.child_token();
+    let _poll_guard = poll_cancel.clone().drop_guard();
+    let mut poll_task = None;
+    // Cover registration and every nested channel send with the same stop boundary.
+    let forwarding = async {
+        // Build a BridgeSession and register with the server.
+        let mut session = BridgeSession::new(config.clone());
 
-    // Attempt initial registration; retry with back-off on transient errors.
-    let base_backoff = std::time::Duration::from_millis(1_000);
-    let max_backoff = std::time::Duration::from_secs(30);
-    let mut reg_attempts = 0u32;
+        // Attempt initial registration; retry with back-off on transient errors.
+        let base_backoff = std::time::Duration::from_millis(1_000);
+        let max_backoff = std::time::Duration::from_secs(30);
+        let mut reg_attempts = 0u32;
 
-    loop {
-        match session.register().await {
-            Ok(()) => break,
-            Err(e) => {
-                reg_attempts += 1;
-                warn!(
-                    attempt = reg_attempts,
-                    error = %e,
-                    "Bridge registration failed"
-                );
+        loop {
+            match session.register().await {
+                Ok(()) => break,
+                Err(e) => {
+                    reg_attempts += 1;
+                    warn!(
+                        attempt = reg_attempts,
+                        error = %e,
+                        "Bridge registration failed"
+                    );
 
-                // Auth errors are fatal — don't retry.
-                let msg = e.to_string();
-                if msg.contains("auth error") || msg.contains("401") || msg.contains("403") {
-                    let _ = tui_tx
-                        .send(TuiBridgeEvent::Error(format!("Bridge auth failed: {}", e)))
-                        .await;
-                    return Err(e);
-                }
-
-                if reg_attempts >= config.max_reconnect_attempts.max(1) {
-                    let _ = tui_tx
-                        .send(TuiBridgeEvent::Error(format!(
-                            "Bridge registration failed after {} attempts: {}",
-                            reg_attempts, e
-                        )))
-                        .await;
-                    return Err(e);
-                }
-
-                let backoff = (base_backoff * 2u32.pow(reg_attempts.min(5))).min(max_backoff);
-                let _ = tui_tx
-                    .send(TuiBridgeEvent::Reconnecting {
-                        attempt: reg_attempts,
-                    })
-                    .await;
-
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = cancel.cancelled() => {
-                        return Ok(());
+                    // Auth errors are fatal — don't retry.
+                    let msg = e.to_string();
+                    if msg.contains("auth error") || msg.contains("401") || msg.contains("403") {
+                        let _ = tui_tx
+                            .send(TuiBridgeEvent::Error(format!("Bridge auth failed: {}", e)))
+                            .await;
+                        return Err(e);
                     }
+
+                    if reg_attempts >= config.max_reconnect_attempts.max(1) {
+                        let _ = tui_tx
+                            .send(TuiBridgeEvent::Error(format!(
+                                "Bridge registration failed after {} attempts: {}",
+                                reg_attempts, e
+                            )))
+                            .await;
+                        return Err(e);
+                    }
+
+                    let backoff = (base_backoff * 2u32.pow(reg_attempts.min(5))).min(max_backoff);
+                    let _ = tui_tx
+                        .send(TuiBridgeEvent::Reconnecting {
+                            attempt: reg_attempts,
+                        })
+                        .await;
+
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }
-    }
 
-    // Build the session URL from server_url + session_id.
-    let session_url = format!(
-        "{}/remote?session={}",
-        config.server_url,
-        session.session_id()
-    );
-    let session_id = session.session_id().to_string();
+        // Build the session URL from server_url + session_id.
+        let session_url = format!(
+            "{}/remote?session={}",
+            config.server_url,
+            session.session_id()
+        );
+        let session_id = session.session_id().to_string();
 
-    let _ = tui_tx
-        .send(TuiBridgeEvent::Connected {
-            session_url: session_url.clone(),
-            session_id: session_id.clone(),
-        })
-        .await;
+        // Build outgoing BridgeEvent channel for the poll loop.
+        let (bridge_ev_tx, bridge_ev_rx) = mpsc::channel::<BridgeEvent>(256);
 
-    // Build outgoing BridgeEvent channel for the poll loop.
-    let (bridge_ev_tx, bridge_ev_rx) = mpsc::channel::<BridgeEvent>(256);
+        // Build incoming message channel.
+        let (msg_tx, mut msg_rx) = mpsc::channel::<BridgeMessage>(64);
 
-    // Build incoming message channel.
-    let (msg_tx, mut msg_rx) = mpsc::channel::<BridgeMessage>(64);
+        // Spawn the low-level poll loop in its own task.
+        let worker_cancel = poll_cancel.clone();
+        poll_task = Some(tokio::spawn(async move {
+            session
+                .run_poll_loop(msg_tx, bridge_ev_rx, worker_cancel)
+                .await;
+        }));
 
-    // Spawn the low-level poll loop in its own task.
-    let poll_cancel = cancel.clone();
-    tokio::spawn(async move {
-        session
-            .run_poll_loop(msg_tx, bridge_ev_rx, poll_cancel)
+        let _ = tui_tx
+            .send(TuiBridgeEvent::Connected {
+                session_url: session_url.clone(),
+                session_id: session_id.clone(),
+            })
             .await;
-    });
 
-    // Message ID counter for outbound text deltas.
-    let mut msg_counter = 0u64;
+        // Message ID counter for outbound text deltas.
+        let mut msg_counter = 0u64;
 
-    let poll_interval = std::time::Duration::from_millis(config.polling_interval_ms.max(50));
-
-    loop {
-        tokio::select! {
-            // Handle cancellation.
-            _ = cancel.cancelled() => {
-                let _ = tui_tx.send(TuiBridgeEvent::Disconnected { reason: None }).await;
-                break;
-            }
-
-            // Convert inbound BridgeMessage → TuiBridgeEvent.
-            msg = msg_rx.recv() => {
-                match msg {
-                    None => {
-                        // Poll loop shut down.
-                        let _ = tui_tx
-                            .send(TuiBridgeEvent::Disconnected {
-                                reason: Some("Bridge poll loop terminated".to_string()),
-                            })
-                            .await;
-                        break;
-                    }
-                    Some(BridgeMessage::UserMessage { content, .. }) => {
-                        let _ = tui_tx
-                            .send(TuiBridgeEvent::InboundPrompt {
-                                content,
-                                sender_id: None,
-                            })
-                            .await;
-                    }
-                    Some(BridgeMessage::PermissionResponse { tool_use_id, decision, .. }) => {
-                        let kind = match decision {
-                            PermissionDecision::Allow | PermissionDecision::AllowPermanently => {
-                                PermissionResponseKind::Allow
-                            }
-                            PermissionDecision::Deny | PermissionDecision::DenyPermanently => {
-                                PermissionResponseKind::Deny
-                            }
-                        };
-                        let tuid = tool_use_id.unwrap_or_default();
-                        if !tuid.is_empty() {
+        loop {
+            tokio::select! {
+                // Convert inbound BridgeMessage → TuiBridgeEvent.
+                msg = msg_rx.recv() => {
+                    match msg {
+                        None => {
+                            // Poll loop shut down.
                             let _ = tui_tx
-                                .send(TuiBridgeEvent::PermissionResponse {
-                                    tool_use_id: tuid,
-                                    response: kind,
+                                .send(TuiBridgeEvent::Disconnected {
+                                    reason: Some("Bridge poll loop terminated".to_string()),
+                                })
+                                .await;
+                            break;
+                        }
+                        Some(BridgeMessage::UserMessage { content, .. }) => {
+                            let _ = tui_tx
+                                .send(TuiBridgeEvent::InboundPrompt {
+                                    content,
+                                    sender_id: None,
+                                })
+                                .await;
+                        }
+                        Some(BridgeMessage::PermissionResponse { tool_use_id, decision, .. }) => {
+                            let kind = match decision {
+                                PermissionDecision::Allow | PermissionDecision::AllowPermanently => {
+                                    PermissionResponseKind::Allow
+                                }
+                                PermissionDecision::Deny | PermissionDecision::DenyPermanently => {
+                                    PermissionResponseKind::Deny
+                                }
+                            };
+                            let tuid = tool_use_id.unwrap_or_default();
+                            if !tuid.is_empty() {
+                                let _ = tui_tx
+                                    .send(TuiBridgeEvent::PermissionResponse {
+                                        tool_use_id: tuid,
+                                        response: kind,
+                                    })
+                                    .await;
+                            }
+                        }
+                        Some(BridgeMessage::Cancel { .. }) => {
+                            let _ = tui_tx.send(TuiBridgeEvent::Cancelled).await;
+                        }
+                        Some(BridgeMessage::Ping) => {
+                            let _ = tui_tx.send(TuiBridgeEvent::Ping).await;
+                            // Also respond with a Pong to the server.
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::Pong {
+                                    server_time: Some(chrono::Utc::now().timestamp() as u64),
                                 })
                                 .await;
                         }
                     }
-                    Some(BridgeMessage::Cancel { .. }) => {
-                        let _ = tui_tx.send(TuiBridgeEvent::Cancelled).await;
-                    }
-                    Some(BridgeMessage::Ping) => {
-                        let _ = tui_tx.send(TuiBridgeEvent::Ping).await;
-                        // Also respond with a Pong to the server.
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::Pong {
-                                server_time: Some(chrono::Utc::now().timestamp() as u64),
-                            })
-                            .await;
-                    }
                 }
-            }
 
-            // Forward outbound events from query loop → bridge server.
-            outbound = outbound_rx.recv() => {
-                match outbound {
-                    None => {
-                        // Sender dropped; nothing to forward.
-                    }
-                    Some(BridgeOutbound::TextDelta { delta, message_id }) => {
-                        msg_counter += 1;
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::TextDelta {
-                                text: delta,
-                                message_id,
-                                index: Some(msg_counter as usize),
-                            })
-                            .await;
-                    }
-                    Some(BridgeOutbound::ToolStart { id, name, input_preview }) => {
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::ToolStart {
-                                tool_name: name,
-                                tool_id: id,
-                                input_preview,
-                            })
-                            .await;
-                    }
-                    Some(BridgeOutbound::ToolEnd { id, output, is_error }) => {
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::ToolEnd {
-                                tool_name: String::new(),
-                                tool_id: id,
-                                result: output,
-                                is_error,
-                            })
-                            .await;
-                    }
-                    Some(BridgeOutbound::TurnComplete { message_id, stop_reason }) => {
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::TurnComplete {
-                                message_id,
-                                stop_reason,
-                                usage: None,
-                            })
-                            .await;
-                    }
-                    Some(BridgeOutbound::Error { message }) => {
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::Error {
-                                message,
-                                code: None,
-                            })
-                            .await;
-                    }
-                    Some(BridgeOutbound::SessionMeta { title, session_id: sid }) => {
-                        let _ = bridge_ev_tx
-                            .send(BridgeEvent::SessionState {
-                                session_id: sid,
-                                state: BridgeSessionState::Connected,
-                            })
-                            .await;
-                        if let Some(t) = title {
-                            let _ = tui_tx
-                                .send(TuiBridgeEvent::SessionNameUpdate { title: t })
+                // Forward outbound events from query loop → bridge server.
+                Some(outbound) = outbound_rx.recv() => {
+                    match outbound {
+                        BridgeOutbound::TextDelta { delta, message_id } => {
+                            msg_counter += 1;
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::TextDelta {
+                                    text: delta,
+                                    message_id,
+                                    index: Some(msg_counter as usize),
+                                })
                                 .await;
+                        }
+                        BridgeOutbound::ToolStart { id, name, input_preview } => {
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::ToolStart {
+                                    tool_name: name,
+                                    tool_id: id,
+                                    input_preview,
+                                })
+                                .await;
+                        }
+                        BridgeOutbound::ToolEnd { id, output, is_error } => {
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::ToolEnd {
+                                    tool_name: String::new(),
+                                    tool_id: id,
+                                    result: output,
+                                    is_error,
+                                })
+                                .await;
+                        }
+                        BridgeOutbound::TurnComplete { message_id, stop_reason } => {
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::TurnComplete {
+                                    message_id,
+                                    stop_reason,
+                                    usage: None,
+                                })
+                                .await;
+                        }
+                        BridgeOutbound::Error { message } => {
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::Error {
+                                    message,
+                                    code: None,
+                                })
+                                .await;
+                        }
+                        BridgeOutbound::SessionMeta { title, session_id: sid } => {
+                            let _ = bridge_ev_tx
+                                .send(BridgeEvent::SessionState {
+                                    session_id: sid,
+                                    state: BridgeSessionState::Connected,
+                                })
+                                .await;
+                            if let Some(t) = title {
+                                let _ = tui_tx
+                                    .send(TuiBridgeEvent::SessionNameUpdate { title: t })
+                                    .await;
+                            }
                         }
                     }
                 }
             }
-
-            // Yield briefly to avoid busy-polling.
-            _ = tokio::time::sleep(poll_interval) => {}
         }
-    }
 
-    Ok(())
+        Ok(())
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            let _ = tui_tx.try_send(TuiBridgeEvent::Disconnected { reason: None });
+            Ok(())
+        }
+        _ = tui_tx.closed() => Ok(()),
+        result = forwarding => result,
+    };
+    poll_cancel.cancel();
+    if let Some(task) = poll_task {
+        task.await
+            .context("Bridge poll task failed during shutdown")?;
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1613,6 +1602,357 @@ pub use reqwest;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LocalBridge {
+        session: Option<BridgeSession>,
+        requests: mpsc::UnboundedReceiver<(String, tokio::sync::oneshot::Sender<&'static str>)>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for LocalBridge {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl LocalBridge {
+        async fn new() -> Self {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (tx, requests) = mpsc::unbounded_channel();
+            let server = tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (socket, _) = accepted.unwrap();
+                            let tx = tx.clone();
+                            connections.spawn(async move {
+                                let mut reader = BufReader::new(socket);
+                                let mut request = String::new();
+                                reader.read_line(&mut request).await.unwrap();
+                                let mut length = 0;
+                                loop {
+                                    let mut header = String::new();
+                                    reader.read_line(&mut header).await.unwrap();
+                                    if header == "\r\n" || header.is_empty() {
+                                        break;
+                                    }
+                                    if let Some((name, value)) = header.split_once(':') {
+                                        if name.eq_ignore_ascii_case("content-length") {
+                                            length = value.trim().parse::<usize>().unwrap();
+                                        }
+                                    }
+                                }
+                                reader.read_exact(&mut vec![0; length]).await.unwrap();
+                                let (respond, response) = tokio::sync::oneshot::channel::<&'static str>();
+                                if tx.send((request, respond)).is_err() {
+                                    return;
+                                }
+                                if let Ok(body) = response.await {
+                                    let reply = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        body.len(), body
+                                    );
+                                    let _ = reader.get_mut().write_all(reply.as_bytes()).await;
+                                }
+                            });
+                        }
+                        Some(result) = connections.join_next() => { result.unwrap(); }
+                    }
+                }
+            });
+            let mut session = BridgeSession::new(BridgeConfig {
+                enabled: true,
+                session_token: Some("fixture-token".into()),
+                server_url: format!("http://{address}"),
+                max_reconnect_attempts: 1,
+                ..Default::default()
+            });
+            session.http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap();
+            Self {
+                session: Some(session),
+                requests,
+                server,
+            }
+        }
+
+        async fn request(&mut self, method: &str) -> tokio::sync::oneshot::Sender<&'static str> {
+            let (request, respond) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), self.requests.recv())
+                    .await
+                    .expect("bridge request timed out")
+                    .expect("server closed");
+            assert!(
+                request.starts_with(&format!("{method} /api/claude_code/sessions")),
+                "{request}"
+            );
+            respond
+        }
+
+        async fn shutdown(&mut self, mut task: tokio::task::JoinHandle<()>) {
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                self.request("DELETE").await.send("").unwrap();
+                (&mut task).await.unwrap();
+            })
+            .await;
+            task.abort();
+            result.expect("bridge failed to deregister and stop");
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_shutdown_cancels_stalled_http_poll() {
+        let mut server = LocalBridge::new().await;
+        let (msg_tx, _msg_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(server.session.take().unwrap().run_poll_loop(
+            msg_tx,
+            event_rx,
+            cancel.clone(),
+        ));
+        let _stalled_poll = server.request("GET").await;
+        cancel.cancel();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn poll_shutdown_cancels_stalled_http_upload() {
+        let mut server = LocalBridge::new().await;
+        let (msg_tx, _msg_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        event_tx
+            .send(BridgeEvent::Pong { server_time: None })
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(server.session.take().unwrap().run_poll_loop(
+            msg_tx,
+            event_rx,
+            cancel.clone(),
+        ));
+        let _stalled_upload = server.request("POST").await;
+        cancel.cancel();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn poll_shutdown_cancels_full_inbound_channel() {
+        let mut server = LocalBridge::new().await;
+        let (msg_tx, mut msg_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(server.session.take().unwrap().run_poll_loop(
+            msg_tx,
+            event_rx,
+            cancel.clone(),
+        ));
+        server
+            .request("GET")
+            .await
+            .send(r#"[{"type":"ping"},{"type":"ping"},{"type":"ping"}]"#)
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), msg_rx.recv())
+                .await
+                .unwrap(),
+            Some(BridgeMessage::Ping)
+        ));
+        cancel.cancel();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn poll_shutdown_deregisters_when_receiver_closes() {
+        let mut server = LocalBridge::new().await;
+        let (msg_tx, msg_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let task = tokio::spawn(server.session.take().unwrap().run_poll_loop(
+            msg_tx,
+            event_rx,
+            CancellationToken::new(),
+        ));
+        let reply = server.request("GET").await;
+        drop(msg_rx);
+        reply.send(r#"[{"type":"ping"}]"#).unwrap();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn poll_shutdown_deregisters_after_reconnect_exhaustion() {
+        let mut server = LocalBridge::new().await;
+        let (msg_tx, _msg_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let task = tokio::spawn(server.session.take().unwrap().run_poll_loop(
+            msg_tx,
+            event_rx,
+            CancellationToken::new(),
+        ));
+        server.request("GET").await.send("invalid JSON").unwrap();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_cancels_stalled_registration() {
+        let mut server = LocalBridge::new().await;
+        let config = server.session.take().unwrap().config;
+        let (tui_tx, _tui_rx) = mpsc::channel(1);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let mut task = tokio::spawn(async move {
+            run_bridge_loop(config, tui_tx, outbound_rx, task_cancel)
+                .await
+                .unwrap();
+        });
+        let _stalled_registration = server.request("POST").await;
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await;
+        task.abort();
+        result.expect("registration did not cancel").unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_cancels_with_full_tui_channel() {
+        let mut server = LocalBridge::new().await;
+        let config = server.session.take().unwrap().config;
+        let (tui_tx, mut tui_rx) = mpsc::channel(1);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_bridge_loop(config, tui_tx, outbound_rx, task_cancel)
+                .await
+                .unwrap();
+        });
+        server.request("POST").await.send("").unwrap();
+        let _stalled_poll = server.request("GET").await;
+        assert_eq!(tui_rx.len(), 1, "Connected must fill the TUI channel");
+        cancel.cancel();
+        server.shutdown(task).await;
+        assert!(matches!(
+            tui_rx.try_recv(),
+            Ok(TuiBridgeEvent::Connected { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_owns_poll_before_connected_delivery() {
+        let mut server = LocalBridge::new().await;
+        let config = server.session.take().unwrap().config;
+        let (tui_tx, _tui_rx) = mpsc::channel(1);
+        tui_tx.send(TuiBridgeEvent::Ping).await.unwrap();
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_bridge_loop(config, tui_tx, outbound_rx, task_cancel)
+                .await
+                .unwrap();
+        });
+        server.request("POST").await.send("").unwrap();
+        // Polling owns the registered session even while Connected cannot be delivered.
+        let _stalled_poll = server.request("GET").await;
+        cancel.cancel();
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_stops_child_when_tui_receiver_closes() {
+        let mut server = LocalBridge::new().await;
+        let config = server.session.take().unwrap().config;
+        let (tui_tx, tui_rx) = mpsc::channel(1);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            run_bridge_loop(config, tui_tx, outbound_rx, CancellationToken::new())
+                .await
+                .unwrap();
+        });
+        server.request("POST").await.send("").unwrap();
+        let _stalled_poll = server.request("GET").await;
+        drop(tui_rx);
+        server.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_closed_outbound_does_not_self_wake() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        struct WakeFlag(AtomicBool);
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let mut server = LocalBridge::new().await;
+        let config = server.session.take().unwrap().config;
+        let (tui_tx, mut tui_rx) = mpsc::channel(1);
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let mut worker = Box::pin(run_bridge_loop(config, tui_tx, outbound_rx, cancel.clone()));
+        let registration = tokio::select! {
+            request = server.request("POST") => request,
+            result = &mut worker => panic!("worker stopped before registration: {result:?}"),
+        };
+        registration.send("").unwrap();
+        let _stalled_poll = tokio::select! {
+            request = server.request("GET") => request,
+            result = &mut worker => panic!("worker stopped before polling: {result:?}"),
+        };
+        assert!(matches!(
+            tui_rx.try_recv(),
+            Ok(TuiBridgeEvent::Connected { .. })
+        ));
+        drop(outbound_tx);
+
+        // A closed outbound channel must leave the worker waiting on real input,
+        // rather than spinning until Tokio's cooperative budget makes it wake itself.
+        let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = Waker::from(flag.clone());
+        let mut context = Context::from_waker(&waker);
+        assert!(worker.as_mut().poll(&mut context).is_pending());
+        tokio::task::yield_now().await; // Flush any cooperative-budget wake.
+        assert!(
+            !flag.0.load(Ordering::SeqCst),
+            "closed outbound caused a self-waking loop"
+        );
+
+        _stalled_poll
+            .send(r#"[{"type":"user_message","content":"still connected","session_id":"s","message_id":"m","attachments":[]}]"#)
+            .unwrap();
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                event = tui_rx.recv() => event,
+                result = &mut worker => panic!("closed outbound stopped inbound delivery: {result:?}"),
+            }
+        })
+        .await
+        .expect("inbound delivery stalled after outbound closure");
+        assert!(
+            matches!(inbound, Some(TuiBridgeEvent::InboundPrompt { content, .. }) if content == "still connected")
+        );
+
+        cancel.cancel();
+        let cleanup = tokio::select! {
+            request = server.request("DELETE") => request,
+            result = &mut worker => panic!("worker stopped before child cleanup: {result:?}"),
+        };
+        cleanup.send("").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn test_device_fingerprint_is_non_empty() {

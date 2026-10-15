@@ -2407,6 +2407,15 @@ async fn run_interactive(
         tui_rx: mpsc::Receiver<TuiBridgeEvent>,
         outbound_tx: mpsc::Sender<BridgeOutbound>,
         cancel: CancellationToken,
+        supplementary_tasks: tokio::task::JoinSet<()>,
+        primary_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for BridgeRuntime {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+            // JoinSet also aborts supplementary tasks on early/error exits.
+        }
     }
 
     // Preserve the bridge token before consuming bridge_config so we can reconstruct
@@ -2422,7 +2431,7 @@ async fn run_interactive(
         app.bridge_state = BridgeConnectionState::Connecting;
 
         let cancel_clone = bridge_cancel.clone();
-        tokio::spawn(async move {
+        let primary_task = tokio::spawn(async move {
             if let Err(e) =
                 claurst_bridge::run_bridge_loop(cfg, tui_tx, outbound_rx, cancel_clone).await
             {
@@ -2434,6 +2443,8 @@ async fn run_interactive(
             tui_rx,
             outbound_tx,
             cancel: bridge_cancel,
+            supplementary_tasks: tokio::task::JoinSet::new(),
+            primary_task,
         })
     } else {
         None
@@ -3911,7 +3922,7 @@ async fn run_interactive(
                             // into a background task that calls post_bridge_event per item.
                             if let Some(rx) = relay_ev_rx_opt.take() {
                                 let info_relay = info.clone();
-                                tokio::spawn(async move {
+                                runtime.supplementary_tasks.spawn(async move {
                                     let mut rx = rx;
                                     while let Some(payload) = rx.recv().await {
                                         let _ =
@@ -3925,7 +3936,7 @@ async fn run_interactive(
                             // forwards inbound user messages to remote_prompt_tx.
                             let info_poll = info.clone();
                             let poll_tx = remote_prompt_tx.clone();
-                            tokio::spawn(async move {
+                            runtime.supplementary_tasks.spawn(async move {
                                 let mut since_id: Option<String> = None;
                                 loop {
                                     match claurst_bridge::poll_bridge_messages(
@@ -4092,7 +4103,16 @@ async fn run_interactive(
             }
         }
         if disconnect_bridge {
-            bridge_runtime = None;
+            bridge_session_info = None;
+            if let Some(mut runtime) = bridge_runtime.take() {
+                runtime.cancel.cancel();
+                // Stop HTTP, channel waits and sleeps before draining stale prompts.
+                runtime.supplementary_tasks.shutdown().await;
+                if let Err(error) = (&mut runtime.primary_task).await {
+                    warn!(%error, "Bridge worker failed during disconnect");
+                }
+            }
+            while remote_prompt_rx.try_recv().is_ok() {}
         }
 
         // Drain inbound prompts from the BridgeSessionInfo poll task.
@@ -4934,8 +4954,17 @@ async fn run_interactive(
         }
     }
 
-    if let Some(runtime) = bridge_runtime.take() {
+    if let Some(runtime) = &bridge_runtime {
         runtime.cancel.cancel();
+    }
+    // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
+    // Still join the worker if restoration fails, then report that error below.
+    let terminal_result = restore_terminal(&mut terminal);
+    if let Some(mut runtime) = bridge_runtime.take() {
+        runtime.supplementary_tasks.shutdown().await;
+        if let Err(error) = (&mut runtime.primary_task).await {
+            warn!(%error, "Bridge worker failed during exit");
+        }
     }
 
     // Mark the session complete in the Coven daemon ledger (best-effort, opt-in).
@@ -4945,7 +4974,7 @@ async fn run_interactive(
         claurst_core::coven_ledger::notify_session_complete(id, Some(0));
     }
 
-    restore_terminal(&mut terminal)?;
+    terminal_result?;
     Ok(())
 }
 
