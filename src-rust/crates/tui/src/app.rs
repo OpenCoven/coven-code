@@ -667,6 +667,8 @@ pub struct App {
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub keybindings: KeybindingResolver,
+    // CLI control-key routing and the normal UI handler resolve each event once.
+    resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
     // Cursor position within input (byte offset)
     pub cursor_pos: usize,
@@ -1247,6 +1249,7 @@ impl App {
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
+            resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,
             new_messages_while_scrolled: 0,
@@ -3843,9 +3846,55 @@ impl App {
         Self::persist_onboarding_complete()
     }
 
+    fn resolve_keybinding(&mut self, key: KeyEvent) -> (bool, KeybindingResult) {
+        if let Some((resolved_key, pending, result)) = self.resolved_keybinding.take() {
+            if resolved_key == key {
+                return (pending, result);
+            }
+        }
+        let pending = self.keybindings.has_pending_chord();
+        let context = self.current_key_context();
+        let result = match key_event_to_keystroke(&key) {
+            Some(stroke) => self.keybindings.process(stroke, &context),
+            None => {
+                self.keybindings.cancel_chord();
+                KeybindingResult::NoMatch
+            }
+        };
+        (pending, result)
+    }
+
+    /// Route configured interrupt/exit actions before the CLI's submission
+    /// handling. Other bindings remain available to the normal UI handler.
+    /// `Some(true)` requests cancellation; `Some(false)` is an exit action.
+    pub fn handle_control_key(&mut self, key: KeyEvent) -> Option<bool> {
+        self.resolved_keybinding = None;
+        let (pending, result) = self.resolve_keybinding(key);
+        let control = match &result {
+            KeybindingResult::Action(action) if action == "interrupt" => Some(true),
+            KeybindingResult::Action(action) if action == "exit" => Some(false),
+            _ => None,
+        };
+        self.resolved_keybinding = Some((key, pending, result));
+        if control.is_some() {
+            self.handle_key_event(key);
+        }
+        control
+    }
+
     /// Process a keyboard event. Returns `true` when the input should be
     /// submitted (Enter pressed with no blocking dialog).
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        let (had_pending_chord, binding) = self.resolve_keybinding(key);
+        if self.rate_limit_recovery.is_pending() {
+            if let KeybindingResult::Action(action) = &binding {
+                if action == "interrupt" || action == "exit" {
+                    self.rate_limit_recovery.dismiss();
+                    self.status_message = Some("Recovery cancelled.".to_string());
+                    return false;
+                }
+            }
+        }
         // The reader owns its visible keys before any normal TUI interaction.
         if self.response_reader.visible {
             self.handle_response_reader_key(key);
@@ -3866,6 +3915,7 @@ impl App {
 
         // Dismiss error modal with Esc
         if key.code == KeyCode::Esc && self.notifications.current_is_error() {
+            self.rate_limit_recovery.dismiss();
             self.dismiss_error_notifications();
             return false;
         }
@@ -4881,21 +4931,11 @@ impl App {
         }
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
-        let key_context = self.current_key_context();
-        if let Some(keystroke) = key_event_to_keystroke(&key) {
-            let had_pending_chord = self.keybindings.has_pending_chord();
-            match self.keybindings.process(keystroke, &key_context) {
-                KeybindingResult::Action(action) => {
-                    return self.handle_keybinding_action(&action);
-                }
-                KeybindingResult::Pending => return false,
-                KeybindingResult::NoMatch if had_pending_chord => return false,
-                KeybindingResult::Unbound | KeybindingResult::NoMatch => {
-                    // Fall through to hardcoded keybinding handlers
-                }
-            }
-        } else {
-            self.keybindings.cancel_chord();
+        match binding {
+            KeybindingResult::Action(action) => return self.handle_keybinding_action(&action),
+            KeybindingResult::Pending => return false,
+            KeybindingResult::NoMatch if had_pending_chord => return false,
+            KeybindingResult::Unbound | KeybindingResult::NoMatch => {}
         }
 
         // Clear any active text selection on key press (except Ctrl+C which copies it).

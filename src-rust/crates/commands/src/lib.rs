@@ -45,6 +45,11 @@ pub enum CommandResult {
     Message(String),
     /// Inject a message into the conversation as though the user typed it.
     UserMessage(String),
+    /// Synthetic goal work bound to the exact goal and database of its payload.
+    GoalUserMessage {
+        message: String,
+        turn: claurst_core::goal::GoalTurn,
+    },
     /// Modify the configuration.
     ConfigChange(Config),
     /// Modify the configuration and show a specific status message.
@@ -1735,13 +1740,16 @@ impl SlashCommand for GoalCommand {
                     Some(s) => s,
                     None => return CommandResult::Error("Could not open goal store.".to_string()),
                 };
-                match store.get_active_goal(session_id) {
-                    None => {
+                match store.capture_active_goal(session_id) {
+                    Err(error) => {
+                        return CommandResult::Error(format!("Could not capture goal: {error}"))
+                    }
+                    Ok(None) => {
                         return CommandResult::Message(
                             "No active goal. Set one with /coven goal <objective>.".to_string(),
                         );
                     }
-                    Some(goal) => {
+                    Ok(Some(turn)) => {
                         let audit_msg = format!(
                             "[User requested goal completion audit]\n\
                              Please review your active goal:\n\
@@ -1752,9 +1760,12 @@ impl SlashCommand for GoalCommand {
                              3. Run any tests or validation commands.\n\
                              4. If fully complete, call GoalComplete with audit_summary and evidence.\n\
                              5. If not complete, describe what remains.",
-                            goal.objective
+                            turn.goal().objective
                         );
-                        return CommandResult::UserMessage(audit_msg);
+                        return CommandResult::GoalUserMessage {
+                            message: audit_msg,
+                            turn,
+                        };
                     }
                 }
             }
@@ -1792,12 +1803,13 @@ impl SlashCommand for GoalCommand {
                 format!("Objective too long ({} chars). Max {} chars.", len, max),
             ),
             Err(e) => CommandResult::Error(format!("Failed to set goal: {}", e)),
-            Ok(goal) => {
-                // Return UserMessage so the query loop fires immediately and the
-                // model begins working toward the goal without user needing to
-                // send another message.
-                CommandResult::UserMessage(claurst_core::goal_kickoff_message(&goal))
-            }
+            Ok(goal) => match store.capture_goal_turn(session_id, &goal.id) {
+                Ok(turn) => CommandResult::GoalUserMessage {
+                    message: claurst_core::goal_kickoff_message(turn.goal()),
+                    turn,
+                },
+                Err(error) => CommandResult::Error(format!("Could not capture goal: {error}")),
+            },
         }
     }
 }
@@ -11594,6 +11606,83 @@ pub(crate) mod test_env {
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn goal_dispatch_payload_keeps_its_captured_authority() {
+        use super::{CommandContext, CommandResult, GoalCommand, SlashCommand};
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let names = [
+            "COVEN_CODE_HOME",
+            "COVEN_CODE_TEST_HOME",
+            "COVEN_CODE_GOALS",
+        ];
+        let _restore = RestoreEnv(names.map(|name| (name, std::env::var_os(name))).to_vec());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_CODE_HOME", dir.path());
+        std::env::remove_var("COVEN_CODE_TEST_HOME");
+        std::env::remove_var("COVEN_CODE_GOALS");
+        let mut ctx = CommandContext {
+            config: Default::default(),
+            cost_tracker: claurst_core::cost::CostTracker::new(),
+            messages: vec![],
+            working_dir: dir.path().to_path_buf(),
+            session_id: "goal-payload".into(),
+            session_title: None,
+            remote_session_url: None,
+            mcp_manager: None,
+            mcp_auth_runner: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut captures = Vec::new();
+        for input in ["original objective", "complete"] {
+            let result = runtime.block_on(GoalCommand.execute(input, &mut ctx));
+            let CommandResult::GoalUserMessage { message, turn } = result else {
+                panic!("goal payload lost its captured authority: {input}: {result:?}");
+            };
+            assert!(message.contains("original objective"));
+            assert_eq!(turn.goal().objective, "original objective");
+            assert_eq!(turn.goal().session_id, ctx.session_id);
+            assert_eq!(
+                turn.store_path(),
+                claurst_core::GoalStore::default_path()
+                    .canonicalize()
+                    .unwrap()
+            );
+            captures.push(turn);
+        }
+        let store = claurst_core::GoalStore::open_default().unwrap();
+        let replacement = store
+            .set_goal(&ctx.session_id, "replacement", None)
+            .unwrap();
+        for turn in captures {
+            assert!(matches!(
+                turn.validate(),
+                Err(claurst_core::GoalError::Replaced { .. })
+            ));
+            assert!(store
+                .capture_goal_turn(&ctx.session_id, &turn.goal().id)
+                .is_err());
+        }
+        assert_eq!(
+            store.try_get_goal(&ctx.session_id).unwrap().unwrap().id,
+            replacement.id
+        );
+    }
 
     pub(crate) struct CommandEnvGuard {
         old_home: Option<String>,

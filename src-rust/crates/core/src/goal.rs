@@ -131,6 +131,7 @@ struct GoalTurnState {
     completed: Option<Goal>,
     revoked: Option<GoalError>,
     final_in_flight: bool,
+    request_attempted: bool,
 }
 
 /// A successful completion grants only the response summarizing that completion.
@@ -148,6 +149,20 @@ impl GoalTurn {
 
     pub fn store_path(&self) -> &std::path::Path {
         &self.store_path
+    }
+
+    /// Whether any model transport belonging to this logical turn was attempted.
+    /// Retries and child/housekeeping projections share this state. Each fresh
+    /// capture (including the next continuation of the same goal) starts empty.
+    pub fn request_attempted(&self) -> bool {
+        self.state.lock().request_attempted
+    }
+
+    /// Called only at a provider's actual model-send/process-spawn boundary.
+    /// A custom provider's entry is the best observable boundary when its
+    /// internal preparation and transport are opaque to Coven Code.
+    pub fn mark_request_attempted(&self) {
+        self.state.lock().request_attempted = true;
     }
 
     /// Reserve the foreground's one final request across provider preparation,
@@ -545,6 +560,29 @@ impl GoalStore {
                 state: Default::default(),
                 role: GoalTurnRole::Foreground,
             }))
+    }
+
+    /// Bind a new logical turn to the row used to construct its payload. A
+    /// replacement between that decision and capture cannot authorize it.
+    pub fn capture_goal_turn(
+        &self,
+        session_id: &str,
+        expected_goal_id: &str,
+    ) -> Result<GoalTurn, GoalError> {
+        let turn = self
+            .capture_active_goal(session_id)?
+            .ok_or_else(|| GoalError::NotActive {
+                session_id: session_id.to_string(),
+            })?;
+        if turn.goal.id != expected_goal_id {
+            return Err(GoalError::Replaced {
+                session_id: session_id.to_string(),
+                expected_goal_id: expected_goal_id.to_string(),
+                actual_goal_id: turn.goal.id,
+            });
+        }
+        turn.validate()?;
+        Ok(turn)
     }
 
     /// Complete only the active row that authorized this logical query.
