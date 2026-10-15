@@ -206,6 +206,7 @@ case "${SHELL:-}" in
 esac
 path_line="export PATH=\"\$PATH:${INSTALL_DIR}\""
 if [[ -n "$shell_rc" ]] && ! grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
+  mkdir -p "$(dirname "$shell_rc")"
   echo "" >> "$shell_rc"
   echo "# Coven Code" >> "$shell_rc"
   echo "$path_line" >> "$shell_rc"

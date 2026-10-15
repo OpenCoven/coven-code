@@ -6,6 +6,7 @@ on:
       - 'install.sh'
       - 'scripts/test_install.py'
       - 'scripts/test_install_options.py'
+      - 'scripts/test_install_config_dir.py'
       - '.github/workflows/installer-tests.yml'
   workflow_dispatch:
 
@@ -27,5 +28,7 @@ jobs:
         run: python3 -B scripts/test_install.py
       - name: Verify option value diagnostics
         run: python3 -B scripts/test_install_options.py
+      - name: Verify shell profile directory creation
+        run: python3 -B scripts/test_install_config_dir.py
       - name: Check shell syntax
         run: bash -n install.sh
