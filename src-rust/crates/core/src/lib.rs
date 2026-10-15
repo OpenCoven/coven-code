@@ -640,6 +640,7 @@ pub mod types {
 // config module
 // ---------------------------------------------------------------------------
 pub mod config {
+    use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1747,11 +1748,13 @@ pub mod config {
         }
 
         /// Load settings from disk, returning defaults when the file is missing.
+        /// Existing files with invalid JSON or settings types return a parse error.
         pub async fn load() -> anyhow::Result<Self> {
             let path = Self::global_settings_path();
             if path.exists() {
                 let content = tokio::fs::read_to_string(&path).await?;
-                Ok(serde_json::from_str(&content).unwrap_or_default())
+                serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse settings file {}", path.display()))
             } else {
                 Ok(Self::default())
             }
@@ -1773,7 +1776,8 @@ pub mod config {
             let path = Self::global_settings_path();
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
-                Ok(serde_json::from_str(&content).unwrap_or_default())
+                serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse settings file {}", path.display()))
             } else {
                 Ok(Self::default())
             }
