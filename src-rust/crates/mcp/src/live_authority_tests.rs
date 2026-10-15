@@ -250,6 +250,7 @@ async fn revoked_auth_session_cannot_bind_callback_or_begin_effects() {
         auth_url: "http://127.0.0.1:1/authorize".into(),
         redirect_uri: "invalid-callback".into(),
         verifier: "fixture".into(),
+        state: "fixture-state".into(),
         metadata: oauth::McpOAuthMetadata {
             authorization_endpoint: "http://127.0.0.1:1/authorize".into(),
             token_endpoint: "http://127.0.0.1:1/token".into(),
