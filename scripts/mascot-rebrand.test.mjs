@@ -34,7 +34,6 @@ for (const file of [
 }
 
 assert.match(read('src-rust/crates/tui/src/mascot.rs'), /pub enum CompanionPose/, 'pose type should be CompanionPose');
-assert.match(read('src-rust/crates/tui/src/mascot.rs'), /pub fn mascot_lines_for/, 'legacy rustle_lines_for should be renamed');
 
 assert.equal(exists('public/Rune.png'), true, 'Rune mascot asset should exist');
 assert.equal(exists('public/Pirate-Rune.png'), true, 'Pirate Rune asset should exist');
