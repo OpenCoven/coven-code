@@ -124,7 +124,7 @@ Write content to a file. Creates the file and any missing parent directories. Ov
 | `file_path` | string | yes | Absolute path to write |
 | `content` | string | yes | Full file content |
 
-Requires the file to have been read first (or the file to not exist). The previous content is stored for `/undo` support.
+Permission is checked before creating parent directories or reading existing content. The previous content is stored for file-history support.
 
 ---
 
