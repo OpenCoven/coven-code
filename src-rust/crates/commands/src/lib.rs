@@ -1630,7 +1630,7 @@ fn parse_token_budget(s: &str) -> Option<u64> {
     } else {
         (s, 1u64)
     };
-    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
+    num_str.trim().parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 #[async_trait]
@@ -1779,8 +1779,12 @@ impl SlashCommand for GoalCommand {
             let mut parts = rest.splitn(2, char::is_whitespace);
             let budget_str = parts.next().unwrap_or("");
             let obj = parts.next().unwrap_or("").trim();
-            let budget = parse_token_budget(budget_str);
-            (budget, obj)
+            let Some(budget) = parse_token_budget(budget_str) else {
+                return CommandResult::Error(format!(
+                    "Invalid token budget '{budget_str}'. Use a non-negative integer, optionally followed by K or M (for example, 250K)."
+                ));
+            };
+            (Some(budget), obj)
         } else {
             (None, args)
         };
