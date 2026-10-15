@@ -9,6 +9,7 @@
 //    - Interactive REPL mode: full TUI with ratatui
 
 mod codex_oauth_flow;
+mod diagnostics;
 mod headless;
 mod memory_admin;
 mod oauth_flow;
@@ -524,6 +525,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // --context loads a versioned coven-github session brief. It
+    // implies full headless + skip-permissions and overrides model/cwd from the
+    // brief. A brief with an unsupported major version is rejected here.
+    let github_context = SessionBrief::load(cli.context.as_ref())?;
+    let is_headless = cli.headless || cli.print || cli.prompt.is_some() || github_context.is_some();
+
     // Setup logging
     let log_level = if cli.verbose { "debug" } else { "warn" };
     let base_filter =
@@ -536,20 +543,34 @@ async fn main() -> anyhow::Result<()> {
         )
         // Suppress error/warn logs from query — errors are already shown as error modals
         .add_directive("claurst_query=off".parse().expect("valid directive"));
-    tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(log_filter)
-        .with_target(false)
-        .without_time()
-        // Logs go to stderr: stdout belongs to the response — plain text in
-        // --print mode, and strictly JSONL in the stream-json runtime protocol
-        // (a stray WARN line on stdout would corrupt the frame stream).
-        .with_writer(std::io::stderr)
-        .init();
-
-    // --context loads a coven-github session brief (headless contract v3). It
-    // implies full headless + skip-permissions and overrides model/cwd from the
-    // brief. A brief with an unsupported major version is rejected here.
-    let github_context = SessionBrief::load(cli.context.as_ref())?;
+        .with_target(false);
+    let diagnostic_log = if !is_headless
+        && !cli.dump_system_prompt
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    {
+        let directory = claurst_core::config::config_home().join("logs");
+        let log = diagnostics::DiagnosticLog::open(&directory).with_context(|| {
+            format!(
+                "Could not open private diagnostics in {}",
+                directory.display()
+            )
+        })?;
+        subscriber
+            .with_ansi(false)
+            .log_internal_errors(false)
+            .with_writer(log.clone())
+            .init();
+        Some(log)
+    } else {
+        // Keep headless stdout protocol-safe and respect explicit stderr redirection.
+        subscriber
+            .without_time()
+            .with_writer(std::io::stderr)
+            .init();
+        None
+    };
 
     // Determine working directory. GitHub session briefs are worker-authored and
     // own the task workspace, so they intentionally override --cwd.
@@ -670,9 +691,6 @@ async fn main() -> anyhow::Result<()> {
         system_parts.push(append.clone());
     }
     let system_prompt = system_parts.join("\n\n");
-
-    // Determine mode early (needed for auth error handling and permission handler selection).
-    let is_headless = cli.headless || cli.print || cli.prompt.is_some() || github_context.is_some();
 
     // Initialize API client.
     // Try config/env first; fall back to configured-client OAuth tokens.
@@ -1062,6 +1080,7 @@ async fn main() -> anyhow::Result<()> {
         has_credentials,
         model_registry,
         user_question_rx,
+        diagnostic_log,
     )
     .await;
 
@@ -2139,6 +2158,7 @@ async fn run_interactive(
     user_question_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<claurst_tools::UserQuestionEvent>,
     >,
+    diagnostic_log: Option<diagnostics::DiagnosticLog>,
 ) -> anyhow::Result<()> {
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
     use claurst_commands::{execute_command, CommandContext, CommandResult};
@@ -2291,6 +2311,12 @@ async fn run_interactive(
         app.attach_mcp_manager(manager);
     }
     app.replace_messages(initial_messages.clone());
+    if let Some(log) = &diagnostic_log {
+        app.push_system_message(
+            format!("Diagnostics: {}", log.path().display()),
+            claurst_tui::app::SystemMessageStyle::Info,
+        );
+    }
 
     // Home directory warning: mirror TS feedConfigs.tsx warningText
     let home_dir = dirs::home_dir();
@@ -2545,6 +2571,17 @@ async fn run_interactive(
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     'main: loop {
+        if let Some(log) = &diagnostic_log {
+            if let Some(error) = log.take_error() {
+                app.push_system_message(
+                    format!(
+                        "Diagnostic logging stopped: {error}. File: {}",
+                        log.path().display()
+                    ),
+                    claurst_tui::app::SystemMessageStyle::Warning,
+                );
+            }
+        }
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_companion_pose();
         app.notifications.tick();
