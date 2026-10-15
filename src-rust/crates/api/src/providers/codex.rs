@@ -573,40 +573,13 @@ impl CodexProvider {
             model,
         })
     }
-}
 
-// ---------------------------------------------------------------------------
-// LlmProvider impl
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-impl LlmProvider for CodexProvider {
-    fn id(&self) -> &ProviderId {
-        &self.id
-    }
-
-    fn name(&self) -> &str {
-        "OpenAI Codex"
-    }
-
-    async fn create_message(
-        &self,
-        request: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
-        self.send_responses_request(&request).await
-    }
-
-    async fn create_message_stream(
-        &self,
-        request: ProviderRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
-    {
-        let resp = self.send_responses_streaming_request(&request).await?;
-        let provider_id = self.id.clone();
-
-        let s = stream! {
-            let mut byte_stream = resp.bytes_stream();
-            let mut leftover = String::new();
+    fn parse_stream(
+        mut byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+        provider_id: ProviderId,
+    ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> {
+        stream! {
+            let mut lines = crate::sse_lines::SseLines::default();
             let mut current_event = String::new();
             let mut current_data: Vec<String> = Vec::new();
             let mut message_started = false;
@@ -628,21 +601,7 @@ impl LlmProvider for CodexProvider {
                     }
                 };
 
-                let text = String::from_utf8_lossy(&chunk);
-                let combined = if leftover.is_empty() {
-                    text.to_string()
-                } else {
-                    let mut s = std::mem::take(&mut leftover);
-                    s.push_str(&text);
-                    s
-                };
-
-                let mut lines: Vec<&str> = combined.split('\n').collect();
-                if !combined.ends_with('\n') {
-                    leftover = lines.pop().unwrap_or("").to_string();
-                }
-
-                for raw_line in lines {
+                for raw_line in lines.feed(&chunk) {
                     let line = raw_line.trim_end_matches('\r');
 
                     if line.is_empty() {
@@ -929,9 +888,41 @@ impl LlmProvider for CodexProvider {
                 message: "Codex stream ended before response.completed".to_string(),
                 partial_response: None,
             });
-        };
+        }
+    }
+}
 
-        Ok(Box::pin(s))
+// ---------------------------------------------------------------------------
+// LlmProvider impl
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl LlmProvider for CodexProvider {
+    fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        "OpenAI Codex"
+    }
+
+    async fn create_message(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<ProviderResponse, ProviderError> {
+        self.send_responses_request(&request).await
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        let resp = self.send_responses_streaming_request(&request).await?;
+        Ok(Box::pin(Self::parse_stream(
+            resp.bytes_stream(),
+            self.id.clone(),
+        )))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -1066,5 +1057,119 @@ mod refresh_error_tests {
             .unwrap();
         assert!(token.refresh_token.is_none());
         assert!(token.expires_in.is_none());
+    }
+}
+
+#[cfg(test)]
+mod byte_boundary_tests {
+    use super::*;
+    use futures::FutureExt;
+
+    async fn events(chunks: Vec<bytes::Bytes>) -> Vec<String> {
+        CodexProvider::parse_stream(
+            futures::stream::iter(chunks.into_iter().map(Ok)),
+            ProviderId::new("codex"),
+        )
+        .map(|event| format!("{event:?}"))
+        .collect()
+        .await
+    }
+
+    #[tokio::test]
+    async fn codex_sse_keeps_lossy_decoding_and_reports_incomplete_stream() {
+        let malformed = b"event: response.output_text.delta\ndata: {\"delta\":\"\xff\"}\n\n";
+        let actual = events(
+            malformed
+                .iter()
+                .map(|byte| bytes::Bytes::from(vec![*byte]))
+                .collect(),
+        )
+        .await;
+        assert!(actual
+            .iter()
+            .any(|event| event.contains("TextDelta") && event.contains('\u{fffd}')));
+        assert!(actual
+            .last()
+            .unwrap()
+            .contains("ended before response.completed"));
+        for wire in [
+            b"event: response.output_text.delta\ndata: {\"delta\":\"not dispatched\"}".as_slice(),
+            b"event: response.output_text.delta\ndata: {\"delta\":\"not dispatched\"}\n",
+        ] {
+            let actual = events(vec![bytes::Bytes::copy_from_slice(wire)]).await;
+            assert_eq!(actual.len(), 1);
+            assert!(actual[0].contains("ended before response.completed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_sse_preserves_unicode_at_every_byte_split() {
+        let text = "é中\u{10000}";
+        let wire = format!(
+            "event: response.output_text.delta\r\ndata: {}\r\n\r\nevent: response.function_call_arguments.delta\r\ndata: {}\r\n\r\nevent: response.completed\r\ndata: {}\r\n\r\n",
+            json!({"output_index":0,"delta":text}),
+            json!({"output_index":1,"delta":format!("{{\"name\":\"{text}\"}}")}),
+            json!({"response":{"id":"fixture","model":"codex","usage":{"input_tokens":2,"output_tokens":3}}}),
+        );
+        let expected = events(vec![bytes::Bytes::copy_from_slice(wire.as_bytes())]).await;
+        assert!(expected
+            .iter()
+            .any(|event| event.contains("TextDelta") && event.contains(text)));
+        assert!(expected
+            .iter()
+            .any(|event| event.contains("InputJsonDelta") && event.contains(text)));
+        assert_eq!(expected.last().unwrap(), "Ok(MessageStop)");
+        for split in std::iter::once(wire.find('é').unwrap() + 1).chain(0..=wire.len()) {
+            assert_eq!(
+                events(vec![
+                    bytes::Bytes::copy_from_slice(&wire.as_bytes()[..split]),
+                    bytes::Bytes::copy_from_slice(&wire.as_bytes()[split..])
+                ])
+                .await,
+                expected,
+                "split at byte {split}"
+            );
+        }
+        assert_eq!(
+            events(
+                wire.bytes()
+                    .map(|byte| bytes::Bytes::from(vec![byte]))
+                    .collect()
+            )
+            .await,
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_sse_waits_for_real_blank_line_and_preserves_multiline_data() {
+        let (input, stream) = futures::channel::mpsc::unbounded();
+        let parsed = CodexProvider::parse_stream(stream, ProviderId::new("codex"));
+        tokio::pin!(parsed);
+        for chunk in [
+            "event: response.output_text.delta\n",
+            "data: {\"output_index\":0,\n",
+            "data: \"delta\":\"kept\"}\n",
+        ] {
+            input
+                .unbounded_send(Ok(bytes::Bytes::from_static(chunk.as_bytes())))
+                .unwrap();
+            assert!(
+                parsed.next().now_or_never().is_none(),
+                "frame dispatched before blank line"
+            );
+        }
+        input
+            .unbounded_send(Ok(bytes::Bytes::from_static(b"\n")))
+            .unwrap();
+        drop(input);
+        let events: Vec<_> = parsed.map(|event| format!("{event:?}")).collect().await;
+        assert!(events
+            .iter()
+            .any(|event| event.contains("TextDelta") && event.contains("kept")));
+        assert!(events
+            .last()
+            .unwrap()
+            .contains("ended before response.completed"));
     }
 }
