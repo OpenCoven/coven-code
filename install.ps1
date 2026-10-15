@@ -163,7 +163,15 @@ function Install-FromBinary {
         exit 1
     }
     Write-Info "Installing coven-code from $script:Binary"
-    Install-Binary $script:Binary
+    # Stage before Install-Binary renames existing executables: the source may
+    # itself be the installed engine or alias.
+    $stagedBinary = [System.IO.Path]::GetTempFileName()
+    try {
+        Copy-Item -LiteralPath $script:Binary -Destination $stagedBinary -Force
+        Install-Binary $stagedBinary
+    } finally {
+        Remove-Item -LiteralPath $stagedBinary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-Binary($source) {

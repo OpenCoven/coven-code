@@ -1,0 +1,30 @@
+name: Windows installer tests
+
+on:
+  pull_request:
+    paths:
+      - install.ps1
+      - scripts/test_install_powershell.py
+      - .github/workflows/windows-installer-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - install.ps1
+      - scripts/test_install_powershell.py
+      - .github/workflows/windows-installer-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  local-install:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python scripts/test_install_powershell.py
