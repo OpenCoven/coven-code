@@ -11,6 +11,8 @@
 mod codex_oauth_flow;
 mod diagnostics;
 mod headless;
+#[cfg(all(test, unix))]
+mod mcp_reconnect_tests;
 mod memory_admin;
 mod oauth_flow;
 mod stream_mode;
@@ -1125,6 +1127,31 @@ fn build_tools_with_mcp(
     }
 
     Arc::new(v)
+}
+
+fn replace_mcp_runtime(
+    new_manager: Option<Arc<claurst_mcp::McpManager>>,
+    tool_ctx: &mut ToolContext,
+    cmd_ctx: &mut claurst_commands::CommandContext,
+    app_manager: &mut Option<Arc<claurst_mcp::McpManager>>,
+) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    // Startup and cron owners can retain these managers after reconnect.
+    // Retire only notifications; their ordinary requests remain available.
+    for retired in [&tool_ctx.mcp_manager, &cmd_ctx.mcp_manager, &*app_manager]
+        .into_iter()
+        .flatten()
+    {
+        if !new_manager
+            .as_ref()
+            .is_some_and(|replacement| Arc::ptr_eq(retired, replacement))
+        {
+            retired.shutdown_notification_poll_loops();
+        }
+    }
+    tool_ctx.mcp_manager = new_manager.clone();
+    cmd_ctx.mcp_manager = new_manager.clone();
+    *app_manager = new_manager.clone();
+    filter_tools_for_hosted_review(build_tools_with_mcp(new_manager), &cmd_ctx.config)
 }
 
 fn model_cache_dir() -> PathBuf {
@@ -4912,11 +4939,11 @@ async fn run_interactive(
 
         if !app.is_streaming && current_query.is_none() && app.take_pending_mcp_reconnect() {
             let new_mcp_manager = connect_mcp_manager_arc(&cmd_ctx.config).await;
-            tool_ctx.mcp_manager = new_mcp_manager.clone();
-            app.mcp_manager = new_mcp_manager.clone();
-            tools_arc = filter_tools_for_hosted_review(
-                build_tools_with_mcp(new_mcp_manager.clone()),
-                &cmd_ctx.config,
+            tools_arc = replace_mcp_runtime(
+                new_mcp_manager.clone(),
+                &mut tool_ctx,
+                &mut cmd_ctx,
+                &mut app.mcp_manager,
             );
             if app.mcp_view.visible {
                 app.refresh_mcp_view();
