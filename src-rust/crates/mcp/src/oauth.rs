@@ -383,14 +383,7 @@ pub fn pkce_verifier() -> String {
 }
 
 /// Derive a PKCE code challenge from a verifier (S256 method).
-pub fn pkce_challenge(verifier: &str) -> String {
-    use base64::Engine as _;
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let hash = hasher.finalize();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
-}
+pub use claurst_core::oauth_config::pkce::code_challenge as pkce_challenge;
 
 // ---------------------------------------------------------------------------
 // OAuth port allocation
@@ -647,6 +640,15 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::TokenHomeGuard;
     use super::*;
+
+    #[test]
+    fn pkce_challenge_known_vectors() {
+        // RFC 7636 Appendix B, through the existing public name.
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
 
     #[test]
     fn pkce_challenge_length() {

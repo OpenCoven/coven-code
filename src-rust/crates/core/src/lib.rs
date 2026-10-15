@@ -5260,12 +5260,7 @@ pub mod oauth {
     }
 
     /// Derive the PKCE code challenge from a verifier: BASE64URL(SHA256(verifier)).
-    pub fn generate_code_challenge(verifier: &str) -> String {
-        use base64::Engine;
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(verifier.as_bytes());
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
-    }
+    pub use crate::oauth_config::pkce::code_challenge as generate_code_challenge;
 
     /// Generate a random OAuth state parameter for CSRF protection.
     pub fn generate_state() -> String {
@@ -5889,6 +5884,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tokens.effective_credential(), None);
+    }
+
+    #[test]
+    fn pkce_challenge_known_vectors() {
+        // RFC 7636 Appendix B, through the existing public name.
+        assert_eq!(
+            crate::oauth::generate_code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     // ---- PKCE tests ---------------------------------------------------------

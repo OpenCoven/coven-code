@@ -474,6 +474,24 @@ mod tests {
     }
 
     #[test]
+    fn pkce_challenge_known_vectors() {
+        // RFC 7636 Appendix B, followed by existing arbitrary-byte input behavior.
+        for (verifier, expected) in [
+            (
+                "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            ),
+            ("", "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"),
+            (
+                "caf\u{e9}\0 verifier\n",
+                "zeN61FdGqTIHgquHSzxjV5pZSQVOB34c2FoHI08Rl18",
+            ),
+        ] {
+            assert_eq!(pkce::code_challenge(verifier), expected);
+        }
+    }
+
+    #[test]
     fn test_pkce_code_challenge_is_base64url() {
         let verifier = pkce::generate_code_verifier();
         assert!(!verifier.is_empty());
