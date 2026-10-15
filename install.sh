@@ -54,6 +54,11 @@ EOF
 # Parse args
 specific_version=""; install_dir_override=""; local_binary=""
 while [[ $# -gt 0 ]]; do
+  if [[ $# -lt 2 && ( "$1" == --version || "$1" == --install-dir || "$1" == --binary ) ]]; then
+    print_message error "Missing value for $1" >&2
+    usage >&2
+    exit 1
+  fi
   case "$1" in
     --version) specific_version="$2"; shift 2 ;;
     --install-dir) install_dir_override="$2"; shift 2 ;;
