@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod marketplace;
 pub mod plugin;
 pub mod registry;
+mod trust;
 
 // Re-export the most commonly used items at the crate root.
 pub use hooks::{register_plugin_hooks, HookOutcome, HookRegistry, RegisteredHook};
@@ -24,6 +25,7 @@ pub use plugin::{
     CommandRunAction, LoadedPlugin, PluginCommandDef, PluginError, PluginSource, ReloadDiff,
 };
 pub use registry::PluginRegistry;
+pub use trust::save_plugin_enabled;
 
 // ---------------------------------------------------------------------------
 // Capability enforcement
@@ -94,6 +96,23 @@ pub fn set_global_registry(registry: PluginRegistry) {
 /// Access the global `PluginRegistry`, if it has been set.
 pub fn global_plugin_registry() -> Option<Arc<PluginRegistry>> {
     GLOBAL_PLUGIN_REGISTRY.read().clone()
+}
+
+/// Refresh active plugins after a project transition without activating startup discovery.
+/// A matching registry retains its existing plugins, including explicit extra paths.
+pub async fn refresh_cached_plugins(project_dir: &std::path::Path) {
+    let Some(registry) = global_plugin_registry() else {
+        return;
+    };
+    if registry.matches_project(project_dir) {
+        return;
+    }
+
+    // Retire the previous project's hooks before discovering the new project.
+    set_global_hooks(HookRegistry::new());
+    let registry = load_plugins(project_dir, &[]).await;
+    set_global_hooks(registry.build_hook_registry());
+    set_global_registry(registry);
 }
 
 /// Store the hook registry built from loaded plugins into a process-global
@@ -194,6 +213,8 @@ pub fn run_global_post_tool_hook(
 /// 2. `<project_dir>/.coven-code/plugins/`  (project-local)
 /// 3. Any paths listed in `extra_paths`
 ///
+/// Project plugins are discovered but disabled until the user grants folder
+/// trust with `/plugin enable`. Only engine-global settings authorize them.
 /// Returns a fully populated `PluginRegistry`.  Errors encountered during
 /// loading are stored in `registry.errors` rather than propagated, so the
 /// caller always gets a usable registry even when individual plugins fail.
@@ -202,6 +223,7 @@ pub async fn load_plugins(
     extra_paths: &[std::path::PathBuf],
 ) -> PluginRegistry {
     let mut registry = PluginRegistry::new();
+    registry.project_root = project_dir.canonicalize().ok();
 
     // User plugins.
     {
@@ -225,6 +247,7 @@ pub async fn load_plugins(
         registry.extend(plugins, errors);
     }
 
+    trust::apply_saved_state(&mut registry, project_dir);
     registry
 }
 
@@ -346,6 +369,10 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
         out.push('\n');
     }
 
+    if all.iter().any(|p| p.source == PluginSource::Project) {
+        out.push_str("\nProject plugins require `/plugin enable <name>` to trust their folder for this project, including future changes.\n");
+    }
+
     if registry.error_count() > 0 {
         out.push_str(&format!(
             "\n{} plugin load error{}:\n",
@@ -389,6 +416,9 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
             ));
             out.push_str(&format!("Source: {}\n", p.source_id));
             out.push_str(&format!("Path: {}\n", p.path.display()));
+            if p.source == PluginSource::Project {
+                out.push_str("Trust: `/plugin enable` authorizes this folder for this project, including future changes.\n");
+            }
 
             // Count commands.
             let cmd_defs = loader::collect_command_defs(p);
@@ -806,7 +836,7 @@ mod tests {
         let reg = load_plugins(tmp.path(), &[]).await;
         assert_eq!(reg.plugin_count(), 1);
         assert!(reg.get("test-plugin").is_some());
-        assert!(reg.is_enabled("test-plugin"));
+        assert!(!reg.is_enabled("test-plugin"));
     }
 
     #[test]

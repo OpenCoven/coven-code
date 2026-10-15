@@ -2171,12 +2171,13 @@ impl SlashCommand for UsageCommand {
 
 async fn loaded_plugin_registry(project_dir: &std::path::Path) -> claurst_plugins::PluginRegistry {
     if let Some(global) = claurst_plugins::global_plugin_registry() {
-        (*global).clone()
-    } else {
-        let registry = claurst_plugins::load_plugins(project_dir, &[]).await;
-        publish_plugin_registry(&registry);
-        registry
+        if global.matches_project(project_dir) {
+            return (*global).clone();
+        }
     }
+    let registry = claurst_plugins::load_plugins(project_dir, &[]).await;
+    publish_plugin_registry(&registry);
+    registry
 }
 
 fn publish_plugin_registry(registry: &claurst_plugins::PluginRegistry) {
@@ -2215,7 +2216,9 @@ impl SlashCommand for PluginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /plugin [list|info <name>|enable <name>|disable <name>|install <path>|reload]\n\
-         Manage Coven plugins.\n\n\
+         Manage Coven plugins. Project plugins start disabled. Enabling one trusts\n\
+         its folder for this project, including future changes; consent is stored\n\
+         in user settings. See docs/plugin-trust.md.\n\n\
          Subcommands:\n\
            /plugin              — list all installed plugins\n\
            /plugin list         — list all installed plugins\n\
@@ -2242,19 +2245,24 @@ impl SlashCommand for PluginCommand {
                 )
             }
             claurst_plugins::PluginSubCommand::Enable(name) => {
-                let registry = loaded_plugin_registry(&project_dir).await;
-                if registry.get(&name).is_none() {
+                let mut registry = loaded_plugin_registry(&project_dir).await;
+                let Some(plugin) = registry.get(&name) else {
                     return CommandResult::Error(format!(
                         "Plugin '{}' not found. Use `/plugin list` to see installed plugins.",
                         name
                     ));
+                };
+                if let Err(error) = claurst_plugins::save_plugin_enabled(&project_dir, plugin, true)
+                {
+                    return CommandResult::Error(format!(
+                        "Failed to enable plugin '{}': {error:#}",
+                        name
+                    ));
                 }
-                let mut settings = claurst_core::config::Settings::load_sync().unwrap_or_default();
-                settings.enabled_plugins.insert(name.clone());
-                settings.disabled_plugins.remove(&name);
-                let _ = settings.save_sync();
+                registry.enable(&name);
+                publish_plugin_registry(&registry);
                 CommandResult::Message(format!(
-                    "Plugin '{}' enabled. Run `/plugin reload` to apply changes in this session.",
+                    "Plugin '{}' enabled. Run `/plugin reload` to refresh contributed resources.",
                     name
                 ))
             }
@@ -2265,19 +2273,25 @@ impl SlashCommand for PluginCommand {
                 )
             }
             claurst_plugins::PluginSubCommand::Disable(name) => {
-                let registry = loaded_plugin_registry(&project_dir).await;
-                if registry.get(&name).is_none() {
+                let mut registry = loaded_plugin_registry(&project_dir).await;
+                let Some(plugin) = registry.get(&name) else {
                     return CommandResult::Error(format!(
                         "Plugin '{}' not found. Use `/plugin list` to see installed plugins.",
                         name
                     ));
+                };
+                if let Err(error) =
+                    claurst_plugins::save_plugin_enabled(&project_dir, plugin, false)
+                {
+                    return CommandResult::Error(format!(
+                        "Failed to disable plugin '{}': {error:#}",
+                        name
+                    ));
                 }
-                let mut settings = claurst_core::config::Settings::load_sync().unwrap_or_default();
-                settings.disabled_plugins.insert(name.clone());
-                settings.enabled_plugins.remove(&name);
-                let _ = settings.save_sync();
+                registry.disable(&name);
+                publish_plugin_registry(&registry);
                 CommandResult::Message(format!(
-                    "Plugin '{}' disabled. Run `/plugin reload` to apply changes in this session.",
+                    "Plugin '{}' disabled. Its commands and hooks are disabled in this session.",
                     name
                 ))
             }
@@ -2316,17 +2330,9 @@ impl SlashCommand for PluginCommand {
                 publish_plugin_registry(&new_registry);
                 CommandResult::Message(summary)
             }
-            claurst_plugins::PluginSubCommand::Help => CommandResult::Message(
-                "Plugin commands:\n\
-                     /plugin              — list all installed plugins\n\
-                     /plugin list         — list all installed plugins\n\
-                     /plugin info <name>  — show plugin details\n\
-                     /plugin enable <name>   — enable a plugin\n\
-                     /plugin disable <name>  — disable a plugin\n\
-                     /plugin install <path>  — install plugin from local path\n\
-                     /plugin reload       — reload plugins from disk"
-                    .to_string(),
-            ),
+            claurst_plugins::PluginSubCommand::Help => {
+                CommandResult::Message(self.help().to_string())
+            }
         }
     }
 }
@@ -11499,7 +11505,8 @@ pub async fn execute_command(input: &str, ctx: &mut CommandContext) -> Option<Co
     }
 
     // Then check plugin-defined slash commands.
-    if let Some(registry) = claurst_plugins::global_plugin_registry() {
+    if claurst_plugins::global_plugin_registry().is_some() {
+        let registry = loaded_plugin_registry(&ctx.working_dir).await;
         for cmd_def in registry.all_command_defs() {
             if cmd_def.name == cmd_name {
                 let adapter = PluginSlashCommandAdapter { def: cmd_def };
@@ -11722,6 +11729,30 @@ mod tests {
                 resolution.lifecycle,
                 catalog::CommandLifecycle::Active
             ));
+        }
+    }
+
+    #[test]
+    fn plugin_toggles_resolve_to_parent_with_arguments_intact() {
+        use claurst_plugins::PluginSubCommand;
+        for command in ["plugin", "plugins"] {
+            for (args, expected) in [
+                (
+                    "enable fixture",
+                    PluginSubCommand::Enable("fixture".to_string()),
+                ),
+                (
+                    "disable fixture",
+                    PluginSubCommand::Disable("fixture".to_string()),
+                ),
+            ] {
+                let input = format!("/{command} {args}");
+                let (name, parsed_args) = claurst_tui::input::parse_slash_command(&input);
+                let resolution = resolve_catalog_command(name, parsed_args).unwrap();
+                assert_eq!(resolution.path, "plugin");
+                assert_eq!(resolution.dispatch_args, args);
+                assert_eq!(claurst_plugins::parse_plugin_args(parsed_args), expected);
+            }
         }
     }
 
