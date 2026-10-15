@@ -61,35 +61,49 @@ Each tool is assigned a conceptual permission level based on what it can do:
 
 ### Permission Modes
 
-The active permission mode controls how `checkPermissions()` behaves:
+The core permission manager evaluates tool names and target paths, rather than
+using the conceptual levels above as a universal approval matrix. The following
+are defaults when no explicit rule matches:
 
-| Mode | Behavior |
-|------|----------|
-| `default` | Prompts the user for any tool that isn't pre-approved |
-| `plan` | All write/execute tools are blocked; read-only tools run freely |
-| `auto` | Non-destructive tools run without prompting; destructive tools prompt |
-| `acceptEdits` | File edits are auto-approved; shell execution still prompts |
-| `bypassPermissions` | All tools run without prompting (headless/CI use) |
+| Settings mode | Permission-manager behavior |
+|---------------|-----------------------------|
+| `default` | Allows workspace reads; asks for outside-root reads, MCP resources, writes, execution, and network access |
+| `plan` | Allows reads and denies other operations; explicit rules are evaluated first |
+| `acceptEdits` | Auto-approves only `Edit` after rule evaluation; other operations retain default checks |
+| `bypassPermissions` | Allows before evaluating permission rules; separate tool guards and availability restrictions still apply |
 
-### Interactive vs. Auto Mode
+There is no `auto` settings mode. CLI spellings use kebab-case:
+`--permission-mode accept-edits` and `--permission-mode bypass-permissions`.
+None of these modes is an operating-system sandbox.
 
-**Interactive mode** (default REPL): Coven Code presents a confirmation prompt for any tool that lacks a pre-existing approval rule. The user can approve once, approve always (adding a permanent rule), or deny.
+### Interactive and headless execution
 
-**Auto mode** (`--dangerously-skip-permissions` or `bypassPermissions`): No prompts are shown. All tool calls execute immediately. Use only in trusted, sandboxed environments.
+An interactive session can present requests needing approval. When a permission
+handler returns `Ask` in headless mode, `ToolContext` denies the request instead
+of waiting for input. Headless operation does not require bypass mode.
 
 ### Permission Rules
 
-Rules are stored per-project and per-user. A rule specifies:
+Rules have session or persistent scope. Persisted rules come from trusted
+settings; project-local settings cannot inject them. Each rule contains:
 
-- **Tool name** (or glob pattern matching tool names)
-- **Path pattern** (optional, for file tools)
-- **Decision**: `allow` or `deny`
+- An optional exact tool name; absence matches any tool (not a tool-name glob).
+- An optional path glob; a rule requiring a path cannot match a request without one.
+- An allow or deny action.
 
-Rules are evaluated in order; the first match wins. Manage rules with `/permissions`.
+Except in bypass mode, any matching deny wins over matching allows. Rules are
+evaluated before mode defaults, including plan mode. Manage rules with
+`/permissions`. See [configuration](configuration.md#permission-modes) for more.
 
-### Read-Before-Write Enforcement
+### File target checks
 
-File write tools check whether the file was read in the current session before allowing a write. This prevents overwriting files the model has not examined. The `readFileState` map in `ToolUseContext` tracks reads.
+`Write`, `Edit`, and `ApplyPatch` evaluate path-scoped rules against the resolved
+filesystem target, including existing symlinks and missing suffixes for new files.
+The same resolved path is used for content access and mutation. These checks do
+not prevent a concurrent process from changing the filesystem after approval.
+
+The Edit tool instructs the model to read first, but Write and Edit do not enforce
+a prior-read prerequisite. They record previous content for file history.
 
 ---
 
@@ -600,7 +614,7 @@ Edit a Jupyter notebook (`.ipynb`) by modifying, inserting, or deleting cells. O
 
 **Permission level:** Execute
 
-Switch the agent into plan mode. In plan mode, all write and execute tools are blocked. The agent can only read files, search, and reason. Used to draft an approach before taking action.
+Switch the agent into plan mode to draft an approach before taking action. The permission manager defaults to reads only, subject to the rule precedence described above.
 
 No parameters.
 
@@ -851,38 +865,36 @@ Calling this tool in an interactive session has no effect; the confirmation stri
 
 ## Tool Framework Internals
 
-### ToolUseContext
+### ToolContext
 
-Every tool receives a `ToolUseContext` at call time. Key fields:
+The Rust `Tool` trait receives `&ToolContext` in `execute()`. Selected fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `options` | object | Session options: loaded tools, commands, model config |
-| `abortController` | AbortController | Abort signal; check `signal.aborted` in long-running operations |
-| `getAppState()` | function | Read current TUI app state |
-| `setAppState()` | function | Update TUI app state |
-| `readFileState` | Map | Tracks file reads (path -> mtime + content) |
-| `permissionContext` | object | Current permission mode and rules |
-| `setToolJSX` | function | Inject a React/Ink component into the TUI |
-| `onPermissionRequest()` | function | Callback to request a permission decision |
-| `agentId` | string | Identifier of the calling agent (if sub-agent) |
-| `isSubagent` | boolean | True when running as a sub-agent |
+| Field | Purpose |
+|-------|---------|
+| `working_dir` | Base directory for relative paths |
+| `permission_mode` | Configured permission mode |
+| `permission_handler` | Shared handler deciding permission requests |
+| `config` | Runtime configuration, including hooks and additional roots |
+| `session_id` | Current session identity |
+| `file_history` | Shared file-history state |
+| `non_interactive` | Deny requests that require an interactive prompt |
+| `mcp_manager` | Optional connected MCP manager |
+| `pending_permissions` | Optional queue for TUI approval dialogs |
+| `permission_manager` | Optional shared rule manager |
+| `user_question_tx` | Optional TUI question channel |
 
-### ToolPermissionContext
-
-| Field | Values | Description |
-|-------|--------|-------------|
-| `mode` | `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions` | Active permission mode |
-| `allowedTools` | string[] | Explicitly pre-approved tool names |
-| `deniedTools` | string[] | Explicitly blocked tool names |
-| `rules` | PermissionRule[] | Path/tool pattern rules |
+`check_permission` and `check_permission_for_path` construct a
+`PermissionRequest` and call the configured handler. Path-sensitive requests
+include the target, working directory, and additional allowed roots.
 
 ### PermissionDecision
 
-The return value of `checkPermissions()`:
+The core Rust enum has `Allow`, `AllowPermanently`, `Deny`, `DenyPermanently`,
+and `Ask { reason }` variants. `ToolContext` accepts either allow variant,
+queues interactive asks when a TUI queue exists, and returns a permission error
+for denied requests or asks that cannot be presented.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `behavior` | `allow`, `deny`, `ask` | Resolved decision |
-| `updatedInput` | object | Optionally-modified input (e.g., path normalization) |
-| `reason` | string | Human-readable explanation for the decision |
+The authoritative definitions are in
+[`crates/tools/src/lib.rs`](../src-rust/crates/tools/src/lib.rs) and the
+`permissions` module in
+[`crates/core/src/lib.rs`](../src-rust/crates/core/src/lib.rs).

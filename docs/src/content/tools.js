@@ -7,9 +7,9 @@ export function render() {
 
     <h2>Permissions</h2>
 
-    <p>Every tool is gated by a <strong>permission level</strong> (None / ReadOnly / Write / Execute / Dangerous) and the session's active <strong>permission mode</strong>. Modes decide whether each level runs, prompts, or is blocked. Pick a mode below to see how the matrix shifts.</p>
+    <p>The examples below show permission-manager decisions when no explicit rule matches. Reads assume a known target path inside or outside the allowed roots as indicated. Tool availability, hosted policy, and tool-specific validation can impose further restrictions.</p>
 
-    <p>Permission rules are evaluated per-project and per-user — first match wins. Manage them with <code>/permissions</code>.</p>
+    <p>Except in bypass mode, matching deny rules take precedence over matching allow rules; both are evaluated before the mode defaults, including plan mode. Project-local persisted permission rules are ignored. Manage trusted rules with <code>/permissions</code>.</p>
 
     <div class="demo" x-data="permissionViz">
       <div class="demo-header">
@@ -40,6 +40,8 @@ export function render() {
         </div>
       </div>
     </div>
+
+    <p>“Requires approval” means an interactive session can ask you. Headless execution denies requests that need interactive approval unless an applicable policy allows them. Bypass mode is not required for headless use. Settings use <code>acceptEdits</code> and <code>bypassPermissions</code>; CLI flags use <code>accept-edits</code> and <code>bypass-permissions</code>.</p>
 
     <h2>Browse the Toolkit</h2>
 
