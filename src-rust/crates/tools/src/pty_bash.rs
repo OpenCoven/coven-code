@@ -13,12 +13,13 @@
 use crate::{session_shell_state, PermissionLevel, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
 use claurst_core::bash_classifier::{classify_bash_command, BashRiskLevel};
-use claurst_core::tasks::{global_registry, BackgroundTask};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(windows)]
 use tokio::process::Command;
 use tracing::debug;
 
@@ -140,94 +141,11 @@ exit $__CC_EXIT_CODE
 }
 
 // ---------------------------------------------------------------------------
-// Background execution (identical to bash.rs — no PTY needed for background)
+// Background execution (no PTY needed for background)
 // ---------------------------------------------------------------------------
 
 async fn run_in_background(command: String, cwd: PathBuf, timeout_ms: u64) -> ToolResult {
-    let task_name = format!("bg: {}", &command[..command.len().min(60)]);
-    let mut task = BackgroundTask::new(&task_name);
-    task.pid = None;
-    let task_id = global_registry().register(task);
-    let task_id_clone = task_id.clone();
-    let command_clone = command.clone();
-
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let child = if cfg!(windows) {
-            Command::new("cmd")
-                .arg("/C")
-                .arg(&command_clone)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-        } else {
-            Command::new("bash")
-                .arg("-c")
-                .arg(&command_clone)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-        };
-
-        match child {
-            Ok(mut c) => {
-                let result = tokio::time::timeout_at(deadline, async {
-                    if let Some(pid) = c.id() {
-                        global_registry().set_pid(&task_id_clone, pid);
-                    }
-                    let stdout = c.stdout.take();
-                    let stderr = c.stderr.take();
-                    crate::shell_pipe::drain_background(stdout, stderr, &task_id_clone).await;
-
-                    match c.wait().await {
-                        Ok(status) if status.success() => {
-                            global_registry().complete(&task_id_clone);
-                        }
-                        Ok(status) => {
-                            let code = status.code().unwrap_or(-1);
-                            global_registry().update_status(
-                                &task_id_clone,
-                                claurst_core::tasks::TaskStatus::Failed(format!(
-                                    "exit code {}",
-                                    code
-                                )),
-                            );
-                        }
-                        Err(e) => {
-                            global_registry().update_status(
-                                &task_id_clone,
-                                claurst_core::tasks::TaskStatus::Failed(e.to_string()),
-                            );
-                        }
-                    }
-                })
-                .await;
-                if result.is_err() {
-                    let mut message = format!("timed out after {}ms", timeout_ms);
-                    // kill() also waits for the owned child to be reaped.
-                    if let Err(error) = c.kill().await {
-                        message.push_str(&format!("; failed to kill/reap child: {}", error));
-                    }
-                    global_registry().update_status(
-                        &task_id_clone,
-                        claurst_core::tasks::TaskStatus::Failed(message),
-                    );
-                }
-            }
-            Err(e) => {
-                global_registry().update_status(
-                    &task_id_clone,
-                    claurst_core::tasks::TaskStatus::Failed(e.to_string()),
-                );
-            }
-        }
-    });
+    let task_id = crate::background_shell::spawn(&command, cwd, timeout_ms);
 
     ToolResult::success(format!(
         "Command started in background.\nTask ID: {}\nCommand: {}",
