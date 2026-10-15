@@ -3,27 +3,26 @@ export const meta = { title: 'Providers' };
 export function render() {
   return `
     <h1>LLM Providers</h1>
-    <p class="lead">Coven Code supports a wide range of LLM providers through a unified <code>LlmProvider</code> trait. Switching between them requires only a configuration change.</p>
+    <p class="lead">Coven Code supports exactly two providers: Anthropic (Claude) and Codex (OpenAI Codex through ChatGPT OAuth).</p>
 
     <h2>Selecting a Provider</h2>
 
     <p>Use <code>--provider</code> on any invocation to override the active provider:</p>
 
-    <pre><code data-lang="bash">coven-code --provider openai "refactor this module"
-coven-code --provider ollama "explain this function"
-coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code></pre>
+    <pre><code data-lang="bash">coven-code --provider anthropic "refactor this module"
+coven-code --provider codex "explain this function"</code></pre>
 
-    <p>Or set it persistently in <code>~/.coven-code/settings.json</code>:</p>
+    <p>Set <code>provider</code> in the engine-global <code>settings.json</code> to persist selection. The default home is <code>~/.coven-code</code> for standalone use or <code>~/.coven/code</code> under Coven; <code>COVEN_CODE_HOME</code> overrides it.</p>
 
     <pre><code data-lang="json">{
-  "provider": "openai"
+  "provider": "anthropic"
 }</code></pre>
 
     <p>When no provider is specified, Coven Code defaults to <strong>Anthropic</strong>.</p>
 
     <h2>Browse Providers</h2>
 
-    <p>Type to filter by id, env var, or model family. Use the chips to narrow to cloud, aggregator, or local providers.</p>
+    <p>Search the two supported provider identities by name, authentication method, or model family.</p>
 
     <div class="demo" x-data="providerExplorer">
       <div class="demo-header">
@@ -34,7 +33,7 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
           <input
             type="text"
             class="explorer-input"
-            placeholder="Search providers — try 'gemini', 'local', 'bedrock', 'API_KEY'…"
+            placeholder="Search providers — try 'Claude', 'Codex', 'OAuth', 'API_KEY'…"
             x-model="query"
             aria-label="Search providers"
           />
@@ -80,20 +79,19 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
 
     <h2>Anthropic (Default)</h2>
 
-    <p>Uses the <code>/v1/messages</code> streaming endpoint. Authenticate via <code>ANTHROPIC_API_KEY</code> or run <code>/login</code> for OAuth.</p>
+    <p>With an Anthropic API key, requests use the Messages API. Without a key, turns run through the local <code>claude</code> CLI, which owns its authentication. Coven Code does not import or replay its OAuth tokens. Set <code>ANTHROPIC_API_KEY</code> or use <code>/account connect</code> for setup.</p>
 
-    <table>
-      <thead><tr><th>Model ID</th><th>Context</th><th>Max Output</th><th>Input ($/1M)</th><th>Output ($/1M)</th></tr></thead>
-      <tbody>
-        <tr><td><code>claude-fable-5</code></td><td>1,000,000</td><td>128,000</td><td>$10.00</td><td>$50.00</td></tr>
-        <tr><td><code>claude-opus-4-8</code></td><td>1,000,000</td><td>128,000</td><td>$5.00</td><td>$25.00</td></tr>
-        <tr><td><code>claude-opus-4-6</code></td><td>200,000</td><td>32,000</td><td>$15.00</td><td>$75.00</td></tr>
-        <tr><td><code>claude-sonnet-4-6</code></td><td>200,000</td><td>16,000</td><td>$3.00</td><td>$15.00</td></tr>
-        <tr><td><code>claude-haiku-4-5-20251001</code></td><td>200,000</td><td>8,096</td><td>$0.80</td><td>$4.00</td></tr>
-      </tbody>
-    </table>
+    <p>The separate direct Anthropic OAuth flow requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>. It is not a Claude CLI credential-import path.</p>
 
-    <p>All Anthropic models support tool calling, vision, and extended reasoning.</p>
+    <h2>Codex</h2>
+    <p>Sign in with ChatGPT OAuth using the engine's browser login. This provider does not use a standalone OpenAI API key.</p>
+    <pre><code data-lang="bash">coven-code codex login
+coven-code --provider codex</code></pre>
+
+    <h2>Model Catalog</h2>
+    <p>Model defaults and availability depend on the installed catalog and account. Inspect the resolved catalog instead of relying on a static pricing table; an entry does not guarantee subscription entitlement.</p>
+    <pre><code data-lang="bash">coven-code models anthropic
+coven-code models codex --json</code></pre>
 
     <h2>Per-Provider Configuration</h2>
 
@@ -105,13 +103,10 @@ coven-code --provider groq --model llama-3.3-70b-versatile "write tests"</code><
     "anthropic": {
       "api_key": "sk-ant-...",
       "models_whitelist": ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
-    },
-    "ollama": {
-      "base_url": "http://localhost:11434"
     }
   }
 }</code></pre>
 
-    <p>See <a href="https://github.com/OpenCoven/coven-code/blob/main/docs/providers.md" target="_blank" rel="noopener">the full providers reference</a> for endpoint URLs, model lists, and per-provider quirks.</p>
+    <p>See <a href="https://github.com/OpenCoven/coven-code/blob/main/docs/providers.md" target="_blank" rel="noopener">the full providers reference</a> for configuration fields and model catalog behavior.</p>
   `;
 }

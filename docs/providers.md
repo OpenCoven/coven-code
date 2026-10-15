@@ -1,6 +1,6 @@
 # LLM Providers
 
-Coven Code talks to Claude through a unified provider abstraction. Every provider implements the same `LlmProvider` trait, so switching between authentication modes requires only a configuration change. Two providers are supported: **Anthropic** (Claude) and **Codex** (OpenAI's Codex, accessed through a ChatGPT/Codex OAuth login).
+Coven Code supports two providers through a common `LlmProvider` interface: **Anthropic** (Claude) and **Codex** (OpenAI's Codex, accessed through a ChatGPT/Codex OAuth login).
 
 ---
 
@@ -13,7 +13,9 @@ coven-code --provider anthropic "refactor this module"
 coven-code --provider codex "explain this function"
 ```
 
-The provider can also be set persistently in `~/.coven-code/settings.json`:
+The provider can also be set in the engine-global `settings.json`: normally
+`~/.coven-code/settings.json` for standalone use or `~/.coven/code/settings.json`
+under Coven. `COVEN_CODE_HOME` can override the engine home. For example:
 
 ```json
 {
@@ -29,28 +31,27 @@ When no provider is specified, Coven Code defaults to **Anthropic**.
 
 ### Anthropic (default)
 
-The default provider. Uses the `/v1/messages` streaming endpoint.
+Claude has two transports. With an Anthropic API key, the engine sends requests
+to the Anthropic Messages API. Without an API key, turns run through the local
+`claude` binary. That CLI owns its authentication; Coven Code does not import or
+replay Claude CLI OAuth tokens.
 
-**Authentication:** `ANTHROPIC_API_KEY` environment variable, set `api_key` in `settings.json`, or sign in with an Anthropic OAuth profile (Claude.ai / Console). See [auth.md](auth.md) for the OAuth flow.
+Set `ANTHROPIC_API_KEY` or configure an engine-owned key. Use `/account connect`
+for provider setup and `/account` for account management. The separate
+`coven-code auth login` flow requires a configured
+`COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`; it is not a Claude CLI token-import path.
 
-**Default model:** when no model is set, Coven Code picks the highest-priority
-available Claude for the active provider — the newest flagship Opus. With the
-live [models.dev](https://models.dev) catalog (fetched and cached on startup)
-that is `claude-opus-4-8`; offline, the bundled snapshot tops out at
-`claude-opus-4-7`. See [Model Registry](#model-registry) for the selection rules.
+Model availability and defaults depend on the installed catalog and account.
+Inspect the engine's resolved models rather than relying on a static price or
+context-window table:
 
-**Selected models (offline bundled snapshot — not exhaustive; the live catalog
-adds newer models such as `claude-opus-4-8` and `claude-fable-5`):**
+```bash
+coven-code models anthropic
+coven-code models anthropic --json
+```
 
-| Model ID | Context Window | Max Output | Input ($/1M) | Output ($/1M) |
-|---|---|---|---|---|
-| `claude-opus-4-7` | 1,000,000 | 128,000 | $5.00 | $25.00 |
-| `claude-opus-4-6` | 1,000,000 | 128,000 | $5.00 | $25.00 |
-| `claude-sonnet-4-6` | 1,000,000 | 64,000 | $3.00 | $15.00 |
-| `claude-haiku-4-5` | 200,000 | 64,000 | $1.00 | $5.00 |
-
-Run `coven-code models anthropic` for the full, up-to-date list with pricing.
-All Anthropic 4.x models support tool calling, vision, and extended reasoning.
+The catalog describes model metadata; it does not guarantee account entitlement.
+Verify current provider pricing before estimating costs.
 
 **Configuration:**
 
@@ -74,27 +75,16 @@ All Anthropic 4.x models support tool calling, vision, and extended reasoning.
 
 Runs Claude-style coding sessions against OpenAI's Codex using your ChatGPT/Codex subscription. Authentication is OAuth-only — there is no standalone API key path.
 
-**Authentication:** Sign in with `coven-code codex login` (ChatGPT/Codex OAuth). Tokens are stored per profile under `~/.coven-code/accounts/codex/<id>/`. See [auth.md](auth.md) for the multi-account flow.
+**Authentication:** Sign in with `coven-code codex login` (ChatGPT/Codex OAuth). Tokens are stored in the effective engine home; account profiles use `accounts/codex/<id>/`. See [auth.md](auth.md) for the multi-account flow.
 
-**Default model:** `gpt-5.6-sol`
+Inspect the models available to the installed engine:
 
-**Bundled Codex model list:**
+```bash
+coven-code models codex
+coven-code models codex --json
+```
 
-| Model ID | Notes |
-|---|---|
-| `gpt-5.6-sol` | Default; latest frontier agentic coding model |
-| `gpt-5.6-terra` | Balanced agentic coding model for everyday work |
-| `gpt-5.6-luna` | Fast, affordable model for lighter tasks and subagents |
-| `gpt-5.5` | Previous default |
-| `gpt-5.4` | Frontier Codex model |
-| `gpt-5.4-mini` | Fast/lower-cost model for lighter coding tasks and subagents |
-| `gpt-5.3-codex-spark` | Research preview for ChatGPT Pro users |
-| `gpt-5.3-codex` | Deprecated for ChatGPT sign-in; retained for explicit selection |
-| `gpt-5.2-codex` | Legacy Codex/API-key compatibility model |
-| `gpt-5.1-codex` | Legacy Codex model |
-| `gpt-5.1-codex-mini` | Legacy mini model |
-| `gpt-5.1-codex-max` | Legacy max model |
-| `gpt-5.2` | Deprecated for ChatGPT sign-in; retained for explicit selection |
+Model catalog entries do not guarantee availability for a particular subscription.
 
 **Configuration:**
 
@@ -110,7 +100,7 @@ Codex credentials are managed entirely through the OAuth login; you do not place
 
 ## Per-Provider Configuration in settings.json
 
-The `providers` map in `~/.coven-code/settings.json` accepts per-provider `ProviderConfig` objects:
+The `providers` map in the engine-global `settings.json` accepts per-provider `ProviderConfig` objects:
 
 ```json
 {
