@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const { pipeline } = require('stream/promises');
 
 const pkg = require('./package.json');
 const checksums = require('./checksums.json');
@@ -40,50 +41,31 @@ function getPlatform() {
   );
 }
 
-function download(url, dest) {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') {
-      reject(new Error(`Refusing to download non-HTTPS URL: ${url}`));
-      return;
-    }
+async function download(url, dest, redirects = 0) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`Refusing to download non-HTTPS URL: ${url}`);
+  }
 
-    const file = fs.createWriteStream(dest);
-    https.get(url, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-        file.close();
-        try { fs.unlinkSync(dest); } catch (_) {}
-        if (!res.headers.location) {
-          reject(new Error(`Redirect without Location header downloading ${url}`));
-          return;
-        }
-        let location;
-        try {
-          location = new URL(res.headers.location, url).toString();
-        } catch (err) {
-          reject(err);
-          return;
-        }
-        download(location, dest).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        file.close();
-        try { fs.unlinkSync(dest); } catch (_) {}
-        reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(resolve));
-      file.on('error', (err) => {
-        try { fs.unlinkSync(dest); } catch (_) {}
-        reject(err);
-      });
-    }).on('error', (err) => {
-      try { fs.unlinkSync(dest); } catch (_) {}
-      reject(err);
-    });
+  const res = await new Promise((resolve, reject) => {
+    https.get(url, resolve).on('error', reject);
   });
+  if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+    res.destroy();
+    if (redirects >= 5) {
+      throw new Error(`Too many redirects downloading ${url}`);
+    }
+    if (!res.headers.location) {
+      throw new Error(`Redirect without Location header downloading ${url}`);
+    }
+    const location = new URL(res.headers.location, url).toString();
+    return download(location, dest, redirects + 1);
+  }
+  if (res.statusCode !== 200) {
+    res.destroy();
+    throw new Error(`HTTP ${res.statusCode} downloading ${url}`);
+  }
+  await pipeline(res, fs.createWriteStream(dest));
 }
 
 function sha256File(filePath) {
@@ -115,7 +97,6 @@ async function main() {
   const { artifact, ext, archive } = getPlatform();
   const archiveName = `${artifact}${archive}`;
   const url = `${BASE_URL}/${archiveName}`;
-  const tmpPath = path.join(os.tmpdir(), `coven-code-install-${process.pid}${archive}`);
   const binaryDest = path.join(NATIVE_DIR, `coven-code${ext}`);
 
   if (fs.existsSync(binaryDest)) {
@@ -125,34 +106,42 @@ async function main() {
 
   fs.mkdirSync(NATIVE_DIR, { recursive: true });
 
-  console.log(`coven-code: downloading v${VERSION} for ${process.platform}/${process.arch}`);
-  console.log(`            ${url}`);
-  await download(url, tmpPath);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coven-code-install-'));
+  try {
+    const tmpPath = path.join(tmpDir, archiveName);
+    console.log(`coven-code: downloading v${VERSION} for ${process.platform}/${process.arch}`);
+    console.log(`            ${url}`);
+    await download(url, tmpPath);
 
-  console.log('coven-code: verifying checksum...');
-  verifyChecksum(tmpPath, archiveName);
+    console.log('coven-code: verifying checksum...');
+    verifyChecksum(tmpPath, archiveName);
 
-  console.log('coven-code: extracting...');
-  if (archive === '.zip') {
-    execFileSync('powershell', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      `Expand-Archive -Force -Path "${tmpPath}" -DestinationPath "${NATIVE_DIR}"`
-    ]);
-  } else {
-    execFileSync('tar', ['-xzf', tmpPath, '-C', NATIVE_DIR]);
+    console.log('coven-code: extracting...');
+    if (archive === '.zip') {
+      execFileSync('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -Force -Path "${tmpPath}" -DestinationPath "${NATIVE_DIR}"`
+      ]);
+    } else {
+      execFileSync('tar', ['-xzf', tmpPath, '-C', NATIVE_DIR]);
+    }
+
+    if (!fs.existsSync(binaryDest)) {
+      throw new Error(`Extraction succeeded but binary not found at ${binaryDest}`);
+    }
+
+    if (ext === '') {
+      fs.chmodSync(binaryDest, 0o755);
+    }
+
+    console.log(`coven-code: ready — run \`coven-code\` to start.`);
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`coven-code: could not remove temporary directory ${tmpDir}: ${err.message}`);
+    }
   }
-
-  try { fs.unlinkSync(tmpPath); } catch (_) {}
-
-  if (!fs.existsSync(binaryDest)) {
-    throw new Error(`Extraction succeeded but binary not found at ${binaryDest}`);
-  }
-
-  if (ext === '') {
-    fs.chmodSync(binaryDest, 0o755);
-  }
-
-  console.log(`coven-code: ready — run \`coven-code\` to start.`);
 }
 
 main().catch((err) => {
