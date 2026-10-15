@@ -71,19 +71,10 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    fn temp_path(name: &str) -> std::path::PathBuf {
-        // Unique-enough per test name; avoids pulling in a tempdir dep.
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("coven-secret-file-test-{name}"));
-        // Clean any leftover from a prior run.
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    }
-
     #[test]
     fn sync_writes_contents_and_tightens_mode() {
-        let dir = temp_path("sync");
-        let path = dir.join("nested").join("secret.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("secret.json");
         write_secret_file_sync(&path, b"{\"token\":\"abc\"}").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"token\":\"abc\"}");
@@ -96,14 +87,12 @@ mod tests {
                 "parent dir should be owner-only"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn sync_resets_loose_mode_on_existing_file() {
-        let dir = temp_path("reset");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("secret.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
         std::fs::write(&path, b"old").unwrap();
         #[cfg(unix)]
         set_mode(&path, 0o644).unwrap();
@@ -112,13 +101,12 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         #[cfg(unix)]
         assert_eq!(mode_of(&path), 0o600, "mode should be re-tightened to 0600");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn async_writes_contents_and_tightens_mode() {
-        let dir = temp_path("async");
-        let path = dir.join("secret.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("secret.json");
         write_secret_file(&path, b"async-secret").await.unwrap();
 
         assert_eq!(
@@ -127,6 +115,5 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(mode_of(&path), 0o600);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
