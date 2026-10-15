@@ -140,12 +140,12 @@ pub fn execute_import(selection: ImportSelection) -> Result<ImportExecutionResul
     let paths = ImportPaths::detect();
 
     let original_claude_md = if prepared.claude_md_content.is_some() {
-        std::fs::read_to_string(&paths.target_claude_md).ok()
+        read_original(&paths.target_claude_md)?
     } else {
         None
     };
     let original_settings = if prepared.merged_settings.is_some() {
-        std::fs::read_to_string(&paths.target_settings_json).ok()
+        read_original(&paths.target_settings_json)?
     } else {
         None
     };
@@ -155,12 +155,12 @@ pub fn execute_import(selection: ImportSelection) -> Result<ImportExecutionResul
 
     let result = (|| -> Result<()> {
         if let Some(content) = &prepared.claude_md_content {
-            atomic_write_text(&paths.target_claude_md, content)?;
+            atomic_write_file(&paths.target_claude_md, content.as_bytes())?;
             wrote_claude_md = true;
         }
         if let Some(settings) = &prepared.merged_settings {
             let content = serde_json::to_string_pretty(settings)?;
-            atomic_write_text(&paths.target_settings_json, &content)?;
+            atomic_write_file(&paths.target_settings_json, content.as_bytes())?;
             wrote_settings = true;
         }
         Ok(())
@@ -589,7 +589,7 @@ fn build_excerpt(content: &str, max_lines: usize, max_chars: usize) -> String {
     excerpt
 }
 
-fn atomic_write_text(path: &Path, content: &str) -> Result<()> {
+fn atomic_write_file(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -604,14 +604,23 @@ fn atomic_write_text(path: &Path, content: &str) -> Result<()> {
         builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
     let mut staged = builder.tempfile_in(parent)?;
-    staged.write_all(content.as_bytes())?;
+    staged.write_all(content)?;
     staged.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
-fn restore_original(path: &Path, original: Option<&str>) -> Result<()> {
+fn read_original(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to back up import target: {}", path.display())),
+    }
+}
+
+fn restore_original(path: &Path, original: Option<&[u8]>) -> Result<()> {
     match original {
-        Some(content) => atomic_write_text(path, content),
+        Some(content) => atomic_write_file(path, content),
         None => {
             if path.exists() {
                 std::fs::remove_file(path)?;
@@ -634,11 +643,11 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_text_replaces_existing_file() {
+    fn atomic_write_file_replaces_existing_file() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("settings.json");
         std::fs::write(&target, "old").unwrap();
-        atomic_write_text(&target, "new").unwrap();
+        atomic_write_file(&target, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
 
@@ -649,7 +658,7 @@ mod tests {
         let unrelated = tmp.path().join("settings.json.tmp-import");
         std::fs::write(&target, "old").unwrap();
         std::fs::write(&unrelated, "unrelated").unwrap();
-        atomic_write_text(&target, "new").unwrap();
+        atomic_write_file(&target, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
@@ -665,7 +674,7 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         std::fs::write(&unrelated, "unrelated").unwrap();
         std::os::unix::fs::symlink(&unrelated, &staging).unwrap();
-        atomic_write_text(&target, "new").unwrap();
+        atomic_write_file(&target, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated");
         assert!(std::fs::symlink_metadata(staging)
             .unwrap()
@@ -689,7 +698,7 @@ mod tests {
         std::fs::write(&original, "original").unwrap();
         let expected_mode = std::fs::metadata(&original).unwrap().permissions().mode() & 0o777;
         std::os::unix::fs::symlink(&original, &target).unwrap();
-        atomic_write_text(&target, "new").unwrap();
+        atomic_write_file(&target, b"new").unwrap();
         assert!(!std::fs::symlink_metadata(&target)
             .unwrap()
             .file_type()
@@ -709,7 +718,7 @@ mod tests {
         let target = tmp.path().join("settings.json");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("sentinel"), "original").unwrap();
-        assert!(atomic_write_text(&target, "new").is_err());
+        assert!(atomic_write_file(&target, b"new").is_err());
         assert_eq!(
             std::fs::read_to_string(target.join("sentinel")).unwrap(),
             "original"
