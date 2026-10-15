@@ -120,27 +120,27 @@ export function registerDemos(Alpine) {
   }));
 
   // ----- Demo 3: Permission visualizer -----------------------------------
-  // Modes × levels → ✓ allow / 🛡 prompt / ✗ block
+  // PermissionManager defaults with no matching rule; tool guards still apply.
   const MATRIX = {
-    default:            { None: 'allow', ReadOnly: 'allow',  Write: 'prompt', Execute: 'prompt', Dangerous: 'prompt' },
-    plan:               { None: 'allow', ReadOnly: 'allow',  Write: 'block',  Execute: 'block',  Dangerous: 'block'  },
-    auto:               { None: 'allow', ReadOnly: 'allow',  Write: 'allow',  Execute: 'prompt', Dangerous: 'prompt' },
-    acceptEdits:        { None: 'allow', ReadOnly: 'allow',  Write: 'allow',  Execute: 'prompt', Dangerous: 'prompt' },
-    bypassPermissions:  { None: 'allow', ReadOnly: 'allow',  Write: 'allow',  Execute: 'allow',  Dangerous: 'allow'  },
+    default:           { 'Workspace read': 'allow', 'Outside-root read': 'prompt', 'MCP resources': 'prompt', Edit: 'prompt', 'Other writes': 'prompt', Shell: 'prompt', Network: 'prompt' },
+    plan:              { 'Workspace read': 'allow', 'Outside-root read': 'allow', 'MCP resources': 'allow', Edit: 'block', 'Other writes': 'block', Shell: 'block', Network: 'block' },
+    acceptEdits:       { 'Workspace read': 'allow', 'Outside-root read': 'prompt', 'MCP resources': 'prompt', Edit: 'allow', 'Other writes': 'prompt', Shell: 'prompt', Network: 'prompt' },
+    bypassPermissions: { 'Workspace read': 'allow', 'Outside-root read': 'allow', 'MCP resources': 'allow', Edit: 'allow', 'Other writes': 'allow', Shell: 'allow', Network: 'allow' },
   };
   const MODE_BLURBS = {
-    default: 'Asks before any write or execute.',
-    plan: 'Read-only: writes and shell are blocked entirely.',
-    auto: 'Non-destructive tools run silently; destructive still prompt.',
-    acceptEdits: 'File edits auto-approved; shell still prompts.',
-    bypassPermissions: 'Headless / CI mode — no prompts at all.',
+    default: 'Workspace reads normally run; writes, execution, and outside-root reads require approval.',
+    plan: 'Without a matching rule, the permission manager allows reads and denies other operations. This is not a filesystem sandbox.',
+    acceptEdits: 'Only Edit is auto-approved after rule evaluation. Other writes and shell commands retain normal checks.',
+    bypassPermissions: 'Bypasses permission rules and approval prompts. Tool availability and tool-specific guards still apply.',
   };
   const LEVEL_EXAMPLES = {
-    None: ['SleepTool'],
-    ReadOnly: ['FileReadTool', 'GlobTool', 'GrepTool', 'WebFetchTool'],
-    Write: ['FileWriteTool', 'FileEditTool', 'ApplyPatchTool', 'ConfigTool'],
-    Execute: ['BashTool', 'PtyBashTool', 'TaskCreate', 'SendMessageTool'],
-    Dangerous: ['ComputerUseTool'],
+    'Workspace read': ['Read', 'Glob', 'Grep'],
+    'Outside-root read': ['Read', 'Glob', 'Grep'],
+    'MCP resources': ['ListMcpResources', 'ReadMcpResource'],
+    Edit: ['Edit'],
+    'Other writes': ['Write', 'NotebookEdit'],
+    Shell: ['Bash'],
+    Network: ['WebFetch'],
   };
   Alpine.data('permissionViz', () => ({
     mode: 'default',
@@ -152,7 +152,7 @@ export function registerDemos(Alpine) {
       return MATRIX[this.mode][level];
     },
     cellLabel(level) {
-      return { allow: 'Allowed', prompt: 'Prompts user', block: 'Blocked' }[this.cell(level)];
+      return { allow: 'Allowed', prompt: 'Requires approval', block: 'Blocked' }[this.cell(level)];
     },
     cellMark(level) {
       return { allow: '✓', prompt: '?', block: '✗' }[this.cell(level)];
