@@ -4950,13 +4950,19 @@ pub mod hooks {
                 }
             };
 
-            // Write context JSON to stdin
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(ctx_json.as_bytes()).await;
-            }
+            // Feed stdin while draining both output pipes to avoid pipe backpressure deadlocks.
+            let stdin = child.stdin.take();
+            let (_, output) = tokio::join!(
+                async {
+                    if let Some(mut stdin) = stdin {
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stdin.write_all(ctx_json.as_bytes()).await;
+                    }
+                },
+                child.wait_with_output(),
+            );
 
-            let output = match child.wait_with_output().await {
+            let output = match output {
                 Ok(o) => o,
                 Err(e) => {
                     warn!(command = %entry.command, error = %e, "Hook wait failed");
