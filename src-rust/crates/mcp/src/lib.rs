@@ -755,6 +755,12 @@ pub mod client {
 
         // ---- Notification dispatch ----------------------------------------
 
+        pub(crate) fn shutdown_notifications(&self) {
+            if let Some(backend) = &self.backend {
+                backend.shutdown_notifications();
+            }
+        }
+
         /// Process a single notification message from the transport stream.
         /// Routes resource updates to subscribers and logs other notifications.
         pub(crate) async fn process_notification(
@@ -1333,13 +1339,17 @@ impl McpManager {
     // Notification dispatch loop
     // -----------------------------------------------------------------------
 
-    /// Stop all notification polling tasks owned by this manager.
+    /// Permanently stop notification ingress and polling tasks owned by this manager.
+    /// Queued backend input is discarded; ordinary requests remain available.
     ///
     /// This is intentionally idempotent: replacement paths may share the same
     /// manager through several runtime handles. `send_replace` is infallible
     /// and preserves the shutdown value even when no polling tasks remain.
     pub fn shutdown_notification_poll_loops(&self) {
         self.notification_shutdown.send_replace(true);
+        for client in self.clients.values() {
+            client.shutdown_notifications();
+        }
     }
 
     /// Spawn background Tokio tasks for each connected MCP client to handle
@@ -1525,6 +1535,7 @@ mod tests {
     struct SingleNotificationStream {
         notification: Option<Value>,
         delivered: Option<oneshot::Sender<()>>,
+        stopped: Option<oneshot::Sender<()>>,
     }
 
     impl futures::Stream for SingleNotificationStream {
@@ -1549,12 +1560,24 @@ mod tests {
         }
     }
 
+    impl Drop for SingleNotificationStream {
+        fn drop(&mut self) {
+            if let Some(stopped) = self.stopped.take() {
+                let _ = stopped.send(());
+            }
+        }
+    }
+
     struct QuietNotificationBackend {
         notification_stream: Mutex<Option<BoxStream<'static, anyhow::Result<Value>>>>,
     }
 
     #[async_trait]
     impl backend::McpClientBackend for QuietNotificationBackend {
+        fn shutdown_notifications(&self) {
+            // This fixture has no ingress queue; the manager drops its stream.
+        }
+
         fn kind(&self) -> backend::McpBackendKind {
             backend::McpBackendKind::Rmcp
         }
@@ -1652,6 +1675,7 @@ mod tests {
         let mut manager = McpManager::new();
         manager.clients.insert("quiet".to_string(), client);
         let manager = Arc::new(manager);
+        let retained_owner = manager.clone();
 
         manager.clone().spawn_notification_poll_loop();
         tokio::time::timeout(Duration::from_secs(2), started_rx)
@@ -1666,11 +1690,14 @@ mod tests {
             .await
             .expect("quiet notification task should stop promptly")
             .expect("quiet notification stream should be dropped");
+        assert_eq!(retained_owner.server_count(), 1);
+        assert!(Arc::ptr_eq(&manager, &retained_owner));
     }
 
     #[tokio::test]
     async fn notification_poll_loop_cancels_blocked_resource_delivery() {
         let (delivered_tx, delivered_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
         let backend = Arc::new(QuietNotificationBackend {
             notification_stream: Mutex::new(Some(Box::pin(SingleNotificationStream {
                 notification: Some(serde_json::json!({
@@ -1679,14 +1706,14 @@ mod tests {
                     "params": { "uri": "file:///blocked.txt" }
                 })),
                 delivered: Some(delivered_tx),
+                stopped: Some(stopped_tx),
             }))),
         });
         let client = Arc::new(McpClient::from_test_backend(backend));
-        let client_weak = Arc::downgrade(&client);
         let mut manager = McpManager::new();
         manager.clients.insert("quiet".to_string(), client);
 
-        let (subscription_tx, _subscription_rx) = tokio::sync::mpsc::channel(1);
+        let (subscription_tx, mut subscription_rx) = tokio::sync::mpsc::channel(1);
         subscription_tx
             .try_send(ResourceChangedEvent {
                 server_name: "quiet".to_string(),
@@ -1699,7 +1726,8 @@ mod tests {
         );
 
         let manager = Arc::new(manager);
-        let manager_weak = Arc::downgrade(&manager);
+        let retained_owner = manager.clone();
+        let resource_subscriptions = manager.resource_subscriptions.clone();
         manager.clone().spawn_notification_poll_loop();
 
         tokio::time::timeout(Duration::from_secs(2), delivered_rx)
@@ -1707,16 +1735,25 @@ mod tests {
             .expect("notification should reach the poll loop")
             .expect("notification delivery signal sender");
 
-        manager.shutdown_notification_poll_loops();
-        drop(manager);
-
         tokio::time::timeout(Duration::from_secs(2), async {
-            while manager_weak.upgrade().is_some() || client_weak.upgrade().is_some() {
+            while Arc::strong_count(&resource_subscriptions) != 3 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("poll task should release the client and manager after shutdown");
+        .expect("notification delivery should be blocked on the saturated subscriber");
+
+        manager.shutdown_notification_poll_loops();
+        manager.shutdown_notification_poll_loops();
+
+        tokio::time::timeout(Duration::from_secs(2), stopped_rx)
+            .await
+            .expect("shutdown must drop the stream while manager owners remain")
+            .unwrap();
+        assert_eq!(retained_owner.server_count(), 1);
+        assert_eq!(Arc::strong_count(&resource_subscriptions), 2);
+        subscription_rx.try_recv().unwrap();
+        assert!(subscription_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1730,6 +1767,7 @@ mod tests {
                     "params": { "uri": "file:///blocked.txt" }
                 })),
                 delivered: Some(delivered_tx),
+                stopped: None,
             }))),
         });
         let client = Arc::new(McpClient::from_test_backend(backend));

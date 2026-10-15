@@ -18,12 +18,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 pub struct RmcpNotificationClient {
-    notifications_tx: mpsc::UnboundedSender<Value>,
+    notifications_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>>,
     client_info: rmcp_model::ClientInfo,
 }
 
@@ -33,7 +33,7 @@ impl RmcpNotificationClient {
         client_info: rmcp_model::ClientInfo,
     ) -> Self {
         Self {
-            notifications_tx,
+            notifications_tx: Arc::new(StdMutex::new(Some(notifications_tx))),
             client_info,
         }
     }
@@ -50,7 +50,15 @@ impl RmcpNotificationClient {
                 "method": method,
             }),
         };
-        let _ = self.notifications_tx.send(payload);
+        let sender = match self.notifications_tx.lock() {
+            Ok(sender) => sender,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Enqueue and retirement use the same lock. Once retirement removes
+        // the sender, no handler can enqueue another notification.
+        if let Some(sender) = sender.as_ref() {
+            let _ = sender.send(payload);
+        }
     }
 }
 
@@ -95,6 +103,8 @@ pub struct RmcpClientBackend {
     #[allow(dead_code)]
     running: Mutex<RunningService<RoleClient, RmcpNotificationClient>>,
     notifications_rx: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
+    notifications_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>>,
+    notification_shutdown: watch::Sender<bool>,
 }
 
 impl RmcpClientBackend {
@@ -165,6 +175,7 @@ impl RmcpClientBackend {
     {
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
         let handler = RmcpNotificationClient::new(notifications_tx, client_info);
+        let notifications_tx = Arc::clone(&handler.notifications_tx);
         let running = handler.serve(transport).await.map_err(|e| {
             anyhow::anyhow!(
                 "rmcp {} client '{}' failed to initialize: {}",
@@ -182,6 +193,8 @@ impl RmcpClientBackend {
             peer,
             running: Mutex::new(running),
             notifications_rx: Arc::new(Mutex::new(notifications_rx)),
+            notifications_tx,
+            notification_shutdown: watch::channel(false).0,
         })
     }
 }
@@ -611,23 +624,75 @@ impl McpClientBackend for RmcpClientBackend {
     fn subscribe_to_notifications(&self) -> BoxStream<'static, anyhow::Result<Value>> {
         let notifications_rx = Arc::clone(&self.notifications_rx);
         let (tx, rx) = mpsc::channel::<anyhow::Result<Value>>(100);
-        tokio::spawn(async move {
-            loop {
-                let next = {
-                    let mut receiver = notifications_rx.lock().await;
-                    receiver.recv().await
-                };
-                match next {
-                    Some(value) => {
-                        if tx.send(Ok(value)).await.is_err() {
-                            break;
-                        }
+        tokio::spawn(forward_notifications(
+            notifications_rx,
+            tx,
+            self.notification_shutdown.subscribe(),
+        ));
+        Box::pin(ReceiverStream::new(rx))
+    }
+
+    fn shutdown_notifications(&self) {
+        match self.notifications_tx.lock() {
+            Ok(mut sender) => {
+                sender.take();
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().take();
+            }
+        }
+        self.notification_shutdown.send_replace(true);
+        // There may be no bridge left (or none may ever have started). Clear
+        // synchronously when possible; otherwise the lock-owning bridge is
+        // woken by shutdown and clears the queue before releasing its ownership.
+        if let Ok(mut receiver) = self.notifications_rx.try_lock() {
+            receiver.close();
+            while receiver.try_recv().is_ok() {}
+        }
+    }
+}
+
+async fn forward_notifications(
+    notifications_rx: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
+    tx: mpsc::Sender<anyhow::Result<Value>>,
+    mut notification_shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *notification_shutdown.borrow() {
+            break;
+        }
+        let next = tokio::select! {
+            biased;
+
+            _ = notification_shutdown.changed() => break,
+
+            // The returned stream owns this bridge. A quiet input (or
+            // another subscription holding the mutex) must not keep it
+            // alive after its consumer has gone away.
+            () = tx.closed() => break,
+            next = async {
+                let mut receiver = notifications_rx.lock().await;
+                receiver.recv().await
+            } => next,
+        };
+        match next {
+            Some(value) => {
+                tokio::select! {
+                    biased;
+                    _ = notification_shutdown.changed() => break,
+                    result = tx.send(Ok(value)) => {
+                        if result.is_err() { break; }
                     }
-                    None => break,
                 }
             }
-        });
-        Box::pin(ReceiverStream::new(rx))
+            None => break,
+        }
+    }
+    drop(tx);
+    if *notification_shutdown.borrow() {
+        let mut receiver = notifications_rx.lock().await;
+        receiver.close();
+        while receiver.try_recv().is_ok() {}
     }
 }
 
@@ -856,9 +921,415 @@ fn json_value_to_object(value: Value) -> anyhow::Result<rmcp_model::JsonObject> 
 mod tests {
     use super::*;
     use claurst_core::config::McpServerConfig;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use futures::StreamExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
+
+    async fn notification_backend() -> (
+        RmcpClientBackend,
+        mpsc::UnboundedSender<Value>,
+        JoinHandle<()>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut server_io = BufReader::new(server_io);
+            let mut line = String::new();
+            server_io.read_line(&mut line).await.unwrap();
+            let request: crate::types::JsonRpcRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(request.method, "initialize");
+            let response = json!({
+                "jsonrpc": "2.0", "id": request.id,
+                "result": {
+                    "protocolVersion": "2024-11-05", "capabilities": {},
+                    "serverInfo": {"name": "notification-test", "version": "1"}
+                }
+            });
+            server_io
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+            // Keep requests usable while notification-only shutdown is tested.
+            loop {
+                line.clear();
+                if server_io.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request.get("id").is_none() {
+                    continue;
+                }
+                assert_eq!(request["method"], "tools/list");
+                let response = json!({
+                    "jsonrpc": "2.0", "id": request["id"],
+                    "result": {"tools": [{
+                        "name": "retained-request", "inputSchema": {"type": "object"}
+                    }]}
+                });
+                server_io
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let backend = timeout(
+            Duration::from_secs(2),
+            RmcpClientBackend::connect_with_transport(
+                &test_sse_config("unused".to_string()),
+                client_io,
+                build_client_info(rmcp_model::ProtocolVersion::V_2024_11_05),
+                "memory",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let input = backend
+            .running
+            .lock()
+            .await
+            .service()
+            .notifications_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        (backend, input, server)
+    }
+
+    async fn bridge_releases_receiver(backend: &RmcpClientBackend) {
+        timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&backend.notifications_rx) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the consumer must release the bridge's receiver ownership");
+    }
+
+    #[tokio::test]
+    async fn notification_bridge_stops_when_quiet_consumer_drops() {
+        let (backend, _input, server) = notification_backend().await;
+        let stream = backend.subscribe_to_notifications();
+        timeout(Duration::from_secs(2), async {
+            while backend.notifications_rx.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bridge must be waiting on its quiet receiver");
+
+        drop(stream);
+        bridge_releases_receiver(&backend).await;
+        assert!(backend.notifications_rx.try_lock().is_ok());
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_bridge_stops_while_waiting_for_receiver_lock() {
+        let (backend, _input, server) = notification_backend().await;
+        let receiver = backend.notifications_rx.lock().await;
+        let (tx, rx) = mpsc::channel(100);
+        let stream = ReceiverStream::new(rx);
+        let mut bridge = Box::pin(forward_notifications(
+            Arc::clone(&backend.notifications_rx),
+            tx,
+            backend.notification_shutdown.subscribe(),
+        ));
+        // Poll the exact worker spawned by subscribe_to_notifications. The
+        // output is open and the receiver lock is held, so this reaches Pending
+        // in lock acquisition before any recv/send can run.
+        assert!(futures::poll!(bridge.as_mut()).is_pending());
+        drop(stream);
+        assert!(
+            futures::poll!(bridge.as_mut()).is_ready(),
+            "consumer drop must cancel an already-pending receiver lock"
+        );
+        drop(bridge);
+        assert_eq!(Arc::strong_count(&backend.notifications_rx), 1);
+        assert!(backend.notifications_rx.try_lock().is_err());
+        drop(receiver);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_bridge_stops_when_saturated_consumer_drops() {
+        let (backend, input, server) = notification_backend().await;
+        let stream = backend.subscribe_to_notifications();
+        for sequence in 0..102 {
+            input.send(json!({"sequence": sequence})).unwrap();
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if backend
+                    .notifications_rx
+                    .try_lock()
+                    .is_ok_and(|rx| rx.len() == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bridge must fill its 100-item output and block on item 101");
+
+        drop(stream);
+        bridge_releases_receiver(&backend).await;
+        assert_eq!(backend.notifications_rx.lock().await.len(), 1);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_bridge_preserves_active_delivery_order_across_capacity() {
+        let (backend, input, server) = notification_backend().await;
+        let mut stream = backend.subscribe_to_notifications();
+        for sequence in 0..205 {
+            input.send(json!({"sequence": sequence})).unwrap();
+        }
+        for sequence in 0..205 {
+            let actual = timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual, json!({"sequence": sequence}));
+        }
+        drop(stream);
+        bridge_releases_receiver(&backend).await;
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn retaining_manager(backend: &Arc<RmcpClientBackend>) -> crate::McpManager {
+        let mut manager = crate::McpManager::new();
+        manager.clients.insert(
+            "retained".to_string(),
+            Arc::new(crate::McpClient::from_test_backend(backend.clone())),
+        );
+        manager
+    }
+
+    async fn assert_retired_ingress_and_live_requests(
+        manager: &crate::McpManager,
+        backend: &RmcpClientBackend,
+    ) {
+        // Exercise the actual handler's producer after forwarding has ended,
+        // while both the backend and its ordinary request owner remain alive.
+        {
+            let running = backend.running.lock().await;
+            for sequence in 0..1024 {
+                running.service().send_notification(
+                    "notifications/resources/updated",
+                    Some(json!({"uri": format!("test://{sequence}")})),
+                );
+            }
+        }
+        let tools = timeout(
+            Duration::from_secs(2),
+            manager.clients["retained"].list_tools(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(tools[0].name, "retained-request");
+        let receiver = backend.notifications_rx.lock().await;
+        assert_eq!(
+            receiver.len(),
+            0,
+            "retirement must discard buffered and subsequent input"
+        );
+        assert!(receiver.is_closed(), "retired ingress must stay closed");
+    }
+
+    #[tokio::test]
+    async fn notification_retirement_clears_input_after_last_bridge_exits() {
+        let (backend, input, server) = notification_backend().await;
+        let backend = Arc::new(backend);
+        let manager = retaining_manager(&backend);
+        let stream = backend.subscribe_to_notifications();
+        drop(stream);
+        bridge_releases_receiver(&backend).await;
+        for sequence in 0..5 {
+            input.send(json!({"sequence": sequence})).unwrap();
+        }
+        manager.shutdown_notification_poll_loops();
+        manager.shutdown_notification_poll_loops();
+        assert_retired_ingress_and_live_requests(&manager, &backend).await;
+        drop(manager);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_retirement_clears_input_before_any_bridge_starts() {
+        let (backend, input, server) = notification_backend().await;
+        let backend = Arc::new(backend);
+        let manager = retaining_manager(&backend);
+        for sequence in 0..5 {
+            input.send(json!({"sequence": sequence})).unwrap();
+        }
+        manager.shutdown_notification_poll_loops();
+        assert_retired_ingress_and_live_requests(&manager, &backend).await;
+        // A subscription created after shutdown observes the sticky retirement.
+        let mut stream = backend.subscribe_to_notifications();
+        assert!(timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .is_none());
+        bridge_releases_receiver(&backend).await;
+        drop(manager);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_retirement_stops_quiet_bridge() {
+        assert_retirement_stops_bridge(false).await;
+    }
+
+    #[tokio::test]
+    async fn notification_retirement_stops_saturated_bridge() {
+        assert_retirement_stops_bridge(true).await;
+    }
+
+    async fn assert_retirement_stops_bridge(saturated: bool) {
+        let (backend, input, server) = notification_backend().await;
+        let backend = Arc::new(backend);
+        let manager = retaining_manager(&backend);
+        let stream = backend.subscribe_to_notifications();
+        if saturated {
+            for sequence in 0..102 {
+                input.send(json!({"sequence": sequence})).unwrap();
+            }
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let ready = match backend.notifications_rx.try_lock() {
+                    Ok(receiver) => saturated && receiver.len() == 1,
+                    Err(_) => !saturated,
+                };
+                if ready {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bridge must reach the quiet receive or saturated send boundary");
+        manager.shutdown_notification_poll_loops();
+        // Keep the consumer open: permanent retirement itself must stop work.
+        bridge_releases_receiver(&backend).await;
+        assert_retired_ingress_and_live_requests(&manager, &backend).await;
+        drop(stream);
+        drop(manager);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_retirement_cancels_pending_lock_before_draining() {
+        let (backend, input, server) = notification_backend().await;
+        let backend = Arc::new(backend);
+        let manager = retaining_manager(&backend);
+        input.send(json!({"buffered": true})).unwrap();
+        let receiver = backend.notifications_rx.lock().await;
+        let (tx, rx) = mpsc::channel(100);
+        let mut bridge = Box::pin(forward_notifications(
+            Arc::clone(&backend.notifications_rx),
+            tx,
+            backend.notification_shutdown.subscribe(),
+        ));
+        assert!(futures::poll!(bridge.as_mut()).is_pending());
+        manager.shutdown_notification_poll_loops();
+        assert!(futures::poll!(bridge.as_mut()).is_pending());
+        // The worker must leave its pending receive/lock and close output
+        // before waiting to acquire the receiver for final buffer disposal.
+        assert!(
+            rx.is_closed(),
+            "retirement must cancel the pending receive before cleanup"
+        );
+        assert!(backend.notifications_rx.try_lock().is_err());
+        drop(receiver);
+        timeout(Duration::from_secs(2), bridge).await.unwrap();
+        assert_retired_ingress_and_live_requests(&manager, &backend).await;
+        drop(manager);
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_stream_drop_preserves_other_consumers_and_resubscription() {
+        let (backend, input, server) = notification_backend().await;
+        let first = backend.subscribe_to_notifications();
+        timeout(Duration::from_secs(2), async {
+            while backend.notifications_rx.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut second = backend.subscribe_to_notifications();
+        drop(first);
+        input.send(json!({"sequence": 1})).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), second.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            json!({"sequence": 1})
+        );
+        drop(second);
+        bridge_releases_receiver(&backend).await;
+        input.send(json!({"sequence": 2})).unwrap();
+        let mut third = backend.subscribe_to_notifications();
+        assert_eq!(
+            timeout(Duration::from_secs(2), third.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            json!({"sequence": 2})
+        );
+        drop(third);
+        bridge_releases_receiver(&backend).await;
+        drop(backend);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     fn test_sse_config(url: String) -> McpServerConfig {
         McpServerConfig {
