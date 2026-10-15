@@ -1470,7 +1470,7 @@ impl SlashCommand for StatusCommand {
         };
 
         // MCP status
-        let mcp_count = ctx.config.mcp_servers.len();
+        let mcp_count = ctx.config.effective_mcp_servers().count();
         let mcp_status = if mcp_count == 0 {
             "none configured".to_string()
         } else {
@@ -2185,24 +2185,6 @@ fn publish_plugin_registry(registry: &claurst_plugins::PluginRegistry) {
     claurst_plugins::set_global_registry(registry.clone());
 }
 
-fn merge_plugin_mcp_servers(
-    config: &mut claurst_core::config::Config,
-    registry: &claurst_plugins::PluginRegistry,
-) -> usize {
-    let mut existing_names: std::collections::HashSet<String> =
-        config.mcp_servers.iter().map(|s| s.name.clone()).collect();
-    let mut added = 0;
-
-    for mcp_server in registry.all_mcp_servers() {
-        if existing_names.insert(mcp_server.name.clone()) {
-            config.mcp_servers.push(mcp_server);
-            added += 1;
-        }
-    }
-
-    added
-}
-
 #[async_trait]
 impl SlashCommand for PluginCommand {
     fn name(&self) -> &str {
@@ -2260,6 +2242,8 @@ impl SlashCommand for PluginCommand {
                     ));
                 }
                 registry.enable(&name);
+                ctx.config.set_mcp_project(&project_dir);
+                ctx.config.plugin_mcp_servers = registry.all_mcp_servers();
                 publish_plugin_registry(&registry);
                 CommandResult::Message(format!(
                     "Plugin '{}' enabled. Run `/plugin reload` to refresh contributed resources.",
@@ -2289,6 +2273,8 @@ impl SlashCommand for PluginCommand {
                     ));
                 }
                 registry.disable(&name);
+                ctx.config.set_mcp_project(&project_dir);
+                ctx.config.plugin_mcp_servers = registry.all_mcp_servers();
                 publish_plugin_registry(&registry);
                 CommandResult::Message(format!(
                     "Plugin '{}' disabled. Its commands and hooks are disabled in this session.",
@@ -2325,7 +2311,8 @@ impl SlashCommand for PluginCommand {
                 let old_registry = loaded_plugin_registry(&project_dir).await;
                 let (new_registry, diff) =
                     claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-                merge_plugin_mcp_servers(&mut ctx.config, &new_registry);
+                ctx.config.set_mcp_project(&project_dir);
+                ctx.config.plugin_mcp_servers = new_registry.all_mcp_servers();
                 let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
                 publish_plugin_registry(&new_registry);
                 CommandResult::Message(summary)
@@ -2361,7 +2348,8 @@ impl SlashCommand for ReloadPluginsCommand {
         let old_registry = loaded_plugin_registry(&project_dir).await;
         let (new_registry, diff) =
             claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-        merge_plugin_mcp_servers(&mut ctx.config, &new_registry);
+        ctx.config.set_mcp_project(&project_dir);
+        ctx.config.plugin_mcp_servers = new_registry.all_mcp_servers();
         let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
         publish_plugin_registry(&new_registry);
 
@@ -2682,13 +2670,13 @@ impl SlashCommand for DoctorCommand {
 
         // ── MCP servers ─────────────────────────────────────────────────────
         lines.push("MCP Servers".to_string());
-        let mcp_count = ctx.config.mcp_servers.len();
+        let mcp_count = ctx.config.effective_mcp_servers().count();
         if mcp_count == 0 {
             lines.push("  • No MCP servers configured".to_string());
         } else if let Some(mgr) = ctx.mcp_manager.as_ref() {
             // Report live connection status from the manager
             let statuses = mgr.all_statuses();
-            for srv in ctx.config.mcp_servers.iter().take(12) {
+            for srv in ctx.config.effective_mcp_servers().take(12) {
                 let status_str = match statuses.get(&srv.name) {
                     Some(claurst_mcp::McpServerStatus::Connected { tool_count }) => {
                         format!(
@@ -2724,7 +2712,7 @@ impl SlashCommand for DoctorCommand {
             lines.push(format!(
                 "  ✓ {mcp_count} MCP server(s) configured (not yet connected):"
             ));
-            for srv in ctx.config.mcp_servers.iter().take(8) {
+            for srv in ctx.config.effective_mcp_servers().take(8) {
                 lines.push(format!("    - {}", srv.name));
             }
             if mcp_count > 8 {
@@ -4040,7 +4028,7 @@ impl SlashCommand for McpCommand {
             return McpCommand::handle_logs(server_name, ctx);
         }
 
-        if ctx.config.mcp_servers.is_empty() {
+        if ctx.config.effective_mcp_servers().next().is_none() {
             return CommandResult::Message(
                 "No MCP servers configured.\n\n\
                  To add a MCP server, edit ~/.coven-code/settings.json:\n\
@@ -4061,7 +4049,7 @@ impl SlashCommand for McpCommand {
         // /mcp status — detailed status table
         if sub == "status" {
             let mut output = String::from("MCP Server Status\n─────────────────\n");
-            for srv in &ctx.config.mcp_servers {
+            for srv in ctx.config.effective_mcp_servers() {
                 let kind = srv.server_type.as_str();
                 let endpoint = srv
                     .url
@@ -4098,9 +4086,9 @@ impl SlashCommand for McpCommand {
         let manager = ctx.mcp_manager.as_ref();
         let mut output = format!(
             "Configured MCP Servers ({})\n──────────────────────────\n",
-            ctx.config.mcp_servers.len()
+            ctx.config.effective_mcp_servers().count()
         );
-        for srv in &ctx.config.mcp_servers {
+        for srv in ctx.config.effective_mcp_servers() {
             let cmd_display = if let Some(ref url) = srv.url {
                 format!("url={}", url)
             } else if let Some(ref cmd) = srv.command {
@@ -4144,16 +4132,14 @@ impl McpCommand {
     async fn handle_auth(server_name: &str, ctx: &CommandContext) -> CommandResult {
         let srv = match ctx
             .config
-            .mcp_servers
-            .iter()
+            .effective_mcp_servers()
             .find(|s| s.name == server_name)
         {
             Some(s) => s,
             None => {
                 let configured: Vec<&str> = ctx
                     .config
-                    .mcp_servers
-                    .iter()
+                    .effective_mcp_servers()
                     .map(|s| s.name.as_str())
                     .collect();
                 return CommandResult::Error(format!(
@@ -4341,11 +4327,14 @@ impl McpCommand {
     /// Handle `/mcp connect <server>` — attempt to reconnect a server.
     async fn handle_connect(server_name: &str, ctx: &CommandContext) -> CommandResult {
         // Validate that the server is configured.
-        if !ctx.config.mcp_servers.iter().any(|s| s.name == server_name) {
+        if !ctx
+            .config
+            .effective_mcp_servers()
+            .any(|s| s.name == server_name)
+        {
             let names: Vec<&str> = ctx
                 .config
-                .mcp_servers
-                .iter()
+                .effective_mcp_servers()
                 .map(|s| s.name.as_str())
                 .collect();
             return CommandResult::Error(format!(
@@ -4412,11 +4401,14 @@ impl McpCommand {
     /// Handle `/mcp logs <server>` — show recent error/log information.
     fn handle_logs(server_name: &str, ctx: &CommandContext) -> CommandResult {
         // Validate server name.
-        if !ctx.config.mcp_servers.iter().any(|s| s.name == server_name) {
+        if !ctx
+            .config
+            .effective_mcp_servers()
+            .any(|s| s.name == server_name)
+        {
             let names: Vec<&str> = ctx
                 .config
-                .mcp_servers
-                .iter()
+                .effective_mcp_servers()
                 .map(|s| s.name.as_str())
                 .collect();
             return CommandResult::Error(format!(

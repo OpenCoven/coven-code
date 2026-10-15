@@ -169,13 +169,34 @@ impl PluginRegistry {
     }
 
     /// Collect all MCP server configs contributed by enabled plugins.
-    pub fn all_mcp_servers(&self) -> Vec<claurst_core::config::McpServerConfig> {
-        let mut servers: Vec<claurst_core::config::McpServerConfig> = Vec::new();
-        for plugin in self.enabled() {
+    pub fn all_mcp_servers(&self) -> Vec<claurst_core::plugin_mcp::PluginMcpContribution> {
+        use claurst_core::plugin_mcp::{PluginMcpContribution, PluginMcpOrigin, PluginMcpSource};
+        let mut servers = Vec::new();
+        let mut plugins = self.enabled();
+        plugins.sort_by(|left, right| left.name.cmp(&right.name));
+        for plugin in plugins {
             let grants = plugin.manifest.capabilities.as_deref();
             if !crate::has_capability(grants, "mcp") {
                 continue;
             }
+            let source = match plugin.source {
+                crate::PluginSource::User => PluginMcpSource::User,
+                crate::PluginSource::Project => PluginMcpSource::Project,
+                crate::PluginSource::Extra(_) => PluginMcpSource::Extra,
+                crate::PluginSource::Inline => PluginMcpSource::Inline,
+                crate::PluginSource::Builtin => PluginMcpSource::Builtin,
+            };
+            let origin = match PluginMcpOrigin::new(
+                source,
+                &plugin.path,
+                self.project_root.as_deref(),
+            ) {
+                Ok(origin) => origin,
+                Err(error) => {
+                    tracing::warn!(plugin = %plugin.name, %error, "Cannot identify plugin MCP origin");
+                    continue;
+                }
+            };
             for mcp in &plugin.manifest.mcp_servers {
                 let required = match mcp.server_type.as_str() {
                     "stdio" => "shell",
@@ -187,13 +208,16 @@ impl PluginRegistry {
                 if !crate::has_capability(grants, required) {
                     continue;
                 }
-                servers.push(claurst_core::config::McpServerConfig {
-                    name: mcp.name.clone(),
-                    command: mcp.command.clone(),
-                    args: mcp.args.clone(),
-                    env: mcp.env.clone(),
-                    url: mcp.url.clone(),
-                    server_type: mcp.server_type.clone(),
+                servers.push(PluginMcpContribution {
+                    origin: origin.clone(),
+                    config: claurst_core::config::McpServerConfig {
+                        name: mcp.name.clone(),
+                        command: mcp.command.clone(),
+                        args: mcp.args.clone(),
+                        env: mcp.env.clone(),
+                        url: mcp.url.clone(),
+                        server_type: mcp.server_type.clone(),
+                    },
                 });
             }
         }
@@ -331,7 +355,10 @@ mod tests {
     #[test]
     fn replacement_uses_the_loaded_plugin_enabled_state() {
         let mut registry = PluginRegistry::new();
+        let root = tempfile::tempdir().unwrap();
         let mut plugin = make_plugin("replacement");
+        // MCP origins are canonical, so the contributing plugin root must exist.
+        plugin.path = root.path().to_path_buf();
         plugin.manifest.capabilities = Some(vec!["mcp".into(), "shell".into()]);
         plugin
             .manifest
@@ -409,5 +436,62 @@ mod tests {
         assert_eq!(diff.added, vec!["new-plugin"]);
         assert_eq!(diff.removed, vec!["gone"]);
         assert!(diff.updated.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mcp_provenance_tests {
+    use super::*;
+    use crate::{PluginManifest, PluginMcpServer, PluginSource};
+    use claurst_core::plugin_mcp::PluginMcpSource;
+
+    #[test]
+    fn mcp_contributions_use_canonical_typed_origin_not_display_source() {
+        let project = tempfile::tempdir().unwrap();
+        let plugin_root = project.path().join("fixture");
+        std::fs::create_dir(&plugin_root).unwrap();
+        let mut registry = PluginRegistry::new();
+        registry.project_root = Some(project.path().canonicalize().unwrap());
+        registry.insert(LoadedPlugin {
+            name: "fixture".into(),
+            path: plugin_root.clone(),
+            source: PluginSource::Project,
+            source_id: "fixture@user".into(),
+            enabled: true,
+            commands_path: None,
+            agents_path: None,
+            skills_path: None,
+            output_styles_path: None,
+            hooks_config: None,
+            manifest: PluginManifest {
+                name: "fixture".into(),
+                capabilities: Some(vec!["mcp".into(), "shell".into()]),
+                mcp_servers: vec![PluginMcpServer {
+                    name: "server".into(),
+                    command: Some("sh".into()),
+                    server_type: "stdio".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+        let entries = registry.all_mcp_servers();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].origin.source(), PluginMcpSource::Project);
+        assert_eq!(
+            entries[0].origin.plugin_root(),
+            plugin_root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            entries[0].origin.project_root(),
+            Some(project.path().canonicalize().unwrap().as_path())
+        );
+        registry.project_root = None;
+        assert!(
+            registry.all_mcp_servers().is_empty(),
+            "unresolved project must not become global"
+        );
+        registry.project_root = Some(project.path().join("missing"));
+        assert!(registry.all_mcp_servers().is_empty());
     }
 }

@@ -48,12 +48,32 @@ commands and registered hooks from the current session. Reloads apply saved
 preferences. Resuming a session in another project refreshes active plugin
 commands and hooks against that project's saved grants.
 
-Existing MCP connections and contributed server configurations remain in the
-session; reconnecting can reuse them after a plugin is disabled or its grants
-change. Restart the session to stop using those connections and configurations.
-Plugin-owned MCP configuration withdrawal and runtime retirement remain a
-required follow-up; capability filtering does not close the full plugin supply
-chain findings (SEC-SUPPLY-1/2).
+Plugin MCP configurations are runtime contributions with a typed discovery
+source, canonical plugin folder, and canonical project folder for project
+plugins. They are separate from saved user MCP configurations. Settings saves
+exclude these contributions, and settings files cannot supply plugin provenance.
+An explicit user server with the same name always takes precedence, including
+when the user adds or edits it after plugin discovery. Previously saved MCP
+entries have no recoverable plugin provenance and remain settings-owned; they
+are never removed or reclassified by matching a plugin name or configuration.
+
+Enable, disable, and reload reconcile the current eligible contributions. A
+withdrawn server or one missing required capabilities is no longer a reconnect
+candidate. Resuming another project removes the previous project's candidates;
+user-owned servers keep their existing configuration. This applies to status
+and panel configuration views as well as subsequent manager construction.
+
+Startup still connects settings-owned MCP servers before discovering plugins.
+Discovery supplies later reconnect candidates without publishing plugin command
+or hook registries. It does not connect plugin servers early. ACP startup
+continues to use settings-owned servers and does not discover plugins.
+
+Existing live MCP connections can still receive requests after a plugin is
+disabled, reloaded, or left behind by a project transition. Restart the session
+to retire those connections. Caller-project request authorization, retained
+manager revocation, and live transport retirement remain a required follow-up;
+configuration withdrawal does not close the full plugin supply chain findings
+(SEC-SUPPLY-1/2).
 
 Plugins explicitly installed in the user-global plugin directory retain their
 trusted default. Their name-based enable and disable settings continue to apply.

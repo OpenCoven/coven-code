@@ -2693,8 +2693,7 @@ impl App {
             let tool_defs = manager.all_tool_definitions();
             return self
                 .config
-                .mcp_servers
-                .iter()
+                .effective_mcp_servers()
                 .map(|server| {
                     let transport = server
                         .url
@@ -2770,8 +2769,7 @@ impl App {
         }
 
         self.config
-            .mcp_servers
-            .iter()
+            .effective_mcp_servers()
             .map(|server| {
                 let transport = server
                     .url
