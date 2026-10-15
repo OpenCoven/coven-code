@@ -190,7 +190,7 @@ async fn execute_action(_params: ComputerUseInput) -> ToolResult {
 
 #[cfg(feature = "computer-use")]
 async fn execute_action(params: ComputerUseInput) -> ToolResult {
-    use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+    use enigo::{Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 
     match params.action.as_str() {
         // ── Screenshot ───────────────────────────────────────────────────
@@ -510,7 +510,7 @@ fn press_key_sequence(
     enigo: &mut enigo::Enigo,
     sequence: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use enigo::{Direction, Key, Keyboard};
+    use enigo::{Direction, Keyboard};
 
     let parts: Vec<&str> = sequence
         .split('+')
@@ -589,7 +589,10 @@ fn parse_key(s: &str) -> Result<enigo::Key, Box<dyn std::error::Error + Send + S
         "tab" => Key::Tab,
         "backspace" => Key::Backspace,
         "delete" | "del" => Key::Delete,
+        #[cfg(not(target_os = "macos"))]
         "insert" => Key::Insert,
+        #[cfg(target_os = "macos")]
+        "insert" => return Err("Insert key is not supported on macOS".into()),
         "home" => Key::Home,
         "end" => Key::End,
         "pageup" | "page_up" => Key::PageUp,
@@ -762,6 +765,19 @@ mod tests {
             .filter(|s| !s.is_empty())
             .collect();
         assert_eq!(parts, vec!["ctrl", "c"]);
+    }
+
+    #[cfg(all(feature = "computer-use", target_os = "macos"))]
+    #[test]
+    fn test_insert_key_reports_unsupported_on_macos() {
+        let error = super::parse_key("insert").unwrap_err();
+        assert_eq!(error.to_string(), "Insert key is not supported on macOS");
+    }
+
+    #[cfg(all(feature = "computer-use", not(target_os = "macos")))]
+    #[test]
+    fn test_insert_key_maps_to_insert() {
+        assert_eq!(super::parse_key("insert").unwrap(), enigo::Key::Insert);
     }
 
     // ---- Tool trait surface --------------------------------------------------

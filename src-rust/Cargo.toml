@@ -71,7 +71,7 @@ sha2 = "0.10"
 hex = "0.4"
 getrandom = "0.2"
 enigo = "0.2"
-xcap = "0.0.13"
+xcap = { version = "0.3.3", features = ["vendored"] }
 url = "2"
 mime = "0.3"
 urlencoding = "2"
