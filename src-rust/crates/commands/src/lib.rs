@@ -2027,9 +2027,13 @@ impl SlashCommand for MemoryCommand {
                             lines = lines,
                             chars = chars,
                             content = if content.len() > 2000 {
+                                let mut end = 2000;
+                                while !content.is_char_boundary(end) {
+                                    end -= 1;
+                                }
                                 format!(
                                     "{}…\n(truncated — file is {} chars)",
-                                    &content[..2000],
+                                    &content[..end],
                                     chars
                                 )
                             } else {
