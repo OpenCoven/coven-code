@@ -6119,14 +6119,25 @@ fn ui_settings_path() -> std::path::PathBuf {
 }
 
 fn load_ui_settings() -> UiSettings {
+    read_ui_settings().unwrap_or_default()
+}
+
+fn read_ui_settings() -> anyhow::Result<UiSettings> {
     let path = ui_settings_path();
-    if !path.exists() {
-        return UiSettings::default();
-    }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UiSettings::default());
+        }
+        Err(err) => {
+            let message = format!("Failed to read UI settings at {}: {err}", path.display());
+            return Err(anyhow::Error::new(err).context(message));
+        }
+    };
+    serde_json::from_str(&content).map_err(|err| {
+        anyhow::Error::new(err)
+            .context(format!("Failed to parse UI settings at {}", path.display()))
+    })
 }
 
 fn save_ui_settings(settings: &UiSettings) -> anyhow::Result<()> {
@@ -6143,7 +6154,7 @@ fn mutate_ui_settings<F>(f: F) -> anyhow::Result<UiSettings>
 where
     F: FnOnce(&mut UiSettings),
 {
-    let mut s = load_ui_settings();
+    let mut s = read_ui_settings()?;
     f(&mut s);
     save_ui_settings(&s)?;
     Ok(s)
