@@ -27,13 +27,17 @@ def precedence(tag):
     return (*(int(match[i]) for i in (1, 2, 3)), not bool(match[4]), tuple(identifiers))
 
 
-def check_release(root, tag, tags):
+def check_forward(tag, tags):
     requested = precedence(tag)
     for existing in tags:
         # Ignore unrelated tags, but fail on malformed version-shaped tags:
         # silently ignoring one could defeat the forward-only guarantee.
         if re.match(r'^v[0-9]', existing) and requested <= precedence(existing):
             raise ValueError(f'{tag} must be strictly newer than {existing}')
+
+
+def check_release(root, tag, tags):
+    check_forward(tag, tags)
     version = tag[1:]
     workspace = tomllib.loads((root / 'src-rust/Cargo.toml').read_text())
     versions = {'Cargo workspace': workspace['workspace']['package']['version']}
@@ -82,6 +86,10 @@ def check_release(root, tag, tags):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('tag')
+    # Auto-release checks ordering before it runs bump-version.py, when the
+    # canonical stamps do not exist yet; it must not verify them.
+    parser.add_argument('--forward-only', action='store_true',
+                        help='check SemVer ordering against origin tags only')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     try:
@@ -90,11 +98,17 @@ def main():
                               check=True, capture_output=True, text=True, timeout=60).stdout
         tags = {line.split('\t', 1)[1].removeprefix('refs/tags/').removesuffix('^{}')
                 for line in refs.splitlines()}
-        check_release(root, args.tag, tags)
+        if args.forward_only:
+            check_forward(args.tag, tags)
+        else:
+            check_release(root, args.tag, tags)
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
         print(f'error: release preflight failed: {error}', file=sys.stderr)
         return 1
-    print(f'{args.tag}: forward version and all canonical stamps verified')
+    if args.forward_only:
+        print(f'{args.tag}: forward version verified against origin tags')
+    else:
+        print(f'{args.tag}: forward version and all canonical stamps verified')
     return 0
 
 

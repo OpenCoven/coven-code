@@ -90,36 +90,15 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # ── 3. Forward-only enforcement ───────────────────────────────────
-      # Two guards:
-      #   a) The exact tag must not already exist (anywhere — local or remote).
-      #   b) `sort -V` must rank the requested tag strictly above the current
-      #      highest `vX.Y.Z` tag.  This catches `v0.1.0` after `v0.1.1` has
-      #      shipped, etc.
+      # The shared release preflight compares SemVer precedence against the
+      # authoritative origin tags (an equal, existing or lower version fails,
+      # and so does a malformed version-shaped tag). Stamps are checked by the
+      # release workflow after bump-version.py, so only ordering runs here.
       - name: Forward-only check
         if: steps.marker.outputs.found == 'true'
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.marker.outputs.tag }}"
-
-          git fetch --tags --force --quiet
-
-          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-            echo "::error::Tag $TAG already exists — releases are forward-only."
-            exit 1
-          fi
-
-          LATEST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1 || true)"
-          if [[ -n "$LATEST" ]]; then
-            HIGHER="$(printf '%s\n%s\n' "$LATEST" "$TAG" | sort -V | tail -1)"
-            if [[ "$HIGHER" != "$TAG" || "$LATEST" == "$TAG" ]]; then
-              echo "::error::Requested $TAG is not strictly newer than current latest $LATEST."
-              echo "::error::Releases are forward-only — bump the requested version."
-              exit 1
-            fi
-            echo "Forward bump OK: $LATEST → $TAG"
-          else
-            echo "No prior tags found — treating as first release."
-          fi
+        env:
+          RELEASE_VERSION: ${{ steps.marker.outputs.tag }}
+        run: python3 scripts/check-release-version.py --forward-only "$RELEASE_VERSION"
 
       # ── 4. Run the bump script ────────────────────────────────────────
       - name: Set up Python
