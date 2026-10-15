@@ -1,0 +1,33 @@
+name: npm packaging tests
+
+on:
+  pull_request:
+    paths:
+      - 'npm/package.json'
+      - 'npm/README.md'
+      - 'scripts/prepare-npm-package*'
+      - 'scripts/npm-publish-workflow.test.mjs'
+      - '.github/workflows/npm-publish.yml'
+      - '.github/workflows/npm-packaging-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packaging:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node scripts/prepare-npm-package.test.mjs
+      - run: node scripts/npm-publish-workflow.test.mjs
