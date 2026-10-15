@@ -5199,13 +5199,11 @@ pub mod oauth {
         /// `~/.coven-code/accounts/anthropic/<profile_id>/oauth_tokens.json`.
         pub async fn save_for_profile(&self, profile_id: &str) -> anyhow::Result<()> {
             let path = crate::accounts::anthropic_token_path(profile_id);
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&path, serde_json::to_string_pretty(self)?).await?;
-            // Restrict to owner-only: this file holds the Anthropic OAuth
-            // access + refresh tokens (and any minted API key).
-            crate::accounts::set_user_only_perms(&path);
+            crate::secret_file::write_secret_file_in_private_dir(
+                &path,
+                serde_json::to_string_pretty(self)?,
+            )
+            .await?;
             Ok(())
         }
 
@@ -5857,6 +5855,49 @@ mod tests {
             tokens.is_expired(),
             "Token within 5-min buffer should be considered expired"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anthropic_profile_writer_creates_private_file_and_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("COVEN_CODE_TEST_HOME");
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
+        let tokens = crate::oauth::OAuthTokens {
+            access_token: "fixture-access".into(),
+            refresh_token: Some("fixture-refresh".into()),
+            scopes: vec![crate::oauth::CLAUDE_AI_INFERENCE_SCOPE.into()],
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(tokens.save_for_profile("fixture"));
+        let path = crate::accounts::anthropic_token_path("fixture");
+        match previous {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+        result.unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+        let saved: crate::oauth::OAuthTokens =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved.access_token, "fixture-access");
     }
 
     #[test]

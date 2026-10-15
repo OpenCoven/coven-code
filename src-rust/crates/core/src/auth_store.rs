@@ -46,13 +46,15 @@ impl AuthStore {
         }
     }
 
-    /// Persist the store to disk (best-effort) using an atomic write.
+    /// Persist the store to disk (best-effort) using an atomic private write.
     ///
     /// Writes go to a sibling tempfile and then `fs::rename` swaps it into
     /// place. This avoids torn writes (a partially-written `auth.json` if
-    /// the process is killed mid-`write_all`) and the lost-update race
-    /// where two concurrent callers both truncate the file. The trade-off
-    /// is that we lose data only on rename failure, not on partial writes.
+    /// the process is killed mid-write). Concurrent writers remain
+    /// last-writer-wins; this store does not merge independent updates.
+    ///
+    /// This compatibility wrapper cannot report persistence failures. Callers
+    /// that need the error must use [`Self::save_to`].
     pub fn save(&self) {
         let _ = self.save_to(&Self::path());
     }
@@ -61,46 +63,9 @@ impl AuthStore {
     /// tests can assert behaviour. The public `save()` wrapper keeps the
     /// best-effort void return for backwards compatibility.
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        // Tempfile lives in the same directory so the rename is a same-
-        // filesystem atomic operation on Unix and ReplaceFile on Windows.
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("auth.json");
-
-        // Each tempfile name needs to be unique even across threads in the
-        // same process and the same nanosecond. PID + monotonic counter +
-        // current thread id is sufficient.
-        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = parent.join(format!(
-            ".{file_name}.tmp.{pid}.{tid:?}.{counter}",
-            pid = std::process::id(),
-            tid = std::thread::current().id(),
-        ));
-
-        std::fs::write(&tmp_path, json)?;
-        // Tighten perms on the tempfile *before* the rename so the credential
-        // file is never world-readable for even a moment. auth.json holds API
-        // keys and OAuth tokens.
-        crate::accounts::set_user_only_perms(&tmp_path);
-        // rename is atomic on POSIX; on Windows std::fs::rename uses
-        // MoveFileExW with MOVEFILE_REPLACE_EXISTING.
-        match std::fs::rename(&tmp_path, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Best-effort cleanup of the leftover tempfile.
-                let _ = std::fs::remove_file(&tmp_path);
-                Err(e)
-            }
-        }
+        crate::secret_file::write_secret_file_sync(path, json)
     }
 
     /// Store a credential for the given provider (persists immediately).
@@ -221,6 +186,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.path().join("auth.json");
         let mut store = AuthStore::default();
         store.credentials.insert(
@@ -233,6 +199,11 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "auth.json must be owner-only, got {mode:o}");
+        let parent_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            parent_mode, 0o755,
+            "AuthStore must not chmod the broad config-home parent"
+        );
     }
 
     #[test]
