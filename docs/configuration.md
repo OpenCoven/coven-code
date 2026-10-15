@@ -237,11 +237,16 @@ Each `McpServerConfig` object:
 set `url` to the endpoint; `command` is for the stdio executable. These
 settings belong in the trusted engine-global file, not project settings.
 
-### Environment variables injected into tools
+### Environment settings map
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `env` | object (string → string) | {} | Environment variables injected into every tool execution. Useful for setting project-specific tokens without polluting the system environment. Values may reference existing env vars using `{env:VARNAME}` syntax. |
+| `env` | object (string → string) | {} | Stored and merged with settings, but currently not applied to built-in tool processes. `{env:VARNAME}` references are not expanded here. |
+
+Export variables in the parent environment before launching `coven-code` for
+normal shell subprocess inheritance. For a specific MCP server, use that
+server's `env` map instead; its values support `${VAR}` and `${VAR:-default}`
+expansion from the process environment.
 
 ### Hooks
 
@@ -699,9 +704,7 @@ This global-file example is plain JSON. See the sections above for field meaning
 
     "disallowed_tools": ["Bash"],
 
-    "env": {
-      "MY_PROJECT_TOKEN": "{env:HOME}/.project_token"
-    },
+    "env": {},
 
     "hooks": {
       "PostToolUse": [
