@@ -192,7 +192,11 @@ async fn run_in_background(
                             };
                             let output = t.output.join("\n");
                             let output_tail = if output.len() > 2000 {
-                                output[output.len() - 2000..].to_string()
+                                let mut tail_start = output.len() - 2000;
+                                while !output.is_char_boundary(tail_start) {
+                                    tail_start += 1;
+                                }
+                                output[tail_start..].to_string()
                             } else {
                                 output
                             };
