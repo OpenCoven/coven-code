@@ -192,22 +192,16 @@ fn validate_cron(expr: &str) -> bool {
         }
         // Handle */N (step)
         if let Some(step) = field.strip_prefix("*/") {
-            if step.parse::<u32>().is_err() {
+            if !step.parse::<u32>().is_ok_and(|step| step > 0) {
                 return false;
             }
             continue;
         }
         // Handle N-M (range) or N
-        let parts: Vec<&str> = field.split('-').collect();
-        for part in &parts {
-            match part.parse::<u32>() {
-                Ok(n) => {
-                    if n < ranges[i].0 || n > ranges[i].1 {
-                        return false;
-                    }
-                }
-                Err(_) => return false,
-            }
+        let (lo, hi) = field.split_once('-').unwrap_or((field, field));
+        match (lo.parse::<u32>(), hi.parse::<u32>()) {
+            (Ok(lo), Ok(hi)) if ranges[i].0 <= lo && lo <= hi && hi <= ranges[i].1 => {}
+            _ => return false,
         }
     }
     true
@@ -590,5 +584,69 @@ mod tests {
         ] {
             assert!(!cron_matches(expression, &date), "{expression}");
         }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::validate_cron;
+
+    #[test]
+    fn rejects_zero_steps_in_every_field() {
+        for index in 0..5 {
+            let mut fields = ["*"; 5];
+            fields[index] = "*/0";
+            assert!(!validate_cron(&fields.join(" ")), "field {index}");
+        }
+    }
+
+    #[test]
+    fn rejects_reversed_and_multiple_ranges_in_every_field() {
+        for index in 0..5 {
+            for value in ["2-1", "1-2-3", "-1", "1-", "1--2"] {
+                let mut fields = ["*"; 5];
+                fields[index] = value;
+                assert!(!validate_cron(&fields.join(" ")), "field {index}: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_field_bounds_and_existing_grammar() {
+        for (index, (min, max)) in [(0u32, 59u32), (0, 23), (1, 31), (1, 12), (0, 7)]
+            .into_iter()
+            .enumerate()
+        {
+            for value in [
+                min.to_string(),
+                max.to_string(),
+                format!("{min}-{max}"),
+                format!("{min}-{min}"),
+                "*/1".into(),
+                format!("*/{}", u32::MAX),
+            ] {
+                let mut fields = ["*"; 5];
+                fields[index] = &value;
+                assert!(validate_cron(&fields.join(" ")), "field {index}: {value}");
+            }
+            let mut invalid = vec![
+                format!("{}", max + 1),
+                format!("{min}-{}", max + 1),
+                "1,2".into(),
+                "*/x".into(),
+                "*/4294967296".into(),
+            ];
+            if min > 0 {
+                invalid.extend(["0".into(), format!("0-{max}")]);
+            }
+            for value in invalid {
+                let mut fields = ["*"; 5];
+                fields[index] = &value;
+                assert!(!validate_cron(&fields.join(" ")), "field {index}: {value}");
+            }
+        }
+        assert!(validate_cron("* * * * *"));
+        assert!(!validate_cron("* * * *"));
+        assert!(!validate_cron("* * * * * *"));
     }
 }
