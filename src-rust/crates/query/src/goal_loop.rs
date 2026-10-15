@@ -4,7 +4,7 @@
 // turn completes.  When an active goal exists it:
 //   1. Records the turn in the GoalStore
 //   2. Checks runaway / budget guards
-//   3. Returns `GoalContinuation::Continue { message }` with the continuation
+//   3. Returns `GoalContinuation::Continue { message, turn }` with the continuation
 //      user message to inject, signalling the caller to dispatch another turn.
 //
 // The caller (cli/src/main.rs) is responsible for the actual dispatch so that
@@ -33,7 +33,10 @@ thread_local! {
 #[derive(Debug)]
 pub enum GoalContinuation {
     /// Inject this user message and run another turn.
-    Continue { message: String },
+    Continue {
+        message: String,
+        turn: claurst_core::goal::GoalTurn,
+    },
     /// Goal is done (complete, paused, cleared, budget hit, runaway).
     Stop { reason: StopReason },
     /// No goal is set for this session.
@@ -304,8 +307,10 @@ fn check_goal_guards(
         });
     }
 
+    let turn = store.capture_goal_turn(session_id, &goal.id)?;
     Ok(GoalContinuation::Continue {
-        message: goal_continuation_message(&goal),
+        message: goal_continuation_message(turn.goal()),
+        turn,
     })
 }
 

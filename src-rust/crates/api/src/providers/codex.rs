@@ -411,6 +411,9 @@ impl CodexProvider {
         // OAuth preparation may await refresh HTTP/body reads. Recheck at the
         // actual model-send boundary after that preparation has completed.
         self.validate_goal_request()?;
+        if let Some((turn, _)) = &self.goal_authority {
+            turn.mark_request_attempted();
+        }
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
             message: format!("HTTP request failed: {}", e),
@@ -475,6 +478,9 @@ impl CodexProvider {
         // OAuth preparation may await refresh HTTP/body reads. Recheck at the
         // actual model-send boundary after that preparation has completed.
         self.validate_goal_request()?;
+        if let Some((turn, _)) = &self.goal_authority {
+            turn.mark_request_attempted();
+        }
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
             message: format!("HTTP request failed: {}", e),
@@ -1362,6 +1368,7 @@ mod goal_tests {
                 let _ = stop.send(()); server.await.unwrap();
                 assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), usize::from(!revoke));
                 assert_eq!(result.is_err(), revoke);
+                assert_eq!(turn.request_attempted(), !revoke, "only the actual model send is an attempt");
             }
         });
     }

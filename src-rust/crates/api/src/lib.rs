@@ -822,7 +822,12 @@ pub mod client {
                 let resp = tokio::select! {
                     biased;
                     error = Self::wait_for_goal_revocation(self.goal_authority.as_ref()) => return Err(error),
-                    response = req.send() => response.map_err(ClaudeError::Http)?,
+                    response = async {
+                        if let Some((turn, _)) = &self.goal_authority {
+                            turn.mark_request_attempted();
+                        }
+                        req.send().await
+                    } => response.map_err(ClaudeError::Http)?,
                 };
                 let status = resp.status().as_u16();
 

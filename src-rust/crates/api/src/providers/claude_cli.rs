@@ -556,6 +556,9 @@ impl ClaudeCliProvider {
                 ]);
             }
         }
+        if let Some((turn, _)) = &self.goal_authority {
+            turn.mark_request_attempted();
+        }
         let mut child = command.spawn().map_err(|e| self.spawn_error(e))?;
 
         let mut stdin = child.stdin.take().ok_or_else(|| ProviderError::Other {

@@ -69,6 +69,9 @@ pub trait LlmProvider: Send + Sync {
 
     /// Query-owned dispatch. Adapters with retries or asynchronous preparation
     /// must propagate typed authority to their actual transport-send boundary.
+    /// All built-in adapters override this method and mark attempts there.
+    /// For custom implementations, entering `create_message_stream` is the
+    /// best observable attempt boundary; their internal preparation is opaque.
     async fn create_message_stream_for_goal(
         &self,
         request: ProviderRequest,
@@ -91,6 +94,7 @@ pub trait LlmProvider: Send + Sync {
                     body: None,
                 });
             }
+            turn.mark_request_attempted();
         }
         self.create_message_stream(request).await
     }
