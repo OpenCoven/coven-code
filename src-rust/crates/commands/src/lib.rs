@@ -7552,47 +7552,82 @@ impl SlashCommand for AdvisorCommand {
         let settings_dir = claurst_core::config::Settings::config_dir();
         let settings_path = settings_dir.join("settings.json");
 
-        // Read or create settings JSON
-        let mut settings_val: serde_json::Value = settings_path
-            .exists()
-            .then(|| std::fs::read_to_string(&settings_path).ok())
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        match arg {
-            "" => {
-                let current = settings_val
-                    .get("advisorModel")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(not set)");
-                CommandResult::Message(format!("Advisor model: {current}"))
-            }
-            "off" | "unset" | "none" => {
-                settings_val
-                    .as_object_mut()
-                    .map(|m| m.remove("advisorModel"));
-                if let Ok(json) = serde_json::to_string_pretty(&settings_val) {
-                    let _ = std::fs::write(&settings_path, json);
-                }
-                CommandResult::Message("Advisor model unset.".to_string())
-            }
-            model => {
-                // Basic validation: must look like a model identifier
-                if model.starts_with("claude-") || model.contains('/') {
-                    settings_val["advisorModel"] = serde_json::Value::String(model.to_string());
-                    if let Ok(json) = serde_json::to_string_pretty(&settings_val) {
-                        let _ = std::fs::write(&settings_path, json);
-                    }
-                    CommandResult::Message(format!("Advisor model set to: {model}"))
-                } else {
-                    CommandResult::Message(format!(
-                        "Unknown model '{model}'. Model IDs should start with 'claude-'.\n\
-                         Use /model to see available models."
-                    ))
-                }
-            }
+        let unset = matches!(arg, "off" | "unset" | "none");
+        if !arg.is_empty() && !unset && !arg.starts_with("claude-") && !arg.contains('/') {
+            return CommandResult::Message(format!(
+                "Unknown model '{arg}'. Model IDs should start with 'claude-'.\n\
+                 Use /model to see available models."
+            ));
         }
+
+        let loaded = (|| -> Result<serde_json::Value, String> {
+            let content = match std::fs::read_to_string(&settings_path) {
+                Ok(content) => content,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(serde_json::json!({}));
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to read advisor settings at {}: {err}",
+                        settings_path.display()
+                    ));
+                }
+            };
+            serde_json::from_str(&content).map_err(|err| {
+                format!(
+                    "Failed to parse advisor settings at {} ({:?}, line {}, column {})",
+                    settings_path.display(),
+                    err.classify(),
+                    err.line(),
+                    err.column()
+                )
+            })
+        })();
+        if arg.is_empty() {
+            let settings_val = loaded.unwrap_or_else(|_| serde_json::json!({}));
+            let current = settings_val
+                .get("advisorModel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(not set)");
+            return CommandResult::Message(format!("Advisor model: {current}"));
+        }
+        let mut settings_val = match loaded {
+            Ok(value) => value,
+            Err(message) => return CommandResult::Error(message),
+        };
+        let message = if unset {
+            if let Some(settings) = settings_val.as_object_mut() {
+                settings.remove("advisorModel");
+            }
+            "Advisor model unset.".to_string()
+        } else {
+            if !settings_val.is_object() && !settings_val.is_null() {
+                return CommandResult::Error(format!(
+                    "Failed to set advisor model: settings at {} must be a JSON object or null",
+                    settings_path.display()
+                ));
+            }
+            settings_val["advisorModel"] = serde_json::Value::String(arg.to_string());
+            format!("Advisor model set to: {arg}")
+        };
+        let json = match serde_json::to_string_pretty(&settings_val) {
+            Ok(json) => json,
+            Err(err) => {
+                return CommandResult::Error(format!(
+                    "Failed to serialize advisor settings at {}: {err}",
+                    settings_path.display()
+                ));
+            }
+        };
+        if let Err(err) = std::fs::create_dir_all(&settings_dir)
+            .and_then(|()| std::fs::write(&settings_path, json))
+        {
+            return CommandResult::Error(format!(
+                "Failed to save advisor settings at {}: {err}",
+                settings_path.display()
+            ));
+        }
+        CommandResult::Message(message)
     }
 }
 
