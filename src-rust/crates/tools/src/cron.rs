@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -157,15 +157,31 @@ fn cron_range_matches(part: &str, value: u32, sunday_alias: bool) -> bool {
 }
 
 /// Return all tasks whose cron expression fires at `dt`.
-/// One-shot tasks (recurring=false) are removed from the store after being returned.
+/// One-shot tasks (recurring=false) are removed before being returned.
+/// Durable one-shots are withheld if their removal cannot be persisted.
+/// Persistence precedes delivery, not execution: a crash between them can lose a run.
 pub async fn pop_due_tasks(dt: &DateTime<Local>) -> Vec<CronTask> {
     ensure_store_loaded().await;
     let mut store = CRON_STORE.write().await;
-    let due: Vec<CronTask> = store
+    let mut due: Vec<CronTask> = store
         .values()
         .filter(|t| cron_matches(&t.cron, dt))
         .cloned()
         .collect();
+    if due.iter().any(|task| task.durable && !task.recurring) {
+        let remaining = store.values().filter(|task| {
+            !due.iter()
+                .any(|due| due.durable && !due.recurring && due.id == task.id)
+        });
+        if let Err(error) = persist_tasks_to_disk(remaining).await {
+            warn!(
+                path = %scheduled_tasks_path().display(),
+                %error,
+                "Failed to persist durable one-shot removal; withholding those tasks"
+            );
+            due.retain(|task| task.recurring || !task.durable);
+        }
+    }
     for t in &due {
         if !t.recurring {
             store.remove(&t.id);
@@ -339,7 +355,7 @@ impl Tool for CronCreateTool {
 
         // Persist to ~/.coven-code/scheduled_tasks.json for durable tasks.
         if params.durable {
-            if let Err(e) = persist_tasks_to_disk(&store).await {
+            if let Err(e) = persist_tasks_to_disk(store.values()).await {
                 if let Some(previous) = previous {
                     store.insert(id, previous);
                 } else {
@@ -425,7 +441,7 @@ impl Tool for CronDeleteTool {
         if let Some(removed) = store.remove(&params.id) {
             // If it was durable, update the file.
             if removed.durable {
-                if let Err(e) = persist_tasks_to_disk(&store).await {
+                if let Err(e) = persist_tasks_to_disk(store.values()).await {
                     store.insert(params.id, removed);
                     return ToolResult::error(format!(
                         "Failed to delete durable cron task: could not write {}: {}",
@@ -519,8 +535,10 @@ impl Tool for CronListTool {
 /// Atomically replace the durable snapshot using a same-directory private file.
 /// Destination symlinks are replaced; a symlinked engine home remains supported.
 /// File contents are synced before replacement, but the parent directory is not.
-async fn persist_tasks_to_disk(store: &HashMap<String, CronTask>) -> Result<(), String> {
-    let durable: Vec<&CronTask> = store.values().filter(|t| t.durable).collect();
+async fn persist_tasks_to_disk<'a>(
+    tasks: impl Iterator<Item = &'a CronTask>,
+) -> Result<(), String> {
+    let durable: Vec<&CronTask> = tasks.filter(|t| t.durable).collect();
     let json = serde_json::to_string_pretty(&durable).map_err(|e| e.to_string())?;
 
     let path = scheduled_tasks_path();
