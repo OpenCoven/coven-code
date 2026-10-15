@@ -37,6 +37,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test polling boundaries
+        run: python3 scripts/tui-tests/test_polling.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
