@@ -1,0 +1,29 @@
+name: npm installer tests
+
+on:
+  pull_request:
+    paths:
+      - 'npm/install.js'
+      - 'scripts/npm-install.test.mjs'
+      - '.github/workflows/npm-install-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node --test scripts/npm-install.test.mjs
