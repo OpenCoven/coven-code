@@ -116,12 +116,7 @@ impl PluginRegistry {
     pub fn all_command_defs(&self) -> Vec<PluginCommandDef> {
         let mut defs: Vec<PluginCommandDef> = Vec::new();
         for plugin in self.enabled() {
-            let mut plugin_defs = crate::loader::collect_command_defs(plugin);
-            // Patch source_id now that we have it.
-            for d in &mut plugin_defs {
-                d.plugin_source_id = plugin.source_id.clone();
-            }
-            defs.extend(plugin_defs);
+            defs.extend(crate::loader::collect_command_defs(plugin));
         }
         defs
     }
