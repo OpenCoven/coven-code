@@ -749,8 +749,34 @@ mod tests {
         );
     }
 
+    fn run_with_isolated_home(test_name: &str) -> bool {
+        const CHILD_TEST: &str = "COVEN_CODE_PLUGIN_TEST_CHILD";
+        if std::env::var(CHILD_TEST).ok().as_deref() == Some(test_name) {
+            return true;
+        }
+        let home = TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name])
+            .env("COVEN_CODE_HOME", home.path())
+            .env_remove("COVEN_CODE_TEST_HOME")
+            .env(CHILD_TEST, test_name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{test_name}: {stdout}\n{stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "child must run exactly one test: {stdout}\n{stderr}"
+        );
+        false
+    }
+
     #[tokio::test]
     async fn load_plugins_empty_dirs() {
+        if !run_with_isolated_home("tests::load_plugins_empty_dirs") {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let reg = load_plugins(tmp.path(), &[]).await;
         assert_eq!(reg.plugin_count(), 0);
@@ -759,6 +785,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_plugins_finds_project_plugin() {
+        if !run_with_isolated_home("tests::load_plugins_finds_project_plugin") {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let plugin_dir = tmp
             .path()
