@@ -92,7 +92,11 @@ impl FeatureFlagManager {
     pub async fn fetch_flags_async(&self) -> Result<()> {
         // Try to load from cache first
         if let Ok(cached) = self.load_cached_flags().await {
-            if self.is_cache_valid(&cached) {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if self.is_cache_valid(&cached, now) {
                 debug!("Using cached feature flags");
                 self.update_flags_from_cached(&cached);
                 return Ok(());
@@ -171,12 +175,9 @@ impl FeatureFlagManager {
     }
 
     /// Check if cached flags are still valid (within TTL)
-    fn is_cache_valid(&self, cached: &CachedFlags) -> bool {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        now - cached.fetched_at < self.cache_ttl
+    fn is_cache_valid(&self, cached: &CachedFlags, now: u64) -> bool {
+        now.checked_sub(cached.fetched_at)
+            .is_some_and(|age| age < self.cache_ttl)
     }
 
     /// Load cached flags from disk
@@ -263,24 +264,59 @@ mod tests {
 
     #[test]
     fn test_cache_validity() {
-        let manager = FeatureFlagManager::new();
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Fresh cache
-        let fresh_cache = CachedFlags {
-            flags: HashMap::new(),
-            fetched_at: now,
+        let manager = FeatureFlagManager {
+            flags: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            cache_path: PathBuf::new(),
+            api_endpoint: String::new(),
+            cache_ttl: 3600,
+            http_client: reqwest::Client::new(),
         };
-        assert!(manager.is_cache_valid(&fresh_cache));
-
-        // Stale cache (older than TTL)
-        let stale_cache = CachedFlags {
-            flags: HashMap::new(),
-            fetched_at: now - 7200, // 2 hours ago
+        for (fetched_at, now, expected) in [
+            (7200, 7200, true),
+            (7199, 7200, true),
+            (3601, 7200, true),
+            (3600, 7200, false),
+            (0, 7200, false),
+            (0, 0, true),
+            (u64::MAX, u64::MAX, true),
+        ] {
+            let cached = CachedFlags {
+                flags: HashMap::new(),
+                fetched_at,
+            };
+            assert_eq!(
+                manager.is_cache_valid(&cached, now),
+                expected,
+                "fetched_at={fetched_at}, now={now}"
+            );
+        }
+        let zero_ttl = FeatureFlagManager {
+            cache_ttl: 0,
+            ..manager
         };
-        assert!(!manager.is_cache_valid(&stale_cache));
+        let cached = CachedFlags {
+            flags: HashMap::new(),
+            fetched_at: 7200,
+        };
+        assert!(!zero_ttl.is_cache_valid(&cached, 7200));
+        assert!(!zero_ttl.is_cache_valid(&cached, 7201));
+    }
+
+    #[test]
+    fn test_future_cache_is_stale() {
+        let manager = FeatureFlagManager {
+            flags: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            cache_path: PathBuf::new(),
+            api_endpoint: String::new(),
+            cache_ttl: 3600,
+            http_client: reqwest::Client::new(),
+        };
+        for fetched_at in [7201, u64::MAX] {
+            let cached = CachedFlags {
+                flags: HashMap::new(),
+                fetched_at,
+            };
+            assert!(!manager.is_cache_valid(&cached, 7200));
+        }
     }
 }
