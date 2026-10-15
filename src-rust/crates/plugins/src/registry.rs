@@ -18,8 +18,6 @@ use std::collections::HashMap;
 pub struct PluginRegistry {
     /// All plugins keyed by name.
     plugins: HashMap<String, LoadedPlugin>,
-    /// Names of plugins that are currently enabled.
-    enabled_names: std::collections::HashSet<String>,
     /// Accumulated load errors.
     pub errors: Vec<PluginError>,
 }
@@ -36,7 +34,6 @@ impl PluginRegistry {
     /// a different path already holds a plugin with the same name.
     pub fn insert(&mut self, plugin: LoadedPlugin) {
         let name = plugin.name.clone();
-        let enabled = plugin.enabled;
 
         if let Some(existing) = self.plugins.get(&name) {
             if existing.path != plugin.path {
@@ -50,10 +47,7 @@ impl PluginRegistry {
             }
         }
 
-        self.plugins.insert(name.clone(), plugin);
-        if enabled {
-            self.enabled_names.insert(name);
-        }
+        self.plugins.insert(name, plugin);
     }
 
     /// Append multiple plugins at once, updating errors inline.
@@ -73,10 +67,7 @@ impl PluginRegistry {
 
     /// Only the enabled plugins.
     pub fn enabled(&self) -> Vec<&LoadedPlugin> {
-        self.plugins
-            .values()
-            .filter(|p| self.enabled_names.contains(&p.name))
-            .collect()
+        self.plugins.values().filter(|p| p.enabled).collect()
     }
 
     /// Look up a plugin by name.
@@ -86,35 +77,27 @@ impl PluginRegistry {
 
     /// Whether a plugin is enabled.
     pub fn is_enabled(&self, name: &str) -> bool {
-        self.enabled_names.contains(name)
+        self.plugins.get(name).is_some_and(|plugin| plugin.enabled)
     }
 
     // ---- Enable / disable -------------------------------------------------
 
     /// Enable a plugin by name.  Returns `false` if the plugin is not loaded.
     pub fn enable(&mut self, name: &str) -> bool {
-        if self.plugins.contains_key(name) {
-            self.enabled_names.insert(name.to_string());
-            if let Some(p) = self.plugins.get_mut(name) {
-                p.enabled = true;
-            }
-            true
-        } else {
-            false
-        }
+        let Some(plugin) = self.plugins.get_mut(name) else {
+            return false;
+        };
+        plugin.enabled = true;
+        true
     }
 
     /// Disable a plugin by name.  Returns `false` if the plugin is not loaded.
     pub fn disable(&mut self, name: &str) -> bool {
-        if self.plugins.contains_key(name) {
-            self.enabled_names.remove(name);
-            if let Some(p) = self.plugins.get_mut(name) {
-                p.enabled = false;
-            }
-            true
-        } else {
-            false
-        }
+        let Some(plugin) = self.plugins.get_mut(name) else {
+            return false;
+        };
+        plugin.enabled = false;
+        true
     }
 
     // ---- Derived collections from enabled plugins -------------------------
@@ -221,7 +204,10 @@ impl PluginRegistry {
 
     /// Number of enabled plugins.
     pub fn enabled_count(&self) -> usize {
-        self.enabled_names.len()
+        self.plugins
+            .values()
+            .filter(|plugin| plugin.enabled)
+            .count()
     }
 
     /// Number of load errors.
@@ -321,6 +307,45 @@ mod tests {
         reg.insert(dup);
         assert_eq!(reg.plugin_count(), 1);
         assert_eq!(reg.error_count(), 1);
+    }
+
+    #[test]
+    fn replacement_uses_the_loaded_plugin_enabled_state() {
+        let mut registry = PluginRegistry::new();
+        let mut plugin = make_plugin("replacement");
+        plugin
+            .manifest
+            .mcp_servers
+            .push(crate::manifest::PluginMcpServer {
+                name: "fixture-server".into(),
+                ..Default::default()
+            });
+        registry.insert(plugin.clone());
+        assert_eq!(registry.all_mcp_servers().len(), 1);
+
+        plugin.enabled = false;
+        registry.insert(plugin.clone());
+        assert!(!registry.get("replacement").unwrap().enabled);
+        assert!(!registry.is_enabled("replacement"));
+        assert_eq!(registry.enabled_count(), 0);
+        assert!(registry.enabled().is_empty());
+        assert!(registry.all_mcp_servers().is_empty());
+
+        plugin.enabled = true;
+        registry.insert(plugin);
+        assert!(registry.get("replacement").unwrap().enabled);
+        assert!(registry.is_enabled("replacement"));
+        assert_eq!(registry.enabled_count(), 1);
+        assert_eq!(registry.enabled().len(), 1);
+        assert_eq!(registry.all_mcp_servers().len(), 1);
+
+        let mut duplicate = make_plugin("replacement");
+        duplicate.path = PathBuf::from("/other/fixture/path");
+        duplicate.enabled = false;
+        registry.insert(duplicate);
+        assert_eq!(registry.error_count(), 1);
+        assert!(registry.is_enabled("replacement"));
+        assert_eq!(registry.all_mcp_servers().len(), 1);
     }
 
     #[test]
