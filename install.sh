@@ -82,23 +82,24 @@ esac
 INSTALL_DIR="${install_dir_override:-$HOME/.coven-code/bin}"
 mkdir -p "$INSTALL_DIR"
 
-# Resolve version
-if [[ -z "$specific_version" ]]; then
-  print_message info "Fetching latest release..."
-  specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
+# Local installs do not need release metadata or network access.
+if [[ -n "$local_binary" ]]; then
+  install_source="local binary"
+else
+  if [[ -z "$specific_version" ]]; then
+    print_message info "Fetching latest release..."
+    specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
+  fi
+  install_source="v${specific_version}"
 fi
-print_message info "Installing ${APP} v${specific_version}"
+print_message info "Installing ${APP} (${install_source})"
 
 # Check existing
 existing_path=$(command -v "$APP" 2>/dev/null || true)
 if [[ -n "$existing_path" ]]; then
   installed_version=$("$existing_path" --version 2>/dev/null | head -1 | sed 's/[^0-9.]//g' || echo "unknown")
-  print_message info "${MUTED}Found existing ${APP} at ${NC}${existing_path}${MUTED} (v${installed_version}) — upgrading to v${specific_version}${NC}"
+  print_message info "${MUTED}Found existing ${APP} at ${NC}${existing_path}${MUTED} (v${installed_version}) — installing ${install_source}${NC}"
 fi
-
-ARTIFACT="${APP}-${PLATFORM}-${ARCH_TAG}"
-ARCHIVE_NAME="${ARTIFACT}.tar.gz"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${specific_version}/${ARCHIVE_NAME}"
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
@@ -109,6 +110,10 @@ if [[ -n "$local_binary" ]]; then
   chmod +x "${INSTALL_DIR}/${APP}.new"
   mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
 else
+  ARTIFACT="${APP}-${PLATFORM}-${ARCH_TAG}"
+  ARCHIVE_NAME="${ARTIFACT}.tar.gz"
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${specific_version}/${ARCHIVE_NAME}"
+
   tmp_dir=$(mktemp -d -t coven-code-install-XXXXXX)
   trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -143,7 +148,7 @@ if [[ -n "$shell_rc" ]] && ! grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; th
   print_message info "Added ${INSTALL_DIR} to PATH in ${shell_rc}"
 fi
 
-print_message success "${APP} v${specific_version} installed to ${INSTALL_DIR}/${APP}"
+print_message success "${APP} (${install_source}) installed to ${INSTALL_DIR}/${APP}"
 print_message success "${ALIAS} alias installed to ${INSTALL_DIR}"
 
 # The unified Coven CLI keeps its own engine under ~/.coven/engine and runs that
