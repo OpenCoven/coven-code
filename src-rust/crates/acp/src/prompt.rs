@@ -44,8 +44,8 @@ pub async fn handle(
     };
     messages.push(Message::user(user_text));
 
-    // Reset the session's cancellation token for this new turn.
-    let cancel = session.cancel_token.clone();
+    // Capture the current token; session/cancel re-arms it for later prompts.
+    let cancel = session.cancel_token.lock().clone();
 
     // Build per-session ToolContext.
     let permission_handler: Arc<dyn claurst_core::PermissionHandler> =

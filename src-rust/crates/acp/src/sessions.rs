@@ -15,19 +15,26 @@ pub struct SessionState {
     pub session_id: acp::SessionId,
     pub cwd: PathBuf,
     pub messages: parking_lot::Mutex<Vec<Message>>,
-    pub cancel_token: CancellationToken,
+    pub cancel_token: parking_lot::Mutex<CancellationToken>,
     pub pending_permissions: Arc<parking_lot::Mutex<PendingPermissionStore>>,
     pub file_history: Arc<parking_lot::Mutex<claurst_core::file_history::FileHistory>>,
     pub current_turn: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SessionState {
+    /// Cancel the in-flight turn without cancelling subsequent prompts.
+    pub fn cancel_turn(&self) {
+        let mut token = self.cancel_token.lock();
+        token.cancel();
+        *token = CancellationToken::new();
+    }
+
     pub fn new(session_id: acp::SessionId, cwd: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             session_id,
             cwd,
             messages: parking_lot::Mutex::new(Vec::new()),
-            cancel_token: CancellationToken::new(),
+            cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
             pending_permissions: Arc::new(parking_lot::Mutex::new(
                 PendingPermissionStore::default(),
             )),
@@ -60,5 +67,36 @@ impl SessionRegistry {
 
     pub fn remove(&self, id: &acp::SessionId) -> Option<Arc<SessionState>> {
         self.inner.remove(id).map(|(_, v)| v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_only_affects_current_turns() {
+        let session = SessionState::new(acp::SessionId::new("test"), PathBuf::from("/tmp"));
+        let first = session.cancel_token.lock().clone();
+        let concurrent = session.cancel_token.lock().clone();
+        session.cancel_turn();
+        assert!(first.is_cancelled());
+        assert!(concurrent.is_cancelled());
+        let next = session.cancel_token.lock().clone();
+        assert!(
+            !next.is_cancelled(),
+            "next prompt inherits previous cancellation"
+        );
+        session.cancel_turn();
+        assert!(next.is_cancelled());
+        assert!(!session.cancel_token.lock().is_cancelled());
+    }
+
+    #[test]
+    fn idle_cancellation_does_not_poison_next_prompt() {
+        let session = SessionState::new(acp::SessionId::new("test"), PathBuf::from("/tmp"));
+        session.cancel_turn();
+        session.cancel_turn();
+        assert!(!session.cancel_token.lock().is_cancelled());
     }
 }
