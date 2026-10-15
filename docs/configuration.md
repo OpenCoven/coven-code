@@ -7,29 +7,31 @@ variables, and command-line flags. This document describes every option.
 
 ## Configuration File Location
 
-The global settings file lives at:
+Global settings live at `<engine-home>/settings.json`. The engine home is
+`~/.coven/code` when a Coven home exists, otherwise `~/.coven-code`.
+`COVEN_HOME` relocates the Coven home; `COVEN_CODE_HOME` explicitly overrides
+the engine home. Global settings require **plain JSON**, without comments.
 
-```
-~/.coven-code/settings.json
-```
-
-The directory `~/.coven-code/` is created automatically on first run if it does
-not exist. The file is standard JSON (or JSONC — comments are stripped before
-parsing).
+Shared `<coven-home>/settings.json` supplies only `model`, `theme`, and
+`permission_mode` defaults when the engine-global values remain at defaults.
+Command-line overrides apply after settings loading.
 
 ### Per-project settings
 
-Coven Code walks up from the current working directory looking for a project-level
-settings file. The first file found wins (project settings take precedence over
-global settings):
+Coven Code walks from the current directory toward its ancestors, checking
+`.coven-code/settings.json` before `.coven-code/settings.jsonc` in each directory.
+Both project files accept comments. The first existing file stops the search;
+an unreadable or invalid file does not fall back to another file or parent.
 
-```
-<project-root>/.coven-code/settings.json
-<project-root>/.coven-code/settings.jsonc
-```
+Project settings are sanitized before merging. Provider routing and credentials,
+MCP and LSP server definitions, hooks, hosted-review policy, persisted permission
+rules, and `workspace_paths` are discarded from this layer. Configure these
+in trusted engine-global settings instead.
 
-Settings that appear in the project file override the corresponding global
-values. Keys absent from the project file fall back to the global value.
+Merging is field-specific: some lists concatenate and maps merge. Omission does
+not always preserve a global value: project defaults can replace fields such as
+`permission_mode`, `theme`, and `output_format`. Keep project settings minimal
+and verify the effective behavior before relying on a global preference.
 
 ---
 
@@ -39,13 +41,13 @@ values. Keys absent from the project file fall back to the global value.
 {
   "version": 1,
   "provider": "anthropic",
-  "config": { ... },
-  "providers": { ... },
-  "projects": { ... },
-  "commands": { ... },
-  "formatter": { ... },
-  "agents": { ... },
-  "skills": { ... },
+  "config": {},
+  "providers": {},
+  "projects": {},
+  "commands": {},
+  "formatter": {},
+  "agents": {},
+  "skills": {},
   "permissionRules": [],
   "enabledPlugins": [],
   "disabledPlugins": [],
@@ -231,8 +233,9 @@ Each `McpServerConfig` object:
 }
 ```
 
-`type` can be `"stdio"` (default) or `"http"` (for HTTP-SSE servers, in which
-case `command` is the base URL).
+`type` is `"stdio"` (default), `"sse"`, or `"http"`. For a remote server,
+set `url` to the endpoint; `command` is for the stdio executable. These
+settings belong in the trusted engine-global file, not project settings.
 
 ### Environment variables injected into tools
 
@@ -287,37 +290,37 @@ tool calls are approved.
 
 ### `default`
 
-Read-only operations (file reads, searches, glob) are permitted automatically.
-Write and execute operations (file writes, shell commands) prompt the user for
-confirmation in the TUI, or are denied in headless mode.
+Workspace reads normally run without a prompt. Reads outside allowed roots,
+MCP resource access, writes, and execution can require approval. In headless
+mode, requests requiring interactive approval are denied unless an applicable
+policy allows them.
 
 ### `acceptEdits`
 
-All tool calls — reads, writes, and shell commands — are automatically
-accepted without prompting. This is useful for trusted automation pipelines
-where you want maximum throughput.
+Automatically approves the `Edit` tool after explicit permission rules have
+been evaluated. Other write tools and shell commands retain their normal checks.
+This is not blanket approval for automation.
 
 ### `bypassPermissions`
 
-All permission checks are skipped entirely. Every tool call is allowed
-unconditionally. This mode cannot be used when running as root or via `sudo`
-on Unix systems (Coven Code blocks it).
-
-Use with caution: the model can read and modify any file reachable from the
-current working directory without any user confirmation.
+The permission manager returns allow before evaluating permission rules. Separate
+tool availability, hosted policy, and tool-specific validation still apply.
+This mode is not an operating-system sandbox and is blocked for root/sudo on Unix.
 
 ### `plan`
 
-Read-only mode. File reads and searches are allowed; file writes and command
-execution are blocked. This matches the built-in `plan` agent's behaviour and
-is useful for code analysis sessions where you want to prevent accidental
-modifications.
+The permission manager allows reads and denies other levels when no explicit
+rule matches. Explicit allow/deny rules are evaluated before this fallback;
+do not treat the mode alone as a security boundary.
 
-The permission mode can also be overridden per-session on the command line:
+Except in bypass mode, matching deny rules take precedence over matching allow
+rules. The examples above describe mode defaults, not every tool-specific guard.
+
+Settings use camelCase mode values; CLI flags use kebab-case:
 
 ```bash
-coven-code --permission-mode acceptEdits "refactor the auth module"
-coven-code --dangerously-skip-permissions "..."  # equivalent to bypassPermissions
+coven-code --permission-mode accept-edits "refactor the auth module"
+coven-code --permission-mode bypass-permissions "..."
 ```
 
 ---
@@ -472,10 +475,13 @@ active provider via the `provider` key in settings or the `--provider` CLI flag.
 
 ### Provider IDs
 
-| Provider ID | Default model |
-|-------------|--------------|
-| `anthropic` | `claude-sonnet-4-6` (or latest) |
-| `codex` | `gpt-5.6-sol` (ChatGPT/Codex OAuth login) |
+| Provider ID | Authentication / transport |
+|-------------|----------------------------|
+| `anthropic` | API key, or the local Claude CLI with its own login |
+| `codex` | ChatGPT/Codex OAuth |
+
+Use `coven-code models` and `/model` to inspect the installed model catalog.
+See [authentication](auth.md) for account setup; Codex does not use an OpenAI API key.
 
 ### Per-provider configuration
 
@@ -517,9 +523,11 @@ and `api_base` override the corresponding environment variables.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key. Checked after the `config.api_key` setting. |
 | `ANTHROPIC_BASE_URL` | Override the Anthropic API base URL. |
+| `COVEN_CODE_HOME` | Explicit engine-home override. |
+| `COVEN_HOME` | Relocate the shared Coven home. |
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
-| `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api_base`. |
-| `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/goal` command and `GoalCompleteTool`). |
+| `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api-base`. |
+| `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/coven goal` command and `GoalCompleteTool`). |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |
@@ -601,7 +609,7 @@ Invoke an agent with `@agentname` in the TUI or `--agent agentname` on the CLI.
 
 ## Managed Agents Configuration
 
-The `managed_agents` key stores the managed-agents architecture configuration set via `/managed-agents configure`. It is written automatically by the command and rarely needs to be edited manually.
+The `managed_agents` key stores the managed-agents architecture configuration set via `/familiar managed configure`. It is written automatically by the command and rarely needs to be edited manually.
 
 ```json
 "managed_agents": {
@@ -627,7 +635,7 @@ The `managed_agents` key stores the managed-agents architecture configuration se
 | `Percentage` | `{ "type": "Percentage", "manager_pct": 20 }` | Manager gets N% of total budget |
 | `FixedCaps` | `{ "type": "FixedCaps", "manager_usd": 0.50, "executor_usd": 2.00 }` | Hard USD caps per role |
 
-Configure via `/managed-agents configure` or `/managed-agents preset <name>`. Set `enabled: false` to disable without removing the configuration.
+Configure via `/familiar managed configure` or `/familiar managed preset <name>`. Set `enabled: false` to disable without removing the configuration.
 
 ---
 
@@ -659,54 +667,42 @@ matches. They are defined in the `formatter` map:
 
 ---
 
-## Annotated Example `settings.json`
+## Example `settings.json`
+
+This global-file example is plain JSON. See the sections above for field meanings.
 
 ```json
 {
-  // Settings schema version
   "version": 1,
 
-  // Active provider (can be overridden per-session with --provider)
   "provider": "anthropic",
 
   "config": {
-    // Omit api_key here; use ANTHROPIC_API_KEY env var instead
     "api_key": null,
 
-    // Model — leave null to use the provider's default
     "model": null,
 
-    // Cap responses at 8 192 tokens
     "max_tokens": 8192,
 
-    // In the TUI, ask before writing files or running commands
     "permission_mode": "default",
 
-    // Dark theme for the TUI
     "theme": "dark",
 
-    // Compact when context window is 85% full
     "auto_compact": true,
     "compact_threshold": 0.85,
 
-    // Show debug logs
     "verbose": false,
 
-    // Plain text output in --print mode
     "output_format": "text",
 
-    // Add a custom instruction to every session
     "append_system_prompt": "Always explain your reasoning before making changes.",
 
-    // Block the Bash tool globally
     "disallowed_tools": ["Bash"],
 
-    // Inject a variable into every tool execution
     "env": {
       "MY_PROJECT_TOKEN": "{env:HOME}/.project_token"
     },
 
-    // Run a script after every tool use
     "hooks": {
       "PostToolUse": [
         {
@@ -716,7 +712,6 @@ matches. They are defined in the `formatter` map:
       ]
     },
 
-    // Connect an MCP server at startup
     "mcp_servers": [
       {
         "name": "filesystem",
@@ -728,7 +723,6 @@ matches. They are defined in the `formatter` map:
     ]
   },
 
-  // Per-provider credentials and options
   "providers": {
     "anthropic": {
       "api_key": null,
@@ -739,7 +733,6 @@ matches. They are defined in the `formatter` map:
     }
   },
 
-  // Custom slash commands
   "commands": {
     "test": {
       "template": "Run the tests for $ARGUMENTS and report any failures.",
@@ -747,7 +740,6 @@ matches. They are defined in the `formatter` map:
     }
   },
 
-  // Auto-run prettier on JS/TS file writes
   "formatter": {
     "prettier": {
       "command": ["prettier", "--write"],

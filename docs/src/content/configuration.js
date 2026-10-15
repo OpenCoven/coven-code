@@ -3,15 +3,15 @@ export const meta = { title: 'Configuration' };
 export function render() {
   return `
     <h1>Configuration</h1>
-    <p class="lead">Coven Code is configured through a layered system of JSON files, environment variables, and command-line flags. Project settings override global settings; CLI flags override both.</p>
+    <p class="lead">Coven Code is configured through a layered system of JSON files, environment variables, and command-line flags. Safe project fields merge with global settings; CLI overrides apply afterward. Merging is field-specific.</p>
 
     <h2>File Locations</h2>
 
     <p>The global settings file lives at:</p>
 
-    <pre><code data-lang="bash">~/.coven-code/settings.json</code></pre>
+    <pre><code data-lang="bash">&lt;engine-home&gt;/settings.json</code></pre>
 
-    <p>The directory is created automatically on first run. Files are standard JSON (or JSONC — comments are stripped before parsing).</p>
+    <p>The engine home is <code>~/.coven/code</code> when a Coven home exists, otherwise <code>~/.coven-code</code>. <code>COVEN_CODE_HOME</code> overrides it. Global settings require plain JSON without comments. Shared Coven settings supply only model, theme, and permission-mode defaults.</p>
 
     <h3>Per-Project Settings</h3>
 
@@ -20,7 +20,7 @@ export function render() {
     <pre><code data-lang="bash">&lt;project-root&gt;/.coven-code/settings.json
 &lt;project-root&gt;/.coven-code/settings.jsonc</code></pre>
 
-    <p>Keys present in the project file override the global value; keys absent fall back to global.</p>
+    <p>Project files accept comments. An invalid or unreadable first file stops the search. Provider routing and credentials, MCP/LSP definitions, hooks, hosted policy, permission rules, and workspace read roots are stripped before merging. Some omitted project fields reset global values to defaults; consult the full reference before relying on inheritance.</p>
 
     <h2>Top-Level Structure</h2>
 
@@ -77,7 +77,7 @@ export function render() {
     </div>
 
     <h3>Permission Mode</h3>
-    <p>Set <code>"permission_mode"</code> to one of <code>"default"</code>, <code>"acceptEdits"</code>, <code>"bypassPermissions"</code>, or <code>"plan"</code>. See the <a href="#tools">interactive permission visualizer</a> for what each mode allows, prompts on, and blocks.</p>
+    <p>Set <code>"permission_mode"</code> to one of <code>"default"</code>, <code>"acceptEdits"</code>, <code>"bypassPermissions"</code>, or <code>"plan"</code>. <code>acceptEdits</code> auto-approves only <code>Edit</code>; shell commands retain normal checks. Rules and tool-specific guards also apply. CLI values use <code>accept-edits</code> and <code>bypass-permissions</code>.</p>
 
     <h3>Familiar</h3>
     <p>Set <code>"familiar"</code> to the id of your active familiar (e.g. <code>"kitty"</code>, <code>"raven"</code>). This drives the welcome-screen portrait and the <code>/familiar</code> overlay when the daemon is online.</p>
@@ -102,8 +102,8 @@ export function render() {
       <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td><code>ANTHROPIC_API_KEY</code></td><td>API key for Anthropic provider.</td></tr>
-        <tr><td><code>OPENAI_API_KEY</code></td><td>API key for OpenAI provider.</td></tr>
-        <tr><td><code>COVEN_CODE_HOME</code></td><td>Override the default <code>~/.coven-code/</code> directory.</td></tr>
+        <tr><td><code>COVEN_HOME</code></td><td>Relocate the shared Coven home.</td></tr>
+        <tr><td><code>COVEN_CODE_HOME</code></td><td>Explicitly override the engine home.</td></tr>
       </tbody>
     </table>
 
