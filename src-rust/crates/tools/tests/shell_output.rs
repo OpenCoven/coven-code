@@ -38,6 +38,7 @@ async fn check_tool(tool: impl Tool, powershell: bool) {
         }),
         cost_tracker: claurst_core::cost::CostTracker::new(),
         session_id: uuid::Uuid::new_v4().to_string(),
+        goal_turn: Default::default(),
         file_history: Arc::new(parking_lot::Mutex::new(
             claurst_core::file_history::FileHistory::new(),
         )),

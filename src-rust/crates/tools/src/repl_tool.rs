@@ -296,6 +296,7 @@ mod tests {
             permission_handler: Arc::new(DenyPermissionHandler),
             cost_tracker: CostTracker::new(),
             session_id: "repl-permission-test".to_string(),
+            goal_turn: Default::default(),
             file_history: Arc::new(parking_lot::Mutex::new(FileHistory::new())),
             current_turn: Arc::new(AtomicUsize::new(0)),
             non_interactive: true,

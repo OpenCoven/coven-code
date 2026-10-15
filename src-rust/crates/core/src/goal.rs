@@ -57,7 +57,7 @@ impl GoalStatus {
 // Goal record
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub id: String,
     pub session_id: String,
@@ -106,6 +106,72 @@ impl Goal {
     }
 }
 
+/// The active goal and actual SQLite file selected for one logical query.
+///
+/// The fields are private so authority can only originate from an opened store.
+/// File identity is bounded to its canonical path, not protection against a
+/// database being maliciously replaced at that same path.
+#[derive(Debug, Clone)]
+pub struct GoalTurn {
+    goal: Goal,
+    store_path: PathBuf,
+}
+
+impl GoalTurn {
+    pub fn goal(&self) -> &Goal {
+        &self.goal
+    }
+
+    pub fn store_path(&self) -> &std::path::Path {
+        &self.store_path
+    }
+}
+
+/// Explicitly distinguish a query awaiting capture from a captured absence.
+/// A failed or empty capture must never acquire a goal installed later.
+#[derive(Debug, Clone)]
+pub enum GoalTurnContext {
+    Pending(PathBuf),
+    Captured(Option<GoalTurn>),
+}
+
+impl Default for GoalTurnContext {
+    fn default() -> Self {
+        Self::Captured(None)
+    }
+}
+
+impl GoalTurnContext {
+    /// Production entry points select the store without opening it yet.
+    pub fn pending_default() -> Self {
+        if goals_enabled() {
+            Self::Pending(GoalStore::default_path())
+        } else {
+            Self::Captured(None)
+        }
+    }
+
+    /// Capture once, synchronously, before the logical query's first await.
+    /// On failure the context remains captured without completion authority.
+    pub fn capture(&mut self, session_id: &str) -> Result<(), GoalError> {
+        if matches!(self, Self::Captured(_)) {
+            return Ok(());
+        }
+        if let Self::Pending(path) = std::mem::take(self) {
+            let store = GoalStore::open(&path)?;
+            *self = Self::Captured(store.capture_active_goal(session_id)?);
+        }
+        Ok(())
+    }
+
+    pub fn captured(&self) -> Option<&GoalTurn> {
+        match self {
+            Self::Captured(turn) => turn.as_ref(),
+            Self::Pending(_) => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -141,6 +207,8 @@ pub enum GoalError {
         field: &'static str,
         value: String,
     },
+    NonPersistentStore,
+    StoreMismatch,
     Db(String),
 }
 
@@ -170,6 +238,12 @@ impl std::fmt::Display for GoalError {
             }
             GoalError::InvalidStoredValue { field, value } => {
                 write!(f, "Invalid stored goal {}: {}", field, value)
+            }
+            GoalError::NonPersistentStore => {
+                write!(f, "Goal completion requires a persistent store")
+            }
+            GoalError::StoreMismatch => {
+                write!(f, "Goal completion store does not match the captured turn")
             }
             GoalError::Db(msg) => write!(f, "Goal DB error: {}", msg),
         }
@@ -249,6 +323,69 @@ impl GoalStore {
     /// Open using the default path (best-effort; returns None on failure).
     pub fn open_default() -> Option<Self> {
         Self::open(&Self::default_path()).ok()
+    }
+
+    fn canonical_path(&self) -> Result<PathBuf, GoalError> {
+        let path = self
+            .conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .ok_or(GoalError::NonPersistentStore)?;
+        std::fs::canonicalize(path).map_err(|error| GoalError::Db(error.to_string()))
+    }
+
+    /// Capture the row once along with the path of this opened connection.
+    pub fn capture_active_goal(&self, session_id: &str) -> Result<Option<GoalTurn>, GoalError> {
+        let store_path = self.canonical_path()?;
+        Ok(self
+            .try_get_goal(session_id)?
+            .filter(|goal| goal.status == GoalStatus::Active)
+            .map(|goal| GoalTurn { goal, store_path }))
+    }
+
+    /// Complete only the active row that authorized this logical query.
+    pub fn complete_goal_turn(&self, turn: &GoalTurn) -> Result<(), GoalError> {
+        if self.canonical_path()? != turn.store_path {
+            return Err(GoalError::StoreMismatch);
+        }
+        let session_id = &turn.goal.session_id;
+        let transaction = self.immediate_transaction()?;
+        let goal = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
+            GoalError::NotFound {
+                session_id: session_id.clone(),
+            }
+        })?;
+        if goal.id != turn.goal.id {
+            return Err(GoalError::Replaced {
+                session_id: session_id.clone(),
+                expected_goal_id: turn.goal.id.clone(),
+                actual_goal_id: goal.id,
+            });
+        }
+        if goal.status != GoalStatus::Active {
+            return Err(GoalError::NotActive {
+                session_id: session_id.clone(),
+            });
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE goals SET status = 'complete', updated_at_ms = ?1
+             WHERE id = ?2 AND session_id = ?3 AND status = 'active'",
+                rusqlite::params![
+                    Self::sqlite_i64(Self::now_ms(), "timestamp")?,
+                    turn.goal.id,
+                    session_id
+                ],
+            )
+            .map_err(|error| GoalError::Db(error.to_string()))?;
+        if updated == 0 {
+            return Err(GoalError::NotActive {
+                session_id: session_id.clone(),
+            });
+        }
+        transaction
+            .commit()
+            .map_err(|error| GoalError::Db(error.to_string()))
     }
 
     fn now_ms() -> u64 {
@@ -2008,5 +2145,96 @@ mod tests {
             "default_path {path:?} should start with config_home()"
         );
         assert_eq!(path.file_name().unwrap(), "goals.sqlite");
+    }
+
+    #[test]
+    fn goal_turn_rejects_non_file_stores_and_failed_capture_stays_closed() {
+        let memory = GoalStore::open(std::path::Path::new(":memory:")).unwrap();
+        memory.set_goal("session", "memory only", None).unwrap();
+        assert_eq!(
+            memory.capture_active_goal("session").unwrap_err(),
+            GoalError::NonPersistentStore
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("goals.sqlite");
+        let mut context = GoalTurnContext::Pending(path.clone());
+        assert!(matches!(context.capture("session"), Err(GoalError::Db(_))));
+        assert!(matches!(context, GoalTurnContext::Captured(None)));
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let store = GoalStore::open(&path).unwrap();
+        store.set_goal("session", "later goal", None).unwrap();
+        context.capture("session").unwrap();
+        assert!(context.captured().is_none());
+    }
+
+    #[test]
+    fn goal_turn_captured_absence_and_existing_snapshot_never_recapture() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let mut empty = GoalTurnContext::Pending(path.clone());
+        empty.capture("session").unwrap();
+        let store = GoalStore::open(&path).unwrap();
+        let original = store.set_goal("session", "A", None).unwrap();
+        let mut captured = GoalTurnContext::Pending(path);
+        captured.capture("session").unwrap();
+        let replacement = store.set_goal("session", "B", None).unwrap();
+        empty.capture("session").unwrap();
+        captured.capture("session").unwrap();
+        assert!(empty.captured().is_none());
+        let turn = captured.captured().unwrap();
+        assert_eq!(turn.goal(), &original);
+        assert!(matches!(
+            store.complete_goal_turn(turn),
+            Err(GoalError::Replaced { .. })
+        ));
+        assert_eq!(store.try_get_goal("session").unwrap().unwrap(), replacement);
+    }
+
+    #[test]
+    fn goal_turn_store_identity_comes_from_open_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let store = GoalStore::open(&path).unwrap();
+        store.set_goal("session", "A", None).unwrap();
+        let turn = store.capture_active_goal("session").unwrap().unwrap();
+        assert_eq!(turn.store_path(), std::fs::canonicalize(&path).unwrap());
+        let copied_path = dir.path().join("copied.sqlite");
+        std::fs::copy(&path, &copied_path).unwrap();
+        let copied = GoalStore::open(&copied_path).unwrap();
+        let before = copied.try_get_goal("session").unwrap();
+        assert_eq!(
+            copied.complete_goal_turn(&turn).unwrap_err(),
+            GoalError::StoreMismatch
+        );
+        assert_eq!(copied.try_get_goal("session").unwrap(), before);
+        store.complete_goal_turn(&turn).unwrap();
+        assert_eq!(
+            store.try_get_goal("session").unwrap().unwrap().status,
+            GoalStatus::Complete
+        );
+    }
+
+    #[test]
+    fn goal_turn_invalid_stored_status_fails_closed_after_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let store = GoalStore::open(&path).unwrap();
+        store.set_goal("session", "A", None).unwrap();
+        store
+            .conn
+            .execute("UPDATE goals SET status = 'unknown'", [])
+            .unwrap();
+        let mut context = GoalTurnContext::Pending(path);
+        assert!(matches!(
+            context.capture("session"),
+            Err(GoalError::InvalidStoredValue {
+                field: "status",
+                ..
+            })
+        ));
+        let replacement = store.set_goal("session", "B", None).unwrap();
+        context.capture("session").unwrap();
+        assert!(matches!(context, GoalTurnContext::Captured(None)));
+        assert_eq!(store.try_get_goal("session").unwrap().unwrap(), replacement);
     }
 }

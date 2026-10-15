@@ -791,6 +791,7 @@ async fn main() -> anyhow::Result<()> {
         permission_handler: permission_handler.clone(),
         cost_tracker: cost_tracker.clone(),
         session_id: session_id.clone(),
+        goal_turn: claurst_core::goal::GoalTurnContext::pending_default(),
         file_history: file_history.clone(),
         current_turn: current_turn.clone(),
         non_interactive: is_non_interactive,
@@ -2110,6 +2111,8 @@ fn permission_request_from_core(
 #[derive(Debug, Clone)]
 struct GoalTurnBaseline {
     goal_id: String,
+    session_id: String,
+    store_path: PathBuf,
     tracker_total: u64,
     started_at: std::time::Instant,
 }
@@ -2121,18 +2124,19 @@ enum GoalTurnAccountingDecision {
 }
 
 fn capture_goal_turn_baseline(
-    session_id: &str,
+    tool_ctx: &mut ToolContext,
     tracker_total: u64,
 ) -> Result<Option<GoalTurnBaseline>, claurst_core::GoalError> {
-    let store = claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())?;
-    let goal = store.try_get_goal(session_id)?;
-    Ok(goal
-        .filter(|goal| goal.status == claurst_core::GoalStatus::Active)
-        .map(|goal| GoalTurnBaseline {
-            goal_id: goal.id,
-            tracker_total,
-            started_at: std::time::Instant::now(),
-        }))
+    // Capture before dispatch: the query derives its prompt and completion
+    // authority from this exact snapshot, never another mutable store read.
+    tool_ctx.goal_turn.capture(&tool_ctx.session_id)?;
+    Ok(tool_ctx.goal_turn.captured().map(|turn| GoalTurnBaseline {
+        goal_id: turn.goal().id.clone(),
+        session_id: turn.goal().session_id.clone(),
+        store_path: turn.store_path().to_path_buf(),
+        tracker_total,
+        started_at: std::time::Instant::now(),
+    }))
 }
 
 fn decide_goal_turn_accounting(
@@ -3522,16 +3526,6 @@ async fn run_interactive(
                         qcfg.output_style = cmd_ctx.config.effective_output_style();
                         qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                         qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
-                        // Inject active goal addendum into system prompt (if goals enabled).
-                        if let Some(goal) = claurst_core::GoalStore::open_default()
-                            .and_then(|s| s.get_active_goal(&session.id))
-                        {
-                            let addendum = claurst_core::goal_system_prompt_addendum(&goal);
-                            qcfg.append_system_prompt = Some(match qcfg.append_system_prompt {
-                                Some(existing) => format!("{}\n{}", existing, addendum),
-                                None => addendum,
-                            });
-                        }
                         // Apply active effort level. Once the user has chosen a
                         // level through any UI (model picker ←/→, the /effort
                         // dialog, or the /effort command) `app.effort_level` is
@@ -3573,7 +3567,7 @@ async fn run_interactive(
                         let client_clone = client.clone();
                         goal_turn_baseline = if claurst_core::goals_enabled() {
                             match capture_goal_turn_baseline(
-                                &session.id,
+                                &mut ctx_clone,
                                 cost_tracker.total_tokens(),
                             ) {
                                 Ok(baseline) => baseline,
@@ -4187,7 +4181,7 @@ async fn run_interactive(
             let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
             let msgs_arc_clone = msgs_arc.clone();
             let tools_arc_clone = tools_arc.clone();
-            let ctx_clone = tool_ctx.clone();
+            let mut ctx_clone = tool_ctx.clone();
             let mut qcfg = base_query_config.clone();
             qcfg.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
             qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
@@ -4195,7 +4189,7 @@ async fn run_interactive(
             let tx = event_tx.clone();
             let client_clone = client.clone();
             goal_turn_baseline = if claurst_core::goals_enabled() {
-                match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
+                match capture_goal_turn_baseline(&mut ctx_clone, cost_tracker.total_tokens()) {
                     Ok(baseline) => baseline,
                     Err(error) => {
                         app.status_message = Some(format!(
@@ -4557,7 +4551,7 @@ async fn run_interactive(
                     let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
                     let msgs_arc_clone = msgs_arc.clone();
                     let tools_arc_clone = tools_arc.clone();
-                    let ctx_clone = tool_ctx.clone();
+                    let mut ctx_clone = tool_ctx.clone();
                     let mut qcfg = base_query_config.clone();
                     qcfg.model =
                         claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
@@ -4579,7 +4573,10 @@ async fn run_interactive(
                     let tx = event_tx.clone();
                     let client_clone = client.clone();
                     goal_turn_baseline = if claurst_core::goals_enabled() {
-                        match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
+                        match capture_goal_turn_baseline(
+                            &mut ctx_clone,
+                            cost_tracker.total_tokens(),
+                        ) {
                             Ok(baseline) => baseline,
                             Err(error) => {
                                 app.status_message = Some(format!(
@@ -4748,9 +4745,16 @@ async fn run_interactive(
                 // without waiting for user input.
                 if completed_end_turn && !was_auto_compact && claurst_core::goals_enabled() {
                     let baseline = goal_turn_baseline.take();
-                    let current_goal =
-                        claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())
-                            .and_then(|store| store.try_get_goal(&session.id));
+                    let goal_path = baseline
+                        .as_ref()
+                        .map(|baseline| baseline.store_path.clone())
+                        .unwrap_or_else(claurst_core::GoalStore::default_path);
+                    let goal_session = baseline
+                        .as_ref()
+                        .map(|baseline| baseline.session_id.as_str())
+                        .unwrap_or(&session.id);
+                    let current_goal = claurst_core::GoalStore::open(&goal_path)
+                        .and_then(|store| store.try_get_goal(goal_session));
                     let continuation = match current_goal {
                         Ok(goal) => match decide_goal_turn_accounting(
                             baseline.as_ref(),
@@ -4763,11 +4767,19 @@ async fn run_interactive(
                             Ok(GoalTurnAccountingDecision::Record { total_tokens_used }) => {
                                 match baseline.as_ref() {
                                     Some(baseline) => {
-                                        claurst_query::check_and_continue_goal_for_goal(
-                                            &session.id,
+                                        claurst_query::check_and_continue_goal_at_path_for_goal(
+                                            &baseline.store_path,
+                                            &baseline.session_id,
                                             &baseline.goal_id,
                                             total_tokens_used,
                                             baseline.started_at.elapsed().as_secs(),
+                                        )
+                                        .unwrap_or_else(
+                                            |error| claurst_query::GoalContinuation::Stop {
+                                                reason: claurst_query::StopReason::Error(
+                                                    error.to_string(),
+                                                ),
+                                            },
                                         )
                                     }
                                     None => claurst_query::GoalContinuation::Stop {
@@ -4831,16 +4843,6 @@ async fn run_interactive(
                             qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                             qcfg.working_directory =
                                 Some(tool_ctx.working_dir.display().to_string());
-                            // Re-inject the goal addendum for this continuation turn.
-                            if let Some(goal) = claurst_core::GoalStore::open_default()
-                                .and_then(|s| s.get_active_goal(&session.id))
-                            {
-                                let addendum = claurst_core::goal_system_prompt_addendum(&goal);
-                                qcfg.append_system_prompt = Some(match qcfg.append_system_prompt {
-                                    Some(existing) => format!("{}\n{}", existing, addendum),
-                                    None => addendum,
-                                });
-                            }
                             let turn_effort = if app.effort_is_set {
                                 Some(app.effort_level.to_core())
                             } else {
@@ -4875,7 +4877,7 @@ async fn run_interactive(
                             let client_clone = client.clone();
                             goal_turn_baseline = if claurst_core::goals_enabled() {
                                 match capture_goal_turn_baseline(
-                                    &session.id,
+                                    &mut ctx_clone,
                                     cost_tracker.total_tokens(),
                                 ) {
                                     Ok(baseline) => baseline,
@@ -6401,6 +6403,8 @@ mod tests {
     fn accounting_baseline(id: &str, tracker_total: u64) -> GoalTurnBaseline {
         GoalTurnBaseline {
             goal_id: id.to_string(),
+            session_id: "session".to_string(),
+            store_path: PathBuf::from("unused-accounting-fixture.sqlite"),
             tracker_total,
             started_at: std::time::Instant::now(),
         }
@@ -6468,5 +6472,81 @@ mod tests {
         let error = decide_goal_turn_accounting(Some(&baseline), Some(&goal), 99).unwrap_err();
 
         assert!(error.contains("tracker moved backwards"));
+    }
+
+    fn goal_capture_context(path: PathBuf) -> ToolContext {
+        ToolContext {
+            working_dir: path.parent().unwrap().to_path_buf(),
+            permission_mode: PermissionMode::Default,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::Default,
+            }),
+            cost_tracker: CostTracker::new(),
+            session_id: "session".to_string(),
+            goal_turn: claurst_core::goal::GoalTurnContext::Pending(path),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        }
+    }
+
+    #[test]
+    fn goal_baseline_and_query_context_share_one_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let store = claurst_core::GoalStore::open(&path).unwrap();
+        let original = store
+            .set_goal("session", "original prompt A", None)
+            .unwrap();
+        let mut ctx = goal_capture_context(path.clone());
+        let baseline = capture_goal_turn_baseline(&mut ctx, 17).unwrap().unwrap();
+        store
+            .set_goal("session", "replacement prompt B", None)
+            .unwrap();
+        let again = capture_goal_turn_baseline(&mut ctx, 21).unwrap().unwrap();
+        let captured = ctx.goal_turn.captured().unwrap();
+        assert_eq!(captured.goal(), &original);
+        assert_eq!(baseline.goal_id, original.id);
+        assert_eq!(again.goal_id, baseline.goal_id);
+        assert_eq!(baseline.session_id, captured.goal().session_id);
+        assert_eq!(baseline.store_path, captured.store_path());
+        assert_eq!(baseline.store_path, std::fs::canonicalize(path).unwrap());
+        assert_eq!(baseline.tracker_total, 17);
+        assert!(claurst_core::goal_system_prompt_addendum(captured.goal())
+            .contains("original prompt A"));
+    }
+
+    #[test]
+    fn goal_baseline_empty_or_failed_capture_cannot_adopt_later_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        for initially_fails in [false, true] {
+            let parent = dir
+                .path()
+                .join(if initially_fails { "failed" } else { "empty" });
+            if !initially_fails {
+                std::fs::create_dir(&parent).unwrap();
+            }
+            let path = parent.join("goals.sqlite");
+            let mut ctx = goal_capture_context(path.clone());
+            let first = capture_goal_turn_baseline(&mut ctx, 10);
+            if initially_fails {
+                assert!(first.is_err());
+                std::fs::create_dir(&parent).unwrap();
+            } else {
+                assert!(first.unwrap().is_none());
+            }
+            let store = claurst_core::GoalStore::open(&path).unwrap();
+            let later = store.set_goal("session", "later B", None).unwrap();
+            assert!(capture_goal_turn_baseline(&mut ctx, 20).unwrap().is_none());
+            assert!(ctx.goal_turn.captured().is_none());
+            assert_eq!(store.try_get_goal("session").unwrap().unwrap(), later);
+        }
     }
 }

@@ -23,6 +23,7 @@ fn context(root: &Path, mode: PermissionMode, rules: Vec<PermissionRule>) -> Too
         ))),
         cost_tracker: CostTracker::new(),
         session_id: "write-path-fixture".into(),
+        goal_turn: Default::default(),
         file_history: Arc::new(parking_lot::Mutex::new(
             claurst_core::file_history::FileHistory::new(),
         )),
