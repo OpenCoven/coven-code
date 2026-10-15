@@ -144,11 +144,6 @@ pub fn execute_import(selection: ImportSelection) -> Result<ImportExecutionResul
     } else {
         None
     };
-    let original_settings = if prepared.merged_settings.is_some() {
-        read_original(&paths.target_settings_json)?
-    } else {
-        None
-    };
 
     let mut wrote_claude_md = false;
     let mut wrote_settings = false;
@@ -167,9 +162,6 @@ pub fn execute_import(selection: ImportSelection) -> Result<ImportExecutionResul
     })();
 
     if let Err(err) = result {
-        if wrote_settings {
-            restore_original(&paths.target_settings_json, original_settings.as_deref())?;
-        }
         if wrote_claude_md {
             restore_original(&paths.target_claude_md, original_claude_md.as_deref())?;
         }
