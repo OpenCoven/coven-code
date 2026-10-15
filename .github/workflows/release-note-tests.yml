@@ -5,6 +5,8 @@ on:
     paths:
       - 'scripts/append-patch-note.py'
       - 'scripts/test_append_patch_note.py'
+      - 'scripts/regen-release-notes.py'
+      - 'scripts/test_release_install_pinning.py'
       - '.github/workflows/patch-release.yml'
       - '.github/workflows/release-note-tests.yml'
   workflow_dispatch:
@@ -22,3 +24,9 @@ jobs:
           persist-credentials: false
       - name: Test patch-note insertion without GitHub calls
         run: python3 -B -m unittest discover -s scripts -p test_append_patch_note.py -v
+      - name: Require snippet runtimes
+        run: |
+          command -v bash
+          command -v pwsh
+      - name: Test release installer version arguments offline
+        run: python3 -B scripts/test_release_install_pinning.py -v
