@@ -517,7 +517,11 @@ pub async fn tombstone_entry(path: &Path, uuid: &str) -> crate::Result<()> {
 /// removing that entry and all subsequent entries.
 ///
 /// Used by `/revert` to discard assistant turns after a given message.
-/// Rewrites the file atomically (load → filter → overwrite).
+/// Stages the replacement beside the existing file before atomically replacing it.
+/// Existing symlinks are followed and permission bits retained. Replacement changes
+/// inode identity: hardlink aliases and already-open handles keep the old file.
+/// Ownership, ACLs, and extended attributes are not copied to the replacement.
+/// Concurrent writers and crash durability of the directory entry are not covered.
 pub async fn truncate_after(path: &Path, from_uuid: &str) -> crate::Result<()> {
     let entries = load_transcript(path).await?;
     let mut keep = Vec::new();
@@ -543,7 +547,44 @@ pub async fn truncate_after(path: &Path, from_uuid: &str) -> crate::Result<()> {
         lines.push_str(&serde_json::to_string(e).map_err(crate::error::ClaudeError::from)?);
         lines.push('\n');
     }
-    tokio::fs::write(path, lines).await?;
+    let target = match tokio::fs::canonicalize(path).await {
+        Ok(target) => target,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Preserve creation through missing paths, including dangling symlinks.
+            tokio::fs::write(path, lines).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    // Validate write access without truncating; directory rename permissions alone
+    // must not allow rewriting a file that the original writer could not open.
+    let original = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .await?;
+    let permissions = original.metadata().await?.permissions();
+    drop(original);
+    let directory = target
+        .parent()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript has no parent")
+        })?
+        .to_owned();
+    let staged = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        use std::io::Write;
+        let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+        staged.write_all(lines.as_bytes())?;
+        staged.as_file().set_permissions(permissions)?;
+        staged.as_file().sync_all()?;
+        Ok(staged)
+    })
+    .await
+    .map_err(|error| {
+        crate::ClaudeError::Other(format!("Transcript staging task failed: {error}"))
+    })??;
+    // Publish only after the await so a cancelled staging task cannot later
+    // overwrite the transcript from its detached blocking worker.
+    staged.persist(target).map_err(|error| error.error)?;
     Ok(())
 }
 
