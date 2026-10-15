@@ -1050,23 +1050,22 @@ mod tests {
     fn bones_are_deterministic() {
         let a = CompanionBones::from_user_id("alice");
         let b = CompanionBones::from_user_id("alice");
-        assert_eq!(a.rarity, b.rarity);
-        assert_eq!(a.species, b.species);
-        assert_eq!(a.eye, b.eye);
-        assert_eq!(a.hat, b.hat);
-        assert_eq!(a.shiny, b.shiny);
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::to_value(b).unwrap()
+        );
     }
 
     #[test]
     fn bones_differ_for_different_users() {
-        // Extremely unlikely (but not impossible) that two different user-ids
-        // produce identical bones.  With 18 species * 5 rarities * 6 eyes *
-        // 8 hats the collision probability is negligible.
+        // These fixed fixtures have different identities; this is not a promise
+        // that every pair of user IDs produces distinct bones.
         let a = CompanionBones::from_user_id("alice");
         let b = CompanionBones::from_user_id("bob");
-        // At minimum one field should differ — check species which has 18 options.
-        // This could theoretically fail but probability is ~1/18.
-        let _ = (a, b); // just ensure no panic
+        assert_ne!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::to_value(b).unwrap()
+        );
     }
 
     #[test]
