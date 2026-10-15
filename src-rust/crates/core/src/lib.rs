@@ -1894,13 +1894,27 @@ pub mod config {
                 for name in &["settings.json", "settings.jsonc"] {
                     let candidate = dir.join(PROJECT_CONFIG_DIRNAME).join(name);
                     if candidate.exists() && candidate != global_path {
-                        if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
-                            let stripped = strip_jsonc_comments(&content);
-                            if let Ok(s) = serde_json::from_str::<Self>(&stripped) {
-                                return Some(s);
+                        match tokio::fs::read_to_string(&candidate).await {
+                            Ok(content) => {
+                                let stripped = strip_jsonc_comments(&content);
+                                match serde_json::from_str::<Self>(&stripped) {
+                                    Ok(settings) => return Some(settings),
+                                    Err(error) => tracing::warn!(
+                                        path = %candidate.display(),
+                                        category = ?error.classify(),
+                                        line = error.line(),
+                                        column = error.column(),
+                                        "Invalid project settings ignored; ancestor search stopped"
+                                    ),
+                                }
                             }
+                            Err(error) => tracing::warn!(
+                                path = %candidate.display(),
+                                error = %error,
+                                "Unreadable project settings ignored; ancestor search stopped"
+                            ),
                         }
-                        // Found a file but couldn't parse — stop here, don't go up.
+                        // Preserve first-file precedence even when reading or parsing fails.
                         return None;
                     }
                 }

@@ -113,3 +113,4 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true, features = ["trace"] }
+tracing-subscriber = { workspace = true }
