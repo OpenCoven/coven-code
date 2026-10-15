@@ -126,6 +126,8 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
             updated_at: None,
         }
     } else {
+        // Reject unsafe names before contacting the registry.
+        plugin_install_dir(name_or_url)?;
         // Search by name
         let results = marketplace_search(name_or_url).await?;
         results
@@ -134,7 +136,7 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
             .ok_or_else(|| format!("Plugin '{}' not found in marketplace", name_or_url))?
     };
 
-    let install_dir = plugin_install_dir(&entry.name);
+    let install_dir = plugin_install_dir(&entry.name)?;
     std::fs::create_dir_all(&install_dir).map_err(|e| format!("Create dir: {e}"))?;
 
     // Download archive
@@ -258,17 +260,23 @@ pub fn list_installed() -> Vec<InstalledPlugin> {
 
 /// Uninstall a plugin by removing its directory.
 pub fn marketplace_uninstall(name: &str) -> Result<(), String> {
-    let dir = plugin_install_dir(name);
+    let dir = plugin_install_dir(name)?;
     if !dir.exists() {
         return Err(format!("Plugin '{}' is not installed", name));
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("Remove dir: {e}"))
 }
 
-fn plugin_install_dir(name: &str) -> std::path::PathBuf {
-    claurst_core::config::config_home()
+fn plugin_install_dir(name: &str) -> Result<std::path::PathBuf, String> {
+    if name.trim_matches(['.', ' ']).is_empty() || name.contains(['/', '\\', ':', '\0']) {
+        return Err(
+            "Plugin name must be a single directory name, not a path or drive-qualified name"
+                .to_string(),
+        );
+    }
+    Ok(claurst_core::config::config_home()
         .join("plugins")
-        .join(name)
+        .join(name))
 }
 
 fn extract_yaml_str(content: &str, key: &str) -> Option<String> {
@@ -278,4 +286,67 @@ fn extract_yaml_str(content: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{marketplace_uninstall, plugin_install_dir};
+
+    #[test]
+    fn marketplace_uninstall_rejects_absolute_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("marker"), "preserve").unwrap();
+        // The failing baseline can delete only this owned temporary directory.
+        let result = marketplace_uninstall(outside.to_str().unwrap());
+        assert!(
+            outside.join("marker").exists(),
+            "uninstall escaped the plugins directory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("marker")).unwrap(),
+            "preserve"
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn marketplace_paths_reject_non_names() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "...",
+            " ",
+            ".. ",
+            " . . ",
+            "../outside",
+            "/absolute",
+            "nested/plugin",
+            r"nested\plugin",
+            r"C:\outside",
+            "C:relative",
+            "plugin:stream",
+            "bad\0name",
+        ] {
+            assert!(plugin_install_dir(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn marketplace_paths_preserve_ordinary_names() {
+        for name in [
+            "my-plugin",
+            "plugin_v2",
+            "plugin.v2",
+            "éclair",
+            ".hidden-plugin",
+            "some plugin",
+        ] {
+            let directory = plugin_install_dir(name).unwrap();
+            assert_eq!(directory.file_name().unwrap(), name);
+            assert_eq!(directory.parent().unwrap().file_name().unwrap(), "plugins");
+        }
+    }
 }
