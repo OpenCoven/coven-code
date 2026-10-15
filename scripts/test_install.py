@@ -1,4 +1,5 @@
 """Exercise the shell installer without network or user configuration writes."""
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -28,12 +29,21 @@ class InstallerTests(unittest.TestCase):
             entry = tarfile.TarInfo("coven-code")
             entry.size = len(BINARY)
             archive.addfile(entry, io.BytesIO(BINARY))
+        # The installer verifies the archive against the release SHA256SUMS,
+        # which must list all five release archives.
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.sums = self.root / "SHA256SUMS"
+        self.sums.write_text("".join(f"{digest}  coven-code-{name}\n" for name in (
+            "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "macos-aarch64.tar.gz",
+            "macos-x86_64.tar.gz", "windows-x86_64.zip",
+        )))
         self.log = self.root / "curl.log"
         self.env = {
             **os.environ,
             "HOME": str(self.home), "SHELL": "/bin/bash",
             "PATH": f"{self.bin}:/usr/bin:/bin",
-            "FIXTURE_ARCHIVE": str(self.archive), "CURL_LOG": str(self.log),
+            "FIXTURE_ARCHIVE": str(self.archive), "FIXTURE_SUMS": str(self.sums),
+            "CURL_LOG": str(self.log),
         }
         # No real curl can run: every invocation is logged and either rejected
         # (offline mode) or answered from this temporary fixture.
@@ -44,8 +54,10 @@ if [[ "${OFFLINE:-0}" == 1 ]]; then exit 77; fi
 if [[ "$*" == *api.github.com* ]]; then
   printf '{"tag_name": "v1.2.3"}\\n'
 else
+  fixture=$FIXTURE_ARCHIVE
+  if [[ "$*" == */SHA256SUMS* ]]; then fixture=$FIXTURE_SUMS; fi
   while [[ $# -gt 0 ]]; do
-    if [[ "$1" == -o ]]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi
+    if [[ "$1" == -o ]]; then cp "$fixture" "$2"; exit; fi
     shift
   done
   exit 78
@@ -79,15 +91,17 @@ fi
     def test_pinned_download(self):
         self.assert_installed(self.run_install("--version", "1.2.3"))
         requests = self.log.read_text().splitlines()
-        self.assertEqual(len(requests), 1)
-        self.assertIn("/releases/download/v1.2.3/", requests[0])
+        self.assertEqual(len(requests), 2)
+        self.assertIn("/releases/download/v1.2.3/SHA256SUMS", requests[0])
+        self.assertIn("/releases/download/v1.2.3/", requests[1])
 
     def test_latest_download(self):
         self.assert_installed(self.run_install())
         requests = self.log.read_text().splitlines()
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
         self.assertIn("/releases/latest", requests[0])
-        self.assertIn("/releases/download/v1.2.3/", requests[1])
+        self.assertIn("/releases/download/v1.2.3/SHA256SUMS", requests[1])
+        self.assertIn("/releases/download/v1.2.3/", requests[2])
 
 
 if __name__ == "__main__":
