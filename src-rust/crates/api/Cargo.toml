@@ -17,3 +17,7 @@ async-trait = { workspace = true }
 parking_lot = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 async-stream = { workspace = true }
+
+[dev-dependencies]
+# Unique temporary fixture directories in Codex goal tests.
+uuid = { workspace = true }

@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use claurst_core::codex_oauth::{
     CODEX_API_ENDPOINT, CODEX_MODELS, CODEX_TOKEN_URL, DEFAULT_CODEX_MODEL,
 };
+use claurst_core::goal::{GoalTurn, GoalTurnPermission};
 use claurst_core::oauth_config::{get_codex_tokens, save_codex_tokens, CodexTokens};
 use claurst_core::provider_id::{ModelId, ProviderId};
 use claurst_core::types::UsageInfo;
@@ -63,6 +64,9 @@ pub struct CodexProvider {
     http_client: reqwest::Client,
     /// Mutable token cache: updated in-place when a refresh succeeds.
     tokens: Arc<Mutex<CodexTokens>>,
+    goal_authority: Option<(GoalTurn, GoalTurnPermission)>,
+    #[cfg(test)]
+    test_endpoints: Option<(String, String)>,
 }
 
 impl CodexProvider {
@@ -73,7 +77,41 @@ impl CodexProvider {
             id,
             http_client,
             tokens: Arc::new(Mutex::new(tokens)),
+            goal_authority: None,
+            #[cfg(test)]
+            test_endpoints: None,
         })
+    }
+
+    fn for_goal(&self, turn: &GoalTurn, permission: GoalTurnPermission) -> Self {
+        Self {
+            id: self.id.clone(),
+            http_client: self.http_client.clone(),
+            tokens: self.tokens.clone(),
+            goal_authority: Some((turn.clone(), permission)),
+            #[cfg(test)]
+            test_endpoints: self.test_endpoints.clone(),
+        }
+    }
+
+    fn validate_goal_request(&self) -> Result<(), ProviderError> {
+        if let Some((turn, permission)) = &self.goal_authority {
+            let actual = turn.validate().map_err(|error| ProviderError::Other {
+                provider: self.id.clone(),
+                message: format!("Goal authority revoked: {error}"),
+                status: None,
+                body: None,
+            })?;
+            if actual != *permission {
+                return Err(ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: "Goal permits only its foreground final response".into(),
+                    status: None,
+                    body: None,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Construct from stored tokens; returns `None` if no tokens are saved or
@@ -186,9 +224,16 @@ impl CodexProvider {
             "refresh_token": refresh_token,
         });
 
+        #[cfg(not(test))]
+        let endpoint = CODEX_TOKEN_URL;
+        #[cfg(test)]
+        let endpoint = self
+            .test_endpoints
+            .as_ref()
+            .map_or(CODEX_TOKEN_URL, |urls| urls.0.as_str());
         let resp = self
             .http_client
-            .post(CODEX_TOKEN_URL)
+            .post(endpoint)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -342,28 +387,36 @@ impl CodexProvider {
         &self,
         request: &ProviderRequest,
     ) -> Result<ProviderResponse, ProviderError> {
+        self.validate_goal_request()?;
         let token = self.access_token().await?;
         let account_id = self.account_id();
 
         let body = Self::build_responses_body(request);
 
+        #[cfg(not(test))]
+        let endpoint = CODEX_API_ENDPOINT;
+        #[cfg(test)]
+        let endpoint = self
+            .test_endpoints
+            .as_ref()
+            .map_or(CODEX_API_ENDPOINT, |urls| urls.1.as_str());
         let builder = self
             .http_client
-            .post(CODEX_API_ENDPOINT)
+            .post(endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json");
         let builder = self.codex_headers(builder, &token, account_id.as_deref());
 
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("HTTP request failed: {}", e),
-                status: None,
-                body: None,
-            })?;
+        let builder = builder.json(&body);
+        // OAuth preparation may await refresh HTTP/body reads. Recheck at the
+        // actual model-send boundary after that preparation has completed.
+        self.validate_goal_request()?;
+        let resp = builder.send().await.map_err(|e| ProviderError::Other {
+            provider: self.id.clone(),
+            message: format!("HTTP request failed: {}", e),
+            status: None,
+            body: None,
+        })?;
 
         let status = resp.status().as_u16();
         let retry_after = retry_after_from_headers(resp.headers());
@@ -397,29 +450,37 @@ impl CodexProvider {
         &self,
         request: &ProviderRequest,
     ) -> Result<reqwest::Response, ProviderError> {
+        self.validate_goal_request()?;
         let token = self.access_token().await?;
         let account_id = self.account_id();
 
         let mut body = Self::build_responses_body(request);
         body["stream"] = json!(true);
 
+        #[cfg(not(test))]
+        let endpoint = CODEX_API_ENDPOINT;
+        #[cfg(test)]
+        let endpoint = self
+            .test_endpoints
+            .as_ref()
+            .map_or(CODEX_API_ENDPOINT, |urls| urls.1.as_str());
         let builder = self
             .http_client
-            .post(CODEX_API_ENDPOINT)
+            .post(endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream");
         let builder = self.codex_headers(builder, &token, account_id.as_deref());
 
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("HTTP request failed: {}", e),
-                status: None,
-                body: None,
-            })?;
+        let builder = builder.json(&body);
+        // OAuth preparation may await refresh HTTP/body reads. Recheck at the
+        // actual model-send boundary after that preparation has completed.
+        self.validate_goal_request()?;
+        let resp = builder.send().await.map_err(|e| ProviderError::Other {
+            provider: self.id.clone(),
+            message: format!("HTTP request failed: {}", e),
+            status: None,
+            body: None,
+        })?;
 
         let status = resp.status().as_u16();
         if !(200..300).contains(&(status as usize)) {
@@ -913,6 +974,23 @@ impl LlmProvider for CodexProvider {
         self.send_responses_request(&request).await
     }
 
+    async fn create_message_stream_for_goal(
+        &self,
+        request: ProviderRequest,
+        turn: Option<&GoalTurn>,
+        permission: GoalTurnPermission,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        match turn {
+            Some(turn) => {
+                self.for_goal(turn, permission)
+                    .create_message_stream(request)
+                    .await
+            }
+            None => self.create_message_stream(request).await,
+        }
+    }
+
     async fn create_message_stream(
         &self,
         request: ProviderRequest,
@@ -1171,5 +1249,120 @@ mod byte_boundary_tests {
             .last()
             .unwrap()
             .contains("ended before response.completed"));
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use claurst_core::goal::{GoalStatus, GoalStore, GoalTurnPermission};
+
+    #[test]
+    fn goal_r1_codex_refresh_rechecks_before_model_send() {
+        let name = "providers::codex::goal_tests::goal_r1_codex_refresh_rechecks_before_model_send";
+        if std::env::var("COVEN_CODE_CODEX_GOAL_TEST").as_deref() != Ok(name) {
+            let dir =
+                std::env::temp_dir().join(format!("coven-codex-goal-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let home = dir.join("code");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::write(home.join("auth.json"), r#"{"credentials":{}}"#).unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            for (key, _) in std::env::vars_os() {
+                let name = key.to_string_lossy();
+                if name.contains("API_KEY")
+                    || name.starts_with("COVEN")
+                        && (name.contains("TEST") || name.contains("FIXTURE"))
+                {
+                    command.env_remove(key);
+                }
+            }
+            let mut child = command
+                .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                .env("COVEN_CODE_CODEX_GOAL_TEST", name)
+                .env("COVEN_CODE_HOME", &home)
+                .env("COVEN_HOME", dir.join("coven"))
+                .env("COVEN_CODE_DISABLE_MODELS_FETCH", "1")
+                .env("COVEN_DAEMON_SOCKET", dir.join("absent.sock"))
+                .env("COVEN_CODE_CLAUDE_BIN", dir.join("absent-claude"))
+                .env("CLAUDE_CONFIG_DIR", dir.join("claude"))
+                .stdout(std::fs::File::create(dir.join("out")).unwrap())
+                .stderr(std::fs::File::create(dir.join("err")).unwrap())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() > deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("Codex fixture timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            let out = std::fs::read_to_string(dir.join("out")).unwrap();
+            let err = std::fs::read_to_string(dir.join("err")).unwrap();
+            assert!(
+                status.success() && out.contains("1 passed; 0 failed"),
+                "{out}\n{err}"
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for (revoke, streaming) in [(false, true), (true, true), (false, false), (true, false)] {
+                let dir = std::env::temp_dir().join(format!("coven-codex-goal-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+                let path = dir.join("goals.sqlite");
+                let store = GoalStore::open(&path).unwrap();
+                store.set_goal("s", "A", None).unwrap();
+                let turn = store.capture_active_goal("s").unwrap().unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base = format!("http://{}", listener.local_addr().unwrap());
+                let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen = count.clone();
+                let (stop, mut done) = tokio::sync::oneshot::channel::<()>();
+                let server = tokio::spawn(async move {
+                    loop {
+                        let (mut socket, _) = tokio::select! { _ = &mut done => break, result = listener.accept() => result.unwrap() };
+                        let mut bytes = Vec::new();
+                        loop {
+                            let mut buffer = [0u8; 4096];
+                            let n = socket.read(&mut buffer).await.unwrap();
+                            assert!(n > 0);
+                            bytes.extend_from_slice(&buffer[..n]);
+                            if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                                let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                                let len = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap();
+                                if bytes.len() >= end + 4 + len { break; }
+                            }
+                        }
+                        let refresh = bytes.starts_with(b"POST /refresh ");
+                        let body = if refresh {
+                            if revoke { GoalStore::open(&path).unwrap().set_status("s", GoalStatus::Paused).unwrap(); }
+                            r#"{"access_token":"fake-refreshed","refresh_token":"fake-refresh","expires_in":3600}"#
+                        } else { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); if streaming { "data: [DONE]\n\n" } else { r#"{"id":"local","model":"local-codex","output":[]}"# } };
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    }
+                });
+                let mut provider = CodexProvider::new(CodexTokens { access_token: "fake-expired".into(), refresh_token: Some("fake-refresh".into()), expires_at: Some(1), account_id: None }).unwrap();
+                provider.test_endpoints = Some((format!("{base}/refresh"), format!("{base}/responses")));
+                let request = ProviderRequest { model: "local-codex".into(), messages: vec![], system_prompt: None, tools: vec![], max_tokens: 10, temperature: None, top_p: None, top_k: None, stop_sequences: vec![], thinking: None, provider_options: json!({}) };
+                let result = if streaming {
+                    provider.create_message_stream_for_goal(request, Some(&turn), GoalTurnPermission::Work).await.map(|_| ())
+                } else {
+                    provider.for_goal(&turn, GoalTurnPermission::Work).create_message(request).await.map(|_| ())
+                };
+                let _ = stop.send(()); server.await.unwrap();
+                assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), usize::from(!revoke));
+                assert_eq!(result.is_err(), revoke);
+            }
+        });
     }
 }

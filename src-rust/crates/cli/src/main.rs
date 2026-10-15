@@ -6530,7 +6530,9 @@ mod tests {
             let parent = dir
                 .path()
                 .join(if initially_fails { "failed" } else { "empty" });
-            if !initially_fails {
+            if initially_fails {
+                std::fs::write(&parent, "not a directory").unwrap();
+            } else {
                 std::fs::create_dir(&parent).unwrap();
             }
             let path = parent.join("goals.sqlite");
@@ -6538,13 +6540,19 @@ mod tests {
             let first = capture_goal_turn_baseline(&mut ctx, 10);
             if initially_fails {
                 assert!(first.is_err());
+                std::fs::remove_file(&parent).unwrap();
                 std::fs::create_dir(&parent).unwrap();
             } else {
                 assert!(first.unwrap().is_none());
             }
             let store = claurst_core::GoalStore::open(&path).unwrap();
             let later = store.set_goal("session", "later B", None).unwrap();
-            assert!(capture_goal_turn_baseline(&mut ctx, 20).unwrap().is_none());
+            let retry = capture_goal_turn_baseline(&mut ctx, 20);
+            if initially_fails {
+                assert!(retry.is_err());
+            } else {
+                assert!(retry.unwrap().is_none());
+            }
             assert!(ctx.goal_turn.captured().is_none());
             assert_eq!(store.try_get_goal("session").unwrap().unwrap(), later);
         }
