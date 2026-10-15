@@ -36,7 +36,7 @@ impl McpToken {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        now + grace_secs >= exp
+        now.saturating_add(grace_secs) >= exp
     }
 
     pub fn expiry_datetime(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -89,11 +89,8 @@ pub fn remove_mcp_token(server_name: &str) -> std::io::Result<()> {
 }
 
 pub fn token_expiry_datetime(expires_at: Option<u64>) -> Option<chrono::DateTime<chrono::Utc>> {
-    expires_at.map(|timestamp| {
-        chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp),
-        )
-    })
+    let timestamp = i64::try_from(expires_at?).ok()?;
+    chrono::DateTime::from_timestamp(timestamp, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +667,37 @@ mod tests {
             server_url: Some("https://example.com/mcp".to_string()),
         };
         assert!(t.is_expired(0));
+    }
+
+    #[test]
+    fn token_expiry_datetime_bounds() {
+        assert_eq!(token_expiry_datetime(None), None);
+        let maximum = u64::try_from(chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp()).unwrap();
+        for timestamp in [0, 1_700_000_000, maximum] {
+            assert_eq!(
+                token_expiry_datetime(Some(timestamp)).unwrap().timestamp(),
+                i64::try_from(timestamp).unwrap()
+            );
+        }
+        for timestamp in [maximum + 1, i64::MAX as u64, u64::MAX] {
+            assert_eq!(token_expiry_datetime(Some(timestamp)), None);
+        }
+    }
+
+    #[test]
+    fn token_expiry_grace_overflow() {
+        let mut token = McpToken {
+            access_token: "test".into(),
+            refresh_token: None,
+            expires_at: Some(u64::MAX),
+            scope: None,
+            server_name: "test".into(),
+            server_url: None,
+        };
+        assert!(!token.is_expired(0));
+        assert!(token.is_expired(u64::MAX));
+        token.expires_at = None;
+        assert!(!token.is_expired(u64::MAX));
     }
 
     #[test]
