@@ -110,15 +110,15 @@ fn message(result: CommandResult) -> String {
 }
 
 async fn reconnect(ctx: &CommandContext) {
-    let configs: Vec<_> = ctx.config.effective_mcp_servers().cloned().collect();
+    let expected = ctx.config.effective_mcp_servers().count();
     let manager = tokio::time::timeout(
         Duration::from_secs(3),
-        claurst_mcp::McpManager::connect_all(&configs),
+        claurst_mcp::McpManager::connect_config(&ctx.config, Some(&ctx.working_dir)),
     )
     .await
     .expect("marker processes must finish promptly");
     assert_eq!(manager.server_count(), 0);
-    assert_eq!(manager.failed_servers().len(), configs.len());
+    assert_eq!(manager.failed_servers().len(), expected);
 }
 
 #[test]

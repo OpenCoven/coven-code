@@ -103,7 +103,11 @@ impl Tool for McpToolWrapper {
 
         let args = if input.is_null() { None } else { Some(input) };
 
-        match self.manager.call_tool(&self.tool_def.name, args).await {
+        match self
+            .manager
+            .call_tool(Some(&ctx.working_dir), &self.tool_def.name, args)
+            .await
+        {
             Ok(result) => {
                 let text = claurst_mcp::mcp_result_to_string(&result);
                 if result.is_error {
@@ -763,7 +767,7 @@ async fn main() -> anyhow::Result<()> {
     let current_turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Initialize MCP servers first (needed for ToolContext.mcp_manager).
-    let mcp_manager_arc = connect_mcp_manager_arc(&config).await;
+    let mcp_manager_arc = connect_mcp_manager_arc(&config, Some(&cwd)).await;
 
     let pending_permissions = Arc::new(ParkingMutex::new(
         claurst_tools::PendingPermissionStore::default(),
@@ -853,7 +857,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Register plugin MCP servers into the in-memory config so they are
             // picked up by any subsequent MCP manager construction.
-            config.plugin_mcp_servers = plugin_registry.all_mcp_servers();
+            config
+                .reconcile_plugin_mcp_servers(plugin_registry.all_mcp_servers())
+                .await?;
         }
     }
 
@@ -1086,21 +1092,30 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn refresh_mcp_project_config(config: &mut Config, project_dir: &std::path::Path) {
-    config.set_mcp_project(project_dir);
+async fn refresh_mcp_project_config(
+    config: &mut Config,
+    project_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    config.set_mcp_project(project_dir).await?;
     claurst_plugins::refresh_cached_plugins(project_dir).await;
     if config.hosted_review_enabled() && !config.hosted_review.allow_plugins {
-        config.plugin_mcp_servers.clear();
+        config.reconcile_plugin_mcp_servers(Vec::new()).await?;
     } else if let Some(registry) = claurst_plugins::global_plugin_registry()
         .filter(|registry| registry.matches_project(project_dir))
     {
-        config.plugin_mcp_servers = registry.all_mcp_servers();
+        config
+            .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+            .await?;
     }
+    Ok(())
 }
 
-async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::McpManager>> {
-    let servers: Vec<_> = config.effective_mcp_servers().cloned().collect();
-    if servers.is_empty() {
+async fn connect_mcp_manager_arc(
+    config: &Config,
+    caller: Option<&std::path::Path>,
+) -> Option<Arc<claurst_mcp::McpManager>> {
+    let server_count = config.effective_mcp_servers().count();
+    if server_count == 0 {
         return None;
     }
     if config.hosted_review_enabled() && !config.hosted_review.allow_mcp_servers {
@@ -1108,9 +1123,9 @@ async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::Mcp
         return None;
     }
 
-    info!(count = servers.len(), "Connecting to MCP servers");
-    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_all(&servers).await);
-    mcp_manager.clone().spawn_notification_poll_loop();
+    info!(count = server_count, "Connecting to MCP servers");
+    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_config(config, caller).await);
+    mcp_manager.clone().spawn_notification_poll_loop(caller);
     Some(mcp_manager)
 }
 
@@ -2234,7 +2249,7 @@ async fn run_interactive(
                     let saved_path = std::path::PathBuf::from(saved_dir);
                     if saved_path.exists() {
                         tool_ctx.working_dir = saved_path;
-                        refresh_mcp_project_config(&mut config, &tool_ctx.working_dir).await;
+                        refresh_mcp_project_config(&mut config, &tool_ctx.working_dir).await?;
                     }
                 }
                 tool_ctx.session_id = session.id.clone();
@@ -2979,7 +2994,7 @@ async fn run_interactive(
                                         if saved_path.exists() {
                                             tool_ctx.working_dir = saved_path.clone();
                                             cmd_ctx.working_dir = saved_path;
-                                            refresh_mcp_project_config(&mut cmd_ctx.config, &tool_ctx.working_dir).await;
+                                            refresh_mcp_project_config(&mut cmd_ctx.config, &tool_ctx.working_dir).await?;
                                             app.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
                                             tool_ctx.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
                                             tool_ctx.config.project_dir = cmd_ctx.config.project_dir.clone();
@@ -4928,7 +4943,10 @@ async fn run_interactive(
                         server_name
                     ));
                 } else if let Some(manager) = app.mcp_manager.clone() {
-                    match manager.begin_auth(&server_name).await {
+                    match manager
+                        .begin_auth(Some(&cmd_ctx.working_dir), &server_name)
+                        .await
+                    {
                         Ok(session) => {
                             let auth_url = session.auth_url.clone();
                             let redirect_uri = session.redirect_uri.clone();
@@ -4953,7 +4971,8 @@ async fn run_interactive(
         }
 
         if !app.is_streaming && current_query.is_none() && app.take_pending_mcp_reconnect() {
-            let new_mcp_manager = connect_mcp_manager_arc(&cmd_ctx.config).await;
+            let new_mcp_manager =
+                connect_mcp_manager_arc(&cmd_ctx.config, Some(&cmd_ctx.working_dir)).await;
             tools_arc = replace_mcp_runtime(
                 new_mcp_manager.clone(),
                 &mut tool_ctx,

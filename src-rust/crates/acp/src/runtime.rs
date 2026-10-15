@@ -111,6 +111,6 @@ async fn build_mcp_manager(config: &Config) -> Option<Arc<claurst_mcp::McpManage
         return None;
     }
     let mgr = Arc::new(claurst_mcp::McpManager::connect_all(&config.mcp_servers).await);
-    mgr.clone().spawn_notification_poll_loop();
+    mgr.clone().spawn_notification_poll_loop(None);
     Some(mgr)
 }

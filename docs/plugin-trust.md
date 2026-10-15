@@ -68,12 +68,32 @@ Discovery supplies later reconnect candidates without publishing plugin command
 or hook registries. It does not connect plugin servers early. ACP startup
 continues to use settings-owned servers and does not discover plugins.
 
-Existing live MCP connections can still receive requests after a plugin is
-disabled, reloaded, or left behind by a project transition. Restart the session
-to retire those connections. Caller-project request authorization, retained
-manager revocation, and live transport retirement remain a required follow-up;
-configuration withdrawal does not close the full plugin supply chain findings
-(SEC-SUPPLY-1/2).
+Plugin MCP clients retain the contribution's runtime authority. Requests check
+the actual caller's canonical working directory, including calls through old
+tool wrappers and retained managers. Project plugins reject missing,
+unresolvable, or different caller directories; canonical aliases are accepted.
+Settings-owned servers and user-global plugins remain available across projects.
+The same checks cover resource and prompt requests, resource subscriptions,
+notification subscribers, and authentication/token operations. Background OAuth
+sessions are cancelled on withdrawal and cannot persist tokens afterward.
+
+Disable, reload withdrawal (including capability removal, a removed server, or
+a deleted manifest), and project transitions permanently revoke the withdrawn
+authority. Stale configuration clones cannot launch it again. Unchanged eligible
+contributions keep their authority; re-enabling creates a new lifetime and does
+not reactivate old clients. Successful withdrawal waits for the actual local
+transport and owned background work to retire, including closing and reaping
+stdio children. Cleanup errors are reported, not treated as completed cleanup.
+An unresponsive request or initialization handshake does not prevent revocation.
+Remote HTTP session deletion remains best-effort according to the transport;
+local retirement does not claim destruction of state held by a remote server.
+
+Ordinary MCP reconnect only retires the replaced manager's notification work.
+Retained settings-owned clients can still finish requests, including cron work.
+Plugin withdrawal closes only the affected plugin transports. Dropping the last
+plugin client also closes its transport while its eligible configuration remains.
+These controls do not constitute an OS sandbox or close all plugin supply chain
+findings (SEC-SUPPLY-1/2).
 
 Plugins explicitly installed in the user-global plugin directory retain their
 trusted default. Their name-based enable and disable settings continue to apply.
