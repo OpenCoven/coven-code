@@ -487,7 +487,7 @@ Each companion has five stats: DEBUGGING, PATIENCE, CHAOS, WISDOM, SNARK. One st
 
 The bones (species, rarity, stats, eyes, hat, shiny) are never stored and are always recomputed from `hash(userId)`.
 
-`get_companion(user_id, config_dir)` loads this soul and derives the bones from the user ID. `load_companion_soul` returns `None` for a missing, unreadable, or malformed file. `save_companion_soul` returns write errors; it currently writes directly to the destination rather than staging an atomic replacement.
+`get_companion(user_id, config_dir)` loads this soul and derives the bones from the user ID. `load_companion_soul` returns `None` for a missing, unreadable, or malformed file. `save_companion_soul` returns write errors. For an existing file, it stages the replacement in the same directory, preserves permission bits, and follows live symlinks. A failed staged write leaves the previous contents intact. Replacement requires write permission on the containing directory. New files and dangling symlink targets retain direct-write creation, which can leave partial contents on failure. Replacement changes the file inode; hard links and open handles keep the old file, and ownership, ACLs, and extended attributes are not copied. Concurrent writers and crash durability of the directory entry are not guaranteed.
 
 ---
 
