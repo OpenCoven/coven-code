@@ -168,10 +168,39 @@ integration plan live in [docs/unification.md](docs/unification.md).
 
 ## Release checklist
 
-When cutting a `coven-code` release:
-1. Update version in `src-rust/Cargo.toml` `[workspace.package]` and run `scripts/bump-version.py <version>`.
-2. Update `src-rust/crates/acp/registry-template/agent.json` archive URLs.
-3. Update `npm/package.json` version.
-4. Build release binaries for all 5 platforms; name them `coven-code-{platform}-{arch}[.exe]`.
-5. Create GitHub release on `OpenCoven/coven-code` with those archives + `install.sh` + `install.ps1`.
-6. `npm publish --access public` for `@opencoven/coven-code` from `npm/`.
+Prepare a release from the reviewed main commit with explicit publication
+authorization. A new release must be strictly newer than every existing version
+tag; use a new version for fixes rather than replacing published assets.
+
+1. Select patch or minor scope from the changes since the last shipped tag.
+   Resolve security, migration and public-contract gates before publication.
+2. Run `python3 scripts/bump-version.py vMAJOR.MINOR.PATCH` from the repository
+   root. The script owns Cargo workspace/lock versions, npm version, README and
+   documentation stamps, and the ACP registry version and five archive URLs.
+   Do not edit these version fields manually.
+3. Run `python3 scripts/check-release-version.py vMAJOR.MINOR.PATCH`. It reads
+   remote tags and rejects equal/older versions and inconsistent stamps. Network
+   failure is a preflight failure, not evidence that a version is available.
+4. Verify the exact stamped tree: workspace formatting, check, Clippy and tests;
+   [reverse consumer contracts](docs/reverse-contract-ci.md); headless schemas;
+   installer tests; upgrade/rollback fixtures; and required terminal acceptance.
+5. Review release notes against the previous shipped tag, including migration
+   steps and compatibility limits. Build and verify all five release archives:
+   Windows x86_64 ZIP, Linux x86_64/aarch64 and macOS x86_64/aarch64 tarballs.
+   Each contains `coven-code` (Windows: `coven-code.exe`). Require the final
+   checksum manifest and verify archive contents and native smoke tests before
+   declaring the candidate ready. Do not infer platform support from compilation
+   alone.
+6. After authorized Git delivery and passing exact-commit CI, dispatch
+   `.github/workflows/release.yml` from the approved main commit with the chosen
+   version. The workflow publishes a GitHub Release; it is not a dry run.
+   Verify the uploaded archives, installers and checksum manifest before
+   announcing the release or updating managed engine pins.
+7. Keep `publish_npm` false. `@opencoven/coven-code` is deprecated; npm publication
+   is an explicit opt-in through the release workflow, not a routine release step.
+
+A package-version bump does not replace a required engine-contract version bump
+or consumer coordination. Retain a verified prior binary and backup of affected
+engine data for rollback; do not assume a standalone install replaces the engine
+selected by the unified `coven` CLI. Human/native-platform checks and final
+publication authorization remain separate from automated local checks.

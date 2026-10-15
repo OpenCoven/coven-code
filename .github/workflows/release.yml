@@ -13,9 +13,10 @@ on:
         type: boolean
         default: false
 
-# Only one release at a time — prevent races on the same tag.
+# Serialize all release versions and asset replacement, not just one tag.
+# Preflight rechecks remote versions after acquiring this shared group.
 concurrency:
-  group: release-${{ inputs.version }}
+  group: coven-code-release-publication
   cancel-in-progress: false
 
 permissions:
@@ -61,16 +62,12 @@ jobs:
             exit 1
           fi
 
-      - name: Version tag must match Cargo.toml
-        run: |
-          CARGO_VERSION=$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG_VERSION="$RELEASE_VERSION"
-          TAG_VERSION="${TAG_VERSION#v}"  # strip leading v
-          if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml ($CARGO_VERSION). Update Cargo.toml first."
-            exit 1
-          fi
-          echo "Version verified: $CARGO_VERSION"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify forward version and canonical stamps
+        run: python scripts/check-release-version.py "$RELEASE_VERSION"
 
   # ── Build matrix ────────────────────────────────────────────────────
   build:
@@ -374,6 +371,11 @@ jobs:
 
           echo "── Final release notes ──────────────────────────────"
           cat release-notes.md
+
+      # Recheck authoritative tags after the build, immediately before publishing.
+      # This also catches tags created outside these serialized workflows.
+      - name: Recheck forward version before publication
+        run: python scripts/check-release-version.py "$RELEASE_VERSION"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

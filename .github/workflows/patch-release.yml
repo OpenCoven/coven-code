@@ -31,10 +31,9 @@ on:
         type: string
         default: ''
 
-# Don't race patches on the same tag.  Also don't race with a regular release
-# of the same tag (concurrency groups share the same name shape).
+# Share the normal release group so asset replacement cannot overlap a release.
 concurrency:
-  group: release-${{ inputs.version }}
+  group: coven-code-release-publication
   cancel-in-progress: false
 
 permissions:
