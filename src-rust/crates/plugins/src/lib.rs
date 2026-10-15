@@ -294,7 +294,7 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
     let mut all: Vec<&LoadedPlugin> = registry.all();
     all.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if all.is_empty() {
+    if all.is_empty() && registry.errors.is_empty() {
         return "No plugins installed.\n\nUse `/plugin install <path>` to install a plugin from a local directory.".to_string();
     }
 
@@ -348,10 +348,13 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
 
     if registry.error_count() > 0 {
         out.push_str(&format!(
-            "\n{} plugin{} failed to load. Use `/plugin info <name>` for details.\n",
+            "\n{} plugin load error{}:\n",
             registry.error_count(),
             if registry.error_count() == 1 { "" } else { "s" }
         ));
+        for error in &registry.errors {
+            out.push_str(&format!("  {error}\n"));
+        }
     }
 
     out
@@ -827,7 +830,69 @@ mod tests {
     fn format_plugin_list_empty() {
         let reg = PluginRegistry::new();
         let out = format_plugin_list(&reg);
-        assert!(out.contains("No plugins installed"));
+        assert_eq!(out, "No plugins installed.\n\nUse `/plugin install <path>` to install a plugin from a local directory.");
+    }
+
+    #[tokio::test]
+    async fn format_plugin_list_reports_errors_without_loaded_plugins() {
+        let root = TempDir::new().unwrap();
+        let plugin_dir = root.path().join("broken");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        let manifest_path = plugin_dir.join("plugin.json");
+        std::fs::write(&manifest_path, "{ invalid json").unwrap();
+        let (plugins, errors) =
+            discover_plugins(&[root.path().to_path_buf()], PluginSource::User).await;
+        assert!(plugins.is_empty());
+        assert_eq!(errors.len(), 1);
+        let manifest_error = errors[0].to_string();
+        let mut registry = PluginRegistry::new();
+        registry.extend(plugins, errors);
+        let unreadable_path = root.path().join("unreadable").display().to_string();
+        // Construct an IO diagnostic without relying on host permission behavior.
+        registry.errors.push(PluginError::Io {
+            path: unreadable_path.clone(),
+            message: "fixture read failure".into(),
+        });
+        let output = format_plugin_list(&registry);
+        assert!(output.starts_with("Installed plugins: 0 (0 enabled)\n"));
+        assert!(output.contains("2 plugin load errors:"));
+        assert!(output.contains(&manifest_error));
+        assert!(output.contains(&manifest_path.display().to_string()));
+        assert!(output.contains(&format!(
+            "IO error reading '{unreadable_path}': fixture read failure"
+        )));
+        assert!(!output.contains("Use `/plugin info"));
+    }
+
+    #[tokio::test]
+    async fn format_plugin_list_reports_duplicates_alongside_loaded_plugins() {
+        let root = TempDir::new().unwrap();
+        let mut registry = PluginRegistry::new();
+        for directory in ["first", "second"] {
+            let plugin_dir = root.path().join(directory);
+            std::fs::create_dir(&plugin_dir).unwrap();
+            write_manifest(
+                &plugin_dir,
+                &serde_json::json!({"name": "fixture", "version": "1.0.0"}),
+            );
+            let (plugins, errors) = discover_plugins(&[plugin_dir], PluginSource::User).await;
+            registry.extend(plugins, errors);
+            if directory == "first" {
+                assert_eq!(
+                    format_plugin_list(&registry),
+                    "Installed plugins: 1 (1 enabled)\n\n  fixture [enabled] v1.0.0\n"
+                );
+            }
+        }
+        assert_eq!(registry.plugin_count(), 1);
+        assert_eq!(registry.error_count(), 1);
+        let output = format_plugin_list(&registry);
+        assert!(output.contains("  fixture [enabled] v1.0.0\n"));
+        assert!(output.contains("1 plugin load error:"));
+        assert!(output.contains("Duplicate plugin name 'fixture'"));
+        assert!(output.contains(&root.path().join("first").display().to_string()));
+        assert!(output.contains(&root.path().join("second").display().to_string()));
+        assert!(!output.contains("Use `/plugin info"));
     }
 
     #[test]
