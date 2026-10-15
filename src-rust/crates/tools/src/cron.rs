@@ -63,28 +63,37 @@ fn scheduled_tasks_path() -> PathBuf {
 }
 
 /// Ensure the store has been loaded from disk (once per process).
-async fn ensure_store_loaded() {
+async fn ensure_store_loaded() -> Result<(), String> {
     let mut init = STORE_INITIALISED.lock().await;
     if *init {
-        return;
+        return Ok(());
     }
-    *init = true;
 
     // Load from ~/.coven-code/scheduled_tasks.json if it exists.
     let path = scheduled_tasks_path();
 
     let data = match tokio::fs::read_to_string(&path).await {
         Ok(d) => d,
-        Err(_) => return, // file doesn't exist yet — that's fine
-    };
-
-    let tasks: Vec<CronTask> = match serde_json::from_str(&data) {
-        Ok(t) => t,
-        Err(e) => {
-            debug!("Failed to parse scheduled_tasks.json: {}", e);
-            return;
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *init = true;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read cron tasks from {}: {}",
+                path.display(),
+                error
+            ))
         }
     };
+
+    let tasks: Vec<CronTask> = serde_json::from_str(&data).map_err(|error| {
+        format!(
+            "Failed to parse cron tasks from {}: {}",
+            path.display(),
+            error
+        )
+    })?;
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -100,6 +109,8 @@ async fn ensure_store_loaded() {
         }
         store.insert(task.id.clone(), task);
     }
+    *init = true;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +172,10 @@ fn cron_range_matches(part: &str, value: u32, sunday_alias: bool) -> bool {
 /// Durable one-shots are withheld if their removal cannot be persisted.
 /// Persistence precedes delivery, not execution: a crash between them can lose a run.
 pub async fn pop_due_tasks(dt: &DateTime<Local>) -> Vec<CronTask> {
-    ensure_store_loaded().await;
+    if let Err(error) = ensure_store_loaded().await {
+        warn!(%error, "Cannot load scheduled tasks; skipping this scheduler tick");
+        return Vec::new();
+    }
     let mut store = CRON_STORE.write().await;
     let mut due: Vec<CronTask> = store
         .values()
@@ -327,7 +341,9 @@ impl Tool for CronCreateTool {
         }
 
         // Ensure persistent tasks are loaded from disk before we check the count.
-        ensure_store_loaded().await;
+        if let Err(error) = ensure_store_loaded().await {
+            return ToolResult::error(error);
+        }
 
         let mut store = CRON_STORE.write().await;
         if store.len() >= 50 {
@@ -435,7 +451,9 @@ impl Tool for CronDeleteTool {
         };
 
         // Load disk state first so we don't accidentally drop persisted tasks.
-        ensure_store_loaded().await;
+        if let Err(error) = ensure_store_loaded().await {
+            return ToolResult::error(error);
+        }
 
         let mut store = CRON_STORE.write().await;
         if let Some(removed) = store.remove(&params.id) {
@@ -486,7 +504,9 @@ impl Tool for CronListTool {
 
     async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
         // Merge in-memory store with any persisted tasks from disk.
-        ensure_store_loaded().await;
+        if let Err(error) = ensure_store_loaded().await {
+            return ToolResult::error(error);
+        }
 
         let store = CRON_STORE.read().await;
 
@@ -695,5 +715,114 @@ mod validation_tests {
         assert!(validate_cron("* * * * *"));
         assert!(!validate_cron("* * * *"));
         assert!(!validate_cron("* * * * * *"));
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+    use claurst_core::config::{Config, PermissionMode};
+    use claurst_core::permissions::AutoPermissionHandler;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    #[test]
+    fn cancelled_initialization_can_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cron::load_tests::cancelled_load_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("COVEN_CODE_HOME", home.path())
+            .env_remove("COVEN_CODE_TEST_HOME")
+            .env("COVEN_CRON_LOAD_CASE", "cancelled")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "fixture timed out: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("cron-cancelled-load-complete"));
+    }
+
+    #[tokio::test]
+    #[ignore = "run by isolated parent with temporary engine home"]
+    async fn cancelled_load_child() {
+        assert_eq!(std::env::var("COVEN_CRON_LOAD_CASE").unwrap(), "cancelled");
+        let home = std::path::PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap());
+        let ctx = ToolContext {
+            working_dir: home.clone(),
+            permission_mode: PermissionMode::Default,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::Default,
+            }),
+            cost_tracker: claurst_core::cost::CostTracker::new(),
+            session_id: "cron-load-fixture".into(),
+            file_history: Arc::new(parking_lot::Mutex::new(
+                claurst_core::file_history::FileHistory::new(),
+            )),
+            current_turn: Arc::new(AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+
+        let task = CronTask {
+            id: "retained".into(),
+            cron: "* * * * *".into(),
+            prompt: "stored".into(),
+            recurring: true,
+            durable: true,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        let stored = serde_json::to_vec(&vec![task]).unwrap();
+        let path = home.join("scheduled_tasks.json");
+        std::fs::write(&path, &stored).unwrap();
+        let store_guard = CRON_STORE.write().await;
+        {
+            let load = ensure_store_loaded();
+            tokio::pin!(load);
+            assert!(futures::poll!(&mut load).is_pending());
+            assert!(
+                STORE_INITIALISED.try_lock().is_err(),
+                "loader must have entered"
+            );
+        }
+        drop(store_guard);
+        let listed = CronListTool.execute(serde_json::json!({}), &ctx).await;
+        assert!(!listed.is_error, "{}", listed.content);
+        assert!(listed.content.contains("retained"), "{}", listed.content);
+        assert_eq!(std::fs::read(path).unwrap(), stored);
+        println!("cron-cancelled-load-complete");
     }
 }
