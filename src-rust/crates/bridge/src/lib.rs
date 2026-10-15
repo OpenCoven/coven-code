@@ -997,13 +997,17 @@ pub async fn start_bridge_session(
         }
         _ => {
             let body_text = resp.text().await.unwrap_or_default();
+            let mut preview_end = body_text.len().min(200);
+            while !body_text.is_char_boundary(preview_end) {
+                preview_end -= 1;
+            }
             anyhow::bail!(
                 "Bridge session registration failed: server returned HTTP {}. {}",
                 status,
                 if body_text.is_empty() {
                     String::new()
                 } else {
-                    format!("Response: {}", &body_text[..body_text.len().min(200)])
+                    format!("Response: {}", &body_text[..preview_end])
                 }
             );
         }
@@ -1952,6 +1956,98 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    // Child processes isolate the environment-based endpoint without global env races.
+    #[tokio::test]
+    async fn registration_error_body_is_bounded_utf8() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let cases = [
+            (String::new(), String::new()),
+            ("short failure".to_owned(), "short failure".to_owned()),
+            ("a".repeat(250), "a".repeat(200)),
+            (format!("{}é", "a".repeat(199)), "a".repeat(199)),
+            (
+                format!("{}étail", "a".repeat(198)),
+                format!("{}é", "a".repeat(198)),
+            ),
+            (format!("{}\u{10000}tail", "a".repeat(198)), "a".repeat(198)),
+        ];
+        for (body, preview) in cases {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let expected = format!(
+                "Bridge session registration failed: server returned HTTP 503. {}",
+                if preview.is_empty() {
+                    String::new()
+                } else {
+                    format!("Response: {preview}")
+                }
+            );
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::registration_http_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("COVEN_CODE_BRIDGE_URL", format!("http://{address}"))
+                .env("COVEN_CODE_BRIDGE_TOKEN", "local-test-token")
+                .env("COVEN_TEST_EXPECTED_ERROR", expected)
+                .kill_on_drop(true);
+            let serve = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0, "request ended before headers");
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        assert!(headers.starts_with("POST /api/bridge/sessions HTTP/1.1\r\n"));
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        while request.len() < end + 4 + length {
+                            let count = socket.read(&mut chunk).await.unwrap();
+                            assert_ne!(count, 0, "request ended before body");
+                            request.extend_from_slice(&chunk[..count]);
+                        }
+                        break;
+                    }
+                }
+                let response = format!("HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                socket.write_all(response.as_bytes()).await.unwrap();
+            };
+            let (_, output) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(serve, command.output())
+            })
+            .await
+            .expect("local registration fixture timed out");
+            let output = output.unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "invoked in an isolated process by registration_error_body_is_bounded_utf8"]
+    async fn registration_http_child() {
+        let expected = std::env::var("COVEN_TEST_EXPECTED_ERROR").unwrap();
+        let error = start_bridge_session(None).await.unwrap_err();
+        assert_eq!(error.to_string(), expected);
     }
 
     #[test]
