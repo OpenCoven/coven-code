@@ -55,32 +55,35 @@ impl McpToken {
 /// as all other state and migrate together under the unified coven CLI. (This
 /// previously constructed `~/.coven-code/mcp-tokens` directly, which would have
 /// stranded tokens in the legacy dir after relocation.)
-fn token_path(server_name: &str) -> PathBuf {
-    claurst_core::config::config_home()
+fn token_path(server_name: &str) -> std::io::Result<PathBuf> {
+    if server_name.is_empty() || server_name.contains(['/', '\\', ':', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MCP server name must be non-empty and contain no path separators, colon, or NUL",
+        ));
+    }
+    Ok(claurst_core::config::config_home()
         .join("mcp-tokens")
-        .join(format!("{}.json", server_name))
+        .join(format!("{}.json", server_name)))
 }
 
 /// Persist an MCP OAuth token to disk.
 pub fn store_mcp_token(token: &McpToken) -> std::io::Result<()> {
-    let path = token_path(&token.server_name);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let path = token_path(&token.server_name)?;
     let json = serde_json::to_string_pretty(token).map_err(std::io::Error::other)?;
-    std::fs::write(&path, json)
+    claurst_core::secret_file::write_secret_file_sync(&path, json)
 }
 
 /// Read a stored MCP OAuth token (None if not found or invalid).
 pub fn get_mcp_token(server_name: &str) -> Option<McpToken> {
-    let path = token_path(server_name);
+    let path = token_path(server_name).ok()?;
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
 /// Delete the stored token for a server (effectively logs out).
 pub fn remove_mcp_token(server_name: &str) -> std::io::Result<()> {
-    let path = token_path(server_name);
+    let path = token_path(server_name)?;
     if path.exists() {
         std::fs::remove_file(&path)
     } else {
@@ -319,7 +322,7 @@ pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<Mcp
         server_name: session.server_name,
         auth_url: session.auth_url,
         redirect_uri: session.redirect_uri,
-        token_path: token_path(&token.server_name),
+        token_path: token_path(&token.server_name)?,
     })
 }
 
