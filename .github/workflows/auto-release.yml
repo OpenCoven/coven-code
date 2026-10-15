@@ -60,6 +60,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Accept complete stable version tokens only; never truncate a prerelease.
       # ── 1. Parse the marker ───────────────────────────────────────────
       - name: Look for --release marker
         id: marker
@@ -69,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="$(printf '%s' "$MSG" \
-                  | grep -oE -- '--release[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+' \
+                  | grep -oE -- '(^|[[:space:]])--release[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+([[:space:]]|$)' \
                   | head -1 \
                   | awk '{print $2}' || true)"
           if [[ -z "$TAG" ]]; then
@@ -203,7 +204,8 @@ jobs:
       # Word-boundary match so `--patch` in a longer string (e.g. a quoted
       # filename or a URL fragment) doesn't accidentally trigger.  Also
       # explicitly exits if the commit ALSO carries `--release` — release
-      # wins, patch is silent, no double-dispatch.
+      # wins, patch is silent, no double-dispatch. Invalid or missing release
+      # arguments must not fall through to patching the published version.
       - name: Look for --patch marker
         id: marker
         if: steps.actor.outputs.skip != 'true'
@@ -211,7 +213,7 @@ jobs:
           MSG: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
-          if printf '%s' "$MSG" | grep -qE -- '(^|[[:space:]])--release[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+'; then
+          if printf '%s' "$MSG" | grep -qE -- '(^|[[:space:]])--release([[:space:]]|$)'; then
             echo "Commit also carries --release marker — letting auto-release handle it; patch skipped."
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0

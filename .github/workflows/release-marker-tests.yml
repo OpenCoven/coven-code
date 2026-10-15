@@ -1,0 +1,27 @@
+name: Release marker tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/test_release_markers.py'
+      - '.github/workflows/auto-release.yml'
+      - '.github/workflows/release-marker-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/test_release_markers.py'
+      - '.github/workflows/auto-release.yml'
+      - '.github/workflows/release-marker-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: python3 scripts/test_release_markers.py -v
