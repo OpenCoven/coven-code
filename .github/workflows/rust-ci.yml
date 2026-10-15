@@ -10,6 +10,13 @@ on:
       - 'scripts/check-release-version.py'
       - 'scripts/test-release-version.py'
       - 'scripts/bump-version.py'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'scripts/*checksums*'
+      - 'scripts/package-release.py'
+      - 'scripts/test-package-release.py'
+      - '.github/workflows/patch-release.yml'
+      - '.github/workflows/release.yml'
       - '.github/workflows/rust-ci.yml'
   workflow_dispatch:
 
@@ -24,6 +31,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  installer-checksums:
+    name: Installer checksum fixtures (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify archive contents and packaging rejection paths
+        run: python scripts/test-package-release.py
+      - name: Verify canonical release manifests
+        run: node scripts/generate-release-checksums.test.mjs
+      - name: Verify Bash checksum failure boundaries
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n install.sh scripts/install-sh-checksums.test.sh
+          bash scripts/install-sh-checksums.test.sh
+      - name: Verify PowerShell checksum failure boundaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-ps1-checksums.test.ps1
+
   headless-schemas:
     name: Headless JSON Schema constraints
     runs-on: ubuntu-latest
