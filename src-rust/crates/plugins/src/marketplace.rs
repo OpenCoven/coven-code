@@ -108,7 +108,9 @@ pub async fn marketplace_check_updates_all() -> Vec<(String, String, String)> {
 
 /// Install a plugin by name from the marketplace, or from a URL directly.
 /// ZIP extraction failures are returned without treating the archive as YAML.
-/// Extraction is not atomic: failed installs may leave the archive and partial files.
+/// Downloads are parsed in memory, without a scratch file in the plugin directory.
+/// Direct YAML writes preserve existing manifest permissions; new files use normal
+/// creation permissions. Extraction and manifest writes are not atomic.
 pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, String> {
     let entry = if name_or_url.starts_with("http") {
         // Direct URL install
@@ -163,18 +165,17 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
 
     std::fs::create_dir_all(&install_dir).map_err(|e| format!("Create dir: {e}"))?;
 
-    // Write to disk (assume .zip or direct .yaml file)
-    let archive_path = install_dir.join("plugin.zip");
-    std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write: {e}"))?;
-
-    // Try to unzip; if not a zip, treat as manifest YAML
-    if !try_unzip(&archive_path, &install_dir)? {
-        // Not a zip — assume it's the manifest directly
-        let manifest_path = install_dir.join("manifest.yaml");
-        std::fs::copy(&archive_path, &manifest_path).map_err(|e| format!("Copy: {e}"))?;
-        let _ = std::fs::remove_file(&archive_path);
-    } else {
-        let _ = std::fs::remove_file(&archive_path);
+    // The download is already buffered; parsing it directly avoids collisions
+    // between a scratch archive and installed files or archive members.
+    match zip::ZipArchive::new(std::io::Cursor::new(&bytes)) {
+        Ok(mut archive) => archive
+            .extract(&install_dir)
+            .map_err(|e| format!("Extract archive: {e}"))?,
+        Err(_) => {
+            // Preserve direct-manifest fallback when ZIP parsing fails.
+            std::fs::write(install_dir.join("manifest.yaml"), &bytes)
+                .map_err(|e| format!("Write manifest: {e}"))?;
+        }
     }
 
     Ok(InstalledPlugin {
@@ -183,17 +184,6 @@ pub async fn marketplace_install(name_or_url: &str) -> Result<InstalledPlugin, S
         install_path: install_dir,
         description: entry.description.clone(),
     })
-}
-
-/// Return false if ZIP parsing fails; opening and extraction failures are errors.
-fn try_unzip(archive: &std::path::Path, dest: &std::path::Path) -> Result<bool, String> {
-    let file = std::fs::File::open(archive).map_err(|e| format!("Open archive: {e}"))?;
-    let Ok(mut zip) = zip::ZipArchive::new(file) else {
-        return Ok(false);
-    };
-    zip.extract(dest)
-        .map_err(|e| format!("Extract archive: {e}"))?;
-    Ok(true)
 }
 
 /// Check for an update to `name` and download if newer.
