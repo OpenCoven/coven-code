@@ -132,7 +132,7 @@ pub fn run_global_pre_tool_hook(
     for hook in hooks_for_event {
         // Apply matcher filter if present
         if let Some(ref matcher) = hook.matcher {
-            if !matcher.is_empty() && matcher != tool_name && matcher != "*" {
+            if !matcher.is_empty() && !hooks::glob_match(matcher, tool_name) {
                 continue;
             }
         }
@@ -175,7 +175,7 @@ pub fn run_global_post_tool_hook(
 
     for hook in hooks_for_event {
         if let Some(ref matcher) = hook.matcher {
-            if !matcher.is_empty() && matcher != tool_name && matcher != "*" {
+            if !matcher.is_empty() && !hooks::glob_match(matcher, tool_name) {
                 continue;
             }
         }

@@ -273,7 +273,7 @@ Each hook entry in a hooks configuration:
 | Field | Type | Description |
 |---|---|---|
 | `command` | string | Shell command to run. Receives event JSON on stdin. |
-| `matcher` | string | Optional tool-name filter. Supports `*` wildcard (e.g. `"File*"`, `"*Tool"`). Only relevant for `PreToolUse` / `PostToolUse`. |
+| `matcher` | string | Optional, case-sensitive tool-name filter: exact name, `*`, or a single leading/trailing `*` (e.g. `"File*"`, `"*Tool"`). Omitted or empty filters match all tools in global pre/post dispatch. Interior or multiple wildcards are not supported. Only relevant for `PreToolUse` / `PostToolUse`. |
 | `blocking` | bool | If `true`, a non-zero exit code blocks the operation. Non-blocking hooks (default) only log a warning on failure. |
 
 ### Hooks Configuration Format
