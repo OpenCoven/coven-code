@@ -2183,21 +2183,23 @@ pub mod config {
         let mut result = String::with_capacity(input.len());
         let mut chars = input.chars().peekable();
         let mut in_string = false;
-        let mut prev_char = '\0';
+        let mut escaped = false;
 
         while let Some(ch) = chars.next() {
             if in_string {
-                if ch == '"' && prev_char != '\\' {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
                     in_string = false;
                 }
                 result.push(ch);
-                prev_char = ch;
                 continue;
             }
             if ch == '"' {
                 in_string = true;
                 result.push(ch);
-                prev_char = ch;
                 continue;
             }
             if ch == '/' {
@@ -2227,11 +2229,9 @@ pub mod config {
                     }
                     _ => result.push(ch),
                 }
-                prev_char = '\0';
                 continue;
             }
             result.push(ch);
-            prev_char = ch;
         }
         result
     }
