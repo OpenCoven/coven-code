@@ -16,6 +16,8 @@ use std::collections::HashMap;
 /// `all()` returns every plugin including disabled ones.
 #[derive(Debug, Default, Clone)]
 pub struct PluginRegistry {
+    /// Canonical project identity for a discovered registry; absent on failure.
+    pub(crate) project_root: Option<std::path::PathBuf>,
     /// All plugins keyed by name.
     plugins: HashMap<String, LoadedPlugin>,
     /// Accumulated load errors.
@@ -30,13 +32,13 @@ impl PluginRegistry {
         Self::default()
     }
 
-    /// Insert (or replace) a loaded plugin.  Emits a duplicate error if
-    /// a different path already holds a plugin with the same name.
+    /// Insert (or replace) a loaded plugin. Emits a duplicate error if a
+    /// different path or source already holds a plugin with the same name.
     pub fn insert(&mut self, plugin: LoadedPlugin) {
         let name = plugin.name.clone();
 
         if let Some(existing) = self.plugins.get(&name) {
-            if existing.path != plugin.path {
+            if existing.path != plugin.path || existing.source != plugin.source {
                 self.errors.push(PluginError::DuplicateName {
                     name: name.clone(),
                     first: existing.path.to_string_lossy().into_owned(),
@@ -78,6 +80,14 @@ impl PluginRegistry {
     /// Whether a plugin is enabled.
     pub fn is_enabled(&self, name: &str) -> bool {
         self.plugins.get(name).is_some_and(|plugin| plugin.enabled)
+    }
+
+    /// Whether a cached registry belongs to this canonical project.
+    pub fn matches_project(&self, project_dir: &std::path::Path) -> bool {
+        match (&self.project_root, project_dir.canonicalize()) {
+            (Some(loaded), Ok(current)) => *loaded == current,
+            _ => false,
+        }
     }
 
     // ---- Enable / disable -------------------------------------------------
@@ -346,6 +356,32 @@ mod tests {
         assert_eq!(registry.error_count(), 1);
         assert!(registry.is_enabled("replacement"));
         assert_eq!(registry.all_mcp_servers().len(), 1);
+    }
+
+    #[test]
+    fn same_source_replacement_updates_enabled_membership() {
+        let mut reg = PluginRegistry::new();
+        reg.insert(make_plugin("alpha"));
+
+        let mut replacement = make_plugin("alpha");
+        replacement.enabled = false;
+        replacement.manifest.version = Some("2.0.0".to_string());
+        reg.insert(replacement);
+        assert!(!reg.is_enabled("alpha"));
+        assert!(!reg.get("alpha").unwrap().enabled);
+        assert_eq!(
+            reg.get("alpha").unwrap().manifest.version.as_deref(),
+            Some("2.0.0")
+        );
+        assert!(reg.enabled().is_empty());
+        assert_eq!(reg.enabled_count(), 0);
+        assert_eq!(reg.error_count(), 0);
+
+        reg.insert(make_plugin("alpha"));
+        assert!(reg.is_enabled("alpha"));
+        assert!(reg.get("alpha").unwrap().enabled);
+        assert_eq!(reg.enabled_count(), 1);
+        assert_eq!(reg.error_count(), 0);
     }
 
     #[test]

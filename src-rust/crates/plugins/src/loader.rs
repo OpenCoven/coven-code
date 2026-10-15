@@ -110,6 +110,25 @@ pub fn try_load_from_path(
         return Ok(None);
     };
 
+    // Resolve project aliases before deriving paths used by commands and hooks.
+    // A symlink retarget must not redirect an already-loaded folder grant.
+    let plugin_dir = if source == PluginSource::Project {
+        plugin_dir.canonicalize().map_err(|error| PluginError::Io {
+            path: plugin_dir.to_string_lossy().into_owned(),
+            message: error.to_string(),
+        })?
+    } else {
+        plugin_dir
+    };
+    let manifest_path =
+        plugin_dir.join(
+            manifest_path
+                .file_name()
+                .ok_or_else(|| PluginError::InvalidManifest {
+                    path: manifest_path.to_string_lossy().into_owned(),
+                    message: "Manifest path has no file name".to_string(),
+                })?,
+        );
     let manifest = load_manifest(&manifest_path)?;
 
     // Resolve sub-paths.
@@ -158,7 +177,7 @@ pub fn try_load_from_path(
         source: source.clone(),
         source_id: plugin_source_id,
         manifest,
-        enabled: true,
+        enabled: source != PluginSource::Project,
         commands_path,
         agents_path,
         skills_path,

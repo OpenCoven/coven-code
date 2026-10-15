@@ -2200,6 +2200,7 @@ async fn run_interactive(
                     let saved_path = std::path::PathBuf::from(saved_dir);
                     if saved_path.exists() {
                         tool_ctx.working_dir = saved_path;
+                        claurst_plugins::refresh_cached_plugins(&tool_ctx.working_dir).await;
                     }
                 }
                 tool_ctx.session_id = session.id.clone();
@@ -2865,7 +2866,15 @@ async fn run_interactive(
                             };
                             let command_succeeded = !matches!(&cli_result, Some(CommandResult::Error(_))) && (handled_by_tui || cli_result.is_some());
                             let refresh_catalog = matches!(&cli_result, Some(CommandResult::ResumeSession(_) | CommandResult::ConfigChange(_) | CommandResult::ConfigChangeMessage(_, _)))
-                                || command_succeeded && canonical_path.as_deref() == Some("plugin reload");
+                                || command_succeeded && match canonical_path.as_deref() {
+                                    Some("plugin reload") => true,
+                                    Some("plugin") => matches!(
+                                        claurst_plugins::parse_plugin_args(&cmd_args),
+                                        claurst_plugins::PluginSubCommand::Enable(_)
+                                            | claurst_plugins::PluginSubCommand::Disable(_)
+                                    ),
+                                    _ => false,
+                                };
                             // Start optimistically true; set false for Silent/None below.
                             let mut handled_by_cli = cli_result.is_some();
 
@@ -2935,6 +2944,7 @@ async fn run_interactive(
                                         if saved_path.exists() {
                                             tool_ctx.working_dir = saved_path.clone();
                                             cmd_ctx.working_dir = saved_path;
+                                            claurst_plugins::refresh_cached_plugins(&tool_ctx.working_dir).await;
                                         }
                                     }
                                     app.config.project_dir = Some(tool_ctx.working_dir.clone());
