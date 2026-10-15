@@ -791,19 +791,24 @@ pub struct XaaLoginState {
 ///
 /// Opens the browser to the IdP authorization URL with PKCE parameters.
 /// Returns the login state needed to complete the exchange.
+/// Invalid IdP URLs return `InvalidInput` before opening the browser.
 pub fn initiate_xaa_login(server_name: &str, idp_url: &str) -> std::io::Result<XaaLoginState> {
+    let mut auth_url = url::Url::parse(idp_url)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let port = oauth_port_alloc()?;
     let verifier = pkce_verifier();
     let challenge = pkce_challenge(&verifier);
     let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
 
-    let auth_url = format!(
-        "{}?response_type=code&code_challenge={}&code_challenge_method=S256&redirect_uri={}",
-        idp_url, challenge, redirect_uri
-    );
+    auth_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("redirect_uri", &redirect_uri);
 
     // Open the browser (best-effort; ignore errors on headless systems).
-    let _ = open_browser(&auth_url);
+    let _ = open_browser(auth_url.as_str());
 
     Ok(XaaLoginState {
         server_name: server_name.to_string(),
