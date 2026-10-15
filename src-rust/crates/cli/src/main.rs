@@ -2462,6 +2462,10 @@ async fn run_interactive(
     let (relay_ev_tx, relay_ev_rx) = mpsc::channel::<String>(256);
     let mut relay_ev_rx_opt: Option<mpsc::Receiver<String>> = Some(relay_ev_rx);
     let (remote_prompt_tx, mut remote_prompt_rx) = mpsc::channel::<String>(32);
+    // Primary prompts must not block the shared control/permission event stream.
+    // Retain them until idle; this queue can grow while a remote producer outpaces
+    // completed turns. Supplementary polling retains its bounded channel while busy.
+    let mut pending_remote_prompts = std::collections::VecDeque::new();
 
     // Once the bridge worker reports Connected we build this from the session
     // credentials so both relay tasks can POST/poll the /api/bridge/sessions API.
@@ -3983,66 +3987,7 @@ async fn run_interactive(
                         app.bridge_state = BridgeConnectionState::Reconnecting { attempt };
                     }
                     Ok(TuiBridgeEvent::InboundPrompt { content, .. }) => {
-                        // Inject the remote prompt as if the user typed it, then
-                        // trigger submission automatically.
-                        app.set_prompt_text(content.clone());
-                        // Push as a user message and fire a query immediately.
-                        messages.push(claurst_core::types::Message::user(content.clone()));
-                        app.push_message(claurst_core::types::Message::user(content.clone()));
-                        session.messages = messages.clone();
-                        session.updated_at = chrono::Utc::now();
-                        app.is_streaming = true;
-                        app.streaming_text.clear();
-                        let ct = CancellationToken::new();
-                        cancel = Some(ct.clone());
-                        let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
-                        let msgs_arc_clone = msgs_arc.clone();
-                        let tools_arc_clone = tools_arc.clone();
-                        let ctx_clone = tool_ctx.clone();
-                        let mut qcfg = base_query_config.clone();
-                        qcfg.model = claurst_api::effective_model_for_config(
-                            &cmd_ctx.config,
-                            &model_registry,
-                        );
-                        qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
-                        let tracker = cost_tracker.clone();
-                        let tx = event_tx.clone();
-                        let client_clone = client.clone();
-                        goal_turn_baseline = if claurst_core::goals_enabled() {
-                            match capture_goal_turn_baseline(
-                                &session.id,
-                                cost_tracker.total_tokens(),
-                            ) {
-                                Ok(baseline) => baseline,
-                                Err(error) => {
-                                    app.status_message = Some(format!(
-                                        "Goal error: could not capture turn baseline: {}",
-                                        error
-                                    ));
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-                        let handle = tokio::spawn(async move {
-                            let mut msgs = msgs_arc_clone.lock().await.clone();
-                            let outcome = claurst_query::run_query_loop(
-                                client_clone.as_ref(),
-                                &mut msgs,
-                                tools_arc_clone.as_slice(),
-                                &ctx_clone,
-                                &qcfg,
-                                tracker,
-                                Some(tx),
-                                ct,
-                                None,
-                            )
-                            .await;
-                            *msgs_arc_clone.lock().await = msgs;
-                            outcome
-                        });
-                        current_query = Some((handle, msgs_arc));
+                        pending_remote_prompts.push_back(content);
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         if app.is_streaming {
@@ -4103,6 +4048,7 @@ async fn run_interactive(
             }
         }
         if disconnect_bridge {
+            pending_remote_prompts.clear();
             bridge_session_info = None;
             if let Some(mut runtime) = bridge_runtime.take() {
                 runtime.cancel.cancel();
@@ -4115,65 +4061,66 @@ async fn run_interactive(
             while remote_prompt_rx.try_recv().is_ok() {}
         }
 
-        // Drain inbound prompts from the BridgeSessionInfo poll task.
-        // These are user messages received from the web UI via poll_bridge_messages
-        // and injected here just like TuiBridgeEvent::InboundPrompt.
-        while let Ok(content) = remote_prompt_rx.try_recv() {
-            if !app.is_streaming {
-                app.set_prompt_text(content.clone());
-                messages.push(claurst_core::types::Message::user(content.clone()));
-                app.push_message(claurst_core::types::Message::user(content.clone()));
-                session.messages = messages.clone();
-                session.updated_at = chrono::Utc::now();
-                app.is_streaming = true;
-                app.streaming_text.clear();
-                let ct = CancellationToken::new();
-                cancel = Some(ct.clone());
-                let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
-                let msgs_arc_clone = msgs_arc.clone();
-                let tools_arc_clone = tools_arc.clone();
-                let ctx_clone = tool_ctx.clone();
-                let mut qcfg = base_query_config.clone();
-                qcfg.model =
-                    claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
-                qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
-                let tracker = cost_tracker.clone();
-                let tx = event_tx.clone();
-                let client_clone = client.clone();
-                goal_turn_baseline = if claurst_core::goals_enabled() {
-                    match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
-                        Ok(baseline) => baseline,
-                        Err(error) => {
-                            app.status_message = Some(format!(
-                                "Goal error: could not capture turn baseline: {}",
-                                error
-                            ));
-                            None
-                        }
+        // Both bridge transports share the same literal-prompt launch path.
+        // Primary events observed above precede supplementary messages read here;
+        // each transport retains FIFO ordering. Never reinterpret remote slash text.
+        if let Some(content) = take_remote_prompt(
+            &mut pending_remote_prompts,
+            &mut remote_prompt_rx,
+            app.is_streaming,
+            current_query.is_some(),
+        ) {
+            app.set_prompt_text(content.clone());
+            messages.push(claurst_core::types::Message::user(content.clone()));
+            app.push_message(claurst_core::types::Message::user(content.clone()));
+            session.messages = messages.clone();
+            session.updated_at = chrono::Utc::now();
+            app.is_streaming = true;
+            app.streaming_text.clear();
+            let ct = CancellationToken::new();
+            cancel = Some(ct.clone());
+            let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
+            let msgs_arc_clone = msgs_arc.clone();
+            let tools_arc_clone = tools_arc.clone();
+            let ctx_clone = tool_ctx.clone();
+            let mut qcfg = base_query_config.clone();
+            qcfg.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+            qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
+            let tracker = cost_tracker.clone();
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            goal_turn_baseline = if claurst_core::goals_enabled() {
+                match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
+                    Ok(baseline) => baseline,
+                    Err(error) => {
+                        app.status_message = Some(format!(
+                            "Goal error: could not capture turn baseline: {}",
+                            error
+                        ));
+                        None
                     }
-                } else {
-                    None
-                };
-                let handle = tokio::spawn(async move {
-                    let mut msgs = msgs_arc_clone.lock().await.clone();
-                    let outcome = claurst_query::run_query_loop(
-                        client_clone.as_ref(),
-                        &mut msgs,
-                        tools_arc_clone.as_slice(),
-                        &ctx_clone,
-                        &qcfg,
-                        tracker,
-                        Some(tx),
-                        ct,
-                        None,
-                    )
-                    .await;
-                    *msgs_arc_clone.lock().await = msgs;
-                    outcome
-                });
-                current_query = Some((handle, msgs_arc));
-                break; // process one prompt per frame
-            }
+                }
+            } else {
+                None
+            };
+            let handle = tokio::spawn(async move {
+                let mut msgs = msgs_arc_clone.lock().await.clone();
+                let outcome = claurst_query::run_query_loop(
+                    client_clone.as_ref(),
+                    &mut msgs,
+                    tools_arc_clone.as_slice(),
+                    &ctx_clone,
+                    &qcfg,
+                    tracker,
+                    Some(tx),
+                    ct,
+                    None,
+                )
+                .await;
+                *msgs_arc_clone.lock().await = msgs;
+                outcome
+            });
+            current_query = Some((handle, msgs_arc));
         }
 
         // Drain CLAUDE_STATUS_COMMAND results (most recent wins)
@@ -5612,6 +5559,22 @@ fn should_show_engine_notice(is_interactive: bool, is_tty: bool, coven_parent_se
     is_interactive && is_tty && !coven_parent_set
 }
 
+// Launch at most one remote turn after the previous query has been joined.
+fn take_remote_prompt(
+    pending: &mut std::collections::VecDeque<String>,
+    receiver: &mut tokio::sync::mpsc::Receiver<String>,
+    is_streaming: bool,
+    query_running: bool,
+) -> Option<String> {
+    if is_streaming || query_running {
+        return None;
+    }
+    while let Ok(prompt) = receiver.try_recv() {
+        pending.push_back(prompt);
+    }
+    pending.pop_front()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5716,6 +5679,96 @@ mod tests {
         handle_bridge_permission_response(&mut dialog, &mut store, "active", Response::Allow);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(store.waiting.len(), 1);
+    }
+
+    #[test]
+    fn remote_prompt_waits_while_streaming() {
+        let mut pending = std::collections::VecDeque::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send("first".to_owned()).unwrap();
+        tx.try_send("second".to_owned()).unwrap();
+        assert_eq!(take_remote_prompt(&mut pending, &mut rx, true, false), None);
+        assert_eq!(rx.len(), 2);
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn remote_prompt_waits_for_query_completion() {
+        let mut pending = std::collections::VecDeque::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send("pending".to_owned()).unwrap();
+        assert_eq!(take_remote_prompt(&mut pending, &mut rx, false, true), None);
+        assert_eq!(rx.len(), 1);
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+            Some("pending")
+        );
+    }
+
+    #[test]
+    fn remote_prompt_dequeues_one_at_a_time_in_order() {
+        let mut pending = std::collections::VecDeque::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false),
+            None
+        );
+        tx.try_send("first".to_owned()).unwrap();
+        tx.try_send("second".to_owned()).unwrap();
+        drop(tx);
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+            Some("first")
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_prompt_preserves_primary_and_supplementary_observed_order() {
+        let mut pending =
+            std::collections::VecDeque::from(["primary first".to_owned(), "/exit".to_owned()]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send("secondary first".to_owned()).unwrap();
+        tx.try_send("secondary second".to_owned()).unwrap();
+        for (streaming, running) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                take_remote_prompt(&mut pending, &mut rx, streaming, running),
+                None
+            );
+            assert_eq!(pending.len(), 2);
+            assert_eq!(rx.len(), 2);
+        }
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+            Some("primary first")
+        );
+        pending.push_back("primary later".to_owned());
+        for expected in [
+            "/exit",
+            "secondary first",
+            "secondary second",
+            "primary later",
+        ] {
+            assert_eq!(
+                take_remote_prompt(&mut pending, &mut rx, false, false).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            take_remote_prompt(&mut pending, &mut rx, false, false),
+            None
+        );
     }
 
     fn tool_names(tools: &[Box<dyn claurst_tools::Tool>]) -> Vec<String> {
