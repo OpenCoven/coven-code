@@ -46,7 +46,8 @@ pub fn truncate_tool_output(text: &str, max_chars: usize) -> (String, bool) {
     )
 }
 
-/// Truncate a file path for display, keeping the filename and shortening the directory.
+/// Truncate a file path to a byte budget, keeping the filename and shortening the directory.
+/// The filename is preserved even when it exceeds the budget.
 pub fn truncate_path(path: &str, max_chars: usize) -> String {
     if path.len() <= max_chars {
         return path.to_string();
@@ -58,15 +59,24 @@ pub fn truncate_path(path: &str, max_chars: usize) -> String {
     if filename.len() >= max_chars {
         return filename.to_string();
     }
-    let prefix_len = max_chars - filename.len() - 4; // 4 for "…/"
+    let directory_budget = max_chars
+        .saturating_sub(filename.len())
+        .saturating_sub("…//".len());
+    if directory_budget == 0 {
+        return filename.to_string();
+    }
     let dir = std::path::Path::new(path)
         .parent()
         .and_then(|p| p.to_str())
         .unwrap_or("");
-    if dir.len() <= prefix_len {
-        return path.to_string();
+    let mut start = dir.len().saturating_sub(directory_budget);
+    while !dir.is_char_boundary(start) {
+        start += 1;
     }
-    format!("…/{}/{}", &dir[dir.len() - prefix_len..], filename)
+    if start == dir.len() {
+        return filename.to_string();
+    }
+    format!("…/{}/{}", &dir[start..], filename)
 }
 
 #[cfg(test)]
@@ -92,5 +102,35 @@ mod tests {
         assert!(truncated);
         assert_eq!(out.len(), 6); // 5 lines + 1 indicator
         assert!(out[5].contains("5 more"));
+    }
+
+    #[test]
+    fn truncate_path_preserves_filename_with_small_limits() {
+        for limit in 0..=9 {
+            assert_eq!(truncate_path("/long/directory/file", limit), "file");
+        }
+        assert_eq!(truncate_path("plain", 2), "plain");
+    }
+
+    #[test]
+    fn truncate_path_respects_byte_budget_at_unicode_boundaries() {
+        assert_eq!(truncate_path("/long/directory/file", 12), "…/ory/file");
+        assert_eq!(truncate_path("/long/ééé/file", 11), "…/é/file");
+        for directory in [
+            "/long/ascii/directory",
+            "/long/ééé",
+            "/long/漢漢漢",
+            "/long/\u{10000}\u{10000}\u{10000}",
+        ] {
+            let path = format!("{directory}/file");
+            for limit in 4..=path.len() + 1 {
+                let result = truncate_path(&path, limit);
+                assert!(result.len() <= limit, "{path:?} at {limit}: {result:?}");
+                assert!(result.ends_with("file"));
+                if path.len() <= limit {
+                    assert_eq!(result, path);
+                }
+            }
+        }
     }
 }
