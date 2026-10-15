@@ -222,6 +222,9 @@ impl Tool for AgentTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
+        let mut child_ctx = ctx.clone();
+        child_ctx.goal_turn = ctx.goal_turn.for_child_work();
+        let ctx = &child_ctx;
         info!(description = %params.description, "Spawning sub-agent");
 
         let anthropic_key = ctx.config.resolve_anthropic_api_key().unwrap_or_default();
@@ -566,6 +569,9 @@ pub fn init_team_swarm_runner() {
          ctx: Arc<claurst_tools::ToolContext>| {
             // We must return a Pin<Box<dyn Future<...> + Send>>.
             Box::pin(async move {
+                let mut child_ctx = (*ctx).clone();
+                child_ctx.goal_turn = ctx.goal_turn.for_child_work();
+                let ctx = Arc::new(child_ctx);
                 let anthropic_key = ctx.config.resolve_anthropic_api_key().unwrap_or_default();
                 let anthropic_base = ctx.config.resolve_anthropic_api_base();
                 let client =

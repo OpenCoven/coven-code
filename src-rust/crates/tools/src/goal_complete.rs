@@ -66,6 +66,9 @@ fn complete_goal(
             }
         }
     }
+    if let Err(error) = ctx.goal_turn.require_work(&ctx.session_id) {
+        return ToolResult::error(format!("Failed to mark goal complete: {error}"));
+    }
     let store = match claurst_core::GoalStore::open(turn.store_path()) {
         Ok(store) => store,
         Err(error) => return ToolResult::error(format!("Could not open goal store: {error}")),

@@ -51,6 +51,7 @@ use claurst_core::claudemd::MemoryProvenance;
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::error::ClaudeError;
+use claurst_core::goal::{GoalTurn, GoalTurnPermission};
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
 use claurst_tools::{Tool, ToolContext, ToolResult};
 use futures::{FutureExt, StreamExt};
@@ -119,6 +120,41 @@ struct ProviderStreamContext<'a> {
 #[cfg(test)]
 tokio::task_local! {
     static TEST_STREAM_STALL_TIMEOUT: std::time::Duration;
+}
+
+// Goal checks bound the next observable request/work boundary. They cannot
+// atomically interrupt work already started in another process or a tool.
+async fn wait_for_goal_revocation(
+    turn: Option<&GoalTurn>,
+    permission: GoalTurnPermission,
+) -> ClaudeError {
+    let Some(turn) = turn else {
+        return futures::future::pending().await;
+    };
+    loop {
+        match turn.validate() {
+            Err(error) => return ClaudeError::Api(format!("Goal authority revoked: {error}")),
+            Ok(actual) if actual != permission => {
+                return ClaudeError::Api("Goal work completed".into())
+            }
+            Ok(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn await_goal_request<T>(
+    turn: Option<&GoalTurn>,
+    permission: GoalTurnPermission,
+    cancel: &tokio_util::sync::CancellationToken,
+    request: impl std::future::Future<Output = Result<T, ClaudeError>>,
+) -> Result<T, ClaudeError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ClaudeError::Cancelled),
+        error = wait_for_goal_revocation(turn, permission) => Err(error),
+        result = request => result,
+    }
 }
 
 fn stream_stall_timeout() -> std::time::Duration {
@@ -1164,10 +1200,14 @@ pub fn fire_post_sampling_hooks(
 ///
 /// Stop hooks are non-blocking by design: the caller does not wait for them.
 /// Returns an empty `Vec` immediately; results (if any) are lost.
+/// Query callers supply work-only authority; independent callers may use `None`.
+/// A detached thread checks before starting its child and reaps that child.
+/// Its lifetime does not hold Tokio runtime shutdown open.
 pub fn stop_hooks_with_full_behavior(
     turn_result: &claurst_core::types::Message,
     config: &claurst_core::config::Config,
     working_dir: std::path::PathBuf,
+    goal_turn: Option<GoalTurn>,
 ) -> Vec<claurst_core::types::Message> {
     use claurst_core::config::HookEvent;
 
@@ -1182,19 +1222,34 @@ pub fn stop_hooks_with_full_behavior(
         let cmd = entry.command.clone();
         let dir = working_dir.clone();
         let text = output_text.clone();
+        let goal_turn = goal_turn.clone();
 
         tokio::task::spawn_blocking(move || {
-            let sh = if cfg!(windows) { "cmd" } else { "sh" };
-            let flag = if cfg!(windows) { "/C" } else { "-c" };
-
-            let _ = std::process::Command::new(sh)
-                .args([flag, &cmd])
-                .current_dir(&dir)
-                .env("CLAUDE_HOOK_OUTPUT", &text)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            // The blocking pool only schedules the reaper; it never waits for
+            // the hook's lifetime. Detached hooks retain their existing ability
+            // to outlive the runtime (and potentially the engine process).
+            if let Err(error) = std::thread::Builder::new()
+                .name("coven-stop-hook".into())
+                .spawn(move || {
+                    if let Some(turn) = &goal_turn {
+                        if turn.validate() != Ok(GoalTurnPermission::Work) {
+                            return;
+                        }
+                    }
+                    let sh = if cfg!(windows) { "cmd" } else { "sh" };
+                    let flag = if cfg!(windows) { "/C" } else { "-c" };
+                    let _ = std::process::Command::new(sh)
+                        .args([flag, &cmd])
+                        .current_dir(&dir)
+                        .env("CLAUDE_HOOK_OUTPUT", &text)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                })
+            {
+                warn!(%error, "Could not start Stop hook reaper");
+            }
         });
     }
 
@@ -1656,6 +1711,7 @@ pub async fn run_query_loop(
                 "Goal error: could not capture turn: {error}"
             )));
         }
+        return QueryOutcome::Error(ClaudeError::Api(format!("Goal authority failed: {error}")));
     }
     let tool_ctx = &turn_ctx;
     let mut turn_config = config.clone();
@@ -1705,7 +1761,119 @@ pub async fn run_query_loop(
         None
     };
 
+    macro_rules! require_goal_work {
+        ($message:expr) => {
+            let permission = tool_ctx.goal_turn.validate(&tool_ctx.session_id);
+            if permission != Ok(GoalTurnPermission::Work) {
+                finalize_terminal_assistant_with_unexecuted_tool_results(
+                    messages,
+                    &mut $message,
+                    shadow_snap.as_ref(),
+                    initial_snapshot.as_deref(),
+                    event_tx.as_ref(),
+                    "goal work is no longer authorized",
+                )
+                .await;
+                match permission {
+                    Ok(
+                        GoalTurnPermission::FinalResponse | GoalTurnPermission::ReturnToForeground,
+                    ) => continue,
+                    Err(error) => {
+                        return QueryOutcome::Error(ClaudeError::Api(format!(
+                            "Goal authority revoked: {error}"
+                        )))
+                    }
+                    Ok(GoalTurnPermission::Work) => {
+                        unreachable!("work was handled before finalization")
+                    }
+                }
+            }
+        };
+    }
+
     loop {
+        let goal_permission = match tool_ctx.goal_turn.validate(&tool_ctx.session_id) {
+            Ok(permission) => permission,
+            Err(error) => {
+                return QueryOutcome::Error(ClaudeError::Api(format!(
+                    "Goal authority revoked: {error}"
+                )))
+            }
+        };
+        if goal_permission == GoalTurnPermission::ReturnToForeground {
+            // Return received findings and tool evidence without another model
+            // request. The foreground needs the successful completion audit.
+            let mut findings = Vec::new();
+            for message in messages.iter() {
+                match &message.content {
+                    claurst_core::types::MessageContent::Text(text)
+                        if message.role == claurst_core::types::Role::Assistant =>
+                    {
+                        findings.push(text.as_str())
+                    }
+                    claurst_core::types::MessageContent::Blocks(blocks) => {
+                        for block in blocks {
+                            match block {
+                                ContentBlock::Text { text }
+                                    if message.role == claurst_core::types::Role::Assistant =>
+                                {
+                                    findings.push(text.as_str())
+                                }
+                                ContentBlock::ToolResult {
+                                    content: ToolResultContent::Text(text),
+                                    ..
+                                } => findings.push(text.as_str()),
+                                ContentBlock::ToolResult {
+                                    content: ToolResultContent::Blocks(blocks),
+                                    ..
+                                } => {
+                                    findings.extend(blocks.iter().filter_map(
+                                        |block| match block {
+                                            ContentBlock::Text { text } => Some(text.as_str()),
+                                            _ => None,
+                                        },
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let text = if findings.is_empty() {
+                "Goal marked complete.".to_owned()
+            } else {
+                findings.join("\n\n")
+            };
+            return QueryOutcome::EndTurn {
+                message: Message::assistant(text),
+                usage: UsageInfo::default(),
+            };
+        }
+        let final_response = goal_permission == GoalTurnPermission::FinalResponse;
+        let final_reservation = if final_response {
+            match tool_ctx
+                .goal_turn
+                .captured()
+                .map(GoalTurn::reserve_final_response)
+                .transpose()
+            {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    return QueryOutcome::Error(ClaudeError::Api(format!(
+                        "Goal final response unavailable: {error}"
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+        let goal_client = tool_ctx
+            .goal_turn
+            .captured()
+            .map(|turn| client.for_goal_turn(turn, goal_permission));
+        let client = goal_client.as_ref().unwrap_or(client);
         turn += 1;
         tool_ctx
             .current_turn
@@ -1732,7 +1900,7 @@ pub async fn run_query_loop(
         // Drain any pending user messages that were queued during the previous
         // tool-execution phase (e.g. commands entered while tools ran).
         // Mirrors the TS `messageQueueManager` drain between turns.
-        if let Some(queue) = pending_messages.as_deref_mut() {
+        if let Some(queue) = pending_messages.as_deref_mut().filter(|_| !final_response) {
             for text in queue.drain(..) {
                 debug!("Injecting pending message: {}", &text);
                 messages.push(Message::user(text));
@@ -1742,7 +1910,7 @@ pub async fn run_query_loop(
         // T1-4: Drain the priority command queue (if wired up) and prepend any
         // resulting messages to the conversation before the API call.
         // Mirrors the TS `messageQueueManager` priority-queue drain.
-        if let Some(ref cq) = config.command_queue {
+        if let Some(cq) = config.command_queue.as_ref().filter(|_| !final_response) {
             if !cq.is_empty() {
                 let injected = drain_command_queue(cq);
                 if !injected.is_empty() {
@@ -1759,7 +1927,7 @@ pub async fn run_query_loop(
         // in the conversation exceeds the configured threshold, replace the
         // oldest results with a placeholder until we're back under budget.
         // This mirrors the TS `applyToolResultBudget` call in query.ts.
-        if config.tool_result_budget > 0 {
+        if !final_response && config.tool_result_budget > 0 {
             let (budgeted, truncated) =
                 apply_tool_result_budget(std::mem::take(messages), config.tool_result_budget);
             *messages = budgeted;
@@ -1783,6 +1951,7 @@ pub async fn run_query_loop(
         let api_messages: Vec<ApiMessage> = messages.iter().map(ApiMessage::from).collect();
         let api_tools: Vec<ApiToolDefinition> = tools
             .iter()
+            .filter(|_| !final_response)
             .map(|t| ApiToolDefinition::from(&t.to_definition()))
             .collect();
 
@@ -1826,6 +1995,13 @@ pub async fn run_query_loop(
                 }
             }
 
+            if final_response {
+                let instruction = "The captured goal was completed by this turn. Respond only with the final summary of that completed work. Do not use tools, initiate work, or continue the objective.";
+                patched.append_system_prompt = Some(match patched.append_system_prompt {
+                    Some(existing) => format!("{existing}\n{instruction}"),
+                    None => instruction.to_owned(),
+                });
+            }
             build_system_prompt(&patched)
         };
 
@@ -2082,7 +2258,7 @@ pub async fn run_query_loop(
                         caps.thinking = model_entry.reasoning;
                     }
                     let provider_tools: Vec<claurst_core::types::ToolDefinition> =
-                        if caps.tool_calling {
+                        if caps.tool_calling && !final_response {
                             tools.iter().map(|t| t.to_definition()).collect()
                         } else {
                             Vec::new()
@@ -2145,16 +2321,42 @@ pub async fn run_query_loop(
 
                     // Use create_message_stream so the TUI receives real-time
                     // text deltas instead of waiting for the full response.
-                    let startup = tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => return QueryOutcome::Cancelled,
-                        result = provider.create_message_stream(provider_request) => result,
-                    };
-                    let stream = match startup {
+                    if let Err(error) = tool_ctx.goal_turn.validate(&tool_ctx.session_id) {
+                        return QueryOutcome::Error(ClaudeError::Api(format!(
+                            "Goal authority revoked: {error}"
+                        )));
+                    }
+                    let stream = match await_goal_request(
+                        tool_ctx.goal_turn.captured(),
+                        goal_permission,
+                        &cancel_token,
+                        async {
+                            provider
+                                .create_message_stream_for_goal(
+                                    provider_request,
+                                    tool_ctx.goal_turn.captured(),
+                                    goal_permission,
+                                )
+                                .await
+                                .map_err(ClaudeError::from)
+                        },
+                    )
+                    .await
+                    {
                         Ok(s) => s,
+                        Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
                         Err(e) => {
+                            if !final_response
+                                && matches!(
+                                    tool_ctx.goal_turn.validate(&tool_ctx.session_id),
+                                    Ok(GoalTurnPermission::FinalResponse
+                                        | GoalTurnPermission::ReturnToForeground)
+                                )
+                            {
+                                continue;
+                            }
                             error!(provider = %provider_id_str, error = %e, "Provider stream failed");
-                            let claude_error: claurst_core::error::ClaudeError = e.into();
+                            let claude_error = e;
                             return QueryOutcome::Error(enrich_error_notice(
                                 claude_error,
                                 &provider_id_str,
@@ -2167,24 +2369,37 @@ pub async fn run_query_loop(
                     let provider_stall_timeout = stream_stall_timeout();
                     let mut terminal_stream_error = None;
                     let mut accumulator = StreamAccumulator::new();
-                    let provider_stream_outcome = {
+                    let stream_cancel = cancel_token.child_token();
+                    let (provider_stream_outcome, goal_revocation) = {
                         let mut provider_stream_context = ProviderStreamContext {
-                            cancel_token: &cancel_token,
+                            cancel_token: &stream_cancel,
                             accumulator: &mut accumulator,
                             event_tx: event_tx.as_ref(),
                             provider_id: &provider_id_str,
                             model_id: &model_id_str,
                             terminal_stream_error: &mut terminal_stream_error,
                         };
-                        consume_provider_stream(
+                        let receive = consume_provider_stream(
                             stream,
                             &mut provider_stream_context,
                             provider_stall_timeout,
-                        )
-                        .await
+                        );
+                        tokio::pin!(receive);
+                        tokio::select! {
+                            biased;
+                            error = wait_for_goal_revocation(tool_ctx.goal_turn.captured(), goal_permission) => {
+                                stream_cancel.cancel();
+                                (receive.await, Some(error))
+                            }
+                            outcome = &mut receive => (outcome, None),
+                        }
                     };
-                    let provider_stream_cancelled =
-                        provider_stream_outcome == ProviderStreamOutcome::Cancelled;
+                    let goal_revoked = goal_revocation.is_some();
+                    if let Some(error) = goal_revocation {
+                        terminal_stream_error = Some(error);
+                    }
+                    let provider_stream_cancelled = !goal_revoked
+                        && provider_stream_outcome == ProviderStreamOutcome::Cancelled;
                     let provider_stream_stalled =
                         provider_stream_outcome == ProviderStreamOutcome::Stalled;
 
@@ -2198,6 +2413,93 @@ pub async fn run_query_loop(
                     let (mut assistant_msg, usage, stop_reason) =
                         finish_stream_accumulator(accumulator);
                     let stop_str = stop_reason.unwrap_or_else(|| "end_turn".to_string());
+
+                    let permission_now = tool_ctx.goal_turn.validate(&tool_ctx.session_id);
+                    let own_completion = !final_response
+                        && matches!(
+                            permission_now,
+                            Ok(GoalTurnPermission::FinalResponse
+                                | GoalTurnPermission::ReturnToForeground)
+                        );
+                    let goal_error = permission_now.err();
+                    if goal_error.is_some()
+                        || own_completion
+                        || (final_response
+                            && !provider_stream_cancelled
+                            && !provider_stream_stalled
+                            && terminal_stream_error.is_none())
+                    {
+                        cost_tracker.add_usage(
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_creation_input_tokens,
+                            usage.cache_read_input_tokens,
+                        );
+                        finalize_terminal_assistant_with_unexecuted_tool_results(
+                            messages,
+                            &mut assistant_msg,
+                            shadow_snap.as_ref(),
+                            initial_snapshot.as_deref(),
+                            event_tx.as_ref(),
+                            "goal work is no longer authorized",
+                        )
+                        .await;
+                        if let Some(error) = goal_error {
+                            return QueryOutcome::Error(ClaudeError::Api(format!(
+                                "Goal authority revoked: {error}"
+                            )));
+                        }
+                        if let Err(error) = tool_ctx.goal_turn.validate(&tool_ctx.session_id) {
+                            return QueryOutcome::Error(ClaudeError::Api(format!(
+                                "Goal authority revoked: {error}"
+                            )));
+                        }
+                        // Keep cancelled handoffs under the normal loop terminal checks.
+                        if own_completion && cancel_token.is_cancelled() {
+                            continue;
+                        }
+                        if let Some(reservation) = &final_reservation {
+                            reservation.finish();
+                        }
+                        // Goal permission does not waive the independent session cost cap.
+                        if let Some(limit) = config.max_budget_usd {
+                            let spent = cost_tracker.total_cost_usd();
+                            if spent >= limit {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(QueryEvent::Status(format!(
+                                        "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
+                                        limit, spent
+                                    )));
+                                }
+                                return QueryOutcome::BudgetExceeded {
+                                    cost_usd: spent,
+                                    limit_usd: limit,
+                                };
+                            }
+                        }
+                        if own_completion {
+                            continue;
+                        }
+                        if !assistant_msg.get_tool_use_blocks().is_empty() {
+                            return QueryOutcome::Error(ClaudeError::Api("Completed goal permits only a final response; tool calls were not executed".into()));
+                        }
+                        if stop_str == "end_turn" || stop_str == "stop_sequence" {
+                            emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
+                            return QueryOutcome::EndTurn {
+                                message: assistant_msg,
+                                usage,
+                            };
+                        }
+                        if stop_str == "max_tokens" {
+                            return QueryOutcome::MaxTokens {
+                                partial_message: assistant_msg,
+                                usage,
+                            };
+                        }
+                        return QueryOutcome::Error(ClaudeError::Api(format!(
+                            "Final response ended with {stop_str}"
+                        )));
+                    }
 
                     // Stalled attempts may have been visible and billable even
                     // though they never reached a protocol terminal event.
@@ -2349,6 +2651,7 @@ pub async fn run_query_loop(
                         }
                     }
 
+                    require_goal_work!(assistant_msg);
                     if stop_str == "max_tokens" {
                         finalize_terminal_assistant_with_unexecuted_tool_results(
                             messages,
@@ -2547,14 +2850,31 @@ pub async fn run_query_loop(
 
         // Send to API
         debug!(turn, model = %effective_model, "Sending API request");
-        let startup = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return QueryOutcome::Cancelled,
-            result = client.create_message_stream(request, handler) => result,
-        };
-        let mut stream_rx = match startup {
+        if let Err(error) = tool_ctx.goal_turn.validate(&tool_ctx.session_id) {
+            return QueryOutcome::Error(ClaudeError::Api(format!(
+                "Goal authority revoked: {error}"
+            )));
+        }
+        let mut stream_rx = match await_goal_request(
+            tool_ctx.goal_turn.captured(),
+            goal_permission,
+            &cancel_token,
+            client.create_message_stream(request, handler),
+        )
+        .await
+        {
             Ok(rx) => rx,
+            Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
             Err(e) => {
+                if !final_response
+                    && matches!(
+                        tool_ctx.goal_turn.validate(&tool_ctx.session_id),
+                        Ok(GoalTurnPermission::FinalResponse
+                            | GoalTurnPermission::ReturnToForeground)
+                    )
+                {
+                    continue;
+                }
                 // On overloaded/rate-limit errors, attempt one switch to the fallback model.
                 if !used_fallback && is_fallback_worthy_api_error(&e) {
                     if let Some(ref fb) = config.fallback_model {
@@ -2591,17 +2911,32 @@ pub async fn run_query_loop(
         let stall_timeout = stream_stall_timeout();
         let mut accumulator = StreamAccumulator::new();
         let mut terminal_stream_error = None;
-        let stream_outcome = consume_anthropic_stream(
-            &mut stream_rx,
-            &cancel_token,
-            &mut accumulator,
-            event_tx.as_ref(),
-            &effective_model,
-            &mut terminal_stream_error,
-            stall_timeout,
-        )
-        .await;
-        let stream_cancelled = stream_outcome == AnthropicStreamOutcome::Cancelled;
+        let stream_cancel = cancel_token.child_token();
+        let (stream_outcome, goal_revocation) = {
+            let receive = consume_anthropic_stream(
+                &mut stream_rx,
+                &stream_cancel,
+                &mut accumulator,
+                event_tx.as_ref(),
+                &effective_model,
+                &mut terminal_stream_error,
+                stall_timeout,
+            );
+            tokio::pin!(receive);
+            tokio::select! {
+                biased;
+                error = wait_for_goal_revocation(tool_ctx.goal_turn.captured(), goal_permission) => {
+                    stream_cancel.cancel();
+                    (receive.await, Some(error))
+                }
+                outcome = &mut receive => (outcome, None),
+            }
+        };
+        let goal_revoked = goal_revocation.is_some();
+        if let Some(error) = goal_revocation {
+            terminal_stream_error = Some(error);
+        }
+        let stream_cancelled = !goal_revoked && stream_outcome == AnthropicStreamOutcome::Cancelled;
         let stream_stalled = stream_outcome == AnthropicStreamOutcome::Stalled;
         let stream_ended_prematurely = stream_outcome == AnthropicStreamOutcome::PrematureEof;
 
@@ -2612,6 +2947,96 @@ pub async fn run_query_loop(
         }
 
         let (mut assistant_msg, usage, stop_reason) = finish_stream_accumulator(accumulator);
+        let stop_str = stop_reason.as_deref().unwrap_or("end_turn");
+
+        let permission_now = tool_ctx.goal_turn.validate(&tool_ctx.session_id);
+        let own_completion = !final_response
+            && matches!(
+                permission_now,
+                Ok(GoalTurnPermission::FinalResponse | GoalTurnPermission::ReturnToForeground)
+            );
+        let goal_error = permission_now.err();
+        if goal_error.is_some()
+            || own_completion
+            || (final_response
+                && !stream_cancelled
+                && !stream_stalled
+                && terminal_stream_error.is_none())
+        {
+            cost_tracker.add_usage(
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
+            finalize_terminal_assistant_with_unexecuted_tool_results(
+                messages,
+                &mut assistant_msg,
+                shadow_snap.as_ref(),
+                initial_snapshot.as_deref(),
+                event_tx.as_ref(),
+                "goal work is no longer authorized",
+            )
+            .await;
+            if let Some(error) = goal_error {
+                return QueryOutcome::Error(ClaudeError::Api(format!(
+                    "Goal authority revoked: {error}"
+                )));
+            }
+            if let Err(error) = tool_ctx.goal_turn.validate(&tool_ctx.session_id) {
+                return QueryOutcome::Error(ClaudeError::Api(format!(
+                    "Goal authority revoked: {error}"
+                )));
+            }
+            // Keep cancelled handoffs under the normal loop terminal checks.
+            if own_completion && cancel_token.is_cancelled() {
+                continue;
+            }
+            if let Some(reservation) = &final_reservation {
+                reservation.finish();
+            }
+            // Goal permission does not waive the independent session cost cap.
+            if let Some(limit) = config.max_budget_usd {
+                let spent = cost_tracker.total_cost_usd();
+                if spent >= limit {
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(QueryEvent::Status(format!(
+                            "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
+                            limit, spent
+                        )));
+                    }
+                    return QueryOutcome::BudgetExceeded {
+                        cost_usd: spent,
+                        limit_usd: limit,
+                    };
+                }
+            }
+            if own_completion {
+                continue;
+            }
+            if !assistant_msg.get_tool_use_blocks().is_empty() {
+                return QueryOutcome::Error(ClaudeError::Api(
+                    "Completed goal permits only a final response; tool calls were not executed"
+                        .into(),
+                ));
+            }
+            if stop_str == "end_turn" || stop_str == "stop_sequence" {
+                emit_turn_complete(event_tx.as_ref(), turn, stop_str, &usage);
+                return QueryOutcome::EndTurn {
+                    message: assistant_msg,
+                    usage,
+                };
+            }
+            if stop_str == "max_tokens" {
+                return QueryOutcome::MaxTokens {
+                    partial_message: assistant_msg,
+                    usage,
+                };
+            }
+            return QueryOutcome::Error(ClaudeError::Api(format!(
+                "Final response ended with {stop_str}"
+            )));
+        }
 
         if stream_stalled && retries_left > 0 {
             finalize_stalled_attempt_before_retry(
@@ -2779,6 +3204,8 @@ pub async fn run_query_loop(
             }
         }
 
+        require_goal_work!(assistant_msg);
+
         // Auto-compact: if context is near-full, summarise older messages now
         // (before the next turn's API call would fail with prompt-too-long).
         //
@@ -2826,6 +3253,14 @@ pub async fn run_query_loop(
                         return QueryOutcome::Cancelled;
                     }
                     Some(Ok(result)) => {
+                        if tool_ctx
+                            .goal_turn
+                            .require_work(&tool_ctx.session_id)
+                            .is_err()
+                        {
+                            *messages = original_messages;
+                            require_goal_work!(assistant_msg);
+                        }
                         *messages = result.messages;
                         info!(
                             tokens_freed = result.tokens_freed,
@@ -2835,6 +3270,7 @@ pub async fn run_query_loop(
                     Some(Err(e)) => {
                         warn!(error = %e, "Context-collapse failed");
                         *messages = original_messages;
+                        require_goal_work!(assistant_msg);
                         finalize_terminal_assistant_with_unexecuted_tool_results(
                             messages,
                             &mut assistant_msg,
@@ -2862,6 +3298,14 @@ pub async fn run_query_loop(
                 .await
                 {
                     Ok(result) => {
+                        if tool_ctx
+                            .goal_turn
+                            .require_work(&tool_ctx.session_id)
+                            .is_err()
+                        {
+                            *messages = original_messages;
+                            require_goal_work!(assistant_msg);
+                        }
                         *messages = result.messages;
                         info!(
                             tokens_freed = result.tokens_freed,
@@ -2885,6 +3329,7 @@ pub async fn run_query_loop(
                     Err(e) => {
                         warn!(error = %e, "Reactive compact failed");
                         *messages = original_messages;
+                        require_goal_work!(assistant_msg);
                         finalize_terminal_assistant_with_unexecuted_tool_results(
                             messages,
                             &mut assistant_msg,
@@ -2932,6 +3377,7 @@ pub async fn run_query_loop(
                     return QueryOutcome::Cancelled;
                 }
                 Some(Some(new_messages)) => {
+                    require_goal_work!(assistant_msg);
                     *messages = new_messages;
                     if let Some(ref tx) = event_tx {
                         let _ = tx.send(QueryEvent::Status(
@@ -2941,6 +3387,7 @@ pub async fn run_query_loop(
                 }
                 Some(None) if compaction_required => {
                     *messages = original_messages;
+                    require_goal_work!(assistant_msg);
                     finalize_terminal_assistant_with_unexecuted_tool_results(
                         messages,
                         &mut assistant_msg,
@@ -2957,6 +3404,8 @@ pub async fn run_query_loop(
                 Some(None) => {}
             }
         }
+
+        require_goal_work!(assistant_msg);
 
         // Announce-then-stop stall detection (issue #165): an `end_turn`
         // round with no tool calls whose text is empty or closes on an
@@ -2975,6 +3424,7 @@ pub async fn run_query_loop(
         // Helper closure for firing the Stop hook.
         macro_rules! fire_stop_hook {
             ($msg:expr) => {{
+                require_goal_work!($msg);
                 let stop_ctx = claurst_core::hooks::HookContext {
                     event: "Stop".to_string(),
                     tool_name: None,
@@ -2990,6 +3440,7 @@ pub async fn run_query_loop(
                     &tool_ctx.working_dir,
                 )
                 .await;
+                require_goal_work!($msg);
             }};
         }
 
@@ -3031,6 +3482,7 @@ pub async fn run_query_loop(
                     &assistant_msg,
                     &tool_ctx.config,
                     tool_ctx.working_dir.clone(),
+                    tool_ctx.goal_turn.for_background_work().captured().cloned(),
                 );
 
                 // Asynchronously extract and persist session memories if warranted.
@@ -3053,8 +3505,18 @@ pub async fn run_query_loop(
                                     ..Default::default()
                                 },
                             ) {
+                                let background_goal = tool_ctx.goal_turn.for_background_work();
+                                let sm_client = match background_goal.captured() {
+                                    Some(turn) => {
+                                        sm_client.for_goal_turn(turn, GoalTurnPermission::Work)
+                                    }
+                                    None => sm_client,
+                                };
                                 let sm_client = std::sync::Arc::new(sm_client);
                                 tokio::spawn(async move {
+                                    if background_goal.require_work(&session_id_clone).is_err() {
+                                        return;
+                                    }
                                     let memory_provenance = build_session_memory_provenance(
                                         &session_id_clone,
                                         &working_dir_clone,
@@ -3066,6 +3528,12 @@ pub async fn run_query_loop(
                                         .await
                                     {
                                         Ok(memories) if !memories.is_empty() => {
+                                            if background_goal
+                                                .require_work(&session_id_clone)
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
                                             let target = working_dir_clone
                                                 .join(".coven-code")
                                                 .join("AGENTS.md");
@@ -3109,6 +3577,7 @@ pub async fn run_query_loop(
                 // the spawn doesn't call run_query_loop recursively from within
                 // its own future (which would make the future !Send).
                 {
+                    require_goal_work!(assistant_msg);
                     let memory_dir = claurst_core::config::config_home().join("memory");
                     let conversations_dir =
                         claurst_core::config::config_home().join("conversations");
@@ -3130,8 +3599,17 @@ pub async fn run_query_loop(
                                 "run_in_background": true,
                                 "isolation": null
                             });
-                            let ctx_for_dream = tool_ctx.clone();
+                            let mut ctx_for_dream = tool_ctx.clone();
+                            ctx_for_dream.goal_turn = tool_ctx.goal_turn.for_background_work();
                             tokio::spawn(async move {
+                                if ctx_for_dream
+                                    .goal_turn
+                                    .require_work(&ctx_for_dream.session_id)
+                                    .is_err()
+                                {
+                                    let _ = tokio::fs::remove_file(&task.lock_file).await;
+                                    return;
+                                }
                                 let agent = crate::agent_tool::AgentTool;
                                 let _result = claurst_tools::Tool::execute(
                                     &agent,
@@ -3139,12 +3617,21 @@ pub async fn run_query_loop(
                                     &ctx_for_dream,
                                 )
                                 .await;
-                                crate::auto_dream::AutoDream::finish_consolidation(&task).await;
+                                if ctx_for_dream
+                                    .goal_turn
+                                    .require_work(&ctx_for_dream.session_id)
+                                    .is_ok()
+                                {
+                                    crate::auto_dream::AutoDream::finish_consolidation(&task).await;
+                                } else {
+                                    let _ = tokio::fs::remove_file(&task.lock_file).await;
+                                }
                             });
                         }
                     }
                 }
 
+                require_goal_work!(assistant_msg);
                 finalize_terminal_assistant_with_unexecuted_tool_results(
                     messages,
                     &mut assistant_msg,
@@ -3292,7 +3779,9 @@ pub async fn run_query_loop(
                     &assistant_msg,
                     &tool_ctx.config,
                     tool_ctx.working_dir.clone(),
+                    tool_ctx.goal_turn.for_background_work().captured().cloned(),
                 );
+                require_goal_work!(assistant_msg);
                 finalize_terminal_assistant_with_unexecuted_tool_results(
                     messages,
                     &mut assistant_msg,
@@ -3334,6 +3823,7 @@ pub async fn run_query_loop(
                     &assistant_msg,
                     &tool_ctx.config,
                     tool_ctx.working_dir.clone(),
+                    tool_ctx.goal_turn.for_background_work().captured().cloned(),
                 );
                 finalize_terminal_assistant_with_unexecuted_tool_results(
                     messages,
@@ -3373,6 +3863,17 @@ async fn execute_tool_blocks_with_hooks(
     // execution before any tool side effects occur.
     let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());
     for (id, name, input) in tool_blocks {
+        if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
+            prepared.push(PreparedTool {
+                id,
+                name,
+                input,
+                blocked_result: Some(ToolResult::error(format!(
+                    "Goal authority denied tool: {error}"
+                ))),
+            });
+            continue;
+        }
         if let Some(tx) = event_tx {
             let _ = tx.send(QueryEvent::ToolStart {
                 tool_name: name.clone(),
@@ -3397,6 +3898,17 @@ async fn execute_tool_blocks_with_hooks(
         )
         .await;
 
+        if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
+            prepared.push(PreparedTool {
+                id,
+                name,
+                input,
+                blocked_result: Some(ToolResult::error(format!(
+                    "Goal authority denied tool: {error}"
+                ))),
+            });
+            continue;
+        }
         let plugin_pre_outcome =
             claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
 
@@ -3453,21 +3965,33 @@ async fn execute_tool_blocks_with_hooks(
             is_error: Some(result.is_error),
             session_id: Some(tool_ctx.session_id.clone()),
         };
-        claurst_core::hooks::run_hooks(
-            &tool_ctx.config.hooks,
-            claurst_core::config::HookEvent::PostToolUse,
-            &post_ctx,
-            &tool_ctx.working_dir,
-        )
-        .await;
+        if tool_ctx
+            .goal_turn
+            .require_work(&tool_ctx.session_id)
+            .is_ok()
+        {
+            claurst_core::hooks::run_hooks(
+                &tool_ctx.config.hooks,
+                claurst_core::config::HookEvent::PostToolUse,
+                &post_ctx,
+                &tool_ctx.working_dir,
+            )
+            .await;
 
-        claurst_plugins::run_global_post_tool_hook(
-            &p.name,
-            &p.input,
-            &result.content,
-            result.is_error,
-            &tool_ctx.working_dir,
-        );
+            if tool_ctx
+                .goal_turn
+                .require_work(&tool_ctx.session_id)
+                .is_ok()
+            {
+                claurst_plugins::run_global_post_tool_hook(
+                    &p.name,
+                    &p.input,
+                    &result.content,
+                    result.is_error,
+                    &tool_ctx.working_dir,
+                );
+            }
+        }
 
         if let Some(tx) = event_tx {
             let _ = tx.send(QueryEvent::ToolEnd {
@@ -3495,6 +4019,9 @@ async fn execute_tool(
     tools: &[Box<dyn Tool>],
     ctx: &ToolContext,
 ) -> ToolResult {
+    if let Err(error) = ctx.goal_turn.require_work(&ctx.session_id) {
+        return ToolResult::error(format!("Goal authority denied tool: {error}"));
+    }
     let tool = tools.iter().find(|t| t.name() == name);
 
     match tool {

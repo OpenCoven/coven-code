@@ -371,6 +371,23 @@ impl LlmProvider for AnthropicProvider {
         Ok(Box::pin(s))
     }
 
+    async fn create_message_stream_for_goal(
+        &self,
+        request: ProviderRequest,
+        turn: Option<&claurst_core::goal::GoalTurn>,
+        permission: claurst_core::goal::GoalTurnPermission,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        match turn {
+            Some(turn) => {
+                Self::new(Arc::new(self.client.for_goal_turn(turn, permission)))
+                    .create_message_stream(request)
+                    .await
+            }
+            None => self.create_message_stream(request).await,
+        }
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(claude_model_catalog())
     }

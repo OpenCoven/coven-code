@@ -115,6 +115,30 @@ impl Goal {
 pub struct GoalTurn {
     goal: Goal,
     store_path: PathBuf,
+    state: std::sync::Arc<parking_lot::Mutex<GoalTurnState>>,
+    role: GoalTurnRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoalTurnRole {
+    Foreground,
+    Child,
+    Housekeeping,
+}
+
+#[derive(Debug, Default)]
+struct GoalTurnState {
+    completed: Option<Goal>,
+    revoked: Option<GoalError>,
+    final_in_flight: bool,
+}
+
+/// A successful completion grants only the response summarizing that completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalTurnPermission {
+    Work,
+    FinalResponse,
+    ReturnToForeground,
 }
 
 impl GoalTurn {
@@ -125,6 +149,118 @@ impl GoalTurn {
     pub fn store_path(&self) -> &std::path::Path {
         &self.store_path
     }
+
+    /// Reserve the foreground's one final request across provider preparation,
+    /// retries and streaming. Dropping an unsuccessful attempt permits retry.
+    pub fn reserve_final_response(&self) -> Result<GoalFinalResponse, GoalError> {
+        if self.validate()? != GoalTurnPermission::FinalResponse {
+            return Err(GoalError::NotActive {
+                session_id: self.goal.session_id.clone(),
+            });
+        }
+        let mut state = self.state.lock();
+        if let Some(error) = &state.revoked {
+            return Err(error.clone());
+        }
+        if state.final_in_flight {
+            return Err(GoalError::FinalResponseInFlight);
+        }
+        state.final_in_flight = true;
+        Ok(GoalFinalResponse {
+            state: self.state.clone(),
+            session_id: self.goal.session_id.clone(),
+        })
+    }
+
+    /// Re-read the original database before a request or work boundary. This is
+    /// an observation fence, not an atomic cross-process read-and-action lock.
+    /// Once observed, revocation is permanent for every clone of this turn.
+    pub fn validate(&self) -> Result<GoalTurnPermission, GoalError> {
+        let mut state = self.state.lock();
+        if let Some(error) = &state.revoked {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            let conn = rusqlite::Connection::open_with_flags(
+                &self.store_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(|error| GoalError::Db(error.to_string()))?;
+            // Do not wait behind an external writer while granting stale work.
+            conn.busy_timeout(std::time::Duration::ZERO)
+                .map_err(|error| GoalError::Db(error.to_string()))?;
+            let store = GoalStore { conn };
+            if store.canonical_path()? != self.store_path {
+                return Err(GoalError::StoreMismatch);
+            }
+            let goal =
+                store
+                    .try_get_goal(&self.goal.session_id)?
+                    .ok_or_else(|| GoalError::NotFound {
+                        session_id: self.goal.session_id.clone(),
+                    })?;
+            if goal.id != self.goal.id {
+                return Err(GoalError::Replaced {
+                    session_id: self.goal.session_id.clone(),
+                    expected_goal_id: self.goal.id.clone(),
+                    actual_goal_id: goal.id,
+                });
+            }
+            match &state.completed {
+                Some(receipt) if &goal == receipt => Ok(GoalTurnPermission::FinalResponse),
+                None if goal.status == GoalStatus::Active
+                    && !goal.is_over_budget(goal.tokens_used)
+                    && goal.turns_used < MAX_GOAL_TURNS =>
+                {
+                    Ok(GoalTurnPermission::Work)
+                }
+                _ => Err(GoalError::NotActive {
+                    session_id: self.goal.session_id.clone(),
+                }),
+            }
+        })();
+        if let Err(error) = &result {
+            state.revoked = Some(error.clone());
+        }
+        if matches!(result, Ok(GoalTurnPermission::FinalResponse)) {
+            if self.role == GoalTurnRole::Housekeeping {
+                // Local projection denial must not revoke the foreground receipt.
+                return Err(GoalError::NotActive {
+                    session_id: self.goal.session_id.clone(),
+                });
+            }
+            if self.role == GoalTurnRole::Child {
+                return Ok(GoalTurnPermission::ReturnToForeground);
+            }
+        }
+        result
+    }
+}
+
+/// An in-process final-request reservation. It cannot be cloned or constructed
+/// independently of the original foreground's completion receipt.
+#[derive(Debug)]
+pub struct GoalFinalResponse {
+    state: std::sync::Arc<parking_lot::Mutex<GoalTurnState>>,
+    session_id: String,
+}
+
+impl GoalFinalResponse {
+    /// Consume only after a coherent MessageStop, including rejected tool calls.
+    pub fn finish(&self) {
+        let mut state = self.state.lock();
+        if state.revoked.is_none() {
+            state.revoked = Some(GoalError::NotActive {
+                session_id: self.session_id.clone(),
+            });
+        }
+    }
+}
+
+impl Drop for GoalFinalResponse {
+    fn drop(&mut self) {
+        self.state.lock().final_in_flight = false;
+    }
 }
 
 /// Explicitly distinguish a query awaiting capture from a captured absence.
@@ -133,6 +269,7 @@ impl GoalTurn {
 pub enum GoalTurnContext {
     Pending(PathBuf),
     Captured(Option<GoalTurn>),
+    Failed(GoalError),
 }
 
 impl Default for GoalTurnContext {
@@ -152,14 +289,22 @@ impl GoalTurnContext {
     }
 
     /// Capture once, synchronously, before the logical query's first await.
-    /// On failure the context remains captured without completion authority.
+    /// A failed capture remains failed; it cannot turn into ordinary authority.
     pub fn capture(&mut self, session_id: &str) -> Result<(), GoalError> {
+        if let Self::Failed(error) = self {
+            return Err(error.clone());
+        }
         if matches!(self, Self::Captured(_)) {
             return Ok(());
         }
         if let Self::Pending(path) = std::mem::take(self) {
-            let store = GoalStore::open(&path)?;
-            *self = Self::Captured(store.capture_active_goal(session_id)?);
+            match GoalStore::open(&path).and_then(|store| store.capture_active_goal(session_id)) {
+                Ok(turn) => *self = Self::Captured(turn),
+                Err(error) => {
+                    *self = Self::Failed(error.clone());
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -167,7 +312,53 @@ impl GoalTurnContext {
     pub fn captured(&self) -> Option<&GoalTurn> {
         match self {
             Self::Captured(turn) => turn.as_ref(),
-            Self::Pending(_) => None,
+            Self::Pending(_) | Self::Failed(_) => None,
+        }
+    }
+
+    /// User-requested children keep work/completion authority, but the original
+    /// foreground alone owns the user-facing summary, including child completion.
+    pub fn for_child_work(&self) -> Self {
+        let mut context = self.clone();
+        if let Self::Captured(Some(turn)) = &mut context {
+            if turn.role == GoalTurnRole::Foreground {
+                turn.role = GoalTurnRole::Child;
+            }
+        }
+        context
+    }
+
+    /// Housekeeping inherits stop ownership, never completion or final-response
+    /// authority. User-requested children use the separate child projection.
+    pub fn for_background_work(&self) -> Self {
+        let mut context = self.clone();
+        if let Self::Captured(Some(turn)) = &mut context {
+            turn.role = GoalTurnRole::Housekeeping;
+        }
+        context
+    }
+
+    pub fn require_work(&self, session_id: &str) -> Result<(), GoalError> {
+        match self.validate(session_id)? {
+            GoalTurnPermission::Work => Ok(()),
+            GoalTurnPermission::FinalResponse | GoalTurnPermission::ReturnToForeground => {
+                Err(GoalError::NotActive {
+                    session_id: session_id.to_owned(),
+                })
+            }
+        }
+    }
+
+    /// A legitimate captured absence remains an ordinary query. Uncaptured or
+    /// failed contexts cannot silently become ordinary request authority.
+    pub fn validate(&self, session_id: &str) -> Result<GoalTurnPermission, GoalError> {
+        match self {
+            Self::Captured(Some(turn)) if turn.goal.session_id == session_id => turn.validate(),
+            Self::Captured(None) => Ok(GoalTurnPermission::Work),
+            Self::Failed(error) => Err(error.clone()),
+            _ => Err(GoalError::NotActive {
+                session_id: session_id.to_owned(),
+            }),
         }
     }
 }
@@ -176,7 +367,7 @@ impl GoalTurnContext {
 // Error type
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalError {
     ObjectiveEmpty,
     ObjectiveTooLong {
@@ -209,6 +400,7 @@ pub enum GoalError {
     },
     NonPersistentStore,
     StoreMismatch,
+    FinalResponseInFlight,
     Db(String),
 }
 
@@ -245,6 +437,7 @@ impl std::fmt::Display for GoalError {
             GoalError::StoreMismatch => {
                 write!(f, "Goal completion store does not match the captured turn")
             }
+            GoalError::FinalResponseInFlight => write!(f, "Final response already in flight"),
             GoalError::Db(msg) => write!(f, "Goal DB error: {}", msg),
         }
     }
@@ -293,6 +486,12 @@ impl StoredGoal {
 impl GoalStore {
     /// Open (or create) the goal database.
     pub fn open(db_path: &std::path::Path) -> Result<Self, GoalError> {
+        if let Some(parent) = db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|error| GoalError::Db(error.to_string()))?;
+        }
         let conn = rusqlite::Connection::open(db_path).map_err(|e| GoalError::Db(e.to_string()))?;
 
         conn.execute_batch(
@@ -340,52 +539,97 @@ impl GoalStore {
         Ok(self
             .try_get_goal(session_id)?
             .filter(|goal| goal.status == GoalStatus::Active)
-            .map(|goal| GoalTurn { goal, store_path }))
+            .map(|goal| GoalTurn {
+                goal,
+                store_path,
+                state: Default::default(),
+                role: GoalTurnRole::Foreground,
+            }))
     }
 
     /// Complete only the active row that authorized this logical query.
     pub fn complete_goal_turn(&self, turn: &GoalTurn) -> Result<(), GoalError> {
-        if self.canonical_path()? != turn.store_path {
+        if turn.role == GoalTurnRole::Housekeeping {
+            return Err(GoalError::NotActive {
+                session_id: turn.goal.session_id.clone(),
+            });
+        }
+        // A different caller-supplied store is not an observation of our store.
+        let mut state = turn.state.lock();
+        let path = match self.canonical_path() {
+            Ok(path) => path,
+            Err(error) => {
+                state.revoked = Some(error.clone());
+                return Err(error);
+            }
+        };
+        if path != turn.store_path {
             return Err(GoalError::StoreMismatch);
         }
-        let session_id = &turn.goal.session_id;
-        let transaction = self.immediate_transaction()?;
-        let goal = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
-            GoalError::NotFound {
-                session_id: session_id.clone(),
+        if let Some(error) = &state.revoked {
+            return Err(error.clone());
+        }
+        if state.completed.is_some() {
+            return Err(GoalError::NotActive {
+                session_id: turn.goal.session_id.clone(),
+            });
+        }
+        let result = (|| {
+            let session_id = &turn.goal.session_id;
+            let transaction = self.immediate_transaction()?;
+            let goal = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
+                GoalError::NotFound {
+                    session_id: session_id.clone(),
+                }
+            })?;
+            if goal.id != turn.goal.id {
+                return Err(GoalError::Replaced {
+                    session_id: session_id.clone(),
+                    expected_goal_id: turn.goal.id.clone(),
+                    actual_goal_id: goal.id,
+                });
             }
-        })?;
-        if goal.id != turn.goal.id {
-            return Err(GoalError::Replaced {
-                session_id: session_id.clone(),
-                expected_goal_id: turn.goal.id.clone(),
-                actual_goal_id: goal.id,
-            });
-        }
-        if goal.status != GoalStatus::Active {
-            return Err(GoalError::NotActive {
-                session_id: session_id.clone(),
-            });
-        }
-        let updated = transaction
-            .execute(
-                "UPDATE goals SET status = 'complete', updated_at_ms = ?1
+            if goal.status != GoalStatus::Active {
+                return Err(GoalError::NotActive {
+                    session_id: session_id.clone(),
+                });
+            }
+            let updated = transaction
+                .execute(
+                    "UPDATE goals SET status = 'complete', updated_at_ms = ?1
              WHERE id = ?2 AND session_id = ?3 AND status = 'active'",
-                rusqlite::params![
-                    Self::sqlite_i64(Self::now_ms(), "timestamp")?,
-                    turn.goal.id,
-                    session_id
-                ],
-            )
-            .map_err(|error| GoalError::Db(error.to_string()))?;
-        if updated == 0 {
-            return Err(GoalError::NotActive {
-                session_id: session_id.clone(),
-            });
+                    rusqlite::params![
+                        Self::sqlite_i64(Self::now_ms(), "timestamp")?,
+                        turn.goal.id,
+                        session_id
+                    ],
+                )
+                .map_err(|error| GoalError::Db(error.to_string()))?;
+            if updated == 0 {
+                return Err(GoalError::NotActive {
+                    session_id: session_id.clone(),
+                });
+            }
+            let receipt = Self::transaction_goal(&transaction, session_id)?.ok_or_else(|| {
+                GoalError::NotFound {
+                    session_id: session_id.clone(),
+                }
+            })?;
+            transaction
+                .commit()
+                .map_err(|error| GoalError::Db(error.to_string()))?;
+            Ok(receipt)
+        })();
+        match result {
+            Ok(receipt) => {
+                state.completed = Some(receipt);
+                Ok(())
+            }
+            Err(error) => {
+                state.revoked = Some(error.clone());
+                Err(error)
+            }
         }
-        transaction
-            .commit()
-            .map_err(|error| GoalError::Db(error.to_string()))
     }
 
     fn now_ms() -> u64 {
@@ -2156,14 +2400,17 @@ mod tests {
             GoalError::NonPersistentStore
         );
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing").join("goals.sqlite");
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let path = blocked.join("goals.sqlite");
         let mut context = GoalTurnContext::Pending(path.clone());
         assert!(matches!(context.capture("session"), Err(GoalError::Db(_))));
-        assert!(matches!(context, GoalTurnContext::Captured(None)));
-        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        assert!(context.capture("session").is_err());
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
         let store = GoalStore::open(&path).unwrap();
         store.set_goal("session", "later goal", None).unwrap();
-        context.capture("session").unwrap();
+        assert!(context.capture("session").is_err());
         assert!(context.captured().is_none());
     }
 
@@ -2233,8 +2480,225 @@ mod tests {
             })
         ));
         let replacement = store.set_goal("session", "B", None).unwrap();
-        context.capture("session").unwrap();
-        assert!(matches!(context, GoalTurnContext::Captured(None)));
+        assert!(context.capture("session").is_err());
         assert_eq!(store.try_get_goal("session").unwrap().unwrap(), replacement);
+    }
+
+    #[test]
+    fn dispatch_validation_latches_every_observed_stop_without_mutating_rows() {
+        for stop in [
+            "pause", "complete", "budget", "clear", "replace", "corrupt", "tokens",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("goals.sqlite");
+            let store = GoalStore::open(&path).unwrap();
+            store.set_goal("s", "A", Some(100)).unwrap();
+            let turn = store.capture_active_goal("s").unwrap().unwrap();
+            assert_eq!(turn.validate(), Ok(GoalTurnPermission::Work));
+            match stop {
+                "pause" => store.set_status("s", GoalStatus::Paused).unwrap(),
+                "complete" => store.set_status("s", GoalStatus::Complete).unwrap(),
+                "budget" => store.set_status("s", GoalStatus::BudgetLimited).unwrap(),
+                "clear" => store.clear_goal("s").unwrap(),
+                "replace" => {
+                    store.set_goal("s", "B", Some(200)).unwrap();
+                }
+                "corrupt" => {
+                    store
+                        .conn
+                        .execute("UPDATE goals SET status='invalid'", [])
+                        .unwrap();
+                }
+                "tokens" => store.add_tokens("s", 100).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = store.try_get_goal("s");
+            assert!(turn.validate().is_err(), "{stop}");
+            assert_eq!(store.try_get_goal("s"), before);
+            if before.as_ref().is_ok_and(|row| row.is_some()) {
+                store.set_status("s", GoalStatus::Active).unwrap();
+            }
+            assert!(
+                turn.clone().validate().is_err(),
+                "observed {stop} cannot revive"
+            );
+            assert!(store.complete_goal_turn(&turn).is_err());
+        }
+    }
+
+    #[test]
+    fn housekeeping_cannot_complete_or_consume_foreground_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GoalStore::open(&dir.path().join("goals.sqlite")).unwrap();
+        store.set_goal("s", "A", None).unwrap();
+        let foreground = GoalTurnContext::Captured(store.capture_active_goal("s").unwrap());
+        let background = foreground.for_background_work();
+        assert!(background.require_work("s").is_ok());
+        assert!(store
+            .complete_goal_turn(background.captured().unwrap())
+            .is_err());
+        store
+            .complete_goal_turn(foreground.captured().unwrap())
+            .unwrap();
+        assert!(background.require_work("s").is_err());
+        assert!(background
+            .captured()
+            .unwrap()
+            .reserve_final_response()
+            .is_err());
+        assert_eq!(
+            foreground.validate("s"),
+            Ok(GoalTurnPermission::FinalResponse)
+        );
+        foreground
+            .captured()
+            .unwrap()
+            .reserve_final_response()
+            .unwrap()
+            .finish();
+        assert!(foreground.validate("s").is_err());
+    }
+
+    #[test]
+    fn own_completion_receipt_rejects_later_replacement_clear_and_store_errors() {
+        for stop in [
+            "replace",
+            "clear",
+            "pause",
+            "complete",
+            "budget",
+            "missing-file",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("goals.sqlite");
+            let store = GoalStore::open(&path).unwrap();
+            store.set_goal("s", "A", None).unwrap();
+            let turn = store.capture_active_goal("s").unwrap().unwrap();
+            store.complete_goal_turn(&turn).unwrap();
+            assert_eq!(turn.validate(), Ok(GoalTurnPermission::FinalResponse));
+            match stop {
+                "replace" => {
+                    store.set_goal("s", "B", None).unwrap();
+                }
+                "clear" => store.clear_goal("s").unwrap(),
+                "pause" => store.set_status("s", GoalStatus::Paused).unwrap(),
+                "budget" => store.set_status("s", GoalStatus::BudgetLimited).unwrap(),
+                "complete" => {
+                    store
+                        .conn
+                        .execute("UPDATE goals SET updated_at_ms = updated_at_ms + 1", [])
+                        .unwrap();
+                }
+                "missing-file" => {
+                    drop(store);
+                    std::fs::remove_file(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(turn.validate().is_err(), "{stop}");
+            if stop == "missing-file" {
+                assert!(!path.exists(), "validation must never recreate a store");
+            }
+        }
+    }
+    #[test]
+    fn goal_r1_fresh_store_initializes_parent_and_keeps_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh/engine/goals.sqlite");
+        let mut context = GoalTurnContext::Pending(path.clone());
+        context.capture("s").unwrap();
+        assert!(matches!(context, GoalTurnContext::Captured(None)));
+        GoalStore::open(&path)
+            .unwrap()
+            .set_goal("s", "later", None)
+            .unwrap();
+        context.capture("s").unwrap();
+        assert!(matches!(context, GoalTurnContext::Captured(None)));
+    }
+
+    #[test]
+    fn goal_r1_transactional_stop_is_sticky_after_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GoalStore::open(&dir.path().join("goals.sqlite")).unwrap();
+        store.set_goal("s", "A", None).unwrap();
+        let turn = store.capture_active_goal("s").unwrap().unwrap();
+        assert_eq!(turn.validate(), Ok(GoalTurnPermission::Work));
+        store.set_status("s", GoalStatus::Paused).unwrap();
+        let observed = store.complete_goal_turn(&turn).unwrap_err();
+        store.set_status("s", GoalStatus::Active).unwrap();
+        assert_eq!(turn.validate(), Err(observed));
+    }
+
+    #[test]
+    fn goal_r1_child_completion_preserves_foreground_and_housekeeping_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GoalStore::open(&dir.path().join("goals.sqlite")).unwrap();
+        store.set_goal("s", "A", None).unwrap();
+        let foreground = GoalTurnContext::Captured(store.capture_active_goal("s").unwrap());
+        let child = foreground.for_child_work();
+        let housekeeping = child.for_background_work();
+        assert_eq!(child.validate("s"), Ok(GoalTurnPermission::Work));
+        store.complete_goal_turn(child.captured().unwrap()).unwrap();
+        assert_eq!(
+            child.validate("s"),
+            Ok(GoalTurnPermission::ReturnToForeground)
+        );
+        assert!(child.captured().unwrap().reserve_final_response().is_err());
+        assert!(housekeeping.validate("s").is_err());
+        assert!(store
+            .complete_goal_turn(housekeeping.captured().unwrap())
+            .is_err());
+        assert_eq!(
+            foreground.validate("s"),
+            Ok(GoalTurnPermission::FinalResponse)
+        );
+        let reservation = foreground
+            .captured()
+            .unwrap()
+            .reserve_final_response()
+            .unwrap();
+        assert!(matches!(
+            foreground.captured().unwrap().reserve_final_response(),
+            Err(GoalError::FinalResponseInFlight)
+        ));
+        assert_eq!(
+            foreground.validate("s"),
+            Ok(GoalTurnPermission::FinalResponse)
+        );
+        drop(reservation);
+        foreground
+            .captured()
+            .unwrap()
+            .reserve_final_response()
+            .unwrap()
+            .finish();
+        assert!(foreground.validate("s").is_err());
+    }
+
+    #[test]
+    fn goal_r1_transactional_replacement_and_store_errors_stay_latched() {
+        for replacement in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = GoalStore::open(&dir.path().join("goals.sqlite")).unwrap();
+            let original = store.set_goal("s", "A", None).unwrap();
+            let turn = store.capture_active_goal("s").unwrap().unwrap();
+            if replacement {
+                store.set_goal("s", "B", None).unwrap();
+            } else {
+                store
+                    .conn
+                    .execute("UPDATE goals SET status='invalid' WHERE session_id='s'", [])
+                    .unwrap();
+            }
+            let observed = store.complete_goal_turn(&turn).unwrap_err();
+            store
+                .conn
+                .execute(
+                    "UPDATE goals SET id=?1,status='active' WHERE session_id='s'",
+                    [&original.id],
+                )
+                .unwrap();
+            assert_eq!(turn.validate(), Err(observed));
+        }
     }
 }

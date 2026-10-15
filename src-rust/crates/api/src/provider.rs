@@ -67,6 +67,34 @@ pub trait LlmProvider: Send + Sync {
         request: ProviderRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>;
 
+    /// Query-owned dispatch. Adapters with retries or asynchronous preparation
+    /// must propagate typed authority to their actual transport-send boundary.
+    async fn create_message_stream_for_goal(
+        &self,
+        request: ProviderRequest,
+        turn: Option<&claurst_core::goal::GoalTurn>,
+        permission: claurst_core::goal::GoalTurnPermission,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        if let Some(turn) = turn {
+            let actual = turn.validate().map_err(|error| ProviderError::Other {
+                provider: self.id().clone(),
+                message: format!("Goal authority revoked: {error}"),
+                status: None,
+                body: None,
+            })?;
+            if actual != permission {
+                return Err(ProviderError::Other {
+                    provider: self.id().clone(),
+                    message: "Goal permits only its final response".into(),
+                    status: None,
+                    body: None,
+                });
+            }
+        }
+        self.create_message_stream(request).await
+    }
+
     /// Return the list of models available through this provider.
     ///
     /// Implementations may make a network call (e.g. `GET /v1/models`) or
