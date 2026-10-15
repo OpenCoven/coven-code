@@ -666,7 +666,7 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "monitor",
     "GoalComplete",
     #[cfg(feature = "computer-use")]
-    "ComputerUse",
+    "computer",
 ];
 
 pub fn all_tool_names() -> &'static [&'static str] {
@@ -774,7 +774,7 @@ pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
         "monitor" => Some(Box::new(MonitorTool)),
         "GoalComplete" => Some(Box::new(GoalCompleteTool)),
         #[cfg(feature = "computer-use")]
-        "ComputerUse" => Some(Box::new(ComputerUseTool)),
+        "computer" | "ComputerUse" => Some(Box::new(ComputerUseTool)),
         _ => None,
     }
 }
@@ -892,6 +892,26 @@ mod tests {
                 tool.name()
             );
         }
+    }
+
+    #[test]
+    fn test_advertised_tool_names_round_trip() {
+        for &name in all_tool_names() {
+            let tool = find_tool(name).unwrap_or_else(|| panic!("Missing tool: {name}"));
+            assert_eq!(tool.name(), name);
+        }
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[test]
+    fn test_computer_use_lookup_alias() {
+        let canonical = find_tool("computer").expect("canonical computer tool");
+        let alias = find_tool("ComputerUse").expect("existing ComputerUse alias");
+        assert_eq!(canonical.name(), "computer");
+        assert_eq!(alias.name(), canonical.name());
+        assert_eq!(alias.to_definition().name, canonical.to_definition().name);
+        assert_eq!(alias.input_schema(), canonical.input_schema());
+        assert_eq!(alias.permission_level(), canonical.permission_level());
     }
 
     #[test]
