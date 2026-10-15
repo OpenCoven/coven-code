@@ -460,19 +460,8 @@ async fn run_windows_fallback(
 // Shared output truncation helper
 // ---------------------------------------------------------------------------
 
-fn truncate_output(mut output: String, exit_code: i32) -> ToolResult {
-    const MAX_OUTPUT_LEN: usize = 100_000;
-    if output.len() > MAX_OUTPUT_LEN {
-        let half = MAX_OUTPUT_LEN / 2;
-        let start = output[..half].to_string();
-        let end = output[output.len() - half..].to_string();
-        output = format!(
-            "{}\n\n... ({} characters truncated) ...\n\n{}",
-            start,
-            output.len() - MAX_OUTPUT_LEN,
-            end
-        );
-    }
+fn truncate_output(output: String, exit_code: i32) -> ToolResult {
+    let output = crate::shell_output::truncate(output);
 
     if exit_code != 0 {
         ToolResult::error(format!(

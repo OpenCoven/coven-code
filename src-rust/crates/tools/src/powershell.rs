@@ -278,18 +278,7 @@ impl Tool for PowerShellTool {
                 }
 
                 // Truncate very long output (same limit as BashTool)
-                const MAX_OUTPUT_LEN: usize = 100_000;
-                if output.len() > MAX_OUTPUT_LEN {
-                    let half = MAX_OUTPUT_LEN / 2;
-                    let start = &output[..half];
-                    let end = &output[output.len() - half..];
-                    output = format!(
-                        "{}\n\n... ({} characters truncated) ...\n\n{}",
-                        start,
-                        output.len() - MAX_OUTPUT_LEN,
-                        end
-                    );
-                }
+                let output = crate::shell_output::truncate(output);
 
                 if exit_code != 0 {
                     ToolResult::error(format!(

@@ -43,6 +43,7 @@ pub mod pty_bash;
 pub mod remote_trigger;
 pub mod repl_tool;
 pub mod send_message;
+mod shell_output;
 pub mod skill_tool;
 pub mod sleep;
 pub mod synthetic_output;

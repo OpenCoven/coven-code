@@ -546,18 +546,7 @@ impl Tool for BashTool {
                 }
 
                 // Truncate very long output
-                const MAX_OUTPUT_LEN: usize = 100_000;
-                if output.len() > MAX_OUTPUT_LEN {
-                    let half = MAX_OUTPUT_LEN / 2;
-                    let start = &output[..half];
-                    let end = &output[output.len() - half..];
-                    output = format!(
-                        "{}\n\n... ({} characters truncated) ...\n\n{}",
-                        start,
-                        output.len() - MAX_OUTPUT_LEN,
-                        end
-                    );
-                }
+                let output = crate::shell_output::truncate(output);
 
                 if exit_code != 0 {
                     ToolResult::error(format!(
@@ -647,18 +636,7 @@ impl BashTool {
                 if output.is_empty() {
                     output = "(no output)".to_string();
                 }
-                const MAX_OUTPUT_LEN: usize = 100_000;
-                if output.len() > MAX_OUTPUT_LEN {
-                    let half = MAX_OUTPUT_LEN / 2;
-                    let start = &output[..half];
-                    let end = &output[output.len() - half..];
-                    output = format!(
-                        "{}\n\n... ({} characters truncated) ...\n\n{}",
-                        start,
-                        output.len() - MAX_OUTPUT_LEN,
-                        end
-                    );
-                }
+                let output = crate::shell_output::truncate(output);
                 if exit_code != 0 {
                     ToolResult::error(format!(
                         "Command exited with code {}\n{}",
