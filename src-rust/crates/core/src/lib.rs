@@ -1942,7 +1942,28 @@ pub mod config {
         /// pre-4.3 two-layer load.
         pub async fn load_hierarchical(cwd: &std::path::Path) -> Self {
             // 1. Load engine-global settings.
-            let mut merged = Self::load().await.unwrap_or_default();
+            let mut merged = match Self::load().await {
+                Ok(settings) => settings,
+                Err(error) => {
+                    let path = Self::global_settings_path();
+                    if let Some(parse_error) = error.downcast_ref::<serde_json::Error>() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            category = ?parse_error.classify(),
+                            line = parse_error.line(),
+                            column = parse_error.column(),
+                            "Invalid global settings; using defaults before shared/project layers"
+                        );
+                    } else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %error,
+                            "Unreadable global settings; using defaults before shared/project layers"
+                        );
+                    }
+                    Self::default()
+                }
+            };
             // 2. Apply shared ~/.coven/settings.json as the lowest layer: fill
             //    in whitelisted keys only when the engine-global left them at
             //    their default value (i.e. the user did not explicitly set
