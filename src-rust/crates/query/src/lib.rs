@@ -2124,7 +2124,12 @@ pub async fn run_query_loop(
 
                     // Use create_message_stream so the TUI receives real-time
                     // text deltas instead of waiting for the full response.
-                    let stream = match provider.create_message_stream(provider_request).await {
+                    let startup = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return QueryOutcome::Cancelled,
+                        result = provider.create_message_stream(provider_request) => result,
+                    };
+                    let stream = match startup {
                         Ok(s) => s,
                         Err(e) => {
                             error!(provider = %provider_id_str, error = %e, "Provider stream failed");
@@ -2521,7 +2526,12 @@ pub async fn run_query_loop(
 
         // Send to API
         debug!(turn, model = %effective_model, "Sending API request");
-        let mut stream_rx = match client.create_message_stream(request, handler).await {
+        let startup = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => return QueryOutcome::Cancelled,
+            result = client.create_message_stream(request, handler) => result,
+        };
+        let mut stream_rx = match startup {
             Ok(rx) => rx,
             Err(e) => {
                 // On overloaded/rate-limit errors, attempt one switch to the fallback model.
