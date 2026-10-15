@@ -5,8 +5,7 @@ to the release's version, asset table, verify snippet, and a compare
 link to the previous tag.
 
 Run with no args from anywhere in the repo. Writes one body file per
-tag to /tmp/release-notes/, then `gh release edit <tag> --notes-file`
-for each.
+tag to /tmp/release-notes/. This script does not publish to GitHub.
 
 Skips no tags; for the very first release (v0.0.1) the changelog is
 "all commits up to this tag" since there's no previous tag.
@@ -24,7 +23,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Repo root — script lives in /tmp, repo path is fixed here for clarity.
+# Resolve the repository root from this script location.
 REPO = Path(__file__).resolve().parent.parent
 OUT = Path("/tmp/release-notes")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -151,12 +150,12 @@ def install_section(version_with_v: str) -> str:
 
 **One-line (Linux/macOS):**
 ```bash
-curl -fsSL https://github.com/OpenCoven/coven-code/releases/download/{version_with_v}/install.sh | bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/download/{version_with_v}/install.sh | bash -s -- --version {bare}
 ```
 
 **One-line (Windows PowerShell):**
 ```powershell
-irm https://github.com/OpenCoven/coven-code/releases/download/{version_with_v}/install.ps1 | iex
+& ([scriptblock]::Create((irm https://github.com/OpenCoven/coven-code/releases/download/{version_with_v}/install.ps1))) -Version {bare}
 ```
 
 **npm:**
