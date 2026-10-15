@@ -254,11 +254,10 @@ pub fn load_hooks_config(
 /// Scan a plugin's commands directory and return all `PluginCommandDef` items.
 pub fn collect_command_defs(plugin: &LoadedPlugin) -> Vec<crate::plugin::PluginCommandDef> {
     let mut defs: Vec<crate::plugin::PluginCommandDef> = Vec::new();
-    let capabilities = plugin.manifest.capabilities.clone();
 
     // Commands from the `commands/` directory.
     if let Some(ref cmd_dir) = plugin.commands_path {
-        collect_markdown_commands(cmd_dir, &plugin.name, capabilities.clone(), &mut defs);
+        collect_markdown_commands(cmd_dir, plugin, &mut defs);
     }
 
     // Extra commands declared in the manifest.
@@ -276,10 +275,10 @@ pub fn collect_command_defs(plugin: &LoadedPlugin) -> Vec<crate::plugin::PluginC
                     file_path: abs.to_string_lossy().into_owned(),
                     plugin_root: plugin.path.to_string_lossy().into_owned(),
                 },
-                plugin_capabilities: capabilities.clone(),
+                plugin_capabilities: plugin.manifest.capabilities.clone(),
             });
         } else if abs.is_dir() {
-            collect_markdown_commands(&abs, &plugin.name, capabilities.clone(), &mut defs);
+            collect_markdown_commands(&abs, plugin, &mut defs);
         }
     }
 
@@ -289,8 +288,7 @@ pub fn collect_command_defs(plugin: &LoadedPlugin) -> Vec<crate::plugin::PluginC
 /// Recursively collect .md files from `dir` into `PluginCommandDef` items.
 fn collect_markdown_commands(
     dir: &Path,
-    plugin_name: &str,
-    capabilities: Option<Vec<String>>,
+    plugin: &LoadedPlugin,
     defs: &mut Vec<crate::plugin::PluginCommandDef>,
 ) {
     use walkdir::WalkDir;
@@ -313,35 +311,35 @@ fn collect_markdown_commands(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("skill");
-            let cmd_name = format!("{}:{}", plugin_name, base_name);
+            let cmd_name = format!("{}:{}", plugin.name, base_name);
             defs.push(crate::plugin::PluginCommandDef {
                 name: cmd_name,
                 description: extract_description_from_markdown_file(path)
                     .unwrap_or_else(|| "Plugin skill".to_string()),
-                plugin_name: plugin_name.to_string(),
-                plugin_source_id: String::new(),
+                plugin_name: plugin.name.clone(),
+                plugin_source_id: plugin.source_id.clone(),
                 run_action: crate::plugin::CommandRunAction::MarkdownPrompt {
                     file_path: path.to_string_lossy().into_owned(),
-                    plugin_root: dir.to_string_lossy().into_owned(),
+                    plugin_root: plugin.path.to_string_lossy().into_owned(),
                 },
-                plugin_capabilities: capabilities.clone(),
+                plugin_capabilities: plugin.manifest.capabilities.clone(),
             });
             continue;
         }
 
         if path.extension().map(|e| e == "md").unwrap_or(false) {
-            let cmd_name = command_name_from_file(path, plugin_name);
+            let cmd_name = command_name_from_file(path, &plugin.name);
             defs.push(crate::plugin::PluginCommandDef {
                 name: cmd_name,
                 description: extract_description_from_markdown_file(path)
                     .unwrap_or_else(|| "Plugin command".to_string()),
-                plugin_name: plugin_name.to_string(),
-                plugin_source_id: String::new(),
+                plugin_name: plugin.name.clone(),
+                plugin_source_id: plugin.source_id.clone(),
                 run_action: crate::plugin::CommandRunAction::MarkdownPrompt {
                     file_path: path.to_string_lossy().into_owned(),
-                    plugin_root: dir.to_string_lossy().into_owned(),
+                    plugin_root: plugin.path.to_string_lossy().into_owned(),
                 },
-                plugin_capabilities: capabilities.clone(),
+                plugin_capabilities: plugin.manifest.capabilities.clone(),
             });
         }
     }
