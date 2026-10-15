@@ -63,18 +63,19 @@ Every provider implements `LlmProvider`. To add an OpenCoven-specific or private
 
 ### 2. Plugin system — `src-rust/crates/plugins/`
 
-Runtime plugin loading. Plugins can add tools, slash commands, and UI panels.  
-Entry point: `PluginRuntime` in `crates/plugins/src/lib.rs`.
+Plugin discovery and loading start at `load_plugins` in `crates/plugins/src/lib.rs`,
+which returns a `PluginRegistry`. Reloading uses `reload_plugins` and reports a
+`ReloadDiff`; hook registration lives in `hooks.rs`.
 
 ### 3. ACP server — `src-rust/crates/acp/`
 
 JSON-RPC 2.0 over stdio (`coven-code acp`). This is the recommended Coven orchestration entry point.  
-Extend `AcpServer` with OpenCoven-specific RPC methods here.  
+RPC dispatch lives in `AgentServer` in `crates/acp/src/server.rs`.
 See `registry-template/agent.json` for how Coven registers this agent.
 
 ### 4. Command/slash registry — `src-rust/crates/commands/`
 
-Add new `/slash` commands by implementing the `Command` trait and registering in `commands/src/lib.rs`.
+Add new `/slash` commands by implementing the `SlashCommand` trait and registering in `commands/src/lib.rs`.
 
 ### 5. TUI theme — `src-rust/crates/tui/src/theme_colors.rs`
 
@@ -87,8 +88,9 @@ Replace `default_theme()` return values when brand assets are finalized.
 
 ### 6. Companion mascot — `src-rust/crates/tui/src/mascot.rs`
 
-ASCII mascot renderer. Currently "Rune" (renamed from "Rustle" upstream).  
-The internal module and pose naming now use companion/mascot terminology; update art in `mascot_lines_for()` and call-sites in `render.rs` / `app.rs`.
+`mascot.rs` defines `CompanionPose` for animation state. The familiar glyph is
+composed in `familiar_card.rs` using the archetype resolved by `familiar_theme.rs`.
+Fresh installs do not receive a built-in named familiar.
 
 ### 7. Memory / session hooks — `src-rust/crates/core/src/memdir.rs`, `session_storage.rs`
 
@@ -204,3 +206,7 @@ or consumer coordination. Retain a verified prior binary and backup of affected
 engine data for rollback; do not assume a standalone install replaces the engine
 selected by the unified `coven` CLI. Human/native-platform checks and final
 publication authorization remain separate from automated local checks.
+
+The [auto-release workflow](.github/workflows/auto-release.yml) provides the
+release-bot marker path: it stamps versions and dispatches the release workflow.
+Its marker jobs run only for pushes by `opencoven-bot`.
