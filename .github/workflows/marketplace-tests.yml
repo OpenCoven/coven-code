@@ -1,0 +1,26 @@
+name: Marketplace generation tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/sync-marketplace.py'
+      - 'scripts/sync-marketplace.test.py'
+      - 'marketplace/**'
+      - '.github/workflows/marketplace-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  marketplace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Test catalog preflight in temporary fixtures
+        run: python3 -B scripts/sync-marketplace.test.py
+      - name: Check generated marketplace files
+        run: python3 -B scripts/sync-marketplace.py --check

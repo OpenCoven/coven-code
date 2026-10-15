@@ -21,9 +21,26 @@ def load_catalog() -> dict[str, Any]:
     with CATALOG.open("r", encoding="utf-8") as handle:
         catalog = json.load(handle)
     names = [plugin["name"] for plugin in catalog["plugins"]]
+    for name in names:
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in {".", ".."}
+            or any(char in name for char in "/\\:\0")
+        ):
+            raise ValueError(f"Invalid marketplace plugin name: {name!r}")
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"Duplicate marketplace plugin names: {', '.join(duplicates)}")
+    server_owners: dict[str, str] = {}
+    for plugin in catalog["plugins"]:
+        for server in plugin.get("mcpServers", {}):
+            if server in server_owners:
+                raise ValueError(
+                    f"Duplicate MCP server name {server!r} in plugins "
+                    f"{server_owners[server]!r} and {plugin['name']!r}"
+                )
+            server_owners[server] = plugin["name"]
     return catalog
 
 
