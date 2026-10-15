@@ -335,12 +335,21 @@ impl Tool for CronCreateTool {
             created_at: now,
         };
 
-        store.insert(id.clone(), task);
+        let previous = store.insert(id.clone(), task);
 
         // Persist to ~/.coven-code/scheduled_tasks.json for durable tasks.
         if params.durable {
             if let Err(e) = persist_tasks_to_disk(&store).await {
-                debug!("Failed to persist cron task to disk: {}", e);
+                if let Some(previous) = previous {
+                    store.insert(id, previous);
+                } else {
+                    store.remove(&id);
+                }
+                return ToolResult::error(format!(
+                    "Failed to create durable cron task: could not write {}: {}",
+                    scheduled_tasks_path().display(),
+                    e
+                ));
             }
         }
 
@@ -417,7 +426,12 @@ impl Tool for CronDeleteTool {
             // If it was durable, update the file.
             if removed.durable {
                 if let Err(e) = persist_tasks_to_disk(&store).await {
-                    debug!("Failed to update scheduled_tasks.json after delete: {}", e);
+                    store.insert(params.id, removed);
+                    return ToolResult::error(format!(
+                        "Failed to delete durable cron task: could not write {}: {}",
+                        scheduled_tasks_path().display(),
+                        e
+                    ));
                 }
             }
             ToolResult::success(format!("Deleted cron task '{}'.", params.id))
