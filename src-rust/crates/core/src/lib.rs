@@ -4685,19 +4685,6 @@ pub mod cost {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    /// Free upstream provider IDs used in the free provider system.
-    const FREE_UPSTREAM_IDS: &[&str] = &[];
-
-    /// Check if a model name is an upstream-prefixed free model (e.g., "groq/llama-3.3-70b-versatile").
-    fn is_free_upstream_model(model: &str) -> bool {
-        for upstream_id in FREE_UPSTREAM_IDS {
-            if model.starts_with(&format!("{}/", upstream_id)) {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Per-model pricing tiers (USD per million tokens).
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct ModelPricing {
@@ -4747,11 +4734,8 @@ pub mod cost {
 
         /// Pick pricing based on model name substring matching.
         pub fn for_model(model: &str) -> Self {
-            // Check for free models first (those with "-free" suffix, "free/" prefix, or upstream-prefixed free model)
-            if model.ends_with("-free")
-                || model.starts_with("free/")
-                || is_free_upstream_model(model)
-            {
+            // Check for free models first ("-free" suffix or "free/" prefix).
+            if model.ends_with("-free") || model.starts_with("free/") {
                 Self::FREE
             } else if model.contains("opus") {
                 Self::OPUS
