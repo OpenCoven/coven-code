@@ -1,0 +1,31 @@
+name: Version stamp tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/bump-version.py'
+      - 'scripts/test_bump_version.py'
+      - 'src-rust/Cargo.toml'
+      - 'src-rust/Cargo.lock'
+      - 'npm/package.json'
+      - 'README.md'
+      - 'docs/index.md'
+      - 'docs/installation.md'
+      - 'src-rust/crates/acp/registry-template/agent.json'
+      - '.github/workflows/auto-release.yml'
+      - '.github/workflows/version-stamp-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version-stamp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Test version stamping in temporary fixtures
+        run: python3 -B -m unittest discover -s scripts -p test_bump_version.py -v
