@@ -1590,9 +1590,13 @@ impl SlashCommand for DiffCommand {
                     // Truncate very long diffs
                     let text = stdout.as_ref();
                     let display = if text.len() > 8000 {
+                        let mut end = 8000;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
                         format!(
                             "{}\n… (truncated — {} total bytes; use `git diff` for full output)",
-                            &text[..8000],
+                            &text[..end],
                             text.len()
                         )
                     } else {
