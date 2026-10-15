@@ -1797,12 +1797,12 @@ pub mod config {
         /// Return the effective `Config`, merging top-level provider settings
         /// into the embedded `config` field.
         ///
-        /// - `settings.provider` wins over `settings.config.provider` (if set).
+        /// - `settings.provider` fills in `settings.config.provider` only when it is unset.
         /// - `settings.providers` entries are merged into `config.provider_configs`,
         ///   with the embedded config values taking precedence for keys already present.
         pub fn effective_config(&self) -> Config {
             let mut config = self.config.clone();
-            // Top-level `provider` key overrides config.provider when set.
+            // The embedded provider takes precedence over the top-level fallback.
             if self.provider.is_some() && config.provider.is_none() {
                 config.provider = self.provider.clone();
             }
