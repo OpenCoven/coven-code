@@ -158,7 +158,9 @@ fn build_mcp_auth_url(
 ) -> anyhow::Result<String> {
     let challenge = pkce_challenge(verifier);
     let mut auth_url = url::Url::parse(authorization_endpoint).map_err(|error| {
-        anyhow::anyhow!("Failed to parse OAuth authorization endpoint: {}", error)
+        // Keep the typed parse error as the source while showing it inline.
+        let message = format!("Failed to parse OAuth authorization endpoint: {error}");
+        anyhow::Error::new(error).context(message)
     })?;
     const RESERVED_PARAMETERS: &[&str] = &[
         "response_type",
@@ -1366,6 +1368,70 @@ mod tests {
             0,
             "the client must not invent an OAuth scope"
         );
+    }
+
+    #[test]
+    fn build_auth_url_preserves_endpoint_query_and_fragment() {
+        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+        let redirect = "http://127.0.0.1:9999/callback?label=a+b&next=/done";
+        for endpoint in [
+            "https://example.com/authorize?audience=mcp%2Btools",
+            "https://example.com/authorize?audience=mcp%2Btools#login",
+            "https://example.com/authorize#login",
+        ] {
+            let built = build_mcp_auth_url(endpoint, redirect, verifier, "fixture-state").unwrap();
+            let parsed = url::Url::parse(&built).unwrap();
+            assert_eq!(
+                parsed.query_pairs().count(),
+                if endpoint.contains("audience=") { 7 } else { 6 }
+            );
+            let query: std::collections::BTreeMap<_, _> =
+                parsed.query_pairs().into_owned().collect();
+            assert_eq!(
+                query.get("client_id").map(String::as_str),
+                Some("coven-code")
+            );
+            assert_eq!(
+                query.get("redirect_uri").map(String::as_str),
+                Some(redirect)
+            );
+            assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
+            assert_eq!(
+                query.get("code_challenge_method").map(String::as_str),
+                Some("S256")
+            );
+            assert_eq!(query.get("code_challenge"), Some(&pkce_challenge(verifier)));
+            assert_eq!(
+                query.get("state").map(String::as_str),
+                Some("fixture-state")
+            );
+            if endpoint.contains("audience=") {
+                assert_eq!(query.get("audience").map(String::as_str), Some("mcp+tools"));
+            }
+            assert_eq!(
+                parsed.fragment(),
+                if endpoint.contains('#') {
+                    Some("login")
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn build_auth_url_reports_invalid_endpoint() {
+        let error = build_mcp_auth_url(
+            "not an absolute URL",
+            "http://127.0.0.1/callback",
+            "verifier",
+            "fixture-state",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Failed to parse OAuth authorization endpoint"));
+        assert!(error.downcast_ref::<url::ParseError>().is_some());
     }
 
     #[test]
