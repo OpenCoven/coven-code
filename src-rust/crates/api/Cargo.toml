@@ -17,10 +17,3 @@ async-trait = { workspace = true }
 parking_lot = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 async-stream = { workspace = true }
-chrono = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-urlencoding = { workspace = true }
-url = { workspace = true }
-uuid = { workspace = true }
-hmac = "0.12"

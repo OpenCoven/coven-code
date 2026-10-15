@@ -27,7 +27,6 @@ tracing = { workspace = true }
 
 # Filesystem
 walkdir = { workspace = true }
-dirs = { workspace = true }
 
 # HTTP (marketplace downloads)
 reqwest = { workspace = true }

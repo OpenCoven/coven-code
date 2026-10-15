@@ -679,21 +679,14 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
- "chrono",
  "claurst-core",
  "futures",
- "hex",
- "hmac",
  "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tracing",
- "url",
- "urlencoding",
- "uuid",
  "xxhash-rust",
 ]
 
@@ -809,7 +802,6 @@ dependencies = [
  "chrono",
  "claurst-core",
  "dashmap",
- "dirs",
  "futures",
  "getrandom 0.2.17",
  "once_cell",
@@ -834,7 +826,6 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "claurst-core",
- "dirs",
  "futures",
  "hex",
  "once_cell",
@@ -924,7 +915,6 @@ dependencies = [
  "crossterm 0.29.0",
  "dashmap",
  "dirs",
- "hound",
  "icy_sixel",
  "image",
  "once_cell",
@@ -1336,7 +1326,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
- "subtle",
 ]
 
 [[package]]
@@ -1861,15 +1850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest",
-]
-
-[[package]]
 name = "hostname"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1879,12 +1859,6 @@ dependencies = [
  "libc",
  "windows-link 0.2.1",
 ]
-
-[[package]]
-name = "hound"
-version = "3.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "http"
@@ -4212,12 +4186,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
-
-[[package]]
-name = "subtle"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
