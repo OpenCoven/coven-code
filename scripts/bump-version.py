@@ -13,9 +13,9 @@ Touches:
   - src-rust/crates/acp/registry-template/agent.json
                                         version field + 5 release download URLs
 
-Fails loudly if any expected pattern is missing — that means the file shape
-changed and the script needs updating, not silently producing a half-stamped
-release.
+Prepares every replacement and runs the existing parsing and pattern checks
+before writing any file. Detected input errors leave files unchanged. Write-time
+I/O failures can still interrupt the final writes; this is not a filesystem transaction.
 """
 from __future__ import annotations
 
@@ -32,17 +32,16 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def replace(path: Path, pattern: str, repl: str, *, count: int = 0, flags: int = re.MULTILINE) -> None:
-    text = path.read_text(encoding="utf-8")
+def replace(updates: dict[Path, str], path: Path, pattern: str, repl: str, *, count: int = 0, flags: int = re.MULTILINE) -> None:
+    text = updates[path] if path in updates else path.read_text(encoding="utf-8")
     new, n = re.subn(pattern, repl, text, count=count, flags=flags)
     if n == 0:
         die(f"no matches for {pattern!r} in {path.relative_to(ROOT)}")
-    if new != text:
-        path.write_text(new, encoding="utf-8")
+    updates[path] = new
     print(f"  {path.relative_to(ROOT)}: {n} replacement(s)")
 
 
-def bump_cargo_lock(version: str) -> None:
+def bump_cargo_lock(updates: dict[Path, str], version: str) -> None:
     """Rewrite every workspace [[package]] block (those without a `source = ` line)."""
     path = ROOT / "src-rust" / "Cargo.lock"
     text = path.read_text(encoding="utf-8")
@@ -77,7 +76,7 @@ def bump_cargo_lock(version: str) -> None:
 
     if touched == 0:
         die("Cargo.lock: found zero workspace package blocks — file shape changed?")
-    path.write_text("".join(blocks), encoding="utf-8")
+    updates[path] = "".join(blocks)
     print(f"  src-rust/Cargo.lock: {touched} workspace package(s)")
 
 
@@ -92,9 +91,11 @@ def main() -> None:
     version = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
 
     print(f"Stamping version {version} ({tag}):")
+    updates: dict[Path, str] = {}
 
     # 1. Cargo.toml (workspace.package.version — first `version = "..."` line)
     replace(
+        updates,
         ROOT / "src-rust" / "Cargo.toml",
         r'^version = "\d+\.\d+\.\d+"$',
         f'version = "{version}"',
@@ -102,24 +103,25 @@ def main() -> None:
     )
 
     # 2. Cargo.lock — every claurst* workspace package
-    bump_cargo_lock(version)
+    bump_cargo_lock(updates, version)
 
     # 3. npm/package.json
     pkg_path = ROOT / "npm" / "package.json"
     pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
     pkg["version"] = version
-    pkg_path.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+    updates[pkg_path] = json.dumps(pkg, indent=2) + "\n"
     print(f"  npm/package.json")
 
     # 4. README.md — engine introduction and Beta callout.
     # Claurst attribution identifies the upstream baseline, not our release.
     readme = ROOT / "README.md"
-    replace(readme, r"Beta \(v\d+\.\d+\.\d+\)\.", f"Beta (v{version}).", count=1)
-    replace(readme, r"`coven-code` \*\*v\d+\.\d+\.\d+\*\*",
+    replace(updates, readme, r"Beta \(v\d+\.\d+\.\d+\)\.", f"Beta (v{version}).", count=1)
+    replace(updates, readme, r"`coven-code` \*\*v\d+\.\d+\.\d+\*\*",
             f"`coven-code` **v{version}**", count=1)
 
     # 5. docs/index.md
     replace(
+        updates,
         ROOT / "docs" / "index.md",
         r"\*\*Version:\*\* \d+\.\d+\.\d+",
         f"**Version:** {version}",
@@ -128,6 +130,7 @@ def main() -> None:
 
     # 6. docs/installation.md — sample output line ("coven-code X.Y.Z")
     replace(
+        updates,
         ROOT / "docs" / "installation.md",
         r"^coven-code \d+\.\d+\.\d+$",
         f"coven-code {version}",
@@ -143,8 +146,11 @@ def main() -> None:
         die("agent.json: version field not found")
     if n_u == 0:
         die("agent.json: no /releases/download/vX.Y.Z/ URLs found")
-    agent.write_text(text, encoding="utf-8")
+    updates[agent] = text
     print(f"  src-rust/crates/acp/registry-template/agent.json: 1 version + {n_u} URL(s)")
+
+    for path, contents in updates.items():
+        path.write_text(contents, encoding="utf-8")
 
     print(f"\nStamped {version}.")
 
