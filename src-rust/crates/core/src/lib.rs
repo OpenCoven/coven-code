@@ -3973,8 +3973,8 @@ pub mod permissions {
                     &request.allowed_roots,
                 );
             }
-            // If the lock is poisoned fall back to allow (user is watching)
-            PermissionDecision::Allow
+            // Deny when policy cannot be evaluated because the manager is poisoned.
+            PermissionDecision::Deny
         }
 
         fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision {
