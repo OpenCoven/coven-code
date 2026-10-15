@@ -163,15 +163,7 @@ impl PluginRegistry {
     pub fn build_hook_registry(&self) -> HookRegistry {
         let mut registry: HookRegistry = HashMap::new();
         for plugin in self.enabled() {
-            if let Some(ref hooks_config) = plugin.hooks_config {
-                register_plugin_hooks(
-                    hooks_config,
-                    &plugin.path.to_string_lossy(),
-                    &plugin.name,
-                    &plugin.source_id,
-                    &mut registry,
-                );
-            }
+            register_plugin_hooks(plugin, self.project_root.as_deref(), &mut registry);
         }
         registry
     }
@@ -180,7 +172,21 @@ impl PluginRegistry {
     pub fn all_mcp_servers(&self) -> Vec<claurst_core::config::McpServerConfig> {
         let mut servers: Vec<claurst_core::config::McpServerConfig> = Vec::new();
         for plugin in self.enabled() {
+            let grants = plugin.manifest.capabilities.as_deref();
+            if !crate::has_capability(grants, "mcp") {
+                continue;
+            }
             for mcp in &plugin.manifest.mcp_servers {
+                let required = match mcp.server_type.as_str() {
+                    "stdio" => "shell",
+                    "sse" | "http" => "network",
+                    _ => continue,
+                };
+                // Decide eligibility while plugin origin and grants are still
+                // available, before lowering into the generic core config.
+                if !crate::has_capability(grants, required) {
+                    continue;
+                }
                 servers.push(claurst_core::config::McpServerConfig {
                     name: mcp.name.clone(),
                     command: mcp.command.clone(),
@@ -198,6 +204,9 @@ impl PluginRegistry {
     pub fn all_lsp_servers(&self) -> Vec<crate::manifest::PluginLspServer> {
         let mut servers: Vec<crate::manifest::PluginLspServer> = Vec::new();
         for plugin in self.enabled() {
+            if !crate::has_capability(plugin.manifest.capabilities.as_deref(), "shell") {
+                continue;
+            }
             for lsp in &plugin.manifest.lsp_servers {
                 servers.push(lsp.clone());
             }
@@ -323,11 +332,13 @@ mod tests {
     fn replacement_uses_the_loaded_plugin_enabled_state() {
         let mut registry = PluginRegistry::new();
         let mut plugin = make_plugin("replacement");
+        plugin.manifest.capabilities = Some(vec!["mcp".into(), "shell".into()]);
         plugin
             .manifest
             .mcp_servers
             .push(crate::manifest::PluginMcpServer {
                 name: "fixture-server".into(),
+                server_type: "stdio".into(),
                 ..Default::default()
             });
         registry.insert(plugin.clone());

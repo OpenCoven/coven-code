@@ -31,41 +31,25 @@ pub use trust::save_plugin_enabled;
 // Capability enforcement
 // ---------------------------------------------------------------------------
 
-/// Check whether a plugin command is allowed to execute based on its declared
-/// capability grants and the capability the action requires.
-///
-/// # Policy
-/// - If the manifest has **no `capabilities` field** (`None`), the plugin
-///   predates capability enforcement and is trusted unconditionally (backwards
-///   compatibility with existing plugins).
-/// - If the manifest declares an explicit list (even an empty one), the
-///   required capability **must** appear in that list.
-///
-/// Returns `Ok(())` when execution is permitted, or `Err(reason)` when it
-/// should be blocked.  The caller should convert `Err` into a `ToolResult::error`.
+/// Effectful actions require an explicit manifest capability. Missing and empty
+/// grants deny those actions; static responses require no grant.
 pub fn check_plugin_capability(def: &PluginCommandDef) -> Result<(), String> {
-    // Determine what capability this action needs.
-    let required = match def.run_action.required_capability() {
-        None => return Ok(()), // StaticResponse — no capability needed.
-        Some(cap) => cap,
+    let Some(required) = def.run_action.required_capability() else {
+        return Ok(());
     };
-
-    match &def.plugin_capabilities {
-        // No `capabilities` field — old-style manifest, allow everything.
-        None => Ok(()),
-        // Explicit capability list — enforce it.
-        Some(granted) => {
-            if granted.iter().any(|g| g.as_str() == required) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Plugin '{}' is not allowed to use capability '{}'. \
-                     Add '{}' to the 'capabilities' list in its manifest to enable this action.",
-                    def.plugin_name, required, required
-                ))
-            }
-        }
+    if has_capability(def.plugin_capabilities.as_deref(), required) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Plugin '{}' is not allowed to use capability '{}'. \
+             Add '{}' to the 'capabilities' list in its manifest to enable this action.",
+            def.plugin_name, required, required
+        ))
     }
+}
+
+pub(crate) fn has_capability(granted: Option<&[String]>, required: &str) -> bool {
+    granted.is_some_and(|grants| grants.iter().any(|grant| grant == required))
 }
 
 use once_cell::sync::Lazy;
@@ -129,6 +113,7 @@ pub fn set_global_hooks(registry: HookRegistry) {
 pub fn run_global_pre_tool_hook(
     tool_name: &str,
     tool_input: &serde_json::Value,
+    working_dir: &Path,
 ) -> hooks::HookOutcome {
     let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
@@ -155,7 +140,7 @@ pub fn run_global_pre_tool_hook(
                 continue;
             }
         }
-        match hooks::run_hook_sync(hook, &event_json) {
+        match hooks::run_hook_sync(hook, &event_json, working_dir) {
             hooks::HookOutcome::Deny(reason) => return hooks::HookOutcome::Deny(reason),
             hooks::HookOutcome::Allow | hooks::HookOutcome::Error(_) => {}
         }
@@ -171,6 +156,7 @@ pub fn run_global_post_tool_hook(
     tool_input: &serde_json::Value,
     tool_output: &str,
     is_error: bool,
+    working_dir: &Path,
 ) {
     let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
@@ -198,7 +184,7 @@ pub fn run_global_post_tool_hook(
                 continue;
             }
         }
-        hooks::run_hook_sync(hook, &event_json);
+        hooks::run_hook_sync(hook, &event_json, working_dir);
     }
 }
 

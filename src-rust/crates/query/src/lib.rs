@@ -3376,7 +3376,8 @@ async fn execute_tool_blocks_with_hooks(
         )
         .await;
 
-        let plugin_pre_outcome = claurst_plugins::run_global_pre_tool_hook(&name, &input);
+        let plugin_pre_outcome =
+            claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
 
         let blocked_result = if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome
         {
@@ -3444,6 +3445,7 @@ async fn execute_tool_blocks_with_hooks(
             &p.input,
             &result.content,
             result.is_error,
+            &tool_ctx.working_dir,
         );
 
         if let Some(tx) = event_tx {
@@ -7627,6 +7629,93 @@ mod tests {
         // Not set in the test environment → enabled by default.
         assert!(stall_recovery_enabled());
     }
+    #[tokio::test]
+    async fn plugin_hooks_use_tool_context_project_without_refreshing_globals() {
+        // This is the only query test that writes the plugin hook registry. A
+        // unique matcher keeps other concurrently running tool tests unaffected.
+        struct ResetHooks;
+        impl Drop for ResetHooks {
+            fn drop(&mut self) {
+                claurst_plugins::set_global_hooks(Default::default());
+            }
+        }
+        let _reset = ResetHooks;
+        let owner = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let mut registry = claurst_plugins::HookRegistry::new();
+        for event in ["PreToolUse", "PostToolUse"] {
+            let command = if cfg!(windows) {
+                format!("echo ran>\"%CLAUDE_PLUGIN_ROOT%\\{event}\"")
+            } else {
+                format!("printf ran > \"$CLAUDE_PLUGIN_ROOT/{event}\"")
+            };
+            let hook = claurst_plugins::RegisteredHook {
+                command,
+                matcher: Some("PluginScopeFixture".into()),
+                blocking: false,
+                plugin_root: owner.path().to_string_lossy().into_owned(),
+                plugin_name: "fixture".into(),
+                plugin_source: "fixture@project".into(),
+                plugin_capabilities: Some(vec!["shell".into()]),
+                scope: claurst_plugins::hooks::HookScope::Project(
+                    owner.path().canonicalize().unwrap(),
+                ),
+            };
+            registry.insert(event.into(), vec![hook]);
+        }
+        claurst_plugins::set_global_hooks(registry);
+        let mut ctx = ToolContext {
+            working_dir: foreign.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: CostTracker::new(),
+            session_id: "plugin-hook-scope".into(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        // Exercise the actual tool path, without a provider call or cache refresh.
+        for (working_dir, allowed) in [
+            (foreign.path(), false),
+            (owner.path(), true),
+            (foreign.path(), false),
+        ] {
+            ctx.working_dir = working_dir.to_path_buf();
+            let results = execute_tool_blocks_with_hooks(
+                vec![(
+                    "scope-test".into(),
+                    "PluginScopeFixture".into(),
+                    serde_json::json!({}),
+                )],
+                &[],
+                &ctx,
+                None,
+            )
+            .await;
+            assert_eq!(results.len(), 1);
+            for event in ["PreToolUse", "PostToolUse"] {
+                let marker = owner.path().join(event);
+                assert_eq!(
+                    marker.exists(),
+                    allowed,
+                    "{event} crossed caller project boundary"
+                );
+                if allowed {
+                    std::fs::remove_file(marker).unwrap();
+                }
+            }
+        }
+    }
+
     #[test]
     fn repeated_provider_ids_keep_independent_attempt_uuids() {
         let mut messages = Vec::new();
