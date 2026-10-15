@@ -61,7 +61,7 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                         }
                         Ok(status) => {
                             let code = status.code().unwrap_or(-1);
-                            global_registry().update_status(
+                            global_registry().finish_if_running(
                                 &task_id_clone,
                                 claurst_core::tasks::TaskStatus::Failed(format!(
                                     "exit code {}",
@@ -70,7 +70,7 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                             );
                         }
                         Err(e) => {
-                            global_registry().update_status(
+                            global_registry().finish_if_running(
                                 &task_id_clone,
                                 claurst_core::tasks::TaskStatus::Failed(e.to_string()),
                             );
@@ -84,14 +84,14 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                     if let Err(error) = c.kill().await {
                         message.push_str(&format!("; failed to kill/reap child: {}", error));
                     }
-                    global_registry().update_status(
+                    global_registry().finish_if_running(
                         &task_id_clone,
                         claurst_core::tasks::TaskStatus::Failed(message),
                     );
                 }
             }
             Err(e) => {
-                global_registry().update_status(
+                global_registry().finish_if_running(
                     &task_id_clone,
                     claurst_core::tasks::TaskStatus::Failed(e.to_string()),
                 );

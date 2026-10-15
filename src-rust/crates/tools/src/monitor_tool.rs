@@ -158,8 +158,11 @@ impl Tool for MonitorTool {
                                         .output();
                                 }
                             }
-                            global_registry().update_status(&id, TaskStatus::Cancelled);
-                            ToolResult::success(format!("Task {} cancelled.", id))
+                            if global_registry().finish_if_running(&id, TaskStatus::Cancelled) {
+                                ToolResult::success(format!("Task {} cancelled.", id))
+                            } else {
+                                ToolResult::error(format!("Task {} is no longer running", id))
+                            }
                         } else {
                             ToolResult::error(format!(
                                 "Task {} is not running (status: {})",
@@ -251,6 +254,42 @@ mod tests {
         let result = tool.execute(input, &ctx).await;
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn monitor_cancel_commits_running_task_without_pid() {
+        let id = global_registry().register(claurst_core::tasks::BackgroundTask::new(
+            "monitor registry-only cancellation fixture",
+        ));
+        let result = MonitorTool
+            .execute(json!({"action": "cancel", "task_id": id}), &make_test_ctx())
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, format!("Task {} cancelled.", id));
+        let task = global_registry().get(&id).unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert!(task.completed_at.is_some());
+        assert!(task.pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn monitor_cancel_rejects_completed_task() {
+        let id = global_registry().register(claurst_core::tasks::BackgroundTask::new(
+            "monitor completed fixture",
+        ));
+        global_registry().complete(&id);
+        let before = global_registry().get(&id).unwrap();
+        let result = MonitorTool
+            .execute(json!({"action": "cancel", "task_id": id}), &make_test_ctx())
+            .await;
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            format!("Task {} is not running (status: completed)", id)
+        );
+        let after = global_registry().get(&id).unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.completed_at, before.completed_at);
     }
 
     fn make_test_ctx() -> ToolContext {
