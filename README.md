@@ -50,15 +50,18 @@ Recent highlights:
 ### Install
 
 ```bash
-npm install -g @opencoven/coven-code
+npm install -g @opencoven/cli
+coven engine install
 ```
 
-Then open a new terminal and run `coven-code`. The `coven-cave` alias is also installed. (The bare `coven` command belongs to the [Coven daemon CLI](https://github.com/OpenCoven/coven) — `@opencoven/cli` — which execs into `coven-code` for the TUI.)
+Then run `coven`. The unified CLI selects its managed engine. Direct `coven-code` installs remain available through [release archives and source builds](docs/installation.md); the deprecated engine npm package is not published with every release.
 
 ### Upgrade
 
 ```bash
-npm install -g @opencoven/coven-code@latest
+npm install -g @opencoven/cli@latest
+coven engine install
+coven doctor
 ```
 
 ---
@@ -84,7 +87,7 @@ Each archive contains a single `coven-code` (or `coven-code.exe`) binary.
 ```bash
 git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
-cargo build --release --package claurst   # binary outputs as coven-code; coven-cave is an alias target
+cargo build --release --locked --package claurst   # binary: coven-code
 ```
 
 > Internal Rust crate names (`claurst-core`, `claurst-tui`, etc.) are preserved from upstream for merge-friendliness. The compiled binary is named `coven-code`.
@@ -121,7 +124,7 @@ cargo build --release --package claurst   # binary outputs as coven-code; coven-
 
 Coven Code is a **local CLI tool** — it runs entirely on your machine. You bring your own Anthropic API key or Codex login. Nothing is sent to OpenCoven servers; all requests go directly from your terminal to the provider.
 
-Settings live in `~/.coven-code/settings.json`. Set your Anthropic key in the environment or via `/config`:
+Standalone settings normally live in `~/.coven-code/settings.json`; under Coven they live in `~/.coven/code/settings.json`. `COVEN_CODE_HOME` overrides the engine home. Set an Anthropic key in the environment:
 
 ```bash
 export ANTHROPIC_API_KEY=<your-key>
@@ -146,20 +149,14 @@ Environment variable prefix: `COVEN_CODE_*` (e.g. `COVEN_CODE_SKIP_PROMPT_HISTOR
 
 ### First run & connecting in-app
 
-If you launch `coven-code` with no credentials configured, the TUI opens a
-**provider-setup** prompt. Press `1` to start the best available Claude path
-(local Claude CLI import when present, otherwise API key), `2` to start Codex
-browser login, or `Enter` to open the full connect picker. `Esc` skips setup;
-you can connect or switch providers later with `/connect`.
+Claude uses an Anthropic API key when configured. Without a key, requests run
+through the local `claude` CLI, which owns its authentication. Coven Code does
+not import or replay Claude CLI OAuth tokens. Codex uses the engine's
+`coven-code codex login` browser flow.
 
-Useful in-session commands:
-
-| Command | Does |
-|---|---|
-| `/connect` | Connect or switch a provider (Claude API key, Claude.ai / Codex OAuth, or import from the Claude CLI) |
-| `/model` | Open the model picker for the active provider; `←`/`→` adjusts reasoning effort |
-| `/effort <low\|medium\|high\|max>` | Set reasoning effort for extended-thinking models (no arg opens a picker) |
-| `/help` | Full keybinding + command reference |
+Use `/account connect` for provider setup and `/account` for account management.
+`/model` opens model selection, `/effort` configures reasoning effort, and `/help`
+shows command and keybinding guidance. See the [command reference](docs/slash-commands.md).
 
 List the model catalog from the shell with `coven-code models [<provider>]`
 (`--refresh` to re-fetch from models.dev, `--json` for machine output).

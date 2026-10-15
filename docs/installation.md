@@ -1,360 +1,177 @@
 # Coven Code Installation Guide
 
-Coven Code is a Rust reimplementation of the Claude Code CLI. The recommended
-npm install path is the `@opencoven/coven-code` package, which installs the
-`coven-code` CLI. Run `coven-code` with no arguments to open the interactive
-Coven Code UI.
+Coven Code is the Rust coding engine used by the unified Coven CLI. Install
+`@opencoven/cli` for the managed engine path. The deprecated
+`@opencoven/coven-code` npm package is not published with every engine release.
+Direct engine binaries and source builds remain available.
 
----
-
-## System Requirements
-
-| Platform | Architecture | Minimum OS |
-|----------|-------------|------------|
-| Windows  | x86_64      | Windows 10 / Server 2019 |
-| Linux    | x86_64      | glibc 2.17+ (most distros from 2014 onward) |
-| Linux    | aarch64     | glibc 2.17+ (Raspberry Pi 4, AWS Graviton, etc.) |
-| macOS    | x86_64      | macOS 11 Big Sur |
-| macOS    | aarch64     | macOS 11 Big Sur (Apple Silicon: M1/M2/M3) |
-
-There are no other runtime dependencies. The binary is statically linked where
-possible; on Linux it links against the system glibc.
-
----
-
-## Quick install (recommended)
-
-If you have Node.js or Bun installed, install Coven Code globally:
-
-```bash
-# npm
-npm install -g @opencoven/coven-code
-
-# bun
-bun install -g @opencoven/coven-code
-```
-
-The postinstall script downloads the correct pre-built binary from GitHub
-Releases — no compilation needed. After installation, run:
-
-```bash
-coven-code
-```
-
-The installed command is `coven-code`; `coven-cave` is installed as an alias
-for the same CLI. The bare `coven` command is owned by the Coven daemon CLI
-(`@opencoven/cli`) and is not installed by this package.
-
-You can also run Coven Code without a permanent install:
-
-```bash
-npx @opencoven/coven-code          # via npm
-bunx @opencoven/coven-code         # via bun
-```
-
----
-
-## Standalone Coven Code binary
-
-### Linux / macOS
-
-```bash
-curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash
-```
-
-### Windows (PowerShell)
-
-```powershell
-irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
-```
-
-Both installers:
-
-1. Detect your platform and architecture.
-2. Download the matching archive from the latest GitHub release.
-3. Extract `coven-code` into `~/.coven-code/bin/` (Windows: `%USERPROFILE%\.coven-code\bin\`).
-4. Append that directory to your shell config (`.bashrc`, `.zshrc`,
-   `.config/fish/config.fish`) or to your Windows user `PATH`.
-5. On macOS, strip the quarantine attribute so Gatekeeper does not block the
-   unsigned binary.
-
-Open a new terminal afterwards (or `source` the modified shell config) so
-the updated `PATH` takes effect, then run `coven-code --version` to verify.
-
-### Installer flags
-
-Both scripts accept the same flags:
-
-| Flag (sh) | Flag (ps1) | Effect |
-|---|---|---|
-| `--version 0.1.0` | `-Version 0.1.0` | Install a specific version |
-| `--binary <path>` | `-Binary <path>` | Install from a local file (skip download) |
-| `--install-dir <path>` | `-InstallDir <path>` | Override the install directory |
-| `--no-modify-path` | `-NoModifyPath` | Don't touch shell config / user PATH |
-| `--help` | `-Help` | Show usage |
-
-Example: `curl -fsSL https://.../install.sh | bash -s -- --version 0.1.0`
-
----
-
-## Coven daemon (optional)
-
-The Coven daemon unlocks the ecosystem features (familiars as agents,
-daemon-registered skills, roster glyphs). It ships separately as the Coven
-CLI:
+## Managed installation
 
 ```bash
 npm install -g @opencoven/cli
-coven daemon start
+coven engine install
+coven
 ```
 
-Use `coven doctor` to inspect local setup and
-`coven run <harness> "<task>"` for direct harness sessions. Coven Code is
-fully standalone without the daemon.
-
-**Supported platforms via npm:**
-
-| Platform | Architecture |
-|----------|-------------|
-| Linux    | x86_64, aarch64 |
-| macOS    | x86_64 (Intel), aarch64 (Apple Silicon) |
-| Windows  | x86_64 |
-
----
-
-## Upgrading
-
-Once installed, upgrade in place at any time:
+`coven engine install` installs the engine version pinned by the installed Coven
+CLI. That version can differ from the latest Coven Code GitHub release.
 
 ```bash
-npm install -g @opencoven/coven-code@latest
-# or
-bun install -g @opencoven/coven-code@latest
+coven engine which
+coven doctor
 ```
 
-Settings in `~/.coven/` and `~/.coven-code/` are preserved.
+Use these commands to inspect the selected engine. An explicit `COVEN_ENGINE_BIN`
+override takes precedence; otherwise the managed engine takes precedence over a
+standalone copy on PATH. See the [unification guide](unification.md).
 
----
+## Release platforms
 
-## Manual install from GitHub Releases
+| Platform | Architecture | Archive |
+|---|---|---|
+| Windows | x86_64 | `coven-code-windows-x86_64.zip` |
+| Linux | x86_64 | `coven-code-linux-x86_64.tar.gz` |
+| Linux | aarch64 | `coven-code-linux-aarch64.tar.gz` |
+| macOS | x86_64 | `coven-code-macos-x86_64.tar.gz` |
+| macOS | aarch64 | `coven-code-macos-aarch64.tar.gz` |
 
-If you'd rather not run an install script, grab archives directly from
-[**GitHub Releases**](https://github.com/OpenCoven/coven-code/releases):
+These are build targets, not a guarantee of compatibility with every OS version.
+Linux binaries use system libraries; check the release's native verification
+results for the supported runtime baseline. There is no native Windows ARM64
+release artifact.
 
-| Archive | Platform |
-|---------|----------|
-| `coven-code-windows-x86_64.zip` | Windows 64-bit |
-| `coven-code-linux-x86_64.tar.gz` | Linux x86_64 |
-| `coven-code-linux-aarch64.tar.gz` | Linux ARM64 |
-| `coven-code-macos-x86_64.tar.gz` | macOS Intel |
-| `coven-code-macos-aarch64.tar.gz` | macOS Apple Silicon |
+## Standalone installation
 
-Every archive contains a single binary named `coven-code` (or `coven-code.exe`).
-The installers also place `coven-cave` on PATH as an alias for that binary.
-Extract it and put it somewhere on your `PATH`. For example on Linux:
+Download the installer from the chosen
+[GitHub Release](https://github.com/OpenCoven/coven-code/releases), inspect it,
+and run it locally. Use the installer belonging to that release when pinning a
+version. Launch the installed engine with `coven-code`; the installers also create
+`coven-cave` as an alias. They do not install the unified `coven` CLI.
+
+The default location is `~/.coven-code/bin/` on Unix and
+`%USERPROFILE%\.coven-code\bin\` on Windows. The shell installer appends a PATH
+entry to a recognized shell's configuration; the PowerShell installer updates
+the user PATH unless `-NoModifyPath` is supplied. Reopen the terminal afterward.
+The shell installer does not remove macOS quarantine attributes automatically.
+
+| Shell flag | PowerShell parameter | Effect |
+|---|---|---|
+| `--version <version>` | `-Version <version>` | Select a release; use its numeric version without `v` |
+| `--binary <path>` | `-Binary <path>` | Install an already verified local binary |
+| `--install-dir <path>` | `-InstallDir <path>` | Override the install directory |
+| Not supported | `-NoModifyPath` | Leave the Windows user PATH unchanged |
+| `--help` | `-Help` | Print usage |
+
+The local-binary path does not authenticate the file for you. Verify its origin
+and digest before installing it. The shell installer may still resolve the
+latest release if no `--version` is supplied, even with `--binary`.
+
+### Archive verification
+
+For releases with `SHA256SUMS`, obtain the archive and manifest from the same
+versioned release. Verify the selected archive against its exact manifest entry
+before extracting or replacing an executable. Every archive should contain only
+`coven-code` (or `coven-code.exe` on Windows).
+
+The next-release checksum-verifying installers require a complete manifest for
+all five archives and fail before extraction on missing, malformed or mismatched
+checksums. Older releases, including v0.8.0, lack that manifest and cannot be
+installed with those new download paths. Historical installers do not provide
+this verification. A checksum delivered over the same HTTPS release channel is
+not an independently signed build attestation.
+
+For manual installation, use the verified archive, inspect its contents, then
+place the extracted executable in a directory on PATH. Do not pipe an unverified
+download directly into an archive extractor.
+
+## Upgrading and rollback
+
+For a managed installation:
 
 ```bash
-curl -L https://github.com/OpenCoven/coven-code/releases/latest/download/coven-code-linux-x86_64.tar.gz \
-  | tar -xz
-chmod +x coven-code
-sudo mv coven-code /usr/local/bin/
+npm install -g @opencoven/cli@latest
+coven engine install
+coven engine which
+coven doctor
 ```
 
-On macOS, also strip the quarantine flag so Gatekeeper allows the unsigned
-binary:
+For a standalone installation, use the selected release's verified installer or
+archive, then check the exact installed path and version. Updating a standalone
+binary does not override a managed engine.
 
-```bash
-xattr -rd com.apple.quarantine /usr/local/bin/coven-code
-```
+Before upgrading, preserve a verified prior binary and back up the affected
+engine configuration and session data. Standalone settings normally live under
+`~/.coven-code/`; under Coven they normally live under `~/.coven/code/`.
+`COVEN_CODE_HOME` can override the engine home, and `COVEN_HOME` can relocate the
+Coven home. Inspect the effective paths, including migration symlinks, rather
+than assuming the default directory is active.
 
-On Windows, extract the zip and add the folder containing `coven-code.exe`
-to your user `PATH` via **Settings → System → Advanced system settings →
-Environment Variables**.
+Rollback requires a verified prior binary and data compatible with that version.
+Do not disable checksum verification to install a manifest-less historical
+release. Restore an independently verified artifact and, if required, the
+matching data backup. Consult the release notes for migration-specific limits;
+a successful binary replacement alone does not prove data rollback safety.
 
-### User-local install without sudo
-
-```bash
-mkdir -p ~/.local/bin
-mv coven-code ~/.local/bin/coven-code
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-For Zsh users, substitute `.zshrc` for `.bashrc`.
-
----
-
-## Verifying the Installation
+## Verify the installation
 
 ```bash
 coven-code --version
 ```
 
-A successful installation prints the version string, for example:
+Example engine output:
 
 ```
 coven-code 0.8.0
 ```
 
-To confirm the binary is the one you installed:
+Use `command -v coven-code` on Unix or `Get-Command coven-code` in PowerShell to
+inspect the standalone executable. Use `coven engine which` for the managed
+selection; the two paths may differ.
 
-```bash
-which coven-code          # Linux / macOS
-where coven-code          # Windows (Command Prompt)
-```
+## Building from source
 
----
-
-## Building from Source
-
-Building from source requires the Rust toolchain (stable channel, 1.75 or
-later). Install Rust via [rustup](https://rustup.rs/):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-### Option A: Install from a clone
+Use the stable Rust toolchain used by CI and the checked-in lockfile. No older
+minimum Rust version is asserted here without a corresponding build check.
 
 ```bash
 git clone https://github.com/OpenCoven/coven-code.git
 cd coven-code/src-rust
+cargo build --locked --package claurst
+```
+
+The debug binary is `target/debug/coven-code` (`.exe` on Windows). For an optimized
+binary, use `cargo build --release --locked --package claurst`; output is under
+`target/release/`. To install a source build into Cargo's bin directory:
+
+```bash
 cargo install --path crates/cli --locked
 ```
 
-This compiles the `claurst` package and installs the `coven-code` binary to
-`~/.cargo/bin/coven-code`. That directory is added to `PATH` automatically by
-`rustup`.
+The package has one binary target, `coven-code`; standalone release installers
+create the `coven-cave` alias separately. The CLI's default feature is `voice`.
+Use `--no-default-features` to disable it, or `--features steer` for the opt-in
+steering command. Do not pass features that exist only on internal crates to
+the CLI package.
 
-### Option B: Clone and Build
+On Debian/Ubuntu the release workflow installs `libasound2-dev` and `pkg-config`.
+ALSA headers are needed for the voice feature. Use the repository's release
+workflow for Linux aarch64 cross-builds: its Cross.toml pre-build setup installs
+the target ALSA headers and pkg-config inside the container.
 
-```bash
-git clone https://github.com/OpenCoven/coven-code.git
-cd coven-code/src-rust
-
-# Debug build (fast to compile, larger binary, extra runtime checks)
-cargo build --package claurst
-
-# Release build (optimised, smaller, suitable for everyday use)
-cargo build --release --package claurst
-```
-
-The release binary is placed at:
-
-```
-src-rust/target/release/coven-code        # Linux / macOS
-src-rust/target\release\coven-code.exe   # Windows
-```
-
-Copy it to a directory on your `PATH` as described above.
-
-### Linux system dependencies
-
-On Linux, the build requires ALSA development headers (for the optional voice
-feature) and OpenSSL:
-
-```bash
-# Debian / Ubuntu
-sudo apt-get install -y libasound2-dev libssl-dev pkg-config
-
-# Fedora / RHEL
-sudo dnf install -y alsa-lib-devel openssl-devel
-
-# Arch
-sudo pacman -S alsa-lib openssl
-```
-
-### Optional cargo features
-
-| Feature | Description |
-|---------|-------------|
-| `voice` | Microphone input / voice prompting |
-| `computer-use` | Screenshot capture and mouse/keyboard control |
-| `dev_full` | All experimental features combined |
-
-To enable a feature:
-
-```bash
-cargo build --release --package claurst --features voice
-cargo build --release --package claurst --features dev_full
-```
-
-### Cross-compiling for Linux aarch64
-
-The release workflow uses [cross](https://github.com/cross-rs/cross) for
-aarch64 Linux builds. To reproduce it locally:
-
-```bash
-cargo install cross --git https://github.com/cross-rs/cross
-cd src-rust
-cross build --release --locked --package claurst --target aarch64-unknown-linux-gnu
-```
-
-`cross` manages the Docker sysroot, OpenSSL, and ALSA headers automatically.
-
----
-
-## Shell Completions
-
-Coven does not currently ship a dedicated `completions` subcommand. All
-flags can be discovered via `coven-code --help`. If you want basic tab completion
-in bash or zsh you can use the generic completion helper built into your shell:
-
-```bash
-# bash — add to ~/.bashrc
-complete -C coven-code coven-code
-
-# zsh — add to ~/.zshrc (requires compinit)
-compdef _gnu_generic coven-code
-```
-
-Richer completion scripts may be added in a future release.
-
----
-
-## Upgrading a source install
-
-```bash
-cd coven-code/src-rust
-cargo install --path crates/cli --locked --force
-```
-
-For npm or bun installs, reinstall the `@opencoven/coven-code` package — see the
-[Upgrading](#upgrading) section above.
-
----
+To upgrade a source install, update the checkout to the intended reviewed source,
+then run `cargo install --path crates/cli --locked --force` from `src-rust/`.
+Use `coven-code --help` for supported CLI flags; no generated shell-completion
+command is currently documented.
 
 ## Uninstalling
 
-If you used the recommended npm or bun package, remove it globally:
+Remove the executable and installer-created alias from the actual installation
+location, then remove only the corresponding PATH entry. For an old npm install,
+use `npm uninstall -g @opencoven/coven-code` or
+`bun remove -g @opencoven/coven-code`. For a Cargo install, use `cargo uninstall claurst`.
 
-```bash
-npm uninstall -g @opencoven/coven-code
-# or
-bun remove -g @opencoven/coven-code
-```
-
-If you used the install script, remove the install directory:
-
-```bash
-rm -rf ~/.coven-code/bin                    # Linux / macOS
-# Windows (PowerShell):
-Remove-Item -Recurse -Force "$env:USERPROFILE\.coven-code\bin"
-```
-
-For manual installs:
-
-```bash
-sudo rm /usr/local/bin/coven-code           # if installed system-wide
-rm ~/.local/bin/coven-code                  # if installed user-local
-```
-
-To also remove all settings and session data:
-
-```bash
-rm -rf ~/.coven ~/.coven-code
-```
-
-You may also want to remove the `# coven-code` PATH line that the installer
-appended to your shell config (`.bashrc`, `.zshrc`, etc.).
+Keep configuration and sessions unless you intentionally want to delete them.
+Do not delete all of `~/.coven`: it contains shared ecosystem state. If removing
+engine data, first identify the effective engine home, inspect symlinks, and back
+it up. Remove only the engine-owned data you have selected; do not follow a
+migration alias into unrelated state.

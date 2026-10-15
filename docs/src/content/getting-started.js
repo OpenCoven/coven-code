@@ -3,29 +3,30 @@ export const meta = { title: 'Getting Started' };
 export function render() {
   return `
     <h1>Getting Started</h1>
-    <p class="lead">Install, authenticate, and run your first session in under a minute.</p>
+    <p class="lead">Install the managed engine, configure a provider, and start a session.</p>
 
     <h2>1. Install</h2>
 
     <h3>npm</h3>
-    <pre><code data-lang="bash">npm install -g @opencoven/coven-code</code></pre>
+    <pre><code data-lang="bash">npm install -g @opencoven/cli
+coven engine install</code></pre>
 
-    <p>This installs the <code>coven-code</code> CLI (with a <code>coven-cave</code> alias). Run <code>coven-code</code> with no arguments for the interactive UI. The bare <code>coven</code> command belongs to the Coven daemon CLI (<code>@opencoven/cli</code>).</p>
+    <p>The unified <code>coven</code> CLI installs and selects a pinned engine. Run <code>coven engine which</code> or <code>coven doctor</code> to inspect the selected executable. The deprecated engine npm package is not published with every release. Direct engine builds remain available.</p>
 
     <h3>From Source</h3>
     <pre><code data-lang="bash">git clone https://github.com/OpenCoven/coven-code
 cd coven-code/src-rust
-cargo install --path crates/cli</code></pre>
+cargo install --path crates/cli --locked</code></pre>
 
     <h2>2. Connect a Provider</h2>
 
     <pre><code data-lang="bash">export ANTHROPIC_API_KEY=sk-ant-...</code></pre>
 
-    <p>Or launch <code>coven</code> with no credentials. The first-run prompt lets you press <kbd>1</kbd> for Claude setup, <kbd>2</kbd> for Codex browser login, or <kbd>Enter</kbd> for the full <code>/connect</code> picker. If you already use Claude Code or <code>ant</code>, the picker prioritizes local credential import.</p>
+    <p>Claude uses the configured Anthropic API key. Without one, the engine runs turns through the local <code>claude</code> CLI, whose authentication stays inside that CLI. Coven Code does not import or replay its OAuth tokens. Use <code>/account connect</code> for provider setup.</p>
 
     <pre><code data-lang="bash">coven-code codex login</code></pre>
 
-    <p>Claude.ai OAuth requires <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>; without that first-party client, use an API key or Claude CLI import. Multiple named accounts can coexist; switch in the TUI with <code>/login switch &lt;id&gt;</code>.</p>
+    <p>The direct engine command above starts Codex browser login. Direct Anthropic OAuth requires a configured <code>COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID</code>; an API key or authenticated Claude CLI is the usual Claude path. Use <code>/account</code> for account management.</p>
 
     <h2>3. Run Interactively</h2>
 
