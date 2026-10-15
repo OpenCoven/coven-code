@@ -498,10 +498,11 @@ pub fn install_plugin_from_path(source_path: &Path) -> Result<String, PluginErro
     let plugin_name = manifest.name.clone();
 
     // Determine install destination.
-    let dest = default_user_plugins_dir().join(&plugin_name);
+    let plugins_root = default_user_plugins_dir();
+    let dest = plugins_root.join(&plugin_name);
 
     // Copy source to dest.
-    copy_dir_all(source_path, &dest).map_err(|e| PluginError::Io {
+    copy_plugin_files(source_path, &plugins_root, &plugin_name).map_err(|e| PluginError::Io {
         path: dest.to_string_lossy().into_owned(),
         message: e.to_string(),
     })?;
@@ -516,8 +517,122 @@ pub fn install_plugin_from_path(source_path: &Path) -> Result<String, PluginErro
     Ok(plugin_name)
 }
 
+/// Copy into a trusted plugins root without following destination directory links.
+/// Checks assume the directory tree is not concurrently replaced by another process.
+fn copy_plugin_files(source: &Path, plugins_root: &Path, name: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::path::Component;
+
+    // This filesystem boundary also protects callers without stricter manifest validation.
+    let relative = Path::new(name);
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Plugin destination must stay below the plugins directory",
+        ));
+    }
+    let source = std::fs::canonicalize(source)?;
+    let root = resolve_plugins_root(plugins_root)?;
+    let destination = root.join(relative);
+    let mut directory = root;
+    for part in relative.components() {
+        directory.push(part);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_symlink() => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Plugin destination directory is a symbolic link: {}",
+                        directory.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    // Compare filesystem identity, not spelling: canonical paths can still differ
+    // in case on case-insensitive filesystems. Check both ancestor directions.
+    let source_handle = same_file::Handle::from_path(&source)?;
+    for ancestor in destination.ancestors() {
+        match same_file::Handle::from_path(ancestor) {
+            Ok(handle) if handle == source_handle => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Plugin source and installation destination overlap",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match same_file::Handle::from_path(&destination) {
+        Ok(destination_handle) => {
+            for ancestor in source.ancestors() {
+                if same_file::Handle::from_path(ancestor)? == destination_handle {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "Plugin source and installation destination overlap",
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    copy_dir_all(&source, &destination)
+}
+
+/// Resolve the configured root (including intentional symlinks) without creating it.
+fn resolve_plugins_root(root: &Path) -> std::io::Result<std::path::PathBuf> {
+    let mut existing = root;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(mut resolved) => {
+                for part in missing.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = existing.file_name() else {
+                    return Err(error);
+                };
+                missing.push(name);
+                existing = existing
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Recursively copy a directory.
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dst) {
+        Ok(metadata) if metadata.is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Plugin destination directory is a symbolic link: {}",
+                    dst.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -525,7 +640,12 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         if ty.is_dir() {
             copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
         } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+            // Replace the directory entry rather than writing through a symlink
+            // or hardlink. A failed copy leaves the previous file intact.
+            let staging = tempfile::tempdir_in(dst)?;
+            let staged_file = staging.path().join("file");
+            std::fs::copy(entry.path(), &staged_file)?;
+            std::fs::rename(&staged_file, dst.join(entry.file_name()))?;
         }
     }
     Ok(())
@@ -697,5 +817,241 @@ mod tests {
         let diff = ReloadDiff::default();
         let out = format_reload_summary(&reg, &diff);
         assert!(out.contains("Reloaded"));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::copy_plugin_files;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn plugin_copy_merges_and_overwrites() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("plugins");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/new"), "new").unwrap();
+        fs::create_dir_all(root.join("plugin/nested")).unwrap();
+        fs::write(root.join("plugin/nested/new"), "old").unwrap();
+        fs::write(root.join("plugin/retained"), "keep").unwrap();
+        copy_plugin_files(&source, &root, "plugin").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("plugin/nested/new")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("plugin/retained")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn plugin_copy_rejects_same_directory_without_truncation() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("plugin");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), "preserve").unwrap();
+        let result = copy_plugin_files(&source, temp.path(), "plugin");
+        assert_eq!(
+            fs::read_to_string(source.join("marker")).unwrap(),
+            "preserve"
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plugin_copy_rejects_escaping_names() {
+        for name in ["../outside", "absolute"] {
+            let temp = tempdir().unwrap();
+            let source = temp.path().join("source");
+            let root = temp.path().join("plugins");
+            let outside = temp.path().join("outside");
+            fs::create_dir(&source).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&outside).unwrap();
+            fs::write(source.join("marker"), "overwrite").unwrap();
+            fs::write(outside.join("marker"), "preserve").unwrap();
+            let name = if name == "absolute" {
+                outside.to_str().unwrap()
+            } else {
+                name
+            };
+            let result = copy_plugin_files(&source, &root, name);
+            assert_eq!(
+                fs::read_to_string(outside.join("marker")).unwrap(),
+                "preserve"
+            );
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn plugin_copy_replaces_hardlink_without_changing_target() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("plugins");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(root.join("plugin")).unwrap();
+        fs::write(source.join("marker"), "new").unwrap();
+        let outside = temp.path().join("outside");
+        fs::write(&outside, "preserve").unwrap();
+        fs::hard_link(&outside, root.join("plugin/marker")).unwrap();
+        copy_plugin_files(&source, &root, "plugin").unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "preserve");
+        assert_eq!(
+            fs::read_to_string(root.join("plugin/marker")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_copy_rejects_destination_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+        for nested in [false, true] {
+            let temp = tempdir().unwrap();
+            let source = temp.path().join("source");
+            let root = temp.path().join("plugins");
+            let outside = temp.path().join("outside");
+            fs::create_dir_all(source.join("nested")).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&outside).unwrap();
+            let destination = if nested {
+                fs::create_dir(root.join("plugin")).unwrap();
+                fs::write(source.join("nested/marker"), "overwrite").unwrap();
+                root.join("plugin/nested")
+            } else {
+                fs::write(source.join("marker"), "overwrite").unwrap();
+                root.join("plugin")
+            };
+            fs::write(outside.join("marker"), "preserve").unwrap();
+            symlink(&outside, destination).unwrap();
+            let result = copy_plugin_files(&source, &root, "plugin");
+            assert_eq!(
+                fs::read_to_string(outside.join("marker")).unwrap(),
+                "preserve"
+            );
+            assert!(result.is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_copy_replaces_destination_file_symlink() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("plugins");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(root.join("plugin")).unwrap();
+        fs::write(source.join("marker"), "new").unwrap();
+        let outside = temp.path().join("outside");
+        fs::write(&outside, "preserve").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("plugin/marker")).unwrap();
+        copy_plugin_files(&source, &root, "plugin").unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "preserve");
+        assert_eq!(
+            fs::read_to_string(root.join("plugin/marker")).unwrap(),
+            "new"
+        );
+        assert!(!fs::symlink_metadata(root.join("plugin/marker"))
+            .unwrap()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_copy_preserves_root_alias_and_source_file_link_and_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("plugins");
+        let alias = temp.path().join("alias");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&root).unwrap();
+        symlink(&root, &alias).unwrap();
+        let original = temp.path().join("original");
+        fs::write(&original, "linked").unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o751)).unwrap();
+        symlink(&original, source.join("script")).unwrap();
+        copy_plugin_files(&source, &alias, "plugin").unwrap();
+        let destination = root.join("plugin/script");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "linked");
+        assert!(!fs::symlink_metadata(&destination).unwrap().is_symlink());
+        assert_eq!(
+            fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+    }
+    #[test]
+    fn plugin_copy_creates_missing_root_and_nested_destination() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("missing/plugins");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), "copy").unwrap();
+        copy_plugin_files(&source, &root, "nested/plugin").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("nested/plugin/marker")).unwrap(),
+            "copy"
+        );
+    }
+
+    #[test]
+    fn plugin_copy_rejects_overlapping_trees_before_creation() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("child")).unwrap();
+        fs::write(source.join("marker"), "preserve").unwrap();
+        let missing_root = source.join("missing/plugins");
+        assert!(copy_plugin_files(&source, &missing_root, "plugin").is_err());
+        assert!(!source.join("missing").exists());
+        assert!(copy_plugin_files(&source.join("child"), temp.path(), "source").is_err());
+        assert_eq!(
+            fs::read_to_string(source.join("marker")).unwrap(),
+            "preserve"
+        );
+    }
+
+    #[test]
+    fn plugin_copy_rejects_case_alias_overlap() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("Plugin");
+        fs::create_dir(&source).unwrap();
+        let alias = temp.path().join("plugin");
+        if !alias.exists() {
+            // This fixture proves the filesystem is case-sensitive.
+            return;
+        }
+        assert!(same_file::is_same_file(&source, &alias).unwrap());
+        fs::write(source.join("marker"), "preserve").unwrap();
+        assert!(copy_plugin_files(&source, temp.path(), "plugin").is_err());
+        assert!(copy_plugin_files(&source, &alias.join("missing"), "nested").is_err());
+        assert!(!source.join("missing").exists());
+        fs::create_dir(source.join("child")).unwrap();
+        assert!(copy_plugin_files(&source.join("child"), temp.path(), "plugin").is_err());
+        assert_eq!(
+            fs::read_to_string(source.join("marker")).unwrap(),
+            "preserve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_copy_failure_preserves_target_and_cleans_staging() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("plugins");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(root.join("plugin")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), source.join("marker")).unwrap();
+        fs::write(root.join("plugin/marker"), "preserve").unwrap();
+        assert!(copy_plugin_files(&source, &root, "plugin").is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("plugin/marker")).unwrap(),
+            "preserve"
+        );
+        assert_eq!(fs::read_dir(root.join("plugin")).unwrap().count(), 1);
     }
 }
