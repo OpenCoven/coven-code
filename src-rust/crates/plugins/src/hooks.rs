@@ -190,16 +190,41 @@ pub fn run_hook_sync(hook: &RegisteredHook, event_json: &str) -> HookOutcome {
         }
     };
 
-    // Write event JSON to stdin, ignoring errors (child may not read it).
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(event_json.as_bytes());
-    }
+    // Feed stdin while wait_with_output drains both output pipes. Writing all
+    // input first can deadlock a hook that emits output before reading input.
+    let output = std::thread::scope(|scope| {
+        let writer = if let Some(mut stdin) = child.stdin.take() {
+            match std::thread::Builder::new()
+                .name("plugin-hook-stdin".into())
+                .spawn_scoped(scope, move || {
+                    // Hooks may exit successfully without reading the payload.
+                    let _ = stdin.write_all(event_json.as_bytes());
+                }) {
+                Ok(writer) => Some(writer),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("Could not start hook input writer: {error}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let output = child.wait_with_output();
+        if writer.is_some_and(|writer| writer.join().is_err()) {
+            return Err(std::io::Error::other("Hook input writer panicked"));
+        }
+        output
+    });
 
-    let output = match child.wait_with_output() {
+    let output = match output {
         Ok(o) => o,
         Err(e) => {
             let msg = format!(
-                "Plugin '{}' hook '{}' wait error: {}",
+                "Plugin '{}' hook '{}' execution error: {}",
                 hook.plugin_name, hook.command, e
             );
             tracing::warn!("{}", msg);
