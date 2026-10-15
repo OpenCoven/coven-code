@@ -44,6 +44,7 @@ pub mod remote_trigger;
 pub mod repl_tool;
 pub mod send_message;
 mod shell_output;
+mod shell_pipe;
 pub mod skill_tool;
 pub mod sleep;
 pub mod synthetic_output;

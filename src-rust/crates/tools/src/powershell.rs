@@ -20,7 +20,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::debug;
 
@@ -244,18 +243,10 @@ impl Tool for PowerShellTool {
             let mut stdout_lines = Vec::new();
             let mut stderr_lines = Vec::new();
 
-            if let Some(out) = stdout {
-                let mut lines = BufReader::new(out).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stdout_lines.push(line);
-                }
-            }
-            if let Some(err) = stderr {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stderr_lines.push(line);
-                }
-            }
+            tokio::join!(
+                crate::shell_pipe::drain_lines(stdout, |line| stdout_lines.push(line)),
+                crate::shell_pipe::drain_lines(stderr, |line| stderr_lines.push(line)),
+            );
 
             let status = child.wait().await;
             (stdout_lines, stderr_lines, status)

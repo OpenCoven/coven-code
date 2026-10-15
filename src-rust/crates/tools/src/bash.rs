@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::debug;
 
@@ -196,19 +195,7 @@ async fn run_in_background(
                     let stdout = c.stdout.take();
                     let stderr = c.stderr.take();
 
-                    if let Some(out) = stdout {
-                        let mut lines = BufReader::new(out).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            global_registry().append_output(&task_id_clone, &line);
-                        }
-                    }
-                    if let Some(err) = stderr {
-                        let mut lines = BufReader::new(err).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let err_line = format!("STDERR: {}", line);
-                            global_registry().append_output(&task_id_clone, &err_line);
-                        }
-                    }
+                    crate::shell_pipe::drain_background(stdout, stderr, &task_id_clone).await;
 
                     match c.wait().await {
                         Ok(status) if status.success() => {
@@ -470,21 +457,10 @@ impl Tool for BashTool {
             let mut stdout_lines = Vec::new();
             let mut stderr_lines = Vec::new();
 
-            if let Some(stdout) = stdout_handle {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stdout_lines.push(line);
-                }
-            }
-
-            if let Some(stderr) = stderr_handle {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stderr_lines.push(line);
-                }
-            }
+            tokio::join!(
+                crate::shell_pipe::drain_lines(stdout_handle, |line| stdout_lines.push(line)),
+                crate::shell_pipe::drain_lines(stderr_handle, |line| stderr_lines.push(line)),
+            );
 
             let status = child.wait().await;
             (stdout_lines, stderr_lines, status)
@@ -600,20 +576,11 @@ impl BashTool {
             let mut stdout_lines = Vec::new();
             let mut stderr_lines = Vec::new();
 
-            if let Some(stdout) = stdout_handle {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stdout_lines.push(line);
-                }
-            }
-            if let Some(stderr) = stderr_handle {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    stderr_lines.push(line);
-                }
-            }
+            tokio::join!(
+                crate::shell_pipe::drain_lines(stdout_handle, |line| stdout_lines.push(line)),
+                crate::shell_pipe::drain_lines(stderr_handle, |line| stderr_lines.push(line)),
+            );
+
             let status = child.wait().await;
             (stdout_lines, stderr_lines, status)
         })
