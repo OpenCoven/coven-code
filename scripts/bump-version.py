@@ -5,9 +5,9 @@ Usage: scripts/bump-version.py vMAJOR.MINOR.PATCH
 
 Touches:
   - src-rust/Cargo.toml                 workspace.package.version
-  - src-rust/Cargo.lock                 12 coven-code* workspace package entries
+  - src-rust/Cargo.lock                 12 claurst* workspace package entries
   - npm/package.json                    version field
-  - README.md                           shields.io badge (text + alt) + Beta callout
+  - README.md                           engine introduction + Beta callout
   - docs/index.md                       **Version:** line
   - docs/installation.md                "coven-code X.Y.Z" sample output
   - src-rust/crates/acp/registry-template/agent.json
@@ -101,7 +101,7 @@ def main() -> None:
         count=1,
     )
 
-    # 2. Cargo.lock — every coven-code* workspace package
+    # 2. Cargo.lock — every claurst* workspace package
     bump_cargo_lock(version)
 
     # 3. npm/package.json
@@ -111,10 +111,12 @@ def main() -> None:
     pkg_path.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
     print(f"  npm/package.json")
 
-    # 4. README.md — Beta callout + attribution version line
+    # 4. README.md — engine introduction and Beta callout.
+    # Claurst attribution identifies the upstream baseline, not our release.
     readme = ROOT / "README.md"
     replace(readme, r"Beta \(v\d+\.\d+\.\d+\)\.", f"Beta (v{version}).", count=1)
-    replace(readme, r"Claurst v\d+\.\d+\.\d+", f"Claurst v{version}", count=1)
+    replace(readme, r"`coven-code` \*\*v\d+\.\d+\.\d+\*\*",
+            f"`coven-code` **v{version}**", count=1)
 
     # 5. docs/index.md
     replace(
