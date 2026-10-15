@@ -201,60 +201,14 @@ jobs:
         with:
           path: artifacts
 
-      - name: Verify all expected assets exist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate and package release artifacts
         run: |
-          EXPECTED=(
-            coven-code-windows-x86_64
-            coven-code-linux-x86_64
-            coven-code-linux-aarch64
-            coven-code-macos-x86_64
-            coven-code-macos-aarch64
-          )
-          MISSING=()
-          for name in "${EXPECTED[@]}"; do
-            if [[ ! -d "artifacts/$name" ]]; then
-              MISSING+=("$name")
-            fi
-          done
-          if [[ ${#MISSING[@]} -gt 0 ]]; then
-            echo "::error::Missing artifacts: ${MISSING[*]}"
-            exit 1
-          fi
-          echo "All 5 artifacts present."
-
-      - name: Prepare release archives
-        run: |
-          mkdir -p release
-          for dir in artifacts/*/; do
-            name=$(basename "$dir")
-            binary=$(find "$dir" -maxdepth 1 -type f | head -1)
-            if [[ -z "$binary" ]]; then
-              echo "::error::No file in $dir"
-              exit 1
-            fi
-            if [[ "$binary" == *.exe ]]; then
-              (cd "$dir" && zip "../../release/${name}.zip" "$(basename "$binary")")
-            else
-              chmod +x "$binary"
-              tar -czf "release/${name}.tar.gz" -C "$dir" "$(basename "$binary")"
-            fi
-          done
-
-          # Stage install scripts as release assets so users can run:
-          #   curl -fsSL https://github.com/<repo>/releases/latest/download/install.sh | bash
-          #   irm https://github.com/<repo>/releases/latest/download/install.ps1 | iex
-          if [[ -f install.sh ]]; then
-            cp install.sh release/install.sh
-          fi
-          if [[ -f install.ps1 ]]; then
-            cp install.ps1 release/install.ps1
-          fi
-
-          # Hash the final archive bytes. Installers require this exact
-          # versioned manifest and fail closed before extraction.
+          python scripts/package-release.py artifacts release
           node scripts/generate-release-checksums.mjs release
-
-          echo "Release assets:"
           ls -lh release/
 
       # Build release notes in two passes:
