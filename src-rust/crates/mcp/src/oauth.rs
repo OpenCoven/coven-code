@@ -72,7 +72,7 @@ fn token_path(server_name: &str) -> std::io::Result<PathBuf> {
 pub fn store_mcp_token(token: &McpToken) -> std::io::Result<()> {
     let path = token_path(&token.server_name)?;
     let json = serde_json::to_string_pretty(token).map_err(std::io::Error::other)?;
-    claurst_core::secret_file::write_secret_file_sync(&path, json)
+    claurst_core::secret_file::write_secret_file_sync_in_private_dir(&path, json)
 }
 
 /// Read a stored MCP OAuth token (None if not found or invalid).
@@ -698,7 +698,7 @@ pub(crate) mod test_support {
     /// RAII guard that redirects `config_home()` at a fresh temp dir for the
     /// duration of a test and restores the previous `COVEN_CODE_HOME` on drop.
     pub(crate) struct TokenHomeGuard {
-        _tmp: tempfile::TempDir,
+        tmp: tempfile::TempDir,
         prev: Option<String>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -710,10 +710,14 @@ pub(crate) mod test_support {
             let prev = std::env::var("COVEN_CODE_HOME").ok();
             std::env::set_var("COVEN_CODE_HOME", tmp.path());
             Self {
-                _tmp: tmp,
+                tmp,
                 prev,
                 _lock: lock,
             }
+        }
+
+        pub(crate) fn path(&self) -> &std::path::Path {
+            self.tmp.path()
         }
     }
 
@@ -835,6 +839,78 @@ mod tests {
             server_url: None,
         };
         assert!(!t.is_bound_to_server_url("https://example.com/mcp"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_writer_creates_private_file_and_token_directory_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TokenHomeGuard::new();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let token = McpToken {
+            access_token: "fixture-access".into(),
+            refresh_token: Some("fixture-refresh".into()),
+            expires_at: Some(123),
+            scope: Some("fixture-scope".into()),
+            server_name: "fixture".into(),
+            server_url: Some("https://example.com/mcp".into()),
+        };
+
+        store_mcp_token(&token).unwrap();
+
+        let path = home.path().join("mcp-tokens/fixture.json");
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let home_mode = std::fs::metadata(home.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(home_mode, 0o755);
+        assert_eq!(
+            get_mcp_token("fixture").unwrap().access_token,
+            "fixture-access"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_names_cannot_read_write_remove_or_chmod_outside_token_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TokenHomeGuard::new();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sentinel = home.path().join("outside.json");
+        let sentinel_body = br#"{"access_token":"outside-sentinel"}"#;
+        std::fs::write(&sentinel, sentinel_body).unwrap();
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        for traversal in ["../outside", "..\\outside", "/outside", "C:\\outside"] {
+            let token = McpToken {
+                access_token: "replacement".into(),
+                refresh_token: None,
+                expires_at: None,
+                scope: None,
+                server_name: traversal.into(),
+                server_url: Some("https://example.com/mcp".into()),
+            };
+
+            assert!(store_mcp_token(&token).is_err());
+            assert!(get_mcp_token(traversal).is_none());
+            assert!(remove_mcp_token(traversal).is_err());
+        }
+        assert_eq!(std::fs::read(&sentinel).unwrap(), sentinel_body);
+        assert_eq!(
+            std::fs::metadata(&sentinel).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(home.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[tokio::test]
