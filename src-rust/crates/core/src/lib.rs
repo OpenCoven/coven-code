@@ -1119,10 +1119,29 @@ pub mod config {
             };
             let path = home.join("settings.json");
             let raw = match std::fs::read_to_string(&path) {
-                Ok(r) => r,
-                Err(_) => return Self::default(),
+                Ok(raw) => raw,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Self::default()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "Unreadable shared settings; using defaults"
+                    );
+                    return Self::default();
+                }
             };
-            serde_json::from_str::<Self>(&raw).unwrap_or_default()
+            serde_json::from_str::<Self>(&raw).unwrap_or_else(|error| {
+                tracing::warn!(
+                    path = %path.display(),
+                    category = ?error.classify(),
+                    line = error.line(),
+                    column = error.column(),
+                    "Invalid shared settings; using defaults"
+                );
+                Self::default()
+            })
         }
 
         /// Apply whitelisted fields from the shared file to `target` (the
