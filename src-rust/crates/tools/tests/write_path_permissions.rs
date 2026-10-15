@@ -194,3 +194,170 @@ async fn new_target_through_symlink_parent_is_denied_without_side_effects() {
     assert!(result.is_error);
     assert!(!outside_root.join("nested").exists());
 }
+
+fn patch_for(path: &str, old: &str, new: &str) -> String {
+    format!("--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old}\n+{new}\n")
+}
+
+#[tokio::test]
+async fn patch_denied_later_target_preserves_all_files_including_dry_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    let patch = patch_for("first.txt", "old", "new") + &patch_for("second.txt", "old", "new");
+    for dry_run in [false, true] {
+        std::fs::write(&first, "old\n").unwrap();
+        std::fs::write(&second, "old\n").unwrap();
+        let ctx = context(
+            &root,
+            PermissionMode::Default,
+            vec![
+                rule("ApplyPatch", None, PermissionAction::Allow),
+                rule("ApplyPatch", Some(&second), PermissionAction::Deny),
+            ],
+        );
+        let result = claurst_tools::ApplyPatchTool
+            .execute(json!({"patch": patch, "dry_run": dry_run}), &ctx)
+            .await;
+        assert!(
+            result.is_error && result.content.contains("Permission denied"),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "old\n");
+    }
+}
+
+#[tokio::test]
+async fn patch_checks_all_permissions_before_reading_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    // Reading the first target as UTF-8 would fail before reaching the deny.
+    std::fs::write(root.join("first.txt"), [0xff]).unwrap();
+    let second = root.join("second.txt");
+    std::fs::write(&second, "old\n").unwrap();
+    let patch = patch_for("first.txt", "old", "new") + &patch_for("second.txt", "old", "new");
+    for dry_run in [false, true] {
+        let ctx = context(
+            &root,
+            PermissionMode::Default,
+            vec![
+                rule("ApplyPatch", None, PermissionAction::Allow),
+                rule("ApplyPatch", Some(&second), PermissionAction::Deny),
+            ],
+        );
+        let result = claurst_tools::ApplyPatchTool
+            .execute(json!({"patch": patch, "dry_run": dry_run}), &ctx)
+            .await;
+        assert!(
+            result.content.contains("Permission denied"),
+            "read occurred before all approvals: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn patch_scoped_allow_preserves_apply_and_dry_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let target = root.join("allowed.txt");
+    for dry_run in [true, false] {
+        std::fs::write(&target, "old\n").unwrap();
+        let ctx = context(
+            &root,
+            PermissionMode::Default,
+            vec![rule("ApplyPatch", Some(&target), PermissionAction::Allow)],
+        );
+        let result = claurst_tools::ApplyPatchTool
+            .execute(
+                json!({"patch": patch_for("allowed.txt", "old", "new"), "dry_run": dry_run}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            if dry_run { "old\n" } else { "new\n" }
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn patch_symlink_target_deny_applies_to_validation_and_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let target = root.join("protected.txt");
+    std::fs::write(&target, "old\n").unwrap();
+    std::os::unix::fs::symlink(&target, root.join("alias.txt")).unwrap();
+    for dry_run in [false, true] {
+        let ctx = context(
+            &root,
+            PermissionMode::Default,
+            vec![
+                rule("ApplyPatch", None, PermissionAction::Allow),
+                rule("ApplyPatch", Some(&target), PermissionAction::Deny),
+            ],
+        );
+        let result = claurst_tools::ApplyPatchTool
+            .execute(
+                json!({"patch": patch_for("alias.txt", "old", "new"), "dry_run": dry_run}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old\n");
+    }
+}
+
+#[tokio::test]
+async fn patch_late_validation_failure_preserves_earlier_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(root.join("first.txt"), "old\n").unwrap();
+    std::fs::write(root.join("second.txt"), "different\n").unwrap();
+    let ctx = context(
+        &root,
+        PermissionMode::Default,
+        vec![rule("ApplyPatch", None, PermissionAction::Allow)],
+    );
+    let patch = patch_for("first.txt", "old", "new") + &patch_for("second.txt", "old", "new");
+    let result = claurst_tools::ApplyPatchTool
+        .execute(json!({"patch": patch}), &ctx)
+        .await;
+    assert!(
+        result.is_error && result.content.contains("Context not found"),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("first.txt")).unwrap(),
+        "old\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("second.txt")).unwrap(),
+        "different\n"
+    );
+}
+
+#[tokio::test]
+async fn patch_dry_run_requires_approval_in_default_and_plan_modes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let target = root.join("target.txt");
+    std::fs::write(&target, "old\n").unwrap();
+    for mode in [PermissionMode::Default, PermissionMode::Plan] {
+        let ctx = context(&root, mode, vec![]);
+        let result = claurst_tools::ApplyPatchTool
+            .execute(
+                json!({"patch": patch_for("target.txt", "old", "new"), "dry_run": true}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.is_error && result.content.contains("Permission denied"),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old\n");
+    }
+}

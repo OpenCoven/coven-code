@@ -168,8 +168,13 @@ Apply a unified diff patch to one or more files. Accepts standard `diff -u` / `g
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `patch` | string | yes | Unified diff patch text |
+| `dry_run` | boolean | no | Validate without writing (default: false) |
 
-Useful when the model needs to express changes in diff format rather than as string replacements.
+Every resolved target requires ApplyPatch permission before any file content is
+read, including in dry-run mode. In headless mode, an unapproved request fails.
+All hunks are validated before the first write, so permission or validation
+failures leave files unchanged. Writes to separate files are not transactional:
+an I/O failure during writing can leave earlier files changed.
 
 ---
 
