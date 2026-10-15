@@ -5539,6 +5539,26 @@ pub mod tasks {
             }
         }
 
+        /// Atomically finish a running task. Returns false for unknown or terminal
+        /// tasks, or when the requested status is Running. Existing completion
+        /// timestamps are retained, including after an explicit update_status reset.
+        pub fn finish_if_running(&self, id: &str, status: TaskStatus) -> bool {
+            if matches!(status, TaskStatus::Running) {
+                return false;
+            }
+            if let Some(mut entry) = self.tasks.get_mut(id) {
+                if !entry.is_running() {
+                    return false;
+                }
+                entry.status = status;
+                if entry.completed_at.is_none() {
+                    entry.completed_at = Some(Utc::now());
+                }
+                return true;
+            }
+            false
+        }
+
         /// Append a line of output to an existing task.  No-op if unknown.
         pub fn append_output(&self, id: &str, line: &str) {
             if let Some(mut entry) = self.tasks.get_mut(id) {
@@ -5561,12 +5581,12 @@ pub mod tasks {
 
         /// Mark a task as `Completed`.  No-op if unknown or already terminal.
         pub fn complete(&self, id: &str) {
-            self.update_status(id, TaskStatus::Completed);
+            self.finish_if_running(id, TaskStatus::Completed);
         }
 
         /// Mark a task as `Cancelled`.  No-op if unknown or already terminal.
         pub fn cancel(&self, id: &str) {
-            self.update_status(id, TaskStatus::Cancelled);
+            self.finish_if_running(id, TaskStatus::Cancelled);
         }
 
         /// Set the OS process ID for a task.  No-op if unknown.

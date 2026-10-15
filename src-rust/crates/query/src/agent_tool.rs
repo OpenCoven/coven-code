@@ -419,21 +419,13 @@ impl Tool for AgentTool {
                     remove_worktree(&root, &wt).await;
                 }
 
-                // Respect a prior external cancellation mark from monitor cancel.
-                let cancelled = matches!(
-                    claurst_core::tasks::global_registry()
-                        .get(&agent_id_bg)
-                        .map(|t| t.status),
-                    Some(claurst_core::tasks::TaskStatus::Cancelled)
-                );
-
                 let result_text = format_outcome(&outcome);
                 claurst_core::tasks::global_registry().append_output(&agent_id_bg, &result_text);
 
-                if !cancelled {
-                    let status = background_status(&outcome, &result_text);
-                    claurst_core::tasks::global_registry().update_status(&agent_id_bg, status);
-                }
+                // Only a still-running task is finished; a prior monitor
+                // cancellation is kept without a separate read-then-update race.
+                let status = background_status(&outcome, &result_text);
+                claurst_core::tasks::global_registry().finish_if_running(&agent_id_bg, status);
 
                 debug!(
                     agent_id = %agent_id_bg,
