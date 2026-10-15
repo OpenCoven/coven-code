@@ -1,6 +1,7 @@
 use crate::config::{Settings, Theme};
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,19 +590,22 @@ fn build_excerpt(content: &str, max_lines: usize, max_chars: usize) -> String {
 }
 
 fn atomic_write_text(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".coven-import-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Match ordinary file creation, including the process umask.
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("import-target");
-    let tmp_path = path.with_file_name(format!("{}.tmp-import", file_name));
-    std::fs::write(&tmp_path, content)?;
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    std::fs::rename(&tmp_path, path)?;
+    let mut staged = builder.tempfile_in(parent)?;
+    staged.write_all(content.as_bytes())?;
+    staged.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -636,6 +640,81 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         atomic_write_text(&target, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[test]
+    fn atomic_write_does_not_touch_existing_staging_file() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        let unrelated = tmp.path().join("settings.json.tmp-import");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::write(&unrelated, "unrelated").unwrap();
+        atomic_write_text(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_follow_staging_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        let unrelated = tmp.path().join("unrelated");
+        let staging = tmp.path().join("settings.json.tmp-import");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::write(&unrelated, "unrelated").unwrap();
+        std::os::unix::fs::symlink(&unrelated, &staging).unwrap();
+        atomic_write_text(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "unrelated");
+        assert!(std::fs::symlink_metadata(staging)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_creation_mode_and_replaces_target_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        let original = tmp.path().join("original");
+        std::fs::write(&original, "original").unwrap();
+        let expected_mode = std::fs::metadata(&original).unwrap().permissions().mode() & 0o777;
+        std::os::unix::fs::symlink(&original, &target).unwrap();
+        atomic_write_text(&target, "new").unwrap();
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            expected_mode
+        );
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn atomic_write_failure_preserves_target_and_cleans_staging() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("sentinel"), "original").unwrap();
+        assert!(atomic_write_text(&target, "new").is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join("sentinel")).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[test]

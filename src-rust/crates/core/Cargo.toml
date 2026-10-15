@@ -71,6 +71,7 @@ dev_full = [
 ]
 
 [dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -111,5 +112,4 @@ rustix = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 rusqlite = { workspace = true, features = ["trace"] }
