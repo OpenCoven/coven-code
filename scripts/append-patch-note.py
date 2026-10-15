@@ -67,6 +67,8 @@ def splice(body: str, bullet: str) -> str:
         while j < len(lines) and lines[j].strip() == "":
             j += 1
         while j < len(lines) and lines[j].startswith("- "):
+            if lines[j] == bullet:
+                return "\n".join(lines) + "\n"
             j += 1
         lines.insert(j, bullet)
         return "\n".join(lines) + "\n"
