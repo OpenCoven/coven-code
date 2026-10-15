@@ -1799,15 +1799,14 @@ pub mod config {
         }
 
         /// Load settings from disk, returning defaults when the file is missing.
-        /// Existing files with invalid JSON or settings types return a parse error.
+        /// Read failures other than not-found and invalid JSON/settings types return errors.
         pub async fn load() -> anyhow::Result<Self> {
             let path = Self::global_settings_path();
-            if path.exists() {
-                let content = tokio::fs::read_to_string(&path).await?;
-                serde_json::from_str(&content)
-                    .with_context(|| format!("Failed to parse settings file {}", path.display()))
-            } else {
-                Ok(Self::default())
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse settings file {}", path.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+                Err(error) => Err(error.into()),
             }
         }
 
@@ -1839,12 +1838,11 @@ pub mod config {
         /// Synchronous variant used by pre-session commands.
         pub fn load_sync() -> anyhow::Result<Self> {
             let path = Self::global_settings_path();
-            if path.exists() {
-                let content = std::fs::read_to_string(&path)?;
-                serde_json::from_str(&content)
-                    .with_context(|| format!("Failed to parse settings file {}", path.display()))
-            } else {
-                Ok(Self::default())
+            match std::fs::read_to_string(&path) {
+                Ok(content) => serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse settings file {}", path.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+                Err(error) => Err(error.into()),
             }
         }
 
