@@ -2,7 +2,6 @@
 //! every meaningful event back to the ACP client as a `session/update`
 //! notification.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol_schema as acp;
@@ -165,9 +164,6 @@ async fn forward_events(
     session_id: acp::SessionId,
     mut rx: mpsc::UnboundedReceiver<QueryEvent>,
 ) {
-    // Track tool calls so ToolEnd updates carry the right title and kind.
-    let mut active_tools: HashMap<String, ToolMeta> = HashMap::new();
-
     while let Some(event) = rx.recv().await {
         match event {
             QueryEvent::Stream(AnthropicStreamEvent::ContentBlockDelta { delta, .. }) => {
@@ -189,13 +185,6 @@ async fn forward_events(
                 let kind = classify_tool_kind(&tool_name);
                 let raw_input = serde_json::from_str::<serde_json::Value>(&input_json).ok();
                 let title = tool_title(&tool_name, raw_input.as_ref());
-                active_tools.insert(
-                    tool_id.clone(),
-                    ToolMeta {
-                        title: title.clone(),
-                        kind,
-                    },
-                );
                 let mut tool_call =
                     acp::ToolCall::new(acp::ToolCallId::new(tool_id.as_str()), title)
                         .kind(kind)
@@ -241,7 +230,6 @@ async fn forward_events(
                     acp::SessionUpdate::ToolCallUpdate(update),
                 )
                 .await;
-                active_tools.remove(&tool_id);
             }
             QueryEvent::Error(msg) => {
                 send_text_chunk(
@@ -255,13 +243,6 @@ async fn forward_events(
             _ => {}
         }
     }
-}
-
-struct ToolMeta {
-    #[allow(dead_code)]
-    title: String,
-    #[allow(dead_code)]
-    kind: acp::ToolKind,
 }
 
 async fn send_text_chunk(
@@ -320,4 +301,74 @@ fn tool_title(tool_name: &str, raw_input: Option<&serde_json::Value>) -> String 
         }
     }
     tool_name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn interleaved_tool_events_preserve_notification_payloads() {
+        let (mut reader, writer) = tokio::io::duplex(8192);
+        let connection = Connection::new(writer);
+        let (tx, rx) = mpsc::unbounded_channel();
+        for event in [
+            QueryEvent::ToolStart {
+                tool_name: "Read".into(),
+                tool_id: "read-1".into(),
+                input_json: r#"{"file_path":"/workspace/file"}"#.into(),
+            },
+            QueryEvent::ToolStart {
+                tool_name: "Bash".into(),
+                tool_id: "shell-2".into(),
+                input_json: r#"{"command":"pwd"}"#.into(),
+            },
+            QueryEvent::ToolEnd {
+                tool_name: "Bash".into(),
+                tool_id: "shell-2".into(),
+                result: "{\"exit_code\":0}".into(),
+                is_error: false,
+            },
+            QueryEvent::ToolEnd {
+                tool_name: "Read".into(),
+                tool_id: "read-1".into(),
+                result: "Permission denied".into(),
+                is_error: true,
+            },
+        ] {
+            tx.send(event).unwrap();
+        }
+        drop(tx);
+        let forwarder = forward_events(connection, acp::SessionId::new("session-1"), rx);
+        let mut output = String::new();
+        let (_, read_result) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(forwarder, reader.read_to_string(&mut output))
+        })
+        .await
+        .expect("forwarder must drain and close output");
+        read_result.unwrap();
+        let actual: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let expected = [
+            json!({"sessionUpdate":"tool_call", "toolCallId":"read-1",
+                "title":"Read: /workspace/file", "kind":"read", "status":"in_progress",
+                "rawInput":{"file_path":"/workspace/file"}}),
+            json!({"sessionUpdate":"tool_call", "toolCallId":"shell-2",
+                "title":"Bash: pwd", "kind":"execute", "status":"in_progress",
+                "rawInput":{"command":"pwd"}}),
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell-2",
+                "status":"completed", "rawOutput":{"exit_code":0},
+                "content":[{"type":"content", "content":{"type":"text", "text":"{\"exit_code\":0}"}}]}),
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"read-1",
+                "status":"failed", "rawOutput":"Permission denied",
+                "content":[{"type":"content", "content":{"type":"text", "text":"Permission denied"}}]}),
+        ]
+        .map(|update| json!({"jsonrpc":"2.0", "method":"session/update",
+            "params":{"sessionId":"session-1", "update":update}}));
+        assert_eq!(actual, expected);
+    }
 }
