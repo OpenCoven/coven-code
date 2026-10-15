@@ -13,7 +13,6 @@ use claurst_core::codex_oauth::{
 };
 use claurst_core::oauth_config::CodexTokens;
 use claurst_tui::DeviceAuthEvent;
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -34,10 +33,7 @@ pub fn generate_code_verifier() -> String {
 }
 
 /// Compute PKCE code challenge (SHA-256 of verifier, base64url encoded).
-pub fn compute_code_challenge(verifier: &str) -> String {
-    let hash = Sha256::digest(verifier.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash)
-}
+pub use claurst_core::oauth_config::pkce::code_challenge as compute_code_challenge;
 
 /// Generate a random OAuth state parameter.
 pub fn generate_state() -> String {
@@ -268,6 +264,15 @@ fn extract_account_id_from_jwt(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkce_challenge_known_vectors() {
+        // RFC 7636 Appendix B, through the existing public name.
+        assert_eq!(
+            compute_code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
 
     #[test]
     fn test_generate_code_verifier_format() {
