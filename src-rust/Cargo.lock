@@ -831,6 +831,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "reqwest",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",
