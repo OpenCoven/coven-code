@@ -114,24 +114,8 @@ export const STATIC_PALETTE_ITEMS = [
 
   // ---- Providers ------------------------------------------------------
   ...row('Provider', [
-    ['anthropic',  'Cloud',      'Default. Claude Opus/Sonnet/Haiku via /v1/messages.'],
-    ['openai',     'Cloud',      'GPT-4o, o-series, gpt-4.1.'],
-    ['google',     'Cloud',      'Gemini Pro / Flash / Flash-8B.'],
-    ['bedrock',    'Cloud',      'AWS region — Claude, Llama, Titan, Mistral.'],
-    ['azure',      'Cloud',      'OpenAI models through Azure.'],
-    ['groq',       'Cloud',      'Fastest hosted inference — Llama, Mixtral.'],
-    ['mistral',    'Cloud',      'Mistral Large/Medium/Small, Codestral, Pixtral.'],
-    ['deepseek',   'Cloud',      'V3, R1 — reasoning models with strong math/code.'],
-    ['xai',        'Cloud',      'Grok family.'],
-    ['cohere',     'Cloud',      'Command R/R+, Aya.'],
-    ['perplexity', 'Cloud',      'Sonar models with built-in web search.'],
-    ['copilot',    'Cloud',      'GitHub Copilot OAuth.'],
-    ['cerebras',   'Cloud',      'Very high TPS on Llama via wafer-scale silicon.'],
-    ['openrouter', 'Aggregator', 'Single key, 200+ models from many providers.'],
-    ['together',   'Aggregator', 'Llama, Mixtral, DeepSeek, Qwen hosted at Together.'],
-    ['ollama',     'Local',      'Local socket. Bring your own GGUF.'],
-    ['lmstudio',   'Local',      'Local HTTP — point at LM Studio.'],
-    ['llamacpp',   'Local',      'Local HTTP from llama.cpp server.'],
+    ['anthropic', 'Cloud', 'Claude: Anthropic API key or locally authenticated claude CLI.'],
+    ['codex', 'Cloud', 'OpenAI Codex: ChatGPT OAuth via coven-code codex login.'],
   ], '#providers'),
 
   // ---- Hook events ----------------------------------------------------
