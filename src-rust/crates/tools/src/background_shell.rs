@@ -6,7 +6,11 @@ use std::time::Duration;
 use tokio::process::Command;
 
 pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
-    let task_name = format!("bg: {}", &command[..command.len().min(60)]);
+    let mut name_end = command.len().min(60);
+    while !command.is_char_boundary(name_end) {
+        name_end -= 1;
+    }
+    let task_name = format!("bg: {}", &command[..name_end]);
     let mut task = BackgroundTask::new(&task_name);
     task.pid = None; // Will be set after spawn
 
