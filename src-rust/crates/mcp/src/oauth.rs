@@ -481,12 +481,12 @@ pub async fn exchange_code(
         .form(&params)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("exchange_code: request failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("exchange_code: request failed: {}", e.without_url()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("exchange_code: HTTP {} — {}", status, body);
+        // Token responses can reflect credentials; never retain their error bodies.
+        anyhow::bail!("exchange_code: HTTP {}", status);
     }
 
     #[derive(serde::Deserialize)]
@@ -500,7 +500,7 @@ pub async fn exchange_code(
     let tr: TokenResponse = resp
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("exchange_code: bad JSON: {}", e))?;
+        .map_err(|_| anyhow::anyhow!("exchange_code: invalid token response"))?;
 
     let expires_at = tr.expires_in.map(|secs| {
         std::time::SystemTime::now()
@@ -559,12 +559,12 @@ pub async fn refresh_mcp_token(
         .form(&params)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("refresh: request failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("refresh: request failed: {}", e.without_url()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("refresh: HTTP {} — {}", status, body);
+        // Token responses can reflect credentials; never retain their error bodies.
+        anyhow::bail!("refresh: HTTP {}", status);
     }
 
     #[derive(serde::Deserialize)]
@@ -574,7 +574,10 @@ pub async fn refresh_mcp_token(
         expires_in: Option<u64>,
     }
 
-    let tr: TokenResponse = resp.json().await?;
+    let tr: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|_| anyhow::anyhow!("refresh: invalid token response"))?;
     let expires_at = tr.expires_in.map(|s| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -762,5 +765,165 @@ mod tests {
         assert_eq!(callback_path, "/callback");
         assert_eq!(port, 14555);
         drop(listener);
+    }
+}
+
+#[cfg(test)]
+mod token_error_tests {
+    use super::test_support::TokenHomeGuard;
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    async fn token_response(status: u16, body: &str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let worker = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 2048];
+                loop {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                    assert!(request.len() < 16384);
+                    if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                socket.write_all(response.as_bytes()).await.unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        (endpoint, worker)
+    }
+
+    #[tokio::test]
+    async fn token_errors_do_not_disclose_response_canaries() {
+        let _home = TokenHomeGuard::new();
+        let existing = McpToken {
+            access_token: "old-access-fixture".into(),
+            refresh_token: Some("old-refresh-fixture".into()),
+            expires_at: None,
+            scope: None,
+            server_name: "error-fixture".into(),
+            server_url: Some("http://fixture.invalid/mcp".into()),
+        };
+        store_mcp_token(&existing).unwrap();
+        for (status, body) in [
+            (400, r#"{"error":"response-secret-canary"}"#),
+            (
+                200,
+                r#"{"access_token":"fixture","expires_in":"response-secret-canary"}"#,
+            ),
+        ] {
+            for refresh in [false, true] {
+                let (endpoint, worker) = token_response(status, body).await;
+                let result = if refresh {
+                    refresh_mcp_token("error-fixture", "http://fixture.invalid/mcp", &endpoint)
+                        .await
+                } else {
+                    exchange_code(
+                        &endpoint,
+                        "code-fixture",
+                        "verifier-fixture",
+                        "http://127.0.0.1/callback",
+                    )
+                    .await
+                };
+                worker.await.unwrap();
+                let error = result.expect_err("fixture must fail");
+                let rendered = format!("{error} {error:?} {error:#} {error:#?}");
+                assert!(
+                    !rendered.contains("response-secret-canary"),
+                    "response body escaped through error formatting"
+                );
+                assert_eq!(
+                    get_mcp_token("error-fixture").unwrap().access_token,
+                    existing.access_token
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn token_transport_errors_do_not_disclose_endpoint_queries() {
+        let _home = TokenHomeGuard::new();
+        let token = McpToken {
+            access_token: "old-access-fixture".into(),
+            refresh_token: Some("old-refresh-fixture".into()),
+            expires_at: None,
+            scope: None,
+            server_name: "transport-fixture".into(),
+            server_url: Some("http://fixture.invalid/mcp".into()),
+        };
+        store_mcp_token(&token).unwrap();
+        // Unsupported scheme fails locally without a network connection.
+        let endpoint = "ftp://127.0.0.1/token?secret=url-secret-canary";
+        for refresh in [false, true] {
+            let result = if refresh {
+                refresh_mcp_token("transport-fixture", "http://fixture.invalid/mcp", endpoint).await
+            } else {
+                exchange_code(
+                    endpoint,
+                    "code-fixture",
+                    "verifier-fixture",
+                    "http://127.0.0.1/callback",
+                )
+                .await
+            };
+            let error = result.expect_err("unsupported transport must fail");
+            assert!(
+                !format!("{error} {error:?} {error:#} {error:#?}").contains("url-secret-canary")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn token_success_still_decodes_and_refreshes() {
+        let _home = TokenHomeGuard::new();
+        let (endpoint, worker) = token_response(200, r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"scope":"read"}"#).await;
+        let mut token = exchange_code(
+            &endpoint,
+            "code-fixture",
+            "verifier-fixture",
+            "http://127.0.0.1/callback",
+        )
+        .await
+        .unwrap();
+        worker.await.unwrap();
+        assert_eq!(token.access_token, "new-access");
+        assert_eq!(token.scope.as_deref(), Some("read"));
+        token.server_name = "success-fixture".into();
+        token.server_url = Some("http://fixture.invalid/mcp".into());
+        store_mcp_token(&token).unwrap();
+        let (endpoint, worker) = token_response(
+            200,
+            r#"{"access_token":"refreshed-access","expires_in":3600}"#,
+        )
+        .await;
+        let updated = refresh_mcp_token("success-fixture", "http://fixture.invalid/mcp", &endpoint)
+            .await
+            .unwrap();
+        worker.await.unwrap();
+        assert_eq!(updated.access_token, "refreshed-access");
+        assert_eq!(updated.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(
+            get_mcp_token("success-fixture").unwrap().access_token,
+            "refreshed-access"
+        );
     }
 }

@@ -52,6 +52,12 @@ fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64>
 // CodexProvider
 // ---------------------------------------------------------------------------
 
+struct RefreshedToken {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
 pub struct CodexProvider {
     id: ProviderId,
     http_client: reqwest::Client,
@@ -123,6 +129,56 @@ impl CodexProvider {
         self.refresh_token(&refresh).await
     }
 
+    fn decode_refresh_response(
+        &self,
+        status: u16,
+        text: &str,
+    ) -> Result<RefreshedToken, ProviderError> {
+        if !(200..300).contains(&(status as usize)) {
+            return Err(ProviderError::Other {
+                provider: self.id.clone(),
+                message: format!("Token refresh failed (HTTP {})", status),
+                status: Some(status),
+                body: None,
+            });
+        }
+
+        let json_val: Value = serde_json::from_str(text).map_err(|_| ProviderError::Other {
+            provider: self.id.clone(),
+            message: "Failed to parse token refresh response".to_string(),
+            status: Some(status),
+            body: None,
+        })?;
+
+        let new_access = json_val
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if new_access.is_empty() {
+            return Err(ProviderError::Other {
+                provider: self.id.clone(),
+                message: "Token refresh response missing access_token".to_string(),
+                status: Some(status),
+                body: None,
+            });
+        }
+
+        let new_refresh = json_val
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let expires_in = json_val.get("expires_in").and_then(|v| v.as_u64());
+
+        Ok(RefreshedToken {
+            access_token: new_access,
+            refresh_token: new_refresh,
+            expires_in,
+        })
+    }
+
     async fn refresh_token(&self, refresh_token: &str) -> Result<String, ProviderError> {
         let body = json!({
             "grant_type": "refresh_token",
@@ -139,7 +195,7 @@ impl CodexProvider {
             .await
             .map_err(|e| ProviderError::Other {
                 provider: self.id.clone(),
-                message: format!("Token refresh request failed: {}", e),
+                message: format!("Token refresh request failed: {}", e.without_url()),
                 status: None,
                 body: None,
             })?;
@@ -147,48 +203,16 @@ impl CodexProvider {
         let status = resp.status().as_u16();
         let text = resp.text().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
-            message: format!("Failed to read token refresh response: {}", e),
+            message: format!("Failed to read token refresh response: {}", e.without_url()),
             status: Some(status),
             body: None,
         })?;
 
-        if !(200..300).contains(&(status as usize)) {
-            return Err(ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("Token refresh failed (HTTP {})", status),
-                status: Some(status),
-                body: Some(text),
-            });
-        }
-
-        let json_val: Value = serde_json::from_str(&text).map_err(|e| ProviderError::Other {
-            provider: self.id.clone(),
-            message: format!("Failed to parse token refresh response: {}", e),
-            status: Some(status),
-            body: Some(text.clone()),
-        })?;
-
-        let new_access = json_val
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        if new_access.is_empty() {
-            return Err(ProviderError::Other {
-                provider: self.id.clone(),
-                message: "Token refresh response missing access_token".to_string(),
-                status: Some(status),
-                body: Some(text),
-            });
-        }
-
-        let new_refresh = json_val
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let expires_in = json_val.get("expires_in").and_then(|v| v.as_u64());
+        let RefreshedToken {
+            access_token: new_access,
+            refresh_token: new_refresh,
+            expires_in,
+        } = self.decode_refresh_response(status, &text)?;
 
         let new_expires_at = expires_in.map(|secs| {
             SystemTime::now()
@@ -972,5 +996,75 @@ impl LlmProvider for CodexProvider {
             structured_output: false,
             system_prompt_style: SystemPromptStyle::SystemMessage,
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_error_tests {
+    use super::*;
+
+    fn provider() -> CodexProvider {
+        CodexProvider::new(CodexTokens {
+            access_token: "unused-fixture".into(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn refresh_failures_do_not_retain_token_response_bodies() {
+        let provider = provider();
+        let cases = [
+            (400, r#"{"error":"refresh-secret-canary"}"#),
+            (200, r#"{"refresh_token":"refresh-secret-canary", invalid}"#),
+            (200, r#"{"refresh_token":"refresh-secret-canary"}"#),
+            (
+                200,
+                r#"{"access_token":"","refresh_token":"refresh-secret-canary"}"#,
+            ),
+        ];
+        let errors: Vec<_> = cases
+            .into_iter()
+            .map(|(status, body)| {
+                let error = match provider.decode_refresh_response(status, body) {
+                    Ok(_) => panic!("invalid refresh fixture accepted"),
+                    Err(error) => error,
+                };
+                (status, error)
+            })
+            .collect();
+        for (expected_status, error) in errors {
+            let rendered = format!("{error} {error:?} {error:#} {error:#?}");
+            assert!(
+                !rendered.contains("refresh-secret-canary"),
+                "credential body escaped through error representation"
+            );
+            match error {
+                ProviderError::Other { status, body, .. } => {
+                    assert_eq!(status, Some(expected_status));
+                    assert!(body.is_none());
+                }
+                _ => panic!("unexpected error category"),
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_success_preserves_optional_fields() {
+        let provider = provider();
+        let token = provider
+            .decode_refresh_response(
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+            )
+            .unwrap();
+        assert_eq!(token.access_token, "new-access");
+        assert_eq!(token.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(token.expires_in, Some(3600));
+        let token = provider
+            .decode_refresh_response(200, r#"{"access_token":"new-access"}"#)
+            .unwrap();
+        assert!(token.refresh_token.is_none());
+        assert!(token.expires_in.is_none());
     }
 }
