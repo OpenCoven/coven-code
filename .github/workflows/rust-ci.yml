@@ -100,6 +100,28 @@ jobs:
           cargo test -p claurst-core --locked --test keybindings_golden
           cargo test -p claurst-tui --locked --test classic_baselines
 
+  computer-use-macos:
+    name: Check optional computer-use support on macOS
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check computer-use feature and tests
+        working-directory: src-rust
+        run: cargo clippy --package claurst-tools --all-targets --features computer-use --locked -- -D warnings
+
+      - name: Test computer-use parsing without hardware access
+        working-directory: src-rust
+        run: cargo test --package claurst-tools --features computer-use --locked computer_use::tests
+
   coven-contract:
     name: Coven engine contract
     runs-on: ubuntu-latest
