@@ -184,27 +184,34 @@ tui_paste() {
 # tui_settle [seconds]
 tui_settle() { sleep "${1:-$TUI_SETTLE}"; }
 
-# wait_for <substring> [timeout-seconds]  -> 0 found / 1 timeout
+# wait_for <substring> [timeout-seconds] -> 0 found / 1 timeout / 2 capture error
 wait_for() {
-  local needle="$1" timeout="${2:-$TUI_WAIT_TIMEOUT}"
-  local waited=0
+  local needle="$1" timeout="${2:-$TUI_WAIT_TIMEOUT}" capture
   # bash arithmetic is integer; scale by 10 to honor sub-second poll interval
   local step_ms=400 budget_ms=$((timeout * 1000)) elapsed_ms=0
   while [ "$elapsed_ms" -lt "$budget_ms" ]; do
-    if tui_capture | grep -qF -- "$needle"; then return 0; fi
+    if ! capture="$(tui_capture)"; then
+      warn "failed to capture tmux pane while waiting for '$needle'"
+      return 2
+    fi
+    if grep -qF -- "$needle" <<<"$capture"; then return 0; fi
     sleep "$TUI_POLL_INTERVAL"
     elapsed_ms=$((elapsed_ms + step_ms))
   done
   return 1
 }
 
-# wait_absent <substring> [timeout-seconds]  -> 0 once gone / 1 still present
+# wait_absent <substring> [timeout-seconds] -> 0 gone / 1 timeout / 2 capture error
 # Mirror of wait_for for disappearance (e.g. an overlay closing).
 wait_absent() {
-  local needle="$1" timeout="${2:-$TUI_WAIT_TIMEOUT}"
+  local needle="$1" timeout="${2:-$TUI_WAIT_TIMEOUT}" capture
   local step_ms=400 budget_ms=$((timeout * 1000)) elapsed_ms=0
   while [ "$elapsed_ms" -lt "$budget_ms" ]; do
-    if ! tui_capture | grep -qF -- "$needle"; then return 0; fi
+    if ! capture="$(tui_capture)"; then
+      warn "failed to capture tmux pane while waiting for absence of '$needle'"
+      return 2
+    fi
+    if ! grep -qF -- "$needle" <<<"$capture"; then return 0; fi
     sleep "$TUI_POLL_INTERVAL"
     elapsed_ms=$((elapsed_ms + step_ms))
   done
