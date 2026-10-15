@@ -1733,6 +1733,38 @@ pub mod config {
         f()
     }
 
+    // Existing settings are staged beside the resolved target. Missing targets
+    // retain direct creation, including through dangling symlinks.
+    fn prepare_settings_save(
+        path: &std::path::Path,
+        content: &[u8],
+    ) -> std::io::Result<Option<(tempfile::NamedTempFile, PathBuf)>> {
+        use std::io::Write;
+        let target = match std::fs::canonicalize(path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(path, content)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        // Rename permission alone must not bypass the original file's write access.
+        let original = std::fs::OpenOptions::new().write(true).open(&target)?;
+        let permissions = original.metadata()?.permissions();
+        drop(original);
+        let directory = target.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "settings path has no parent",
+            )
+        })?;
+        let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+        staged.write_all(content)?;
+        staged.as_file().set_permissions(permissions)?;
+        staged.as_file().sync_all()?;
+        Ok(Some((staged, target)))
+    }
+
     impl Settings {
         /// The per-user configuration directory (`~/.coven-code`).
         ///
@@ -1761,13 +1793,27 @@ pub mod config {
         }
 
         /// Persist settings to disk.
+        /// Existing files are staged and replaced; live symlinks and permission bits
+        /// are preserved. Replacement requires parent-directory write permission
+        /// and changes inode identity; ownership, ACLs and xattrs are not copied.
+        /// Missing targets use direct creation. Concurrent writes and directory
+        /// crash durability are not coordinated.
         pub async fn save(&self) -> anyhow::Result<()> {
             let path = Self::global_settings_path();
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
             let content = serde_json::to_string_pretty(self)?;
-            tokio::fs::write(&path, content).await?;
+            let prepared = tokio::task::spawn_blocking(move || {
+                prepare_settings_save(&path, content.as_bytes())
+            })
+            .await??;
+            // Publish existing-file replacements only after the await: cancellation
+            // of staging must not let a detached worker replace existing settings.
+            // Missing-target direct creation can still finish after cancellation.
+            if let Some((staged, target)) = prepared {
+                staged.persist(target).map_err(|error| error.error)?;
+            }
             Ok(())
         }
 
@@ -1783,14 +1829,16 @@ pub mod config {
             }
         }
 
-        /// Synchronous variant used by pre-session commands.
+        /// Synchronous variant of [`Self::save`], with the same replacement semantics.
         pub fn save_sync(&self) -> anyhow::Result<()> {
             let path = Self::global_settings_path();
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             let content = serde_json::to_string_pretty(self)?;
-            std::fs::write(&path, content)?;
+            if let Some((staged, target)) = prepare_settings_save(&path, content.as_bytes())? {
+                staged.persist(target).map_err(|error| error.error)?;
+            }
             Ok(())
         }
 
