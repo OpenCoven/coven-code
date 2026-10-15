@@ -14,6 +14,7 @@
 
 use crate::{PermissionLevel, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
+use claurst_core::bash_classifier::{classify_bash_command, BashRiskLevel};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -245,8 +246,26 @@ impl Tool for ReplTool {
             return ToolResult::error(format!("Unsupported language: {}", language));
         }
 
+        if matches!(language.as_str(), "bash" | "")
+            && classify_bash_command(&params.code) == BashRiskLevel::Critical
+        {
+            return ToolResult::error(
+                "REPL Bash code was blocked because it is classified as Critical risk.".to_string(),
+            );
+        }
+
         let reason = format!("Execute {} code in a persistent REPL session.", language);
-        if let Err(e) = ctx.check_permission(self.name(), &reason, false) {
+        let details = format!(
+            "Execute this exact {} code in persistent REPL session '{}':\n{}",
+            language, ctx.session_id, params.code
+        );
+        if let Err(e) = ctx.check_permission_with_details_and_path(
+            self.name(),
+            &reason,
+            &details,
+            std::path::PathBuf::from(&params.code),
+            false,
+        ) {
             return ToolResult::error(e.to_string());
         }
 
