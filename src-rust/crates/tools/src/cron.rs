@@ -516,7 +516,9 @@ impl Tool for CronListTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Persist all durable tasks to `~/.coven-code/scheduled_tasks.json`.
+/// Atomically replace the durable snapshot using a same-directory private file.
+/// Destination symlinks are replaced; a symlinked engine home remains supported.
+/// File contents are synced before replacement, but the parent directory is not.
 async fn persist_tasks_to_disk(store: &HashMap<String, CronTask>) -> Result<(), String> {
     let durable: Vec<&CronTask> = store.values().filter(|t| t.durable).collect();
     let json = serde_json::to_string_pretty(&durable).map_err(|e| e.to_string())?;
@@ -528,9 +530,22 @@ async fn persist_tasks_to_disk(store: &HashMap<String, CronTask>) -> Result<(), 
         .await
         .map_err(|e| e.to_string())?;
 
-    tokio::fs::write(&path, json)
+    let dir = dir.to_path_buf();
+    let staged =
+        tokio::task::spawn_blocking(move || -> std::io::Result<tempfile::NamedTempFile> {
+            use std::io::Write;
+            let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+            staged.write_all(json.as_bytes())?;
+            staged.as_file().sync_all()?;
+            Ok(staged)
+        })
         .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
+
+    // Publish while the caller still holds the store lock. A cancelled staging
+    // future must not leave a detached blocking task that can publish stale state.
+    staged.persist(&path).map_err(|e| e.error.to_string())?;
 
     Ok(())
 }
