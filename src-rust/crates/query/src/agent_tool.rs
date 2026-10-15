@@ -424,17 +424,11 @@ impl Tool for AgentTool {
                     Some(claurst_core::tasks::TaskStatus::Cancelled)
                 );
 
-                let result_text = format_outcome(outcome);
+                let result_text = format_outcome(&outcome);
                 claurst_core::tasks::global_registry().append_output(&agent_id_bg, &result_text);
 
                 if !cancelled {
-                    let status = if result_text.starts_with("[Agent error:")
-                        || result_text.starts_with("[Agent stopped:")
-                    {
-                        claurst_core::tasks::TaskStatus::Failed(result_text.clone())
-                    } else {
-                        claurst_core::tasks::TaskStatus::Completed
-                    };
+                    let status = background_status(&outcome, &result_text);
                     claurst_core::tasks::global_registry().update_status(&agent_id_bg, status);
                 }
 
@@ -515,7 +509,18 @@ impl Tool for AgentTool {
 // Helper: convert a QueryOutcome into a result string for background agents
 // ---------------------------------------------------------------------------
 
-fn format_outcome(outcome: QueryOutcome) -> String {
+fn background_status(outcome: &QueryOutcome, result_text: &str) -> claurst_core::tasks::TaskStatus {
+    use claurst_core::tasks::TaskStatus;
+    match outcome {
+        QueryOutcome::EndTurn { .. } | QueryOutcome::MaxTokens { .. } => TaskStatus::Completed,
+        QueryOutcome::Cancelled => TaskStatus::Cancelled,
+        QueryOutcome::Error(_) | QueryOutcome::BudgetExceeded { .. } => {
+            TaskStatus::Failed(result_text.to_owned())
+        }
+    }
+}
+
+fn format_outcome(outcome: &QueryOutcome) -> String {
     match outcome {
         QueryOutcome::EndTurn { message, .. } => message.get_all_text(),
         QueryOutcome::MaxTokens {
@@ -649,10 +654,78 @@ pub fn init_team_swarm_runner() {
                 )
                 .await;
 
-                format_outcome(outcome)
+                format_outcome(&outcome)
             }) as Pin<Box<dyn std::future::Future<Output = String> + Send>>
         },
     );
 
     claurst_tools::register_agent_runner(runner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claurst_core::{error::ClaudeError, tasks::TaskStatus, types::UsageInfo};
+
+    #[test]
+    fn background_success_text_does_not_determine_status() {
+        for text in [
+            "done",
+            "[Agent error: quoted example]",
+            "[Agent stopped: quoted example]",
+        ] {
+            for outcome in [
+                QueryOutcome::EndTurn {
+                    message: Message::assistant(text),
+                    usage: UsageInfo::default(),
+                },
+                QueryOutcome::MaxTokens {
+                    partial_message: Message::assistant(text),
+                    usage: UsageInfo::default(),
+                },
+            ] {
+                let expected = match &outcome {
+                    QueryOutcome::MaxTokens { .. } => {
+                        format!("{text}\n\n[Note: Agent hit max_tokens limit]")
+                    }
+                    _ => text.to_owned(),
+                };
+                let output = format_outcome(&outcome);
+                assert_eq!(output, expected);
+                assert_eq!(background_status(&outcome, &output), TaskStatus::Completed);
+            }
+        }
+    }
+
+    #[test]
+    fn background_cancelled_outcome_is_cancelled() {
+        let outcome = QueryOutcome::Cancelled;
+        let output = format_outcome(&outcome);
+        assert_eq!(output, "[Agent was cancelled]");
+        assert_eq!(background_status(&outcome, &output), TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn background_failures_retain_formatted_payload() {
+        for (outcome, expected) in [
+            (
+                QueryOutcome::Error(ClaudeError::Api("fixture".into())),
+                "[Agent error: API error: fixture]",
+            ),
+            (
+                QueryOutcome::BudgetExceeded {
+                    cost_usd: 2.5,
+                    limit_usd: 1.0,
+                },
+                "[Agent stopped: budget $2.5000 exceeded (limit $1.0000)]",
+            ),
+        ] {
+            let output = format_outcome(&outcome);
+            assert_eq!(output, expected);
+            assert_eq!(
+                background_status(&outcome, &output),
+                TaskStatus::Failed(expected.to_owned())
+            );
+        }
+    }
 }
