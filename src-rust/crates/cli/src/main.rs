@@ -15,6 +15,8 @@ mod headless;
 mod mcp_reconnect_tests;
 mod memory_admin;
 mod oauth_flow;
+#[cfg(all(test, unix))]
+mod plugin_mcp_config_tests;
 mod stream_mode;
 mod upgrade;
 
@@ -851,13 +853,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Register plugin MCP servers into the in-memory config so they are
             // picked up by any subsequent MCP manager construction.
-            let existing_names: std::collections::HashSet<String> =
-                config.mcp_servers.iter().map(|s| s.name.clone()).collect();
-            for mcp_server in plugin_registry.all_mcp_servers() {
-                if !existing_names.contains(&mcp_server.name) {
-                    config.mcp_servers.push(mcp_server);
-                }
-            }
+            config.plugin_mcp_servers = plugin_registry.all_mcp_servers();
         }
     }
 
@@ -1090,8 +1086,21 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
+async fn refresh_mcp_project_config(config: &mut Config, project_dir: &std::path::Path) {
+    config.set_mcp_project(project_dir);
+    claurst_plugins::refresh_cached_plugins(project_dir).await;
+    if config.hosted_review_enabled() && !config.hosted_review.allow_plugins {
+        config.plugin_mcp_servers.clear();
+    } else if let Some(registry) = claurst_plugins::global_plugin_registry()
+        .filter(|registry| registry.matches_project(project_dir))
+    {
+        config.plugin_mcp_servers = registry.all_mcp_servers();
+    }
+}
+
 async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::McpManager>> {
-    if config.mcp_servers.is_empty() {
+    let servers: Vec<_> = config.effective_mcp_servers().cloned().collect();
+    if servers.is_empty() {
         return None;
     }
     if config.hosted_review_enabled() && !config.hosted_review.allow_mcp_servers {
@@ -1099,11 +1108,8 @@ async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::Mcp
         return None;
     }
 
-    info!(
-        count = config.mcp_servers.len(),
-        "Connecting to MCP servers"
-    );
-    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_all(&config.mcp_servers).await);
+    info!(count = servers.len(), "Connecting to MCP servers");
+    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_all(&servers).await);
     mcp_manager.clone().spawn_notification_poll_loop();
     Some(mcp_manager)
 }
@@ -2202,6 +2208,7 @@ async fn run_interactive(
     let mut client = client;
     let mut model_registry = model_registry;
     let mut tool_ctx = tool_ctx;
+    let mut config = config;
     let mut resume_warning: Option<String> = None;
     let resume_id = if resume_id.as_deref() == Some("__last__") {
         let sessions = claurst_core::history::list_sessions().await;
@@ -2227,7 +2234,7 @@ async fn run_interactive(
                     let saved_path = std::path::PathBuf::from(saved_dir);
                     if saved_path.exists() {
                         tool_ctx.working_dir = saved_path;
-                        claurst_plugins::refresh_cached_plugins(&tool_ctx.working_dir).await;
+                        refresh_mcp_project_config(&mut config, &tool_ctx.working_dir).await;
                     }
                 }
                 tool_ctx.session_id = session.id.clone();
@@ -2263,6 +2270,7 @@ async fn run_interactive(
     if !session.model.is_empty() {
         live_config.model = Some(session.model.clone());
     }
+    tool_ctx.config = live_config.clone();
     let pending_permissions = tool_ctx.pending_permissions.clone().unwrap_or_else(|| {
         Arc::new(ParkingMutex::new(
             claurst_tools::PendingPermissionStore::default(),
@@ -2971,7 +2979,10 @@ async fn run_interactive(
                                         if saved_path.exists() {
                                             tool_ctx.working_dir = saved_path.clone();
                                             cmd_ctx.working_dir = saved_path;
-                                            claurst_plugins::refresh_cached_plugins(&tool_ctx.working_dir).await;
+                                            refresh_mcp_project_config(&mut cmd_ctx.config, &tool_ctx.working_dir).await;
+                                            app.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                            tool_ctx.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                            tool_ctx.config.project_dir = cmd_ctx.config.project_dir.clone();
                                         }
                                     }
                                     app.config.project_dir = Some(tool_ctx.working_dir.clone());
@@ -3272,6 +3283,11 @@ async fn run_interactive(
                             }
 
                             if refresh_catalog {
+                                app.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                tool_ctx.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                if app.mcp_view.visible {
+                                    app.refresh_mcp_view();
+                                }
                                 refresh_command_discovery(&mut app, &cmd_ctx.config, &cmd_ctx.working_dir);
                             }
                             if command_succeeded {
@@ -4899,8 +4915,7 @@ async fn run_interactive(
             if let Some(server_name) = app.take_pending_mcp_panel_auth() {
                 let server_config = cmd_ctx
                     .config
-                    .mcp_servers
-                    .iter()
+                    .effective_mcp_servers()
                     .find(|server| server.name == server_name);
                 let supports_panel_auth = server_config.is_some_and(|server| {
                     matches!(server.server_type.as_str(), "http" | "sse")
@@ -4958,7 +4973,7 @@ async fn run_interactive(
                     && !cmd_ctx.config.hosted_review.allow_mcp_servers
                 {
                     "MCP servers are disabled in hosted review mode.".to_string()
-                } else if cmd_ctx.config.mcp_servers.is_empty() {
+                } else if cmd_ctx.config.effective_mcp_servers().next().is_none() {
                     "No MCP servers configured.".to_string()
                 } else {
                     format!(

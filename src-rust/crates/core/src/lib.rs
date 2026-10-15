@@ -78,6 +78,7 @@ pub mod feature_flags;
 
 // MCP resource prompt template rendering with variable substitution.
 pub mod mcp_templates;
+pub mod plugin_mcp;
 
 // IDE environment detection (VS Code, Cursor, JetBrains, …).
 
@@ -912,7 +913,11 @@ pub mod config {
         pub compact_threshold: f32,
         pub verbose: bool,
         pub output_format: OutputFormat,
+        /// Explicit settings-owned servers; plugin contributions stay separate.
         pub mcp_servers: Vec<McpServerConfig>,
+        /// Discovered plugin contributions are runtime-only, never user settings.
+        #[serde(skip)]
+        pub plugin_mcp_servers: Vec<crate::plugin_mcp::PluginMcpContribution>,
         #[serde(default)]
         pub lsp_servers: Vec<crate::lsp::LspServerConfig>,
         pub allowed_tools: Vec<String>,
@@ -1922,6 +1927,8 @@ pub mod config {
                     v.extend(over.config.mcp_servers);
                     v
                 },
+                // Settings merging cannot confer runtime plugin ownership.
+                plugin_mcp_servers: Vec::new(),
                 lsp_servers: {
                     let mut v = base.config.lsp_servers;
                     v.extend(over.config.lsp_servers);

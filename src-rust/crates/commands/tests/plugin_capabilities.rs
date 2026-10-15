@@ -54,7 +54,11 @@ async fn plugin_stdio_capabilities_gate_real_manager_process_launch() {
                 ..Default::default()
             },
         });
-        let configs = registry.all_mcp_servers();
+        let configs: Vec<_> = registry
+            .all_mcp_servers()
+            .into_iter()
+            .map(|entry| entry.config)
+            .collect();
         let manager = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             claurst_mcp::McpManager::connect_all(&configs),
