@@ -451,6 +451,20 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Convert a relative token lifetime without turning overflow into no expiry.
+fn token_expiry_from_lifetime(expires_in: Option<u64>) -> anyhow::Result<Option<u64>> {
+    let Some(seconds) = expires_in else {
+        return Ok(None);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.checked_add(seconds)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("OAuth token expires_in overflows the Unix timestamp range"))
+}
+
 /// Exchange an authorization code for an access token.
 pub async fn exchange_code(
     token_endpoint: &str,
@@ -492,13 +506,7 @@ pub async fn exchange_code(
         .await
         .map_err(|_| anyhow::anyhow!("exchange_code: invalid token response"))?;
 
-    let expires_at = tr.expires_in.map(|secs| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            + secs
-    });
+    let expires_at = token_expiry_from_lifetime(tr.expires_in)?;
 
     Ok(McpToken {
         access_token: tr.access_token,
@@ -568,13 +576,7 @@ pub async fn refresh_mcp_token(
         .json()
         .await
         .map_err(|_| anyhow::anyhow!("refresh: invalid token response"))?;
-    let expires_at = tr.expires_in.map(|s| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            + s
-    });
+    let expires_at = token_expiry_from_lifetime(tr.expires_in)?;
 
     let new_token = McpToken {
         access_token: tr.access_token,
@@ -645,6 +647,22 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn relative_token_expiry_bounds() {
+        assert_eq!(token_expiry_from_lifetime(None).unwrap(), None);
+        assert!(token_expiry_from_lifetime(Some(u64::MAX)).is_err());
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expiry = token_expiry_from_lifetime(Some(0)).unwrap().unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((before..=after).contains(&expiry));
     }
 
     #[test]
