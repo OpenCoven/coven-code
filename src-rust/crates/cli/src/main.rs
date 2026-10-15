@@ -4340,22 +4340,15 @@ async fn run_interactive(
                         session_url,
                         session_id: conn_sid,
                     }) => {
-                        let short = if session_url.len() > 60 {
-                            format!("{}…", &session_url[..60])
-                        } else {
-                            session_url.clone()
-                        };
+                        let notification = remote_connection_notification(&session_url);
                         app.bridge_state = BridgeConnectionState::Connected {
                             session_url: session_url.clone(),
                             peer_count: 0,
                         };
                         app.remote_session_url = Some(session_url.clone());
                         cmd_ctx.remote_session_url = Some(session_url.clone());
-                        app.notifications.push(
-                            NotificationKind::Success,
-                            format!("Remote control active: {}", short),
-                            Some(5),
-                        );
+                        app.notifications
+                            .push(NotificationKind::Success, notification, Some(5));
                         // Persist the session URL into the saved session record.
                         session.remote_session_url = Some(session_url.clone());
                         session.updated_at = chrono::Utc::now();
@@ -5915,9 +5908,70 @@ fn take_remote_prompt(
     pending.pop_front()
 }
 
+fn remote_connection_notification(session_url: &str) -> String {
+    let short = if session_url.len() > 60 {
+        let mut end = 60;
+        while !session_url.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &session_url[..end])
+    } else {
+        session_url.to_string()
+    };
+    format!("Remote control active: {}", short)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_notification_two_byte_boundary() {
+        let prefix = "a".repeat(59);
+        let url = format!("{prefix}étail");
+        assert!(!url.is_char_boundary(60));
+        assert_eq!(
+            remote_connection_notification(&url),
+            format!("Remote control active: {prefix}…")
+        );
+    }
+
+    #[test]
+    fn remote_notification_three_byte_boundary() {
+        let prefix = "a".repeat(59);
+        let url = format!("{prefix}界tail");
+        assert!(!url.is_char_boundary(60));
+        assert_eq!(
+            remote_connection_notification(&url),
+            format!("Remote control active: {prefix}…")
+        );
+    }
+
+    #[test]
+    fn remote_notification_four_byte_boundary() {
+        let prefix = "a".repeat(58);
+        let url = format!("{prefix}\u{10000}tail");
+        assert!(!url.is_char_boundary(60));
+        assert_eq!(
+            remote_connection_notification(&url),
+            format!("Remote control active: {prefix}…")
+        );
+    }
+
+    #[test]
+    fn remote_notification_ascii_exact_and_short_controls() {
+        let long = "a".repeat(61);
+        assert_eq!(
+            remote_connection_notification(&long),
+            format!("Remote control active: {}…", "a".repeat(60))
+        );
+        for url in [format!("{}界", "a".repeat(57)), "short 界".to_string()] {
+            assert_eq!(
+                remote_connection_notification(&url),
+                format!("Remote control active: {url}")
+            );
+        }
+    }
 
     fn bridge_permission_fixture(
         id: &str,

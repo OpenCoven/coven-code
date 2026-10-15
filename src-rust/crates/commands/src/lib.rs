@@ -5002,7 +5002,11 @@ impl SlashCommand for SessionCommand {
                 if let Some(ref url) = ctx.remote_session_url {
                     let border = "─".repeat(url.len().min(60) + 4);
                     let display_url = if url.len() > 60 {
-                        format!("{}…", &url[..60])
+                        let mut end = 60;
+                        while !url.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}…", &url[..end])
                     } else {
                         url.clone()
                     };
