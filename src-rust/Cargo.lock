@@ -774,6 +774,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -789,6 +790,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "which",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
