@@ -1953,6 +1953,37 @@ async fn run_headless(
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
+fn handle_bridge_permission_response(
+    dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
+    pending_permissions: &mut claurst_tools::PendingPermissionStore,
+    tool_use_id: &str,
+    response: claurst_bridge::PermissionResponseKind,
+) {
+    if !dialog
+        .as_ref()
+        .is_some_and(|pr| pr.tool_use_id == tool_use_id)
+    {
+        return;
+    }
+    let Some(mut pending) = pending_permissions.waiting.remove(tool_use_id) else {
+        return;
+    };
+
+    use claurst_bridge::PermissionResponseKind;
+    use claurst_core::permissions::PermissionDecision;
+    // Preserve the bridge's one-request approval mapping; do not persist rules.
+    let decision = match response {
+        PermissionResponseKind::Allow | PermissionResponseKind::AllowSession => {
+            PermissionDecision::Allow
+        }
+        PermissionResponseKind::Deny => PermissionDecision::Deny,
+    };
+    if let Some(tx) = pending.decision_tx.take() {
+        let _ = tx.send(decision);
+    }
+    *dialog = None;
+}
+
 fn permission_request_from_core(
     pending: &claurst_tools::PendingPermissionRequest,
 ) -> claurst_tui::dialogs::PermissionRequest {
@@ -4015,18 +4046,12 @@ async fn run_interactive(
                         tool_use_id,
                         response,
                     }) => {
-                        // Resolve a pending permission dialog if IDs match.
-                        if let Some(ref pr) = app.permission_request {
-                            if pr.tool_use_id == tool_use_id {
-                                use claurst_bridge::PermissionResponseKind;
-                                let _allow = matches!(
-                                    response,
-                                    PermissionResponseKind::Allow
-                                        | PermissionResponseKind::AllowSession
-                                );
-                                app.permission_request = None;
-                            }
-                        }
+                        handle_bridge_permission_response(
+                            &mut app.permission_request,
+                            &mut pending_permissions.lock(),
+                            &tool_use_id,
+                            response,
+                        );
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
                         session.title = Some(title.clone());
@@ -5561,6 +5586,108 @@ fn should_show_engine_notice(is_interactive: bool, is_tty: bool, coven_parent_se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bridge_permission_fixture(
+        id: &str,
+    ) -> (
+        claurst_tools::PendingPermissionRequest,
+        tokio::sync::oneshot::Receiver<claurst_core::permissions::PermissionDecision>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            claurst_tools::PendingPermissionRequest {
+                tool_use_id: id.into(),
+                request: claurst_core::permissions::PermissionRequest {
+                    tool_name: "Write".into(),
+                    description: "Write a file".into(),
+                    details: None,
+                    is_read_only: false,
+                    path: Some("example.txt".into()),
+                    working_dir: None,
+                    allowed_roots: vec![],
+                    context_description: None,
+                },
+                reason: "Requires approval".into(),
+                decision_tx: Some(tx),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn bridge_permission_response_delivers_decision() {
+        use claurst_bridge::PermissionResponseKind as Response;
+        use claurst_core::permissions::PermissionDecision as Decision;
+
+        for (response, expected) in [
+            (Response::Allow, Decision::Allow),
+            (Response::Deny, Decision::Deny),
+            (Response::AllowSession, Decision::Allow),
+        ] {
+            let (pending, mut rx) = bridge_permission_fixture("active");
+            let mut dialog = Some(permission_request_from_core(&pending));
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.waiting.insert("active".into(), pending);
+
+            handle_bridge_permission_response(&mut dialog, &mut store, "active", response);
+
+            assert_eq!(rx.try_recv(), Ok(expected));
+            assert!(dialog.is_none());
+            assert!(store.waiting.is_empty());
+        }
+    }
+
+    #[test]
+    fn bridge_permission_response_ignores_other_and_repeated_ids() {
+        use claurst_bridge::PermissionResponseKind as Response;
+        use claurst_core::permissions::PermissionDecision as Decision;
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let (first, mut first_rx) = bridge_permission_fixture("first");
+        let (second, mut second_rx) = bridge_permission_fixture("second");
+        let mut dialog = Some(permission_request_from_core(&first));
+        let next_dialog = permission_request_from_core(&second);
+        let mut store = claurst_tools::PendingPermissionStore::default();
+        store.waiting.insert("first".into(), first);
+        store.waiting.insert("second".into(), second);
+
+        handle_bridge_permission_response(&mut dialog, &mut store, "second", Response::Allow);
+        handle_bridge_permission_response(&mut dialog, &mut store, "unknown", Response::Allow);
+        assert_eq!(first_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(second_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(dialog.as_ref().unwrap().tool_use_id, "first");
+        assert_eq!(store.waiting.len(), 2);
+
+        handle_bridge_permission_response(&mut dialog, &mut store, "first", Response::Deny);
+        assert_eq!(first_rx.try_recv(), Ok(Decision::Deny));
+        dialog = Some(next_dialog);
+        handle_bridge_permission_response(&mut dialog, &mut store, "first", Response::Allow);
+        assert_eq!(second_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(dialog.as_ref().unwrap().tool_use_id, "second");
+        assert_eq!(store.waiting.len(), 1);
+    }
+
+    #[test]
+    fn bridge_permission_response_requires_displayed_pending_request() {
+        use claurst_bridge::PermissionResponseKind as Response;
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let (pending, mut rx) = bridge_permission_fixture("active");
+        let mut dialog = Some(permission_request_from_core(&pending));
+        let mut store = claurst_tools::PendingPermissionStore::default();
+        handle_bridge_permission_response(&mut dialog, &mut store, "active", Response::Allow);
+        assert!(
+            dialog.is_some(),
+            "missing pending decision must not hide the dialog"
+        );
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        store.waiting.insert("active".into(), pending);
+        dialog = None;
+        handle_bridge_permission_response(&mut dialog, &mut store, "active", Response::Allow);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(store.waiting.len(), 1);
+    }
 
     fn tool_names(tools: &[Box<dyn claurst_tools::Tool>]) -> Vec<String> {
         let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
