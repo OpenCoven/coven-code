@@ -17,6 +17,7 @@ use std::sync::Arc;
 // Sub-modules – each contains a full tool implementation.
 pub mod apply_patch;
 pub mod ask_user;
+mod background_shell;
 pub mod bash;
 pub mod batch_edit;
 pub mod brief;
