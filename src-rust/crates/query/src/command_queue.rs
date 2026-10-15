@@ -6,7 +6,7 @@
 // Mirrors the TypeScript `messageQueueManager.js` behaviour.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
@@ -55,41 +55,6 @@ pub enum QueuedCommand {
 }
 
 // ---------------------------------------------------------------------------
-// Internal heap entry
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct QueueEntry {
-    command: QueuedCommand,
-    priority: CommandPriority,
-    /// Milliseconds since UNIX epoch — used as tie-breaker (older = higher priority).
-    timestamp: u64,
-}
-
-impl PartialEq for QueueEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.timestamp == other.timestamp
-    }
-}
-
-impl Eq for QueueEntry {}
-
-impl PartialOrd for QueueEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for QueueEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Higher priority wins; among equal priorities, the older entry wins.
-        self.priority
-            .cmp(&other.priority)
-            .then(other.timestamp.cmp(&self.timestamp))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // CommandQueue
 // ---------------------------------------------------------------------------
 
@@ -97,39 +62,32 @@ impl Ord for QueueEntry {
 ///
 /// Cloning the handle yields a second handle to the *same* queue (Arc semantics).
 #[derive(Debug, Clone)]
-pub struct CommandQueue(Arc<Mutex<BinaryHeap<QueueEntry>>>);
+pub struct CommandQueue(Arc<Mutex<[VecDeque<QueuedCommand>; 4]>>);
 
 impl CommandQueue {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(BinaryHeap::new())))
+        Self(Arc::new(Mutex::new(std::array::from_fn(|_| {
+            VecDeque::new()
+        }))))
     }
 
     /// Push a command with the given priority.
     pub fn push(&self, command: QueuedCommand, priority: CommandPriority) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let mut heap = self.0.lock().unwrap();
-        heap.push(QueueEntry {
-            command,
-            priority,
-            timestamp: ts,
-        });
+        self.0.lock().unwrap()[priority as usize].push_back(command);
     }
 
-    /// Drain all pending commands in priority order (highest first).
+    /// Drain all pending commands in priority order (highest first), FIFO within each priority.
     pub fn drain(&self) -> Vec<QueuedCommand> {
-        let mut heap = self.0.lock().unwrap();
-        let mut out = Vec::with_capacity(heap.len());
-        while let Some(entry) = heap.pop() {
-            out.push(entry.command);
+        let mut buckets = self.0.lock().unwrap();
+        let mut out = Vec::with_capacity(buckets.iter().map(VecDeque::len).sum());
+        for bucket in buckets.iter_mut().rev() {
+            out.extend(bucket.drain(..));
         }
         out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
+        self.0.lock().unwrap().iter().all(VecDeque::is_empty)
     }
 }
 
@@ -175,4 +133,104 @@ pub fn drain_command_queue(queue: &CommandQueue) -> Vec<claurst_core::types::Mes
     }
 
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_priority_commands_are_fifo() {
+        let queue = CommandQueue::new();
+        for index in 0..8 {
+            queue.push(
+                QueuedCommand::InjectUserMessage(index.to_string()),
+                CommandPriority::Normal,
+            );
+        }
+        let actual: Vec<_> = queue
+            .drain()
+            .into_iter()
+            .map(|command| match command {
+                QueuedCommand::InjectUserMessage(text) => text,
+                other => panic!("unexpected command: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            (0..8).map(|index| index.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn priority_preempts_fifo_across_cloned_handles() {
+        let queue = CommandQueue::default();
+        let cloned = queue.clone();
+        assert!(queue.is_empty());
+        for priority in [
+            CommandPriority::Low,
+            CommandPriority::Normal,
+            CommandPriority::High,
+            CommandPriority::Interrupt,
+        ] {
+            queue.push(
+                QueuedCommand::InjectUserMessage(format!("{priority:?}-first")),
+                priority,
+            );
+            cloned.push(
+                QueuedCommand::InjectUserMessage(format!("{priority:?}-second")),
+                priority,
+            );
+        }
+        assert!(!cloned.is_empty());
+        let actual: Vec<_> = cloned
+            .drain()
+            .into_iter()
+            .map(|command| match command {
+                QueuedCommand::InjectUserMessage(text) => text,
+                other => panic!("unexpected command: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                "Interrupt-first",
+                "Interrupt-second",
+                "High-first",
+                "High-second",
+                "Normal-first",
+                "Normal-second",
+                "Low-first",
+                "Low-second"
+            ]
+        );
+        assert!(queue.is_empty());
+        assert!(queue.drain().is_empty());
+        cloned.push(QueuedCommand::Clear, CommandPriority::Low);
+        assert!(matches!(queue.drain().as_slice(), [QueuedCommand::Clear]));
+        assert!(cloned.is_empty());
+    }
+
+    #[test]
+    fn drain_preserves_message_mapping_and_ui_command_policy() {
+        use claurst_core::types::{MessageContent, Role};
+        let queue = CommandQueue::new();
+        for command in [
+            QueuedCommand::Compact,
+            QueuedCommand::Clear,
+            QueuedCommand::SetModel("model".into()),
+            QueuedCommand::TriggerSkill("skill".into()),
+            QueuedCommand::InjectUserMessage("plain".into()),
+            QueuedCommand::InjectSystemMessage("notice".into()),
+        ] {
+            queue.push(command, CommandPriority::Normal);
+        }
+        let messages = drain_command_queue(&queue);
+        assert_eq!(messages.len(), 2);
+        for (message, expected) in messages.iter().zip(["plain", "[System]: notice"]) {
+            assert!(matches!(message.role, Role::User));
+            assert!(matches!(&message.content, MessageContent::Text(text) if text == expected));
+        }
+        assert!(queue.is_empty());
+    }
 }
