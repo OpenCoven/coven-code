@@ -82,7 +82,7 @@ fn plugin_enable_reports_settings_read_failure() {
         std::fs::create_dir_all(Settings::global_settings_path()).unwrap();
         let result = PluginCommand.execute("enable fixture", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)), "{result:?}");
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
     });
 }
@@ -96,7 +96,7 @@ fn plugin_enable_reports_malformed_settings_without_overwriting() {
         std::fs::write(Settings::global_settings_path(), "{broken").unwrap();
         let result = PluginCommand.execute("enable fixture", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)), "{result:?}");
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
         assert_eq!(
             std::fs::read_to_string(Settings::global_settings_path()).unwrap(),
@@ -124,25 +124,25 @@ fn enable_and_disable_persist_project_folder_consent() {
             "project consent must not be name-only"
         );
         assert_eq!(settings.enabled_plugins.len(), 1);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(
             plugin.join("marker").exists(),
             "explicit enable should activate hooks"
         );
         std::fs::remove_file(plugin.join("marker")).unwrap();
         message(PluginCommand.execute("reload", &mut ctx).await);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(plugin.join("marker").exists());
         std::fs::remove_file(plugin.join("marker")).unwrap();
 
         message(PluginCommand.execute("disable fixture", &mut ctx).await);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(
             !plugin.join("marker").exists(),
             "disable must remove live hooks"
         );
         message(PluginCommand.execute("reload", &mut ctx).await);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
         assert!(!claurst_plugins::global_plugin_registry()
             .unwrap()
@@ -170,7 +170,11 @@ fn cached_consent_cannot_follow_a_command_context_into_another_project() {
                 .path,
             second_plugin.canonicalize().unwrap()
         );
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook(
+            "Read",
+            &serde_json::json!({}),
+            &second.working_dir,
+        );
         assert!(!second_plugin.join("marker").exists());
     });
 }
@@ -190,7 +194,7 @@ fn project_settings_cannot_authorize_their_own_plugin() {
         )
         .unwrap();
         message(PluginCommand.execute("reload", &mut ctx).await);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
         assert!(!claurst_plugins::global_plugin_registry()
             .unwrap()
@@ -212,7 +216,7 @@ fn plugin_enable_reports_settings_write_failure() {
         .unwrap();
         let result = PluginCommand.execute("enable fixture", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)), "{result:?}");
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
     });
 }
@@ -240,7 +244,7 @@ fn canonical_project_and_plugin_aliases_share_only_the_same_folder_grant() {
             registry.get("fixture").unwrap().path,
             actual_plugin.canonicalize().unwrap()
         );
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(actual_plugin.join("marker").exists());
         std::fs::remove_file(actual_plugin.join("marker")).unwrap();
 
@@ -257,7 +261,7 @@ fn canonical_project_and_plugin_aliases_share_only_the_same_folder_grant() {
         assert!(!claurst_plugins::global_plugin_registry()
             .unwrap()
             .is_enabled("fixture"));
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!actual_plugin.join("marker").exists());
         assert!(!replacement.join("marker").exists());
     });
@@ -288,7 +292,11 @@ fn list_info_and_reload_keep_project_hooks_disabled_without_consent() {
                 result.contains("fixture") || result.contains("0 enabled"),
                 "{result}"
             );
-            claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+            claurst_plugins::run_global_pre_tool_hook(
+                "Read",
+                &serde_json::json!({}),
+                &ctx.working_dir,
+            );
             assert!(!plugin.join("marker").exists(), "{args} activated a hook");
             assert!(!claurst_plugins::global_plugin_registry()
                 .unwrap()
@@ -326,13 +334,13 @@ fn failed_disable_does_not_report_saved_consent() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let (mut ctx, plugin) = env.context("project").await;
         message(PluginCommand.execute("enable fixture", &mut ctx).await);
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(plugin.join("marker").exists());
         std::fs::remove_file(plugin.join("marker")).unwrap();
         std::fs::write(Settings::global_settings_path(), "{broken").unwrap();
         let result = PluginCommand.execute("disable fixture", &mut ctx).await;
         assert!(matches!(result, CommandResult::Error(_)), "{result:?}");
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(
             plugin.join("marker").exists(),
             "failed save must preserve live enabled state"
@@ -342,7 +350,7 @@ fn failed_disable_does_not_report_saved_consent() {
         assert!(!claurst_plugins::global_plugin_registry()
             .unwrap()
             .is_enabled("fixture"));
-        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
         assert!(!plugin.join("marker").exists());
     });
 }

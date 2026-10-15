@@ -2,8 +2,8 @@
 #![cfg(unix)]
 
 use claurst_plugins::{
-    run_global_post_tool_hook, run_global_pre_tool_hook, set_global_hooks, HookOutcome,
-    HookRegistry, RegisteredHook,
+    hooks::HookScope, run_global_post_tool_hook, run_global_pre_tool_hook, set_global_hooks,
+    HookOutcome, HookRegistry, RegisteredHook,
 };
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -85,6 +85,8 @@ fn global_hook_fixture() {
             plugin_root: directory.to_str().unwrap().into(),
             plugin_name: "matcher-fixture".into(),
             plugin_source: "fixture".into(),
+            plugin_capabilities: Some(vec!["shell".into()]),
+            scope: HookScope::Global,
         };
         let event = if mode == "pre" {
             "PreToolUse"
@@ -95,13 +97,13 @@ fn global_hook_fixture() {
         registry.insert(event.into(), vec![hook]);
         set_global_hooks(registry);
         if mode == "pre" {
-            match run_global_pre_tool_hook(tool, &input) {
+            match run_global_pre_tool_hook(tool, &input, &directory) {
                 HookOutcome::Deny(reason) if matches => assert!(reason.contains("fixture denial")),
                 HookOutcome::Allow if !matches => {}
                 outcome => panic!("unexpected {outcome:?} for {matcher:?} and {tool}"),
             }
         } else {
-            run_global_post_tool_hook(tool, &input, "fixture output", true);
+            run_global_post_tool_hook(tool, &input, "fixture output", true, &directory);
         }
         assert_eq!(output_path.exists(), matches, "{mode}: {matcher:?}, {tool}");
         if matches {

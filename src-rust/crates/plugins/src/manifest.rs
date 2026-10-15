@@ -303,11 +303,10 @@ pub struct PluginManifest {
     // ---- Capability grants ----
     /// The set of capability categories this plugin is allowed to use.
     ///
-    /// When `None`, the plugin was written before capability enforcement was
-    /// introduced — all categories are allowed for backwards compatibility.
-    ///
-    /// When `Some([])`, the plugin explicitly declares no capabilities, so any
-    /// tool action that requires a capability will be blocked.
+    /// Missing (`None`) and empty (`Some([])`) grants deny every action that
+    /// requires a capability. Static responses do not require a grant.
+    /// Hooks and LSP commands require `shell`; MCP contributions require `mcp`
+    /// plus `shell` for stdio or `network` for HTTP/SSE.
     ///
     /// Known categories:
     /// - `"read_files"`  — read from the local filesystem

@@ -126,9 +126,8 @@ pub struct PluginCommandDef {
     pub run_action: CommandRunAction,
     /// Capability grants declared in the plugin manifest.
     ///
-    /// `None`  → manifest predates capability enforcement → all capabilities allowed
-    ///           (backwards-compatible default).
-    /// `Some(v)` → only the listed capability strings are permitted.
+    /// Missing or empty grants deny actions requiring a capability.
+    /// Only explicitly listed capability strings are permitted.
     pub plugin_capabilities: Option<Vec<String>>,
 }
 

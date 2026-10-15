@@ -64,7 +64,7 @@ fn project_transition_refresh_preserves_startup_and_same_project_but_replaces_st
             global_plugin_registry().is_none(),
             "resume must not activate startup discovery"
         );
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &first);
         assert!(!user_plugin.join("marker").exists());
 
         let extra = root.path().join("extra");
@@ -79,14 +79,14 @@ fn project_transition_refresh_preserves_startup_and_same_project_but_replaces_st
         let preserved = global_plugin_registry().unwrap();
         assert!(std::sync::Arc::ptr_eq(&original, &preserved));
         assert!(preserved.get("extra-fixture").is_some());
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &first);
         assert!(first_plugin.join("marker").exists());
         std::fs::remove_file(first_plugin.join("marker")).unwrap();
 
         // The CLI calls this immediately after session resume changes its working directory.
         // No /plugin or dynamic plugin command runs before hook dispatch here.
         refresh_cached_plugins(&second).await;
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &second);
         assert!(
             !first_plugin.join("marker").exists(),
             "old project hook survived resume"
@@ -101,11 +101,15 @@ fn project_transition_refresh_preserves_startup_and_same_project_but_replaces_st
         assert!(refreshed.is_enabled("user-fixture"));
 
         refresh_cached_plugins(&first).await;
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &first);
         assert!(first_plugin.join("marker").exists());
         std::fs::remove_file(first_plugin.join("marker")).unwrap();
         refresh_cached_plugins(&root.path().join("missing-project")).await;
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook(
+            "Read",
+            &serde_json::json!({}),
+            &root.path().join("missing-project"),
+        );
         assert!(!first_plugin.join("marker").exists());
     });
 }

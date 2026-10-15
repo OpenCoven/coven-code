@@ -79,7 +79,7 @@ fn project_discovery_list_and_reload_do_not_authorize_hooks() {
             let registry = load_plugins(&project, &[]).await;
             assert!(format_plugin_list(&registry).contains("fixture"));
             set_global_hooks(registry.build_hook_registry());
-            run_global_pre_tool_hook("Read", &serde_json::json!({}));
+            run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
             assert!(
                 !plugin.join("marker").exists(),
                 "discovery activated {name} plugin"
@@ -87,7 +87,7 @@ fn project_discovery_list_and_reload_do_not_authorize_hooks() {
             assert!(!registry.is_enabled("fixture"));
             let (reloaded, _) = reload_plugins(&registry, &project, &[]).await;
             set_global_hooks(reloaded.build_hook_registry());
-            run_global_pre_tool_hook("Read", &serde_json::json!({}));
+            run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
             assert!(!plugin.join("marker").exists());
             assert!(!reloaded.is_enabled("fixture"));
         }
@@ -107,7 +107,7 @@ fn legacy_name_consent_never_authorizes_a_project_plugin() {
         assert!(!registry.is_enabled("fixture"));
         assert!(registry.build_hook_registry().is_empty());
         set_global_hooks(registry.build_hook_registry());
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
         assert!(!plugin.join("marker").exists());
     });
 }
@@ -116,7 +116,7 @@ fn legacy_name_consent_never_authorizes_a_project_plugin() {
 fn user_plugin_precedence_and_saved_disable_survive_reload() {
     let env = TestEnv::new();
     let project = env.project("project");
-    let project_plugin = write_plugin(&project, None);
+    let project_plugin = write_plugin(&project, Some(vec!["shell"]));
     let user_plugin = claurst_plugins::default_user_plugins_dir().join("fixture");
     std::fs::create_dir_all(&user_plugin).unwrap();
     std::fs::copy(
@@ -133,7 +133,7 @@ fn user_plugin_precedence_and_saved_disable_survive_reload() {
         assert!(registry.is_enabled("fixture"));
         assert_eq!(registry.error_count(), 1);
         set_global_hooks(registry.build_hook_registry());
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
         assert!(user_plugin.join("marker").exists());
         std::fs::remove_file(user_plugin.join("marker")).unwrap();
         let mut settings = claurst_core::config::Settings::default();
@@ -143,7 +143,7 @@ fn user_plugin_precedence_and_saved_disable_survive_reload() {
         assert!(!reloaded.is_enabled("fixture"));
         assert!(reloaded.build_hook_registry().is_empty());
         set_global_hooks(reloaded.build_hook_registry());
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
         assert!(!user_plugin.join("marker").exists());
         assert!(!project_plugin.join("marker").exists());
     });
@@ -168,7 +168,7 @@ fn user_plugin_keeps_precedence_when_project_aliases_same_folder() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let registry = load_plugins(&project, &[]).await;
         set_global_hooks(registry.build_hook_registry());
-        run_global_pre_tool_hook("Read", &serde_json::json!({}));
+        run_global_pre_tool_hook("Read", &serde_json::json!({}), &project);
         assert!(
             user_plugin.join("marker").exists(),
             "project alias disabled the trusted user hook"
@@ -183,5 +183,96 @@ fn user_plugin_keeps_precedence_when_project_aliases_same_folder() {
             registry.errors.as_slice(),
             [claurst_plugins::PluginError::DuplicateName { .. }]
         ));
+    });
+}
+
+#[test]
+fn cached_project_hooks_are_scoped_to_each_caller_at_every_runner() {
+    let env = TestEnv::new();
+    let project = env.project("owner");
+    let foreign = env.project("foreign");
+    let missing = env.root.path().join("missing");
+    let plugin = write_plugin(&project, Some(vec!["shell"]));
+    let user_plugin = claurst_plugins::default_user_plugins_dir().join("user-fixture");
+    std::fs::create_dir_all(&user_plugin).unwrap();
+    let mut user_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json")).unwrap()).unwrap();
+    user_manifest["name"] = serde_json::json!("user-fixture");
+    std::fs::write(user_plugin.join("plugin.json"), user_manifest.to_string()).unwrap();
+    let mut callers = vec![
+        (foreign.clone(), false),
+        (missing, false),
+        (project.clone(), true),
+    ];
+    #[cfg(unix)]
+    {
+        let alias = env.root.path().join("owner-alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        callers.push((alias, true));
+    }
+    callers.push((foreign, false));
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut registry = load_plugins(&project, &[]).await;
+        claurst_plugins::save_plugin_enabled(&project, registry.get("fixture").unwrap(), true)
+            .unwrap();
+        registry.enable("fixture");
+        let mut hooks = registry.build_hook_registry();
+        let mut post_hooks = hooks["PreToolUse"].clone();
+        for hook in &mut post_hooks {
+            // The separate post runner exposes tool env, not plugin-root env.
+            hook.command = if cfg!(windows) {
+                format!("echo ran>\"{}\\marker\"", hook.plugin_root)
+            } else {
+                format!(
+                    "printf ran > '{}'/marker",
+                    hook.plugin_root.replace('\'', "'\"'\"'")
+                )
+            };
+        }
+        hooks.insert("PostToolUse".into(), post_hooks);
+        set_global_hooks(hooks.clone());
+        for (caller, allowed) in callers {
+            for runner in ["direct", "global-pre", "global-post", "separate-post"] {
+                match runner {
+                    "direct" => {
+                        for hook in &hooks["PreToolUse"] {
+                            claurst_plugins::hooks::run_hook_sync(hook, "{}", &caller);
+                        }
+                    }
+                    "global-pre" => {
+                        run_global_pre_tool_hook("Read", &serde_json::json!({}), &caller);
+                    }
+                    "global-post" => {
+                        claurst_plugins::run_global_post_tool_hook(
+                            "Read",
+                            &serde_json::json!({}),
+                            "output",
+                            false,
+                            &caller,
+                        );
+                    }
+                    _ => {
+                        claurst_plugins::hooks::dispatch_post_tool_hooks(
+                            &hooks, "Read", "{}", "output", &caller,
+                        )
+                        .await;
+                    }
+                }
+                assert_eq!(
+                    plugin.join("marker").exists(),
+                    allowed,
+                    "{runner}: {}",
+                    caller.display()
+                );
+                assert!(
+                    user_plugin.join("marker").exists(),
+                    "user hook unavailable via {runner}"
+                );
+                std::fs::remove_file(user_plugin.join("marker")).unwrap();
+                if allowed {
+                    std::fs::remove_file(plugin.join("marker")).unwrap();
+                }
+            }
+        }
     });
 }

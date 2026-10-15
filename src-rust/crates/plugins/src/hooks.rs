@@ -3,12 +3,25 @@
 /// Hooks let plugins run shell commands in response to lifecycle events.
 /// This module defines the data model and the synchronous dispatch helper.
 use crate::manifest::{HookEventKind, PluginHookMatcher, PluginHooksConfig};
+use crate::plugin::{LoadedPlugin, PluginSource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Registered hook set
 // ---------------------------------------------------------------------------
+
+/// Ownership is separate from the display-only plugin source identifier.
+/// An unresolved or absent scope never acquires global authority.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum HookScope {
+    Global,
+    /// Canonical owning project folder, captured when registering the hook.
+    Project(PathBuf),
+    #[default]
+    UnresolvedProject,
+}
 
 /// A hook entry enriched with the plugin context it came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +38,26 @@ pub struct RegisteredHook {
     pub plugin_name: String,
     /// Plugin source identifier (e.g. `"myplugin@builtin"`).
     pub plugin_source: String,
+    /// Explicit manifest grants, rechecked at every execution boundary.
+    #[serde(default)]
+    pub plugin_capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    pub scope: HookScope,
+}
+
+impl RegisteredHook {
+    fn is_authorized(&self, working_dir: &Path) -> bool {
+        if !crate::has_capability(self.plugin_capabilities.as_deref(), "shell") {
+            return false;
+        }
+        match &self.scope {
+            HookScope::Global => true,
+            HookScope::Project(owner) => working_dir
+                .canonicalize()
+                .is_ok_and(|caller| caller == *owner),
+            HookScope::UnresolvedProject => false,
+        }
+    }
 }
 
 /// All registered hooks for a running session, keyed by event name.
@@ -37,24 +70,38 @@ pub type HookRegistry = HashMap<String, Vec<RegisteredHook>>;
 /// Convert raw `PluginHooksConfig` (from `hooks/hooks.json` or inline in the
 /// manifest) into `RegisteredHook` entries and merge them into `registry`.
 pub fn register_plugin_hooks(
-    config: &PluginHooksConfig,
-    plugin_root: &str,
-    plugin_name: &str,
-    plugin_source: &str,
+    plugin: &LoadedPlugin,
+    project_root: Option<&Path>,
     registry: &mut HookRegistry,
 ) {
+    if !plugin.enabled || !crate::has_capability(plugin.manifest.capabilities.as_deref(), "shell") {
+        return;
+    }
+    let Some(config) = &plugin.hooks_config else {
+        return;
+    };
+    let scope = match plugin.source {
+        PluginSource::Project => {
+            let Some(root) = project_root.and_then(|root| root.canonicalize().ok()) else {
+                return;
+            };
+            HookScope::Project(root)
+        }
+        _ => HookScope::Global,
+    };
     for (event_name, matchers) in &config.events {
         let registered_hooks = registry.entry(event_name.clone()).or_default();
-
         for matcher in matchers {
             for hook in &matcher.hooks {
                 registered_hooks.push(RegisteredHook {
                     command: hook.command.clone(),
                     matcher: matcher.matcher.clone().or_else(|| hook.matcher.clone()),
                     blocking: hook.blocking,
-                    plugin_root: plugin_root.to_string(),
-                    plugin_name: plugin_name.to_string(),
-                    plugin_source: plugin_source.to_string(),
+                    plugin_root: plugin.path.to_string_lossy().into_owned(),
+                    plugin_name: plugin.name.clone(),
+                    plugin_source: plugin.source_id.clone(),
+                    plugin_capabilities: plugin.manifest.capabilities.clone(),
+                    scope: scope.clone(),
                 });
             }
         }
@@ -148,7 +195,7 @@ pub enum HookOutcome {
     Allow,
     /// Hook exited non-zero and was blocking — deny the operation.
     Deny(String),
-    /// Hook failed to start / timed out — treated as allow (non-blocking failure).
+    /// Hook was unauthorized, failed to start / timed out — treated as allow (non-blocking failure).
     Error(String),
 }
 
@@ -162,7 +209,13 @@ pub enum HookOutcome {
 ///
 /// This is a synchronous wrapper around `std::process::Command`.  For
 /// real-world async usage the caller should spawn a blocking task.
-pub fn run_hook_sync(hook: &RegisteredHook, event_json: &str) -> HookOutcome {
+pub fn run_hook_sync(hook: &RegisteredHook, event_json: &str, working_dir: &Path) -> HookOutcome {
+    if !hook.is_authorized(working_dir) {
+        return HookOutcome::Error(format!(
+            "Plugin '{}' hook is not authorized for this caller project or lacks shell capability",
+            hook.plugin_name
+        ));
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -273,6 +326,7 @@ pub async fn dispatch_post_tool_hooks(
     tool_name: &str,
     tool_input_json: &str,
     tool_result_json: &str,
+    working_dir: &Path,
 ) -> Vec<String> {
     let event_name = event_key(&HookEventKind::PostToolUse);
 
@@ -301,8 +355,10 @@ pub async fn dispatch_post_tool_hooks(
         let tn = tool_name.clone();
         let ti = tool_input.clone();
         let tr = tool_result.clone();
-        let task =
-            tokio::task::spawn_blocking(move || run_post_tool_hook(&hook.command, &tn, &ti, &tr));
+        let caller_dir = working_dir.to_path_buf();
+        let task = tokio::task::spawn_blocking(move || {
+            run_post_tool_hook(&hook, &tn, &ti, &tr, &caller_dir)
+        });
         tasks.push(task);
     }
 
@@ -319,11 +375,19 @@ pub async fn dispatch_post_tool_hooks(
 
 /// Run a single PostToolUse hook command synchronously.
 fn run_post_tool_hook(
-    command: &str,
+    hook: &RegisteredHook,
     tool_name: &str,
     tool_input_json: &str,
     tool_result_json: &str,
+    working_dir: &Path,
 ) -> Result<String, std::io::Error> {
+    if !hook.is_authorized(working_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Plugin '{}' hook is not authorized for this caller project or lacks shell capability", hook.plugin_name),
+        ));
+    }
+    let command = hook.command.as_str();
     let output = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
         .args(if cfg!(windows) {
             vec!["/C", command]

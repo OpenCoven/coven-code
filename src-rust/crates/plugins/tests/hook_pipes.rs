@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use claurst_plugins::hooks::{run_hook_sync, HookOutcome, RegisteredHook};
+use claurst_plugins::hooks::{run_hook_sync, HookOutcome, HookScope, RegisteredHook};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -54,8 +54,14 @@ fn hook_runner_fixture() {
         plugin_root: ".".into(),
         plugin_name: "pipe-fixture".into(),
         plugin_source: "test".into(),
+        plugin_capabilities: Some(vec!["shell".into()]),
+        scope: HookScope::Global,
     };
-    let outcome = run_hook_sync(&hook, &"x".repeat(1024 * 1024));
+    let outcome = run_hook_sync(
+        &hook,
+        &"x".repeat(1024 * 1024),
+        &std::env::current_dir().unwrap(),
+    );
     if mode == "deny" {
         assert!(
             matches!(outcome, HookOutcome::Deny(ref message) if message.contains("fixture denial")),
