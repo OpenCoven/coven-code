@@ -14,6 +14,10 @@ members = [
     "crates/plugins",
     "crates/acp",
 ]
+exclude = ["vendor/rmcp-1.7.0"]
+
+[patch.crates-io]
+rmcp = { path = "vendor/rmcp-1.7.0" }
 
 [workspace.package]
 version = "0.8.0"

@@ -13,6 +13,8 @@ refs/
 # Git
 .gitignore
 .gitattributes
+!src-rust/vendor/rmcp-1.7.0/tests/test_with_python/.gitignore
+!src-rust/vendor/rmcp-1.7.0/tests/test_with_js/.gitignore
 
 # VSCode / unsolicited devcontainers mounts
 .vscode/

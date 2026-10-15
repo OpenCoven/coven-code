@@ -37,9 +37,9 @@ impl Fixture {
         name: &str,
         source: PluginMcpSource,
     ) -> PluginMcpContribution {
-        PluginMcpContribution {
-            origin: PluginMcpOrigin::new(source, project, Some(project)).unwrap(),
-            config: claurst_core::McpServerConfig {
+        PluginMcpContribution::new(
+            PluginMcpOrigin::new(source, project, Some(project)).unwrap(),
+            claurst_core::McpServerConfig {
                 name: name.into(),
                 command: Some("sh".into()),
                 args: vec![
@@ -60,13 +60,16 @@ impl Fixture {
                 url: None,
                 server_type: "stdio".into(),
             },
-        }
+        )
     }
 
     async fn connect(&self, config: &Config) {
-        let result = tokio::time::timeout(Duration::from_secs(3), connect_mcp_manager_arc(config))
-            .await
-            .expect("stdio marker must finish");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            connect_mcp_manager_arc(config, config.project_dir.as_deref()),
+        )
+        .await
+        .expect("stdio marker must finish");
         assert_eq!(
             result.as_ref().map_or(0, |manager| manager.server_count()),
             0
@@ -111,7 +114,7 @@ fn resume_configuration_withdraws_old_project_before_real_reconnect() {
         assert_eq!(fixture.starts("user"), 1);
         claurst_plugins::set_global_registry(claurst_plugins::load_plugins(&a, &[]).await);
         // Both the launch --resume and in-session /resume paths call this helper.
-        refresh_mcp_project_config(&mut config, &b).await;
+        refresh_mcp_project_config(&mut config, &b).await.unwrap();
         assert!(config.plugin_mcp_servers.is_empty());
         fixture.connect(&config).await;
         assert_eq!(fixture.starts("project"), 1);
@@ -147,5 +150,61 @@ fn hosted_review_filters_plugin_contributions_and_all_mcp_launches() {
         fixture.connect(&config).await;
         assert_eq!(fixture.starts("user"), 1);
         assert_eq!(fixture.starts("plugin"), 0);
+    });
+}
+
+#[test]
+fn stale_config_cannot_relaunch_a_withdrawn_contribution() {
+    let fixture = Fixture::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let a = fixture.project("a");
+        let b = fixture.project("b");
+        let mut config = Config {
+            project_dir: Some(a.clone()),
+            plugin_mcp_servers: vec![fixture.contribution(
+                &a,
+                "withdrawn",
+                PluginMcpSource::Project,
+            )],
+            ..Default::default()
+        };
+        for caller in [None, Some(b.as_path()), Some(a.join("missing").as_path())] {
+            let manager = connect_mcp_manager_arc(&config, caller).await.unwrap();
+            assert_eq!(manager.server_count(), 0);
+        }
+        assert_eq!(
+            fixture.starts("withdrawn"),
+            0,
+            "unresolved or foreign launch caller must fail before spawn"
+        );
+        let stale = config.clone();
+        config.set_mcp_project(&b).await.unwrap();
+        fixture.connect(&stale).await;
+        assert_eq!(
+            fixture.starts("withdrawn"),
+            0,
+            "revoked stale config must not reach actual stdio launch"
+        );
+        // Fresh enable is a new lifetime, and cannot revive the old clone.
+        config.set_mcp_project(&a).await.unwrap();
+        config
+            .reconcile_plugin_mcp_servers(vec![fixture.contribution(
+                &a,
+                "withdrawn",
+                PluginMcpSource::Project,
+            )])
+            .await
+            .unwrap();
+        let alias = a.join(".");
+        let manager = connect_mcp_manager_arc(&config, Some(&alias))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.failed_servers().len(),
+            1,
+            "canonical alias reaches the marker child"
+        );
+        fixture.connect(&stale).await;
+        assert_eq!(fixture.starts("withdrawn"), 1);
     });
 }

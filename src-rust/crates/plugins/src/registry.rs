@@ -208,9 +208,9 @@ impl PluginRegistry {
                 if !crate::has_capability(grants, required) {
                     continue;
                 }
-                servers.push(PluginMcpContribution {
-                    origin: origin.clone(),
-                    config: claurst_core::config::McpServerConfig {
+                servers.push(PluginMcpContribution::new(
+                    origin.clone(),
+                    claurst_core::config::McpServerConfig {
                         name: mcp.name.clone(),
                         command: mcp.command.clone(),
                         args: mcp.args.clone(),
@@ -218,7 +218,7 @@ impl PluginRegistry {
                         url: mcp.url.clone(),
                         server_type: mcp.server_type.clone(),
                     },
-                });
+                ));
             }
         }
         servers

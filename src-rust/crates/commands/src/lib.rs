@@ -2242,9 +2242,17 @@ impl SlashCommand for PluginCommand {
                     ));
                 }
                 registry.enable(&name);
-                ctx.config.set_mcp_project(&project_dir);
-                ctx.config.plugin_mcp_servers = registry.all_mcp_servers();
                 publish_plugin_registry(&registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
                 CommandResult::Message(format!(
                     "Plugin '{}' enabled. Run `/plugin reload` to refresh contributed resources.",
                     name
@@ -2273,9 +2281,17 @@ impl SlashCommand for PluginCommand {
                     ));
                 }
                 registry.disable(&name);
-                ctx.config.set_mcp_project(&project_dir);
-                ctx.config.plugin_mcp_servers = registry.all_mcp_servers();
                 publish_plugin_registry(&registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
                 CommandResult::Message(format!(
                     "Plugin '{}' disabled. Its commands and hooks are disabled in this session.",
                     name
@@ -2311,10 +2327,18 @@ impl SlashCommand for PluginCommand {
                 let old_registry = loaded_plugin_registry(&project_dir).await;
                 let (new_registry, diff) =
                     claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-                ctx.config.set_mcp_project(&project_dir);
-                ctx.config.plugin_mcp_servers = new_registry.all_mcp_servers();
-                let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
                 publish_plugin_registry(&new_registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(new_registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
                 CommandResult::Message(summary)
             }
             claurst_plugins::PluginSubCommand::Help => {
@@ -2348,10 +2372,18 @@ impl SlashCommand for ReloadPluginsCommand {
         let old_registry = loaded_plugin_registry(&project_dir).await;
         let (new_registry, diff) =
             claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-        ctx.config.set_mcp_project(&project_dir);
-        ctx.config.plugin_mcp_servers = new_registry.all_mcp_servers();
-        let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
         publish_plugin_registry(&new_registry);
+        if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+            return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+        }
+        if let Err(error) = ctx
+            .config
+            .reconcile_plugin_mcp_servers(new_registry.all_mcp_servers())
+            .await
+        {
+            return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+        }
+        let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
 
         CommandResult::Message(summary)
     }
@@ -4155,6 +4187,24 @@ impl McpCommand {
             }
         };
 
+        if let Some(plugin) = ctx
+            .config
+            .plugin_mcp_servers
+            .iter()
+            .find(|plugin| plugin.config.name == server_name)
+        {
+            if !ctx
+                .config
+                .mcp_servers
+                .iter()
+                .any(|user| user.name == server_name)
+            {
+                if let Err(error) = plugin.check_caller(Some(&ctx.working_dir)) {
+                    return CommandResult::Error(error.to_string());
+                }
+            }
+        }
+
         let is_http = matches!(srv.server_type.as_str(), "http" | "sse");
 
         if !is_http {
@@ -4195,7 +4245,10 @@ impl McpCommand {
             if let Some(run_auth) = &ctx.mcp_auth_runner {
                 // In the interactive CLI/TUI we start browser auth in the background
                 // so the event loop stays responsive while waiting for the callback.
-                match manager.begin_auth(server_name).await {
+                match manager
+                    .begin_auth(Some(&ctx.working_dir), server_name)
+                    .await
+                {
                     Ok(session) => {
                         let auth_url = session.auth_url.clone();
                         let redirect_uri = session.redirect_uri.clone();
@@ -4219,7 +4272,10 @@ impl McpCommand {
                 }
             }
 
-            match manager.authenticate(server_name).await {
+            match manager
+                .authenticate(Some(&ctx.working_dir), server_name)
+                .await
+            {
                 Ok(result) => {
                     return CommandResult::Message(format!(
                         "MCP OAuth — '{}'\n\
@@ -4526,7 +4582,9 @@ impl McpCommand {
         match parts[0] {
             "resources" => {
                 let filter = parts.get(1).copied();
-                let resources = manager.list_all_resources(filter).await;
+                let resources = manager
+                    .list_all_resources(Some(&ctx.working_dir), filter)
+                    .await;
                 if resources.is_empty() {
                     return Some(CommandResult::Message(
                         "No resources available (servers may not support resources/list)."
@@ -4549,7 +4607,9 @@ impl McpCommand {
             }
             "prompts" => {
                 let filter = parts.get(1).copied();
-                let prompts = manager.list_all_prompts(filter).await;
+                let prompts = manager
+                    .list_all_prompts(Some(&ctx.working_dir), filter)
+                    .await;
                 if prompts.is_empty() {
                     return Some(CommandResult::Message(
                         "No prompt templates available (servers may not support prompts/list)."
@@ -4619,7 +4679,10 @@ impl McpCommand {
                     }
                 }
                 let arguments = if args.is_empty() { None } else { Some(args) };
-                match manager.get_prompt(server, prompt_name, arguments).await {
+                match manager
+                    .get_prompt(Some(&ctx.working_dir), server, prompt_name, arguments)
+                    .await
+                {
                     Ok(result) => {
                         let mut injected = String::new();
                         for msg in &result.messages {

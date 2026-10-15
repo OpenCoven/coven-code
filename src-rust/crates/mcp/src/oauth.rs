@@ -1,8 +1,9 @@
 //! MCP OAuth / XAA IdP login flow.
 //! Mirrors src/services/mcp/xaaIdpLogin.ts and src/services/mcp/auth.ts.
 
+use claurst_core::plugin_mcp::PluginMcpContribution;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -108,6 +109,8 @@ pub struct McpOAuthMetadata {
 
 #[derive(Debug, Clone)]
 pub struct McpAuthSession {
+    pub(crate) plugin: Option<claurst_core::plugin_mcp::PluginMcpContribution>,
+    pub(crate) caller: Option<PathBuf>,
     pub server_name: String,
     pub server_url: String,
     pub auth_url: String,
@@ -191,6 +194,8 @@ pub async fn begin_mcp_auth(server_name: &str, server_url: &str) -> anyhow::Resu
     let auth_url = build_mcp_auth_url(&metadata.authorization_endpoint, &redirect_uri, &verifier);
 
     Ok(McpAuthSession {
+        plugin: None,
+        caller: None,
         server_name: server_name.to_string(),
         server_url: normalize_server_url_owned(server_url),
         auth_url,
@@ -300,9 +305,46 @@ async fn wait_for_authorization_code(
 }
 
 pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<McpAuthResult> {
+    run_mcp_auth_session_with(session, |url| {
+        open::that(url)
+            .map_err(|error| anyhow::anyhow!("Failed to open browser for OAuth: {}", error))
+    })
+    .await
+}
+
+async fn run_mcp_auth_session_with(
+    session: McpAuthSession,
+    open_browser: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<McpAuthResult> {
+    let plugin = session.plugin.clone();
+    let caller = session.caller.clone();
+    match plugin {
+        Some(plugin) => {
+            plugin
+                .guard(
+                    caller.as_deref(),
+                    run_mcp_auth_session_inner(session, open_browser),
+                )
+                .await
+        }
+        None => run_mcp_auth_session_inner(session, open_browser).await,
+    }
+}
+
+async fn run_mcp_auth_session_inner(
+    session: McpAuthSession,
+    open_browser: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<McpAuthResult> {
+    if let Some(plugin) = &session.plugin {
+        plugin.check_caller(session.caller.as_deref())?;
+    }
     let (listener, host, callback_path) = bind_callback_listener(&session.redirect_uri).await?;
-    open::that(&session.auth_url)
-        .map_err(|e| anyhow::anyhow!("Failed to open browser for OAuth: {}", e))?;
+    match &session.plugin {
+        Some(plugin) => plugin.authorize(session.caller.as_deref(), || {
+            open_browser(&session.auth_url)
+        })?,
+        None => open_browser(&session.auth_url)?,
+    }
 
     let code = wait_for_authorization_code(
         listener,
@@ -312,6 +354,9 @@ pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<Mcp
         Duration::from_secs(180),
     )
     .await?;
+    if let Some(plugin) = &session.plugin {
+        plugin.check_caller(session.caller.as_deref())?;
+    }
     let mut token = exchange_code(
         &session.metadata.token_endpoint,
         &code,
@@ -321,13 +366,11 @@ pub async fn run_mcp_auth_session(session: McpAuthSession) -> anyhow::Result<Mcp
     .await?;
     token.server_name = session.server_name.clone();
     token.server_url = Some(session.server_url.clone());
-    store_mcp_token(&token).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to store MCP token for '{}': {}",
-            session.server_name,
-            e
-        )
-    })?;
+    let persist = || store_mcp_token(&token).map_err(anyhow::Error::from);
+    match &session.plugin {
+        Some(plugin) => plugin.authorize(session.caller.as_deref(), persist)?,
+        None => persist()?,
+    }
 
     Ok(McpAuthResult {
         server_name: session.server_name,
@@ -349,6 +392,18 @@ pub async fn get_valid_mcp_token(
     server_name: &str,
     server_url: &str,
 ) -> anyhow::Result<Option<McpToken>> {
+    get_valid_mcp_token_for(server_name, server_url, None, None).await
+}
+
+pub(crate) async fn get_valid_mcp_token_for(
+    server_name: &str,
+    server_url: &str,
+    plugin: Option<&PluginMcpContribution>,
+    caller: Option<&Path>,
+) -> anyhow::Result<Option<McpToken>> {
+    if let Some(plugin) = plugin {
+        plugin.check_caller(caller)?;
+    }
     let Some(token) = get_mcp_token(server_name) else {
         return Ok(None);
     };
@@ -366,9 +421,15 @@ pub async fn get_valid_mcp_token(
     }
 
     let metadata = fetch_oauth_metadata(server_url).await?;
-    refresh_mcp_token(server_name, server_url, &metadata.token_endpoint)
-        .await
-        .map(Some)
+    refresh_mcp_token_for(
+        server_name,
+        server_url,
+        &metadata.token_endpoint,
+        plugin,
+        caller,
+    )
+    .await
+    .map(Some)
 }
 
 pub async fn get_valid_mcp_access_token(
@@ -538,6 +599,19 @@ pub async fn refresh_mcp_token(
     server_url: &str,
     token_endpoint: &str,
 ) -> anyhow::Result<McpToken> {
+    refresh_mcp_token_for(server_name, server_url, token_endpoint, None, None).await
+}
+
+async fn refresh_mcp_token_for(
+    server_name: &str,
+    server_url: &str,
+    token_endpoint: &str,
+    plugin: Option<&PluginMcpContribution>,
+    caller: Option<&Path>,
+) -> anyhow::Result<McpToken> {
+    if let Some(plugin) = plugin {
+        plugin.check_caller(caller)?;
+    }
     let existing = get_mcp_token(server_name)
         .ok_or_else(|| anyhow::anyhow!("No stored token for {}", server_name))?;
     if !existing.is_bound_to_server_url(server_url) {
@@ -601,7 +675,11 @@ pub async fn refresh_mcp_token(
         server_url: Some(normalize_server_url_owned(server_url)),
     };
 
-    store_mcp_token(&new_token)?;
+    let persist = || store_mcp_token(&new_token).map_err(anyhow::Error::from);
+    match plugin {
+        Some(plugin) => plugin.authorize(caller, persist)?,
+        None => persist()?,
+    }
     Ok(new_token)
 }
 
@@ -1107,6 +1185,161 @@ mod token_error_tests {
         assert_eq!(
             get_mcp_token("success-fixture").unwrap().access_token,
             "refreshed-access"
+        );
+    }
+}
+
+#[cfg(test)]
+mod plugin_session_tests {
+    use super::*;
+    use claurst_core::plugin_mcp::{PluginMcpContribution, PluginMcpOrigin, PluginMcpSource};
+    use tokio::{io::AsyncReadExt, sync::oneshot, time::timeout};
+
+    fn session(root: &std::path::Path, token_url: &str) -> (PluginMcpContribution, McpAuthSession) {
+        let plugin = PluginMcpContribution::new(
+            PluginMcpOrigin::new(PluginMcpSource::Project, root, Some(root)).unwrap(),
+            claurst_core::McpServerConfig {
+                name: "fixture".into(),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                url: Some(token_url.into()),
+                server_type: "http".into(),
+            },
+        );
+        let session = McpAuthSession {
+            plugin: Some(plugin.clone()),
+            caller: Some(root.to_path_buf()),
+            server_name: "fixture".into(),
+            server_url: token_url.into(),
+            auth_url: "http://127.0.0.1:1/unused-browser".into(),
+            redirect_uri: format!("http://127.0.0.1:{}/callback", oauth_port_alloc().unwrap()),
+            verifier: "fixture-verifier".into(),
+            metadata: McpOAuthMetadata {
+                authorization_endpoint: "unused".into(),
+                token_endpoint: token_url.into(),
+            },
+        };
+        (plugin, session)
+    }
+
+    #[tokio::test]
+    async fn plugin_revocation_releases_pending_oauth_callback_listener() {
+        let _home = test_support::TokenHomeGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let (plugin, session) = session(root.path(), "http://127.0.0.1:1/token");
+        let redirect_uri = session.redirect_uri.clone();
+        let (opened, ready) = oneshot::channel();
+        let task = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
+            let _ = opened.send(());
+            Ok(())
+        }));
+        timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        plugin.revoke();
+        timeout(Duration::from_secs(2), plugin.wait_retired())
+            .await
+            .unwrap()
+            .unwrap();
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("revoked"));
+        assert!(
+            bind_callback_listener(&redirect_uri).await.is_ok(),
+            "callback socket must be released when retirement completes"
+        );
+        assert!(get_mcp_token("fixture").is_none());
+    }
+
+    #[tokio::test]
+    async fn plugin_revocation_during_exchange_prevents_token_persistence() {
+        let _home = test_support::TokenHomeGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let (plugin, session) = session(root.path(), &url);
+        let callback = format!("{}?code=fixture-code", session.redirect_uri);
+        let (seen, request_seen) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let _ = seen.send(());
+            let _ = resume.await;
+            let body = r#"{"access_token":"fixture-token","expires_in":3600}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        let (opened, ready) = oneshot::channel();
+        let task = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
+            let _ = opened.send(());
+            Ok(())
+        }));
+        timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        reqwest::get(callback).await.unwrap();
+        timeout(Duration::from_secs(2), request_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        plugin.revoke();
+        timeout(Duration::from_secs(2), plugin.wait_retired())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("revoked"));
+        let _ = release.send(());
+        server.await.unwrap();
+        assert!(
+            get_mcp_token("fixture").is_none(),
+            "a revoked callback must never write a token"
+        );
+    }
+    #[tokio::test]
+    async fn plugin_refresh_cannot_persist_after_revocation_during_response() {
+        let _home = test_support::TokenHomeGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let (plugin, _) = session(root.path(), &url);
+        store_mcp_token(&McpToken {
+            access_token: "original-fixture-token".into(),
+            refresh_token: Some("fixture-refresh".into()),
+            expires_at: Some(0),
+            scope: None,
+            server_name: "fixture".into(),
+            server_url: Some(url.clone()),
+        })
+        .unwrap();
+        let withdrawn = plugin.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            withdrawn.revoke();
+            let body = r#"{"access_token":"replacement-fixture-token","expires_in":3600}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let result =
+            refresh_mcp_token_for("fixture", &url, &url, Some(&plugin), Some(root.path())).await;
+        server.await.unwrap();
+        assert!(
+            result.is_err(),
+            "refresh continuation must check authority after its network await"
+        );
+        assert_eq!(
+            get_mcp_token("fixture").unwrap().access_token,
+            "original-fixture-token"
         );
     }
 }

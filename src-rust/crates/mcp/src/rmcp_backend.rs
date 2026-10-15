@@ -100,16 +100,18 @@ impl ClientHandler for RmcpNotificationClient {
 pub struct RmcpClientBackend {
     snapshot: McpClientSnapshot,
     peer: rmcp::Peer<RoleClient>,
-    #[allow(dead_code)]
     running: Mutex<RunningService<RoleClient, RmcpNotificationClient>>,
     notifications_rx: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
     notifications_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>>,
     notification_shutdown: watch::Sender<bool>,
+    notification_tasks: StdMutex<Vec<JoinHandle<()>>>,
+    transport_completion: Option<crate::owned_transport::Completion>,
 }
 
 impl RmcpClientBackend {
     pub async fn connect_stdio(
         config: &claurst_core::config::McpServerConfig,
+        shutdown: Option<watch::Receiver<bool>>,
     ) -> anyhow::Result<Self> {
         let command = config.command.clone().ok_or_else(|| {
             anyhow::anyhow!("MCP server '{}' has no command configured", config.name)
@@ -128,13 +130,14 @@ impl RmcpClientBackend {
         })?;
 
         let client_info = build_client_info(rmcp_model::ProtocolVersion::default());
-        Self::connect_with_transport(config, transport, client_info, "stdio").await
+        Self::connect_with_transport(config, transport, client_info, "stdio", shutdown).await
     }
 
     pub async fn connect_http(
         config: &claurst_core::config::McpServerConfig,
         auth_token: Option<String>,
         protocol_version: rmcp_model::ProtocolVersion,
+        shutdown: Option<watch::Receiver<bool>>,
     ) -> anyhow::Result<Self> {
         let endpoint = config
             .url
@@ -146,21 +149,30 @@ impl RmcpClientBackend {
             transport_config = transport_config.auth_header(token);
         }
 
-        let transport = StreamableHttpClientTransport::from_config(transport_config);
         let client_info = build_client_info(protocol_version);
-        Self::connect_with_transport(config, transport, client_info, "http").await
+        if let Some(shutdown) = shutdown {
+            let transport =
+                crate::owned_http::OwnedHttpTransport::new(transport_config, shutdown.clone());
+            Self::connect_with_transport(config, transport, client_info, "http", Some(shutdown))
+                .await
+        } else {
+            let transport = StreamableHttpClientTransport::from_config(transport_config);
+            Self::connect_with_transport(config, transport, client_info, "http", None).await
+        }
     }
 
     pub async fn connect_legacy_sse(
         config: &claurst_core::config::McpServerConfig,
         auth_token: Option<String>,
+        shutdown: Option<watch::Receiver<bool>>,
     ) -> anyhow::Result<Self> {
         // Legacy SSE servers still expose the real POST endpoint via
         // `event: endpoint`; keep a thin compatibility shim here and hand the
         // session and capability flow back to rmcp once connected.
-        let transport = LegacySseRmcpTransport::connect(config, auth_token).await?;
+        let transport =
+            LegacySseRmcpTransport::connect(config, auth_token, shutdown.clone()).await?;
         let client_info = build_client_info(rmcp_model::ProtocolVersion::V_2024_11_05);
-        Self::connect_with_transport(config, transport, client_info, "sse").await
+        Self::connect_with_transport(config, transport, client_info, "sse", shutdown).await
     }
 
     async fn connect_with_transport<T, E, A>(
@@ -168,6 +180,7 @@ impl RmcpClientBackend {
         transport: T,
         client_info: rmcp_model::ClientInfo,
         transport_label: &str,
+        shutdown: Option<watch::Receiver<bool>>,
     ) -> anyhow::Result<Self>
     where
         T: rmcp::transport::IntoTransport<RoleClient, E, A>,
@@ -176,17 +189,46 @@ impl RmcpClientBackend {
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
         let handler = RmcpNotificationClient::new(notifications_tx, client_info);
         let notifications_tx = Arc::clone(&handler.notifications_tx);
-        let running = handler.serve(transport).await.map_err(|e| {
-            anyhow::anyhow!(
-                "rmcp {} client '{}' failed to initialize: {}",
-                transport_label,
-                config.name,
-                e
-            )
-        })?;
-
+        let mut transport_completion = None;
+        let connection = if let Some(shutdown) = shutdown {
+            let owned =
+                crate::owned_transport::OwnedTransport::new(transport.into_transport(), shutdown);
+            transport_completion = Some(owned.completion.clone());
+            handler.serve(owned).await
+        } else {
+            handler.serve(transport).await
+        };
+        let mut running = match connection {
+            Ok(running) => running,
+            Err(error) => {
+                if let Some(completion) = transport_completion {
+                    completion
+                        .await
+                        .map_err(crate::owned_transport::RetirementError)?;
+                }
+                anyhow::bail!(
+                    "rmcp {} client '{}' failed to initialize: {}",
+                    transport_label,
+                    config.name,
+                    error
+                );
+            }
+        };
         let peer = running.peer().clone();
-        let snapshot = build_snapshot(config, &peer).await?;
+        let snapshot = match build_snapshot(config, &peer).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let close = running.close().await;
+                if let Some(completion) = transport_completion {
+                    completion
+                        .await
+                        .map_err(crate::owned_transport::RetirementError)?;
+                }
+                close
+                    .map_err(|error| crate::owned_transport::RetirementError(error.to_string()))?;
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             snapshot,
@@ -195,6 +237,8 @@ impl RmcpClientBackend {
             notifications_rx: Arc::new(Mutex::new(notifications_rx)),
             notifications_tx,
             notification_shutdown: watch::channel(false).0,
+            notification_tasks: StdMutex::new(Vec::new()),
+            transport_completion,
         })
     }
 }
@@ -233,6 +277,7 @@ impl LegacySseRmcpTransport {
     async fn connect(
         config: &claurst_core::config::McpServerConfig,
         auth_token: Option<String>,
+        mut shutdown: Option<watch::Receiver<bool>>,
     ) -> anyhow::Result<Self> {
         let sse_url = config
             .url
@@ -240,7 +285,7 @@ impl LegacySseRmcpTransport {
             .ok_or_else(|| anyhow::anyhow!("MCP server '{}' has no URL configured", config.name))?;
         let client = reqwest::Client::new();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let transport = Self {
+        let mut transport = Self {
             server_name: config.name.clone(),
             sse_url,
             client,
@@ -250,7 +295,24 @@ impl LegacySseRmcpTransport {
             incoming_rx: Arc::new(Mutex::new(incoming_rx)),
             background_tasks: Arc::new(StdMutex::new(Vec::new())),
         };
-        transport.start_sse_listener().await?;
+        let result = if let Some(shutdown) = &mut shutdown {
+            if *shutdown.borrow() {
+                anyhow::bail!("Plugin MCP authority has been revoked");
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => Err(anyhow::anyhow!("Plugin MCP authority has been revoked")),
+                result = transport.start_sse_listener() => result,
+            }
+        } else {
+            transport.start_sse_listener().await
+        };
+        if let Err(error) = result {
+            rmcp::transport::Transport::close(&mut transport)
+                .await
+                .map_err(|error| crate::owned_transport::RetirementError(error.to_string()))?;
+            return Err(error);
+        }
         Ok(transport)
     }
 
@@ -437,11 +499,24 @@ impl rmcp::transport::Transport<RoleClient> for LegacySseRmcpTransport {
     fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let background_tasks = Arc::clone(&self.background_tasks);
         async move {
-            let mut tasks = background_tasks.lock().expect("task mutex poisoned");
-            for handle in tasks.drain(..) {
+            let tasks = {
+                let mut tasks = background_tasks
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                std::mem::take(&mut *tasks)
+            };
+            for handle in &tasks {
                 handle.abort();
             }
-            Ok(())
+            let mut result = Ok(());
+            for handle in tasks {
+                if let Err(error) = handle.await {
+                    if !error.is_cancelled() {
+                        result = result.and(Err(anyhow::anyhow!(error).into()));
+                    }
+                }
+            }
+            result
         }
     }
 }
@@ -521,6 +596,32 @@ async fn handle_legacy_sse_http_response(
 
 #[async_trait]
 impl McpClientBackend for RmcpClientBackend {
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        self.shutdown_notifications();
+        let mut result = self
+            .running
+            .lock()
+            .await
+            .close()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Some(completion) = &self.transport_completion {
+            result = result.and(completion.clone().await.map_err(anyhow::Error::msg));
+        }
+        let tasks = {
+            let mut tasks = self
+                .notification_tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *tasks)
+        };
+        for task in tasks {
+            result = result.and(task.await.map_err(anyhow::Error::from));
+        }
+        result
+    }
+
     fn kind(&self) -> McpBackendKind {
         McpBackendKind::Rmcp
     }
@@ -624,11 +725,16 @@ impl McpClientBackend for RmcpClientBackend {
     fn subscribe_to_notifications(&self) -> BoxStream<'static, anyhow::Result<Value>> {
         let notifications_rx = Arc::clone(&self.notifications_rx);
         let (tx, rx) = mpsc::channel::<anyhow::Result<Value>>(100);
-        tokio::spawn(forward_notifications(
+        let mut tasks = self
+            .notification_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::spawn(forward_notifications(
             notifications_rx,
             tx,
             self.notification_shutdown.subscribe(),
-        ));
+        )));
         Box::pin(ReceiverStream::new(rx))
     }
 
@@ -981,6 +1087,7 @@ mod tests {
                 client_io,
                 build_client_info(rmcp_model::ProtocolVersion::V_2024_11_05),
                 "memory",
+                None,
             ),
         )
         .await
@@ -1145,7 +1252,7 @@ mod tests {
         }
         let tools = timeout(
             Duration::from_secs(2),
-            manager.clients["retained"].list_tools(),
+            manager.clients["retained"].list_tools(None),
         )
         .await
         .unwrap()
@@ -1404,7 +1511,7 @@ mod tests {
         let url = serve_single_response("200 OK", "text/event-stream", body).await;
         let config = test_sse_config(url.clone());
 
-        let transport = LegacySseRmcpTransport::connect(&config, None)
+        let transport = LegacySseRmcpTransport::connect(&config, None, None)
             .await
             .expect("connect legacy sse transport");
 
@@ -1494,5 +1601,120 @@ mod tests {
             .expect("task mutex poisoned")
             .is_empty();
         assert!(is_empty);
+    }
+    #[tokio::test]
+    async fn plugin_initialize_failure_preserves_transport_cleanup_error() {
+        struct FailingTransport;
+        impl rmcp::transport::Transport<RoleClient> for FailingTransport {
+            type Error = std::io::Error;
+            fn send(
+                &mut self,
+                _: rmcp::service::TxJsonRpcMessage<RoleClient>,
+            ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static
+            {
+                std::future::ready(Err(std::io::Error::other("fixture initialize failure")))
+            }
+            async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<RoleClient>> {
+                futures::future::pending().await
+            }
+            async fn close(&mut self) -> Result<(), Self::Error> {
+                Err(std::io::Error::other("fixture close failure"))
+            }
+        }
+        let (_stop, shutdown) = watch::channel(false);
+        let result = timeout(
+            Duration::from_secs(2),
+            RmcpClientBackend::connect_with_transport(
+                &test_sse_config("unused".into()),
+                FailingTransport,
+                build_client_info(rmcp_model::ProtocolVersion::default()),
+                "fixture",
+                Some(shutdown),
+            ),
+        )
+        .await
+        .unwrap();
+        let error = match result {
+            Ok(_) => panic!("fixture must fail initialization"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .downcast_ref::<crate::owned_transport::RetirementError>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains("fixture close failure"));
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_close_joins_all_owned_tasks_before_returning() {
+        struct Receipt(Option<oneshot::Sender<()>>);
+        impl Drop for Receipt {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let mut receipts = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let (closed, receipt) = oneshot::channel();
+            let (started, ready) = oneshot::channel();
+            tasks.push(tokio::spawn(async move {
+                let _receipt = Receipt(Some(closed));
+                let _ = started.send(());
+                futures::future::pending::<()>().await;
+            }));
+            ready.await.unwrap();
+            receipts.push(receipt);
+        }
+        let mut transport = LegacySseRmcpTransport {
+            server_name: "fixture".into(),
+            sse_url: "unused".into(),
+            client: reqwest::Client::new(),
+            auth_token: None,
+            post_endpoint: Arc::new(StdMutex::new(None)),
+            incoming_tx: mpsc::unbounded_channel().0,
+            incoming_rx: Arc::new(Mutex::new(mpsc::unbounded_channel().1)),
+            background_tasks: Arc::new(StdMutex::new(tasks)),
+        };
+        rmcp::transport::Transport::close(&mut transport)
+            .await
+            .unwrap();
+        for mut receipt in receipts {
+            assert!(
+                receipt.try_recv().is_ok(),
+                "close must join every task before reporting completion"
+            );
+        }
+        assert!(transport.background_tasks.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn plugin_http_withdrawal_before_first_protocol_message_joins_worker() {
+        // Simulate withdrawal between the caller's admission check and the
+        // actual HTTP transport construction. No network request is needed.
+        let (_stop, shutdown) = watch::channel(true);
+        let mut config = test_sse_config("http://127.0.0.1:1/unused".into());
+        config.server_type = "http".into();
+        let result = timeout(
+            Duration::from_secs(2),
+            RmcpClientBackend::connect_http(
+                &config,
+                None,
+                rmcp_model::ProtocolVersion::default(),
+                Some(shutdown),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "withdrawal must join a worker waiting for its first protocol message"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "withdrawn initialization must fail closed"
+        );
     }
 }

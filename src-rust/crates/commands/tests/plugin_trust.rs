@@ -373,3 +373,49 @@ fn folder_grants_round_trip_paths_with_json_delimiters() {
             .is_enabled("fixture"));
     });
 }
+
+#[test]
+fn successful_disable_save_removes_hooks_even_if_mcp_retirement_fails() {
+    let env = TestEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut ctx, folder) = env.context("project").await;
+        message(PluginCommand.execute("enable fixture", &mut ctx).await);
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
+        assert!(folder.join("marker").exists());
+        std::fs::remove_file(folder.join("marker")).unwrap();
+        let contribution = claurst_core::plugin_mcp::PluginMcpContribution::new(
+            claurst_core::plugin_mcp::PluginMcpOrigin::new(
+                claurst_core::plugin_mcp::PluginMcpSource::Project,
+                &folder,
+                Some(&ctx.working_dir),
+            )
+            .unwrap(),
+            claurst_core::McpServerConfig {
+                name: "fixture".into(),
+                command: Some("unused".into()),
+                args: vec![],
+                env: Default::default(),
+                url: None,
+                server_type: "stdio".into(),
+            },
+        );
+        contribution
+            .spawn_retirement(Some(&ctx.working_dir), |mut revoked| async move {
+                let _ = revoked.changed().await;
+                anyhow::bail!("fixture transport close failure")
+            })
+            .unwrap();
+        ctx.config.plugin_mcp_servers.push(contribution);
+        let result = PluginCommand.execute("disable fixture", &mut ctx).await;
+        assert!(
+            matches!(result, CommandResult::Error(_)),
+            "cleanup failure must remain visible: {result:?}"
+        );
+        assert!(Settings::load_sync().unwrap().enabled_plugins.is_empty());
+        claurst_plugins::run_global_pre_tool_hook("Read", &serde_json::json!({}), &ctx.working_dir);
+        assert!(
+            !folder.join("marker").exists(),
+            "transport cleanup failure must not leave successfully disabled hooks enabled"
+        );
+    });
+}
