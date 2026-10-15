@@ -163,7 +163,15 @@ pub fn execute_import(selection: ImportSelection) -> Result<ImportExecutionResul
 
     if let Err(err) = result {
         if wrote_claude_md {
-            restore_original(&paths.target_claude_md, original_claude_md.as_deref())?;
+            if let Err(rollback_error) =
+                restore_original(&paths.target_claude_md, original_claude_md.as_deref())
+            {
+                let message = format!(
+                    "Import failed: {err:#}; rollback failed for {}: {rollback_error:#}; original file was not restored",
+                    paths.target_claude_md.display()
+                );
+                return Err(err.context(message));
+            }
         }
         return Err(err);
     }
