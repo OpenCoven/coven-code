@@ -280,6 +280,8 @@ pub struct ToolContext {
     pub permission_handler: Arc<dyn PermissionHandler>,
     pub cost_tracker: Arc<CostTracker>,
     pub session_id: String,
+    /// Completion authority captured once for this logical query.
+    pub goal_turn: claurst_core::goal::GoalTurnContext,
     pub file_history: Arc<parking_lot::Mutex<claurst_core::file_history::FileHistory>>,
     pub current_turn: Arc<AtomicUsize>,
     /// If true, suppress interactive prompts (batch / CI mode).
@@ -821,6 +823,7 @@ mod tests {
             permission_handler: handler,
             cost_tracker: claurst_core::cost::CostTracker::new(),
             session_id: "test".to_string(),
+            goal_turn: Default::default(),
             file_history: Arc::new(parking_lot::Mutex::new(
                 claurst_core::file_history::FileHistory::new(),
             )),

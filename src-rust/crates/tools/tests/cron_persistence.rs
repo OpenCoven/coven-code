@@ -62,6 +62,7 @@ async fn cron_persistence_child() {
         }),
         cost_tracker: claurst_core::cost::CostTracker::new(),
         session_id: "cron-persistence-fixture".into(),
+        goal_turn: Default::default(),
         file_history: Arc::new(parking_lot::Mutex::new(
             claurst_core::file_history::FileHistory::new(),
         )),

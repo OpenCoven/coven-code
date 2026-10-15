@@ -1646,6 +1646,27 @@ pub async fn run_query_loop(
     cancel_token: tokio_util::sync::CancellationToken,
     mut pending_messages: Option<&mut Vec<String>>,
 ) -> QueryOutcome {
+    // One logical query owns one capture, including every tool follow-up and
+    // its final reply. A caller-supplied capture (including absence) is final.
+    let mut turn_ctx = tool_ctx.clone();
+    if let Err(error) = turn_ctx.goal_turn.capture(&turn_ctx.session_id) {
+        warn!(%error, "Could not capture goal turn");
+        if let Some(tx) = &event_tx {
+            let _ = tx.send(QueryEvent::Status(format!(
+                "Goal error: could not capture turn: {error}"
+            )));
+        }
+    }
+    let tool_ctx = &turn_ctx;
+    let mut turn_config = config.clone();
+    if let Some(turn) = tool_ctx.goal_turn.captured() {
+        let addendum = claurst_core::goal_system_prompt_addendum(turn.goal());
+        turn_config.append_system_prompt = Some(match turn_config.append_system_prompt {
+            Some(existing) => format!("{existing}\n{addendum}"),
+            None => addendum,
+        });
+    }
+    let config = &turn_config;
     let mut turn = 0u32;
     let mut compact_state = compact::AutoCompactState::default();
     // Tracks how many consecutive max_tokens recoveries we've attempted so
@@ -3679,6 +3700,7 @@ pub async fn run_single_query(
 
 #[cfg(test)]
 mod tests {
+    include!("goal_completion_tests.rs");
     use std::collections::{HashSet, VecDeque};
     use std::pin::Pin;
     use std::process::Command;
@@ -4126,6 +4148,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "provider-outcome".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -4187,6 +4210,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "provider-cancellation".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -4522,6 +4546,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "anthropic-outcome".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -4581,6 +4606,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "anthropic-cancellation".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -4663,6 +4689,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "anthropic-snapshot".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -5578,6 +5605,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "anthropic-stall-retry".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -6008,6 +6036,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "proactive-compaction-cancellation".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -6168,6 +6197,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "compaction-cancellation".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -6299,6 +6329,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "collapse-cancellation".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -7072,6 +7103,7 @@ mod tests {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "durable-journal".to_string(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,
@@ -7672,6 +7704,7 @@ mod tests {
             }),
             cost_tracker: CostTracker::new(),
             session_id: "plugin-hook-scope".into(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             non_interactive: true,

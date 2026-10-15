@@ -90,6 +90,7 @@ impl Fixture {
             }),
             cost_tracker: cost_tracker.clone(),
             session_id: "reconnect-test".to_string(),
+            goal_turn: Default::default(),
             file_history: Arc::new(ParkingMutex::new(
                 claurst_core::file_history::FileHistory::new(),
             )),

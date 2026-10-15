@@ -125,6 +125,7 @@ impl Fixture {
             }),
             cost_tracker,
             session_id: "startup-cancellation".into(),
+            goal_turn: Default::default(),
             file_history: Default::default(),
             current_turn: Default::default(),
             non_interactive: true,
