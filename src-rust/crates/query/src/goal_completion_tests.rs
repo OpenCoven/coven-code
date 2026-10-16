@@ -2423,11 +2423,24 @@ mod goal_completion {
                 }
                 release_tx.send(()).unwrap();
                 blocker.await.unwrap();
-                // Drain the scheduling closure, then allow the independent
-                // reaper to run its pre-spawn check and the short child.
+                // Drain the scheduling closure, then poll for the independent
+                // reaper's child until it starts or the deadline expires.
                 tokio::task::spawn_blocking(|| ()).await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                assert_eq!(dir.path().join("stop-hook.txt").exists(), !revoke);
+                let hook_path = dir.path().join("stop-hook.txt");
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    let started = hook_path.exists();
+                    if revoke {
+                        assert!(!started, "revoked hook started a child");
+                    } else if started {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        assert_eq!(started, !revoke, "hook state at deadline");
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             });
             runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
