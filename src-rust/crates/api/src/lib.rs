@@ -423,7 +423,7 @@ pub mod client {
     }
 
     /// Configuration for the HTTP client.
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct ClientConfig {
         pub api_key: String,
         pub api_base: String,
@@ -438,6 +438,23 @@ pub mod client {
         pub use_bearer_auth: bool,
         /// Which provider to use for API calls.
         pub provider: Provider,
+    }
+
+    impl std::fmt::Debug for ClientConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ClientConfig")
+                .field("api_key", &"[REDACTED]")
+                .field("api_base", &"[REDACTED]")
+                .field("api_version", &self.api_version)
+                .field("beta_features", &self.beta_features)
+                .field("max_retries", &self.max_retries)
+                .field("initial_retry_delay", &self.initial_retry_delay)
+                .field("max_retry_delay", &self.max_retry_delay)
+                .field("request_timeout", &self.request_timeout)
+                .field("use_bearer_auth", &self.use_bearer_auth)
+                .field("provider", &self.provider)
+                .finish()
+        }
     }
 
     impl Default for ClientConfig {
@@ -1073,6 +1090,21 @@ pub mod client {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn client_config_debug_omits_api_key() {
+            let config = ClientConfig {
+                api_key: "canary-client-key".into(),
+                api_base: "https://canary-url-key@api.invalid/?token=canary-query".into(),
+                ..Default::default()
+            };
+            let rendered = format!("{config:?}");
+            for secret in ["canary-client-key", "canary-url-key", "canary-query"] {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
+            assert!(rendered.contains("Anthropic"));
+            assert_eq!(config.api_key, "canary-client-key");
+        }
 
         #[test]
         fn message_delta_preserves_output_only_usage() {
