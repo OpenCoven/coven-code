@@ -239,7 +239,7 @@ pub enum ProviderStatus {
 // ---------------------------------------------------------------------------
 
 /// The authentication mechanism used to talk to a provider endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum AuthMethod {
     /// A static API key sent as an HTTP header.
@@ -270,6 +270,39 @@ pub enum AuthMethod {
     None,
 }
 
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey { header, .. } => f
+                .debug_struct("ApiKey")
+                .field("key", &"[REDACTED]")
+                .field("header", header)
+                .finish(),
+            Self::Bearer { .. } => f
+                .debug_struct("Bearer")
+                .field("token", &"[REDACTED]")
+                .finish(),
+            Self::AwsCredentials {
+                profile,
+                region,
+                bearer_token,
+            } => f
+                .debug_struct("AwsCredentials")
+                .field("profile", profile)
+                .field("region", region)
+                .field("bearer_token", &bearer_token.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+            Self::OAuth { expires_at, .. } => f
+                .debug_struct("OAuth")
+                .field("access_token", &"[REDACTED]")
+                .field("refresh_token", &"[REDACTED]")
+                .field("expires_at", expires_at)
+                .finish(),
+            Self::None => f.write_str("None"),
+        }
+    }
+}
+
 /// Which HTTP header carries the API key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,4 +313,49 @@ pub enum ApiKeyHeader {
     Authorization,
     /// A custom header name.
     Custom(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_method_debug_omits_credentials() {
+        let methods = [
+            AuthMethod::ApiKey {
+                key: "canary-api-key".into(),
+                header: ApiKeyHeader::XApiKey,
+            },
+            AuthMethod::Bearer {
+                token: "canary-bearer".into(),
+            },
+            AuthMethod::AwsCredentials {
+                profile: Some("fixture".into()),
+                region: "us-east-1".into(),
+                bearer_token: Some("canary-aws-bearer".into()),
+            },
+            AuthMethod::OAuth {
+                access_token: "canary-oauth-access".into(),
+                refresh_token: "canary-oauth-refresh".into(),
+                expires_at: 42,
+            },
+        ];
+        let rendered = format!("{methods:?}");
+        for secret in [
+            "canary-api-key",
+            "canary-bearer",
+            "canary-aws-bearer",
+            "canary-oauth-access",
+            "canary-oauth-refresh",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("fixture"));
+        assert!(rendered.contains("us-east-1"));
+        assert!(rendered.contains("42"));
+        assert_eq!(
+            serde_json::to_value(&methods[0]).unwrap()["key"],
+            "canary-api-key"
+        );
+    }
 }
