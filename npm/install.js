@@ -15,7 +15,7 @@ const VERSION = pkg.version;
 const REPO = 'OpenCoven/coven-code';
 const BASE_URL = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const NATIVE_DIR = path.join(__dirname, 'native');
-const DOWNLOAD_TIMEOUT_MS = 30_000;
+const DOWNLOAD_TIMEOUT_MS = 300_000;
 
 function getPlatform() {
   const platform = process.platform;
