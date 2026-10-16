@@ -93,6 +93,12 @@ function verifyChecksum(filePath, archiveName) {
   }
 }
 
+function powershellLiteral(value) {
+  // Single-quoted PowerShell strings do not evaluate $() or variables.
+  // Doubling a quote keeps apostrophes inside the literal path.
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 async function main() {
   const { artifact, ext, archive } = getPlatform();
   const archiveName = `${artifact}${archive}`;
@@ -120,7 +126,7 @@ async function main() {
     if (archive === '.zip') {
       execFileSync('powershell', [
         '-NoProfile', '-NonInteractive', '-Command',
-        `Expand-Archive -Force -Path "${tmpPath}" -DestinationPath "${NATIVE_DIR}"`
+        `Expand-Archive -Force -LiteralPath ${powershellLiteral(tmpPath)} -DestinationPath ${powershellLiteral(NATIVE_DIR)}`
       ]);
     } else {
       execFileSync('tar', ['-xzf', tmpPath, '-C', NATIVE_DIR]);
