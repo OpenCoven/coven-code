@@ -124,7 +124,7 @@ pub fn check_voice_availability(tokens: Option<&OAuthTokens>) -> VoiceAvailabili
 // ---------------------------------------------------------------------------
 
 /// Configuration for the voice recorder / transcription pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
     /// Whether the user has enabled voice input.
     pub enabled: bool,
@@ -139,6 +139,21 @@ pub struct VoiceConfig {
     /// Base URL for the transcription API.
     /// Defaults to `https://api.openai.com/v1/audio/transcriptions`.
     pub endpoint_url: Option<String>,
+}
+
+impl std::fmt::Debug for VoiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceConfig")
+            .field("enabled", &self.enabled)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("language", &self.language)
+            .field("model", &self.model)
+            .field(
+                "endpoint_url",
+                &self.endpoint_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl Default for VoiceConfig {
@@ -691,6 +706,21 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.api_key.is_none());
         assert_eq!(cfg.model, "whisper-1");
+    }
+
+    #[test]
+    fn voice_config_debug_omits_credentials() {
+        let config = VoiceConfig {
+            enabled: true,
+            api_key: Some("canary-voice-key".into()),
+            endpoint_url: Some("https://canary-url-key@voice.invalid/?token=canary-query".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{config:?}");
+        for secret in ["canary-voice-key", "canary-url-key", "canary-query"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("whisper-1"));
     }
 
     #[test]

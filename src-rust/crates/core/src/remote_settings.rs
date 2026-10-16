@@ -46,7 +46,7 @@ pub async fn fetch_remote_managed_settings() -> Value {
 // ---------------------------------------------------------------------------
 
 /// Configuration for the remote settings manager.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemoteSettingsConfig {
     /// Anthropic API key (x-api-key header). Takes precedence over OAuth.
     pub api_key: Option<String>,
@@ -56,6 +56,20 @@ pub struct RemoteSettingsConfig {
     pub base_url: String,
     /// How often to poll for new settings in the background.
     pub polling_interval: Duration,
+}
+
+impl std::fmt::Debug for RemoteSettingsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteSettingsConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "oauth_token",
+                &self.oauth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("base_url", &"[REDACTED]")
+            .field("polling_interval", &self.polling_interval)
+            .finish()
+    }
 }
 
 impl Default for RemoteSettingsConfig {
@@ -422,6 +436,26 @@ pub(crate) fn remote_settings_dir_for_test() -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn remote_settings_config_debug_omits_credentials() {
+        let config = RemoteSettingsConfig {
+            api_key: Some("canary-api-key".into()),
+            oauth_token: Some("canary-oauth-token".into()),
+            base_url: "https://canary-url-key@remote.invalid/?token=canary-query".into(),
+            ..Default::default()
+        };
+        let rendered = format!("{config:?}");
+        for secret in [
+            "canary-api-key",
+            "canary-oauth-token",
+            "canary-url-key",
+            "canary-query",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("polling_interval"));
+    }
 
     #[test]
     fn test_sort_keys_deep_flat() {
