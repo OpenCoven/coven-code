@@ -45,8 +45,9 @@ mod sessions;
 
 use std::sync::Arc;
 
+use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub use connection::Connection;
 pub use runtime::AgentRuntime;
@@ -67,22 +68,14 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
     let connection = Connection::new(tokio::io::stdout());
     let server = AgentServer::new(connection.clone(), runtime);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     let reader_fut = connection::run_reader(connection, tokio::io::stdin(), tx);
 
     // Track in-flight dispatch tasks so they can finish writing their
     // responses before the runtime shuts down. The dispatch future only
     // returns once the reader has dropped `tx` (closing `rx`) AND every
     // spawned handler has resolved.
-    let dispatch_fut = async {
-        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        while let Some(msg) = rx.recv().await {
-            tasks.push(server.dispatch(msg));
-        }
-        for handle in tasks {
-            let _ = handle.await;
-        }
-    };
+    let dispatch_fut = dispatch_messages(server, rx);
 
     let (reader_res, _) = tokio::join!(reader_fut, dispatch_fut);
     if let Err(e) = reader_res {
@@ -103,3 +96,30 @@ fn install_stderr_tracing() {
         .with_writer(std::io::stderr)
         .try_init();
 }
+
+async fn dispatch_messages(
+    server: Arc<AgentServer>,
+    mut rx: mpsc::UnboundedReceiver<connection::Inbound>,
+) {
+    let mut tasks = FuturesUnordered::new();
+    let mut accepting = true;
+    while accepting || !tasks.is_empty() {
+        tokio::select! {
+            message = rx.recv(), if accepting => {
+                match message {
+                    Some(message) => tasks.push(server.dispatch(message)),
+                    None => accepting = false,
+                }
+            }
+            Some(result) = tasks.next(), if !tasks.is_empty() => {
+                if let Err(error) = result {
+                    warn!(panicked = error.is_panic(), cancelled = error.is_cancelled(),
+                        "ACP: dispatch task failed");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests;
