@@ -213,8 +213,9 @@ fn infer_tool_kind(request: &PermissionRequest) -> acp::ToolKind {
 }
 
 /// Spawn a task that watches the shared `PendingPermissionStore` and
-/// forwards each enqueued request through the ACP connection. The task
-/// exits when `cancel` is fired or the connection drops.
+/// forwards each enqueued request through the ACP connection. Cancellation
+/// aborts and joins its forwarding tasks; aborting the drainer also aborts them.
+/// Requests still in the shared store are not owned or cleared by this task.
 pub fn spawn_drainer(
     connection: Arc<Connection>,
     session_id: acp::SessionId,
@@ -222,25 +223,30 @@ pub fn spawn_drainer(
     cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut requests = tokio::task::JoinSet::new();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = ticker.tick() => {}
-            }
-            let popped: Vec<PendingPermissionRequest> = {
-                let mut guard = store.lock();
-                guard.queue.drain(..).collect()
-            };
-            for pending in popped {
-                let conn = connection.clone();
-                let sid = session_id.clone();
-                tokio::spawn(async move {
-                    forward_pending(conn, sid, pending).await;
-                });
+                Some(result) = requests.join_next(), if !requests.is_empty() => {
+                    if let Err(error) = result {
+                        warn!(cancelled = error.is_cancelled(), panicked = error.is_panic(),
+                            "ACP permission forwarding task failed");
+                    }
+                }
+                _ = ticker.tick() => {
+                    let popped: Vec<PendingPermissionRequest> = {
+                        let mut guard = store.lock();
+                        guard.queue.drain(..).collect()
+                    };
+                    for pending in popped {
+                        requests.spawn(forward_pending(connection.clone(), session_id.clone(), pending));
+                    }
+                }
             }
         }
+        requests.shutdown().await;
     })
 }
 
@@ -308,5 +314,158 @@ mod tests {
         assert!(serialized.contains("Needs file contents"));
         assert!(serialized.contains("/home/alice/.ssh/id_rsa"));
         assert!(serialized.contains("/workspace/project"));
+    }
+
+    fn enqueue_permission(
+        store: &Arc<parking_lot::Mutex<PendingPermissionStore>>,
+        id: &str,
+    ) -> tokio::sync::oneshot::Receiver<PermissionDecision> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        store.lock().queue.push_back(PendingPermissionRequest {
+            tool_use_id: id.into(),
+            request: permission_request("Bash", "fixture", None, None, false),
+            reason: "fixture".into(),
+            decision_tx: Some(tx),
+        });
+        rx
+    }
+
+    async fn next_permission_request(
+        output: &mut tokio::io::BufReader<tokio::io::DuplexStream>,
+    ) -> serde_json::Value {
+        use tokio::io::AsyncBufReadExt;
+        let mut line = String::new();
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            output.read_line(&mut line),
+        )
+        .await
+        .expect("permission request was not forwarded")
+        .unwrap();
+        assert!(count > 0);
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["method"], "session/request_permission");
+        assert_eq!(value["params"]["sessionId"], "fixture-session");
+        value
+    }
+
+    async fn stopped_drainer_releases_forwarded_requests(abort: bool) {
+        let (output, writer) = tokio::io::duplex(8192);
+        let connection = Connection::new(writer);
+        let store = Arc::new(parking_lot::Mutex::new(PendingPermissionStore::default()));
+        let first = enqueue_permission(&store, "first");
+        let second = enqueue_permission(&store, "second");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let drainer = spawn_drainer(
+            connection.clone(),
+            acp::SessionId::new("fixture-session"),
+            store.clone(),
+            cancel.clone(),
+        );
+        let mut output = tokio::io::BufReader::new(output);
+        let one = next_permission_request(&mut output).await;
+        let two = next_permission_request(&mut output).await;
+        assert_ne!(one["id"], two["id"]);
+        assert!(store.lock().queue.is_empty());
+        if abort {
+            drainer.abort();
+        } else {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), drainer)
+            .await
+            .expect("drainer did not stop");
+        if abort {
+            assert!(result.unwrap_err().is_cancelled());
+        } else {
+            result.unwrap();
+        }
+        for receiver in [first, second] {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+                    .await
+                    .expect("forwarding task retained decision sender after owner stopped")
+                    .is_err()
+            );
+        }
+        assert_eq!(Arc::strong_count(&connection), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_drainer_releases_forwarded_requests() {
+        stopped_drainer_releases_forwarded_requests(false).await;
+    }
+
+    #[tokio::test]
+    async fn aborting_drainer_releases_forwarded_requests() {
+        stopped_drainer_releases_forwarded_requests(true).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_permission_replies_keep_independent_decisions() {
+        use tokio::io::AsyncWriteExt;
+        let (output, writer) = tokio::io::duplex(8192);
+        let (mut client_input, reader_input) = tokio::io::duplex(8192);
+        let connection = Connection::new(writer);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let reader = tokio::spawn(crate::connection::run_reader(
+            connection.clone(),
+            reader_input,
+            tx,
+        ));
+        let store = Arc::new(parking_lot::Mutex::new(PendingPermissionStore::default()));
+        let mut first = enqueue_permission(&store, "first");
+        let mut second = enqueue_permission(&store, "second");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let drainer = spawn_drainer(
+            connection,
+            acp::SessionId::new("fixture-session"),
+            store,
+            cancel.clone(),
+        );
+        let mut output = tokio::io::BufReader::new(output);
+        let one = next_permission_request(&mut output).await;
+        let two = next_permission_request(&mut output).await;
+        let requests = [one, two];
+        for (tool_id, option) in [("second", "reject_once"), ("first", "allow_once")] {
+            let request = requests
+                .iter()
+                .find(|request| request["params"]["toolCall"]["toolCallId"] == tool_id)
+                .unwrap();
+            let response = serde_json::json!({"jsonrpc":"2.0", "id":request["id"],
+                "result":{"outcome":{"outcome":"selected", "optionId":option}}});
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            client_input.write_all(&bytes).await.unwrap();
+            let receiver = if tool_id == "second" {
+                &mut second
+            } else {
+                &mut first
+            };
+            let decision = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+                .await
+                .expect("permission reply was not delivered")
+                .unwrap();
+            if tool_id == "second" {
+                assert!(matches!(decision, PermissionDecision::Deny));
+                assert!(matches!(
+                    first.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+            } else {
+                assert!(matches!(decision, PermissionDecision::Allow));
+            }
+        }
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), drainer)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(client_input);
+        tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
