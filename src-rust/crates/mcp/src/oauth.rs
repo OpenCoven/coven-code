@@ -19,7 +19,7 @@ const CALLBACK_ERROR_CODE_MAX_BYTES: usize = 64;
 // ---------------------------------------------------------------------------
 
 /// An OAuth access token with expiry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -31,6 +31,25 @@ pub struct McpToken {
     /// `None` means a legacy stored token is unbound and must re-authenticate.
     #[serde(default)]
     pub server_url: Option<String>,
+}
+
+impl std::fmt::Debug for McpToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpToken")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .field("server_name", &self.server_name)
+            .field(
+                "server_url",
+                &self.server_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl McpToken {
@@ -107,13 +126,22 @@ pub fn token_expiry_datetime(expires_at: Option<u64>) -> Option<chrono::DateTime
 // OAuth metadata / auth flow helpers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpOAuthMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for McpOAuthMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOAuthMetadata")
+            .field("authorization_endpoint", &"[REDACTED]")
+            .field("token_endpoint", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct McpAuthSession {
     pub(crate) plugin: Option<claurst_core::plugin_mcp::PluginMcpContribution>,
     pub(crate) caller: Option<PathBuf>,
@@ -126,12 +154,39 @@ pub struct McpAuthSession {
     pub metadata: McpOAuthMetadata,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for McpAuthSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpAuthSession")
+            .field("plugin", &self.plugin.as_ref().map(|_| "[REDACTED]"))
+            .field("caller", &self.caller.as_ref().map(|_| "[REDACTED]"))
+            .field("server_name", &self.server_name)
+            .field("server_url", &"[REDACTED]")
+            .field("auth_url", &"[REDACTED]")
+            .field("redirect_uri", &"[REDACTED]")
+            .field("verifier", &"[REDACTED]")
+            .field("state", &"[REDACTED]")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct McpAuthResult {
     pub server_name: String,
     pub auth_url: String,
     pub redirect_uri: String,
     pub token_path: PathBuf,
+}
+
+impl std::fmt::Debug for McpAuthResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpAuthResult")
+            .field("server_name", &self.server_name)
+            .field("auth_url", &"[REDACTED]")
+            .field("redirect_uri", &"[REDACTED]")
+            .field("token_path", &"[REDACTED]")
+            .finish()
+    }
 }
 
 fn normalized_server_url(server_url: &str) -> &str {
@@ -781,12 +836,23 @@ pub fn oauth_port_alloc() -> std::io::Result<u16> {
 // ---------------------------------------------------------------------------
 
 /// OAuth login state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaaLoginState {
     pub server_name: String,
     pub idp_url: String,
     pub verifier: String,
     pub redirect_port: u16,
+}
+
+impl std::fmt::Debug for XaaLoginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaaLoginState")
+            .field("server_name", &self.server_name)
+            .field("idp_url", &"[REDACTED]")
+            .field("verifier", &"[REDACTED]")
+            .field("redirect_port", &self.redirect_port)
+            .finish()
+    }
 }
 
 /// Initiate an XAA (cross-agent authorization) login flow.
@@ -1075,6 +1141,68 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::TokenHomeGuard;
     use super::*;
+
+    #[test]
+    fn oauth_debug_omits_tokens_verifiers_states_and_urls() {
+        let token = McpToken {
+            access_token: "canary-access".into(),
+            refresh_token: Some("canary-refresh".into()),
+            expires_at: Some(42),
+            scope: Some("read".into()),
+            server_name: "fixture".into(),
+            server_url: Some("https://mcp.invalid/?key=canary-server-url".into()),
+        };
+        let metadata = McpOAuthMetadata {
+            authorization_endpoint: "https://auth.invalid/?key=canary-auth-endpoint".into(),
+            token_endpoint: "https://auth.invalid/?key=canary-token-endpoint".into(),
+        };
+        let session = McpAuthSession {
+            plugin: None,
+            caller: None,
+            server_name: "fixture".into(),
+            server_url: "https://mcp.invalid/?key=canary-session-url".into(),
+            auth_url: "https://auth.invalid/?state=canary-auth-url".into(),
+            redirect_uri: "http://127.0.0.1/callback".into(),
+            verifier: "canary-verifier".into(),
+            state: "canary-state".into(),
+            metadata: metadata.clone(),
+        };
+        let result = McpAuthResult {
+            server_name: "fixture".into(),
+            auth_url: "https://auth.invalid/?state=canary-result-url".into(),
+            redirect_uri: "http://127.0.0.1/callback".into(),
+            token_path: PathBuf::from("/fixture/token.json"),
+        };
+        let xaa = XaaLoginState {
+            server_name: "fixture".into(),
+            idp_url: "https://idp.invalid/?key=canary-idp-url".into(),
+            verifier: "canary-xaa-verifier".into(),
+            redirect_port: 14555,
+        };
+        let rendered = format!("{token:?} {metadata:?} {session:?} {result:?} {xaa:?}");
+        for secret in [
+            "canary-access",
+            "canary-refresh",
+            "canary-server-url",
+            "canary-auth-endpoint",
+            "canary-token-endpoint",
+            "canary-session-url",
+            "canary-auth-url",
+            "canary-verifier",
+            "canary-state",
+            "canary-result-url",
+            "canary-idp-url",
+            "canary-xaa-verifier",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("fixture"));
+        assert!(rendered.contains("42"));
+        assert_eq!(
+            serde_json::to_value(&token).unwrap()["access_token"],
+            "canary-access"
+        );
+    }
 
     fn callback_request(authority: &str, target: &str) -> Vec<u8> {
         format!("GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
