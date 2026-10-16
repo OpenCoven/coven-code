@@ -470,11 +470,11 @@ impl NamedCommand for BranchCommand {
                 } else {
                     let mut out = format!(
                         "Branches of session {}:\n\n",
-                        &parent_id[..parent_id.len().min(8)]
+                        crate::utf8_byte_prefix(&parent_id, 8)
                     );
                     for b in &branches {
                         let updated = b.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                        let id_short = &b.id[..b.id.len().min(8)];
+                        let id_short = crate::utf8_byte_prefix(&b.id, 8);
                         out.push_str(&format!(
                             "  {} | {} | {} messages | {}\n",
                             id_short,
