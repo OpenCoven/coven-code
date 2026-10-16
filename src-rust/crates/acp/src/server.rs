@@ -1,5 +1,6 @@
 //! Top-level ACP request / notification dispatcher.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol_schema as acp;
@@ -144,14 +145,10 @@ impl AgentServer {
         self: &Arc<Self>,
         req: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
-        if !req.cwd.is_absolute() {
-            return Err(acp::Error::invalid_params().data(Some(
-                serde_json::json!({ "reason": "cwd must be absolute" }),
-            )));
-        }
+        let cwd = validate_session_cwd(&req.cwd)?;
         let session_id = acp::SessionId::new(format!("acp-{}", uuid::Uuid::new_v4()));
-        let state = SessionState::new(session_id.clone(), req.cwd.clone());
-        info!(session_id = %session_id, cwd = %req.cwd.display(), "ACP: new session");
+        let state = SessionState::new(session_id.clone(), cwd.clone());
+        info!(session_id = %session_id, cwd = ?cwd, "ACP: new session");
 
         // v1: ignore req.mcp_servers — agent uses settings.json MCP roster.
         if !req.mcp_servers.is_empty() {
@@ -182,6 +179,29 @@ impl AgentServer {
     }
 }
 
+fn validate_session_cwd(cwd: &Path) -> Result<PathBuf, acp::Error> {
+    let invalid = |reason| {
+        acp::Error::invalid_params().data(Some(serde_json::json!({
+            "reason": reason,
+        })))
+    };
+    if !cwd.is_absolute() {
+        return Err(invalid("cwd must be absolute"));
+    }
+    let canonical =
+        std::fs::canonicalize(cwd).map_err(|_| invalid("cwd must be an existing directory"))?;
+    if !canonical.is_dir() {
+        return Err(invalid("cwd must be an existing directory"));
+    }
+    let display = canonical
+        .to_str()
+        .ok_or_else(|| invalid("cwd must be UTF-8"))?;
+    if display.chars().any(char::is_control) {
+        return Err(invalid("cwd must not contain control characters"));
+    }
+    Ok(canonical)
+}
+
 fn parse_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, acp::Error> {
     let value = params.ok_or_else(acp::Error::invalid_params)?;
     serde_json::from_value(value).map_err(|e| {
@@ -189,4 +209,45 @@ fn parse_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result
             serde_json::json!({ "deserialize_error": e.to_string() }),
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_cwd_must_resolve_to_a_display_safe_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("project");
+        std::fs::create_dir(&directory).unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"fixture").unwrap();
+
+        assert_eq!(
+            validate_session_cwd(&directory.join("..")).unwrap(),
+            root.path().canonicalize().unwrap()
+        );
+        for (cwd, reason) in [
+            (PathBuf::from("relative"), "cwd must be absolute"),
+            (
+                root.path().join("missing"),
+                "cwd must be an existing directory",
+            ),
+            (file, "cwd must be an existing directory"),
+        ] {
+            let error = validate_session_cwd(&cwd).unwrap_err();
+            assert_eq!(error.data, Some(serde_json::json!({ "reason": reason })));
+        }
+
+        #[cfg(unix)]
+        {
+            let newline = root.path().join("line\nbreak");
+            std::fs::create_dir(&newline).unwrap();
+            let error = validate_session_cwd(&newline).unwrap_err();
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({ "reason": "cwd must not contain control characters" }))
+            );
+        }
+    }
 }
