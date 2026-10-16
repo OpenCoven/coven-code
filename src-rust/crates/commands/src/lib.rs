@@ -199,6 +199,14 @@ async fn provider_for_config(
         })
 }
 
+fn utf8_byte_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn text_from_content_blocks(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -1526,7 +1534,7 @@ impl SlashCommand for StatusCommand {
             perm = ctx.config.permission_mode,
             fast = if fast_mode { "on" } else { "off" },
             editor = editor_mode,
-            sid = &ctx.session_id[..ctx.session_id.len().min(12)],
+            sid = utf8_byte_prefix(&ctx.session_id, 12),
             title = ctx.session_title.as_deref().unwrap_or("(untitled)"),
             msgs = ctx.messages.len(),
             wd = ctx.working_dir.display(),
@@ -4992,7 +5000,7 @@ impl SlashCommand for SessionCommand {
                     let mut output = String::from("Recent sessions:\n\n");
                     for sess in sessions.iter().take(10) {
                         let updated = sess.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                        let id_short = &sess.id[..sess.id.len().min(8)];
+                        let id_short = utf8_byte_prefix(&sess.id, 8);
                         output.push_str(&format!(
                             "  {} | {} | {} messages | {}\n",
                             id_short,
@@ -5047,7 +5055,7 @@ impl SlashCommand for SessionCommand {
                         output.push_str("\nRecent sessions:\n\n");
                         for sess in sessions.iter().take(5) {
                             let updated = sess.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                            let id_short = &sess.id[..sess.id.len().min(8)];
+                            let id_short = utf8_byte_prefix(&sess.id, 8);
                             let marker = if sess.id == ctx.session_id {
                                 " ◀ current"
                             } else {
@@ -7949,7 +7957,7 @@ impl SlashCommand for SearchCommand {
             let title = s.title.as_deref().unwrap_or("(untitled)");
             out.push_str(&format!(
                 "  [{}] {} — {} ({} messages, updated {})\n",
-                &s.id[..s.id.len().min(12)],
+                utf8_byte_prefix(&s.id, 12),
                 title,
                 s.model,
                 s.message_count,
