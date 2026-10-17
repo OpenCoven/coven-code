@@ -8,6 +8,7 @@
 //! The wire format matches the Agent Client Protocol: each message is a
 //! single UTF-8 line terminated by `\n` carrying a JSON-RPC 2.0 envelope.
 
+use std::io::Cursor;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -44,10 +45,31 @@ pub enum Inbound {
 /// Clone the returned `Arc` to share a sender. Drive exactly one reader with
 /// [`run_reader`]; its exit closes the response path for outbound requests.
 pub struct Connection {
-    writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
+    writer: Mutex<WriterState>,
     pending: DashMap<String, oneshot::Sender<Result<Value, acp::Error>>>,
     next_outbound_id: AtomicI64,
     reader_closed: CancellationToken,
+}
+
+// Retain a partially written frame until the next send or connection drop.
+// Cancellation or an error cannot retract bytes already accepted by the writer;
+// a later send may finish that frame even though its original caller has left.
+struct WriterState {
+    stream: Box<dyn AsyncWrite + Send + Unpin>,
+    pending: Option<Cursor<Vec<u8>>>,
+}
+
+impl WriterState {
+    async fn finish_pending(&mut self) -> std::io::Result<()> {
+        if let Some(frame) = &mut self.pending {
+            // Cursor advances on every successful write, including before cancellation.
+            self.stream.write_all_buf(frame).await?;
+            self.stream.flush().await?;
+            trace!(bytes = frame.get_ref().len(), "ACP wire send");
+        }
+        self.pending = None;
+        Ok(())
+    }
 }
 
 /// Remove registration on every request exit, including future cancellation.
@@ -70,7 +92,10 @@ impl Connection {
         W: AsyncWrite + Send + Unpin + 'static,
     {
         Arc::new(Self {
-            writer: Mutex::new(Box::new(writer)),
+            writer: Mutex::new(WriterState {
+                stream: Box::new(writer),
+                pending: None,
+            }),
             pending: DashMap::new(),
             next_outbound_id: AtomicI64::new(1),
             reader_closed: CancellationToken::new(),
@@ -184,9 +209,16 @@ impl Connection {
         let mut buf = serde_json::to_vec(value)?;
         buf.push(b'\n');
         let mut w = self.writer.lock().await;
-        w.write_all(&buf).await?;
-        w.flush().await?;
-        trace!(bytes = buf.len(), "ACP wire send");
+        // A canceled send that never wrote any bytes can be discarded safely.
+        if w.pending
+            .as_ref()
+            .is_some_and(|frame| frame.position() == 0)
+        {
+            w.pending = None;
+        }
+        w.finish_pending().await?;
+        w.pending = Some(Cursor::new(buf));
+        w.finish_pending().await?;
         Ok(())
     }
 
@@ -673,5 +705,201 @@ mod tests {
         assert_eq!(response["echo"], "fs/read_text_file");
         let _ = client_loop.await;
         let _ = reader_handle.await;
+    }
+}
+
+#[cfg(test)]
+mod write_frame_tests {
+    use super::*;
+    use std::future::{poll_fn, Future};
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Mutex as StdMutex;
+    use std::task::{Context, Poll};
+    use tokio::io::{duplex, AsyncReadExt};
+    use tokio::time::{timeout, Duration};
+
+    async fn poll_pending<F: Future>(future: Pin<&mut F>) {
+        let mut future = future;
+        poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn send(connection: &Arc<Connection>, method: &str) -> anyhow::Result<()> {
+        timeout(
+            Duration::from_secs(2),
+            connection.send_notification(method, ()),
+        )
+        .await
+        .expect("notification write must finish within two seconds")
+    }
+
+    fn expected(methods: &[&str]) -> Vec<u8> {
+        methods
+            .iter()
+            .flat_map(|method| {
+                let mut bytes = serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0", "method": method, "params": null
+                }))
+                .unwrap();
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_frame_finishes_before_next_frame() {
+        let (mut reader, writer) = duplex(1);
+        let connection = Connection::new(writer);
+        let mut first = Box::pin(connection.send_notification("first", ()));
+        poll_pending(first.as_mut()).await;
+        let mut prefix = [0];
+        reader.read_exact(&mut prefix).await.unwrap();
+        assert_eq!(prefix, [b'{']);
+        drop(first);
+        let send = async move {
+            send(&connection, "next").await.unwrap();
+        };
+        let read = async move {
+            let mut bytes = prefix.to_vec();
+            reader.read_to_end(&mut bytes).await.unwrap();
+            bytes
+        };
+        let (_, bytes) = timeout(Duration::from_secs(2), async { tokio::join!(send, read) })
+            .await
+            .unwrap();
+        assert_eq!(bytes, expected(&["first", "next"]));
+    }
+
+    #[derive(Default)]
+    struct State {
+        bytes: Vec<u8>,
+        limit: Option<usize>,
+        fail: bool,
+        flush_blocked: bool,
+        flush_polls: usize,
+    }
+
+    struct ControlledWriter(Arc<StdMutex<State>>);
+
+    impl AsyncWrite for ControlledWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut state = self.0.lock().unwrap();
+            let available = state
+                .limit
+                .map_or(bytes.len(), |limit| limit.saturating_sub(state.bytes.len()));
+            if available == 0 {
+                return if state.fail {
+                    Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "fixture write failure",
+                    )))
+                } else {
+                    Poll::Pending
+                };
+            }
+            let count = available.min(bytes.len());
+            state.bytes.extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let mut state = self.0.lock().unwrap();
+            state.flush_polls += 1;
+            if state.flush_blocked {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_unstarted_frame_is_not_sent_later() {
+        let state = Arc::new(StdMutex::new(State {
+            limit: Some(0),
+            ..State::default()
+        }));
+        let connection = Connection::new(ControlledWriter(state.clone()));
+        let mut first = Box::pin(connection.send_notification("cancelled", ()));
+        poll_pending(first.as_mut()).await;
+        drop(first);
+        assert!(state.lock().unwrap().bytes.is_empty());
+        state.lock().unwrap().limit = None;
+        send(&connection, "next").await.unwrap();
+        assert_eq!(state.lock().unwrap().bytes, expected(&["next"]));
+    }
+
+    #[tokio::test]
+    async fn cancelled_mutex_waiter_does_not_replace_pending_frame() {
+        let state = Arc::new(StdMutex::new(State {
+            limit: Some(1),
+            ..State::default()
+        }));
+        let connection = Connection::new(ControlledWriter(state.clone()));
+        let mut first = Box::pin(connection.send_notification("first", ()));
+        poll_pending(first.as_mut()).await;
+        let mut waiter = Box::pin(connection.send_notification("cancelled", ()));
+        poll_pending(waiter.as_mut()).await;
+        drop(waiter);
+        drop(first);
+        state.lock().unwrap().limit = None;
+        send(&connection, "next").await.unwrap();
+        assert_eq!(state.lock().unwrap().bytes, expected(&["first", "next"]));
+    }
+
+    #[tokio::test]
+    async fn cancelled_flush_is_retried_without_replaying_bytes() {
+        let state = Arc::new(StdMutex::new(State {
+            flush_blocked: true,
+            ..State::default()
+        }));
+        let connection = Connection::new(ControlledWriter(state.clone()));
+        let mut first = Box::pin(connection.send_notification("first", ()));
+        poll_pending(first.as_mut()).await;
+        drop(first);
+        assert_eq!(state.lock().unwrap().bytes, expected(&["first"]));
+        // A second cancelled send must still wait for the old flush, not write its own frame.
+        let mut waiter = Box::pin(connection.send_notification("cancelled", ()));
+        poll_pending(waiter.as_mut()).await;
+        drop(waiter);
+        assert_eq!(state.lock().unwrap().bytes, expected(&["first"]));
+        state.lock().unwrap().flush_blocked = false;
+        send(&connection, "next").await.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.bytes, expected(&["first", "next"]));
+        assert_eq!(state.flush_polls, 4);
+    }
+
+    #[tokio::test]
+    async fn partial_write_error_preserves_offset_for_next_send() {
+        let state = Arc::new(StdMutex::new(State {
+            limit: Some(3),
+            fail: true,
+            ..State::default()
+        }));
+        let connection = Connection::new(ControlledWriter(state.clone()));
+        let error = send(&connection, "first").await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(state.lock().unwrap().bytes.len(), 3);
+        // Persistent errors propagate without writing any bytes from the new frame.
+        assert!(send(&connection, "blocked").await.is_err());
+        assert_eq!(state.lock().unwrap().bytes.len(), 3);
+        state.lock().unwrap().limit = None;
+        send(&connection, "next").await.unwrap();
+        assert_eq!(state.lock().unwrap().bytes, expected(&["first", "next"]));
     }
 }
