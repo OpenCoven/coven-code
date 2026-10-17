@@ -34,6 +34,7 @@ use futures::Stream;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::provider::{LlmProvider, ModelInfo};
@@ -438,9 +439,10 @@ impl EnvelopeMapper {
 
 /// A spawned CLI turn: the child process, its buffered stdout, the first
 /// stdout line (already consumed during the init handshake), and the shared
-/// stderr accumulator.
+/// stderr accumulator, plus the owned stdin writer task.
 struct CliTurn {
     child: Child,
+    stdin_writer: JoinSet<()>,
     stdout: BufReader<ChildStdout>,
     first_line: String,
     stderr: Arc<Mutex<String>>,
@@ -511,7 +513,7 @@ impl ClaudeCliProvider {
         }
     }
 
-    /// Spawn one CLI turn, write the prompt, and wait for the first stdout
+    /// Spawn one CLI turn, start writing the prompt, and wait for the first stdout
     /// line to confirm the process came up.
     async fn spawn_turn(
         &self,
@@ -568,10 +570,13 @@ impl ClaudeCliProvider {
             body: None,
         })?;
         let payload = stdin_line(prompt, images);
-        if let Err(e) = stdin.write_all(payload.as_bytes()).await {
-            warn!(error = %e, "failed writing prompt to claude CLI stdin");
-        }
-        drop(stdin); // EOF tells the CLI no more input is coming.
+        let mut stdin_writer = JoinSet::new();
+        stdin_writer.spawn(async move {
+            if let Err(e) = stdin.write_all(payload.as_bytes()).await {
+                warn!(error = %e, "failed writing prompt to claude CLI stdin");
+            }
+            drop(stdin); // EOF tells the CLI no more input is coming.
+        });
 
         let stderr_buf = Arc::new(Mutex::new(String::new()));
         if let Some(mut stderr) = child.stderr.take() {
@@ -614,6 +619,7 @@ impl ClaudeCliProvider {
 
         Ok(SpawnOutcome::Turn(Box::new(CliTurn {
             child,
+            stdin_writer,
             stdout: reader,
             first_line,
             stderr: stderr_buf,
@@ -769,6 +775,9 @@ impl LlmProvider for ClaudeCliProvider {
         let fallback_model = request.model.clone();
 
         let s = stream! {
+            // Retain ownership even before the stream is first polled; dropping
+            // the stream aborts a writer still blocked on the child's stdin.
+            let _stdin_writer = turn.stdin_writer;
             let mut mapper = EnvelopeMapper::new(&fallback_model);
             let mut line = std::mem::take(&mut turn.first_line);
             loop {
