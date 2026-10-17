@@ -346,17 +346,9 @@ jobs:
           body_path: release-notes.md
           files: release/*
 
-      # Explicit hand-off to npm-publish.yml.
-      #
-      # We can't rely solely on the `workflow_run` trigger in npm-publish.yml
-      # because this Release workflow is itself triggered by a workflow
-      # dispatch from auto-release.yml's GITHUB_TOKEN, and GitHub's
-      # automatic-token rules don't list `workflow_run` as an exception to
-      # the "events from GITHUB_TOKEN don't create new workflow runs" rule.
-      # In practice that means the workflow_run chain silently no-ops on
-      # auto-cut releases. Dispatching directly here makes the publish step
-      # deterministic — the workflow_run trigger stays as a manual-release
-      # fallback.
+      # npm-publish.yml is manual-only; there is no workflow_run fallback.
+      # Dispatch it explicitly only when publish_npm is true. The deprecated
+      # npm package is otherwise left untouched; releases ship GitHub binaries.
       - name: Dispatch npm-publish.yml
         if: ${{ inputs.publish_npm }}
         env:
