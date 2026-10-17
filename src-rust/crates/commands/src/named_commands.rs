@@ -556,9 +556,26 @@ impl NamedCommand for TagCommand {
                             ))
                         }
                     }
-                    Err(_) => CommandResult::Message(
-                        "No tags set for this session (session not yet saved).".to_string(),
-                    ),
+                    Err(e)
+                        if e.downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        CommandResult::Message(
+                            "No tags set for this session (session not yet saved).".to_string(),
+                        )
+                    }
+                    Err(e) => {
+                        if let Some(error) = e.downcast_ref::<serde_json::Error>() {
+                            CommandResult::Error(format!(
+                                "Could not list tags for session '{session_id}': invalid session JSON ({:?}) at line {} column {}",
+                                error.classify(), error.line(), error.column()
+                            ))
+                        } else {
+                            CommandResult::Error(format!(
+                                "Could not list tags for session '{session_id}': {e}"
+                            ))
+                        }
+                    }
                 }
             }
             "add" => {
