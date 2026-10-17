@@ -59,6 +59,24 @@ if (process.env.SCENARIO === 'write') {
 if (process.env.SCENARIO === 'extract') {
   require('child_process').execFileSync = () => { throw new Error('fixture extraction failure'); };
 }
+if (process.env.SCENARIO === 'windows_quote') {
+  const assert = require('node:assert/strict');
+  const path = require('node:path');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  Object.defineProperty(process, 'arch', { value: 'x64' });
+  require('child_process').execFileSync = (program, args) => {
+    assert.equal(program, 'powershell');
+    assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+    const match = /^Expand-Archive -Force -LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)'$/.exec(args[3]);
+    assert.ok(match, args[3]);
+    const source = match[1].replace(/''/g, "'");
+    const destination = match[2].replace(/''/g, "'");
+    assert.ok(source.startsWith(process.env.TEMP + path.sep), source);
+    assert.equal(destination, path.join(fs.realpathSync(path.dirname(process.argv[1])), 'native'));
+    fs.mkdirSync(destination, { recursive: true });
+    fs.writeFileSync(path.join(destination, 'coven-code.exe'), 'fixture native binary');
+  };
+}
 `;
 
 for (const [scenario, expected] of [
@@ -66,32 +84,37 @@ for (const [scenario, expected] of [
   ['abort', /fixture response aborted/], ['write', /fixture write failure/],
   ['network', /fixture network failure/], ['http', /HTTP 503/],
   ['loop', /Too many redirects/], ['insecure', /non-HTTPS/],
-  ['extract', /fixture extraction failure/],
+  ['extract', /fixture extraction failure/], ['windows_quote', null],
 ]) {
   test(scenario, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'coven-install-fixture-'));
     try {
       const pkg = path.join(temp, 'package');
       const stage = path.join(temp, 'stage');
-      const downloads = path.join(temp, 'downloads');
+      const windows = scenario === 'windows_quote';
+      const downloads = path.join(temp, windows ? "downloads'$(throw 'injected')" : 'downloads');
       for (const dir of [pkg, stage, downloads]) fs.mkdirSync(dir);
       fs.copyFileSync(path.join(root, 'npm/install.js'), path.join(pkg, 'install.js'));
       fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ version: '1.2.3' }));
       fs.writeFileSync(path.join(stage, 'coven-code'), 'fixture native binary');
-      const archive = path.join(temp, 'fixture.tar.gz');
-      const tar = spawnSync('tar', ['-czf', archive, '-C', stage, 'coven-code']);
-      assert.equal(tar.status, 0, tar.stderr.toString());
+      const archive = path.join(temp, windows ? 'fixture.zip' : 'fixture.tar.gz');
+      if (windows) {
+        fs.writeFileSync(archive, 'fixture archive');
+      } else {
+        const tar = spawnSync('tar', ['-czf', archive, '-C', stage, 'coven-code']);
+        assert.equal(tar.status, 0, tar.stderr.toString());
+      }
       const hash = scenario === 'checksum' ? '0'.repeat(64)
         : crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
-      const platform = process.platform === 'darwin' ? 'macos' : process.platform;
-      const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+      const platform = windows ? 'windows' : process.platform === 'darwin' ? 'macos' : process.platform;
+      const arch = windows ? 'x86_64' : process.arch === 'arm64' ? 'aarch64' : 'x86_64';
       fs.writeFileSync(path.join(pkg, 'checksums.json'), JSON.stringify({
-        [`coven-code-${platform}-${arch}.tar.gz`]: { sha256: hash },
+        [`coven-code-${platform}-${arch}${windows ? '.zip' : '.tar.gz'}`]: { sha256: hash },
       }));
       const preload = path.join(temp, 'mock.cjs');
       fs.writeFileSync(preload, mock);
       const result = spawnSync(process.execPath, ['--require', preload, path.join(pkg, 'install.js')], {
-        env: { ...process.env, TMPDIR: downloads, SCENARIO: scenario, FIXTURE_ARCHIVE: archive },
+        env: { ...process.env, TMPDIR: downloads, TMP: downloads, TEMP: downloads, SCENARIO: scenario, FIXTURE_ARCHIVE: archive },
         encoding: 'utf8', timeout: 5000,
       });
       assert.ifError(result.error);
@@ -101,9 +124,9 @@ for (const [scenario, expected] of [
         assert.match(result.stderr, expected);
       } else {
         assert.equal(result.status, 0, result.stdout + result.stderr);
-        const binary = path.join(pkg, 'native/coven-code');
+        const binary = path.join(pkg, windows ? 'native/coven-code.exe' : 'native/coven-code');
         assert.equal(fs.readFileSync(binary, 'utf8'), 'fixture native binary');
-        assert.ok(fs.statSync(binary).mode & 0o111);
+        if (!windows) assert.ok(fs.statSync(binary).mode & 0o111);
       }
       assert.deepEqual(fs.readdirSync(downloads), [], 'temporary downloads leaked');
     } finally {
