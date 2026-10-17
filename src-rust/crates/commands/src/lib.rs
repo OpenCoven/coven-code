@@ -199,6 +199,14 @@ async fn provider_for_config(
         })
 }
 
+fn utf8_byte_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn text_from_content_blocks(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -3668,7 +3676,7 @@ impl SlashCommand for ReviewCommand {
         let diff_for_llm = if diff.len() > MAX_DIFF_CHARS {
             format!(
                 "{}\n\n[... diff truncated at {} chars ...]",
-                &diff[..MAX_DIFF_CHARS],
+                utf8_byte_prefix(&diff, MAX_DIFF_CHARS),
                 MAX_DIFF_CHARS
             )
         } else {
@@ -5976,7 +5984,7 @@ impl SlashCommand for RenameCommand {
             model: rename_model,
             messages: vec![Message::user(format!(
                 "Conversation to name:\n\n{}",
-                &excerpt[..excerpt.len().min(2000)]
+                utf8_byte_prefix(&excerpt, 2000)
             ))],
             system_prompt: Some(claurst_api::SystemPrompt::Text(system_prompt.to_string())),
             tools: vec![],
