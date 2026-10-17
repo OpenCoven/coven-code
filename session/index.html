@@ -204,13 +204,54 @@
   </div>
 </div>
 
-<iframe id="viewer" title="Coven Code session" sandbox="allow-scripts allow-popups allow-same-origin"></iframe>
+<iframe id="viewer" title="Coven Code session" sandbox="allow-scripts allow-popups"></iframe>
 
 <script>
 (async function () {
   var titleEl = document.getElementById('status-title');
   var detailEl = document.getElementById('status-detail');
   var viewer = document.getElementById('viewer');
+
+  // Grant the active opaque-origin frame only this one boolean preference.
+  var toolsPreferenceKey = 'coven-code.share.showTools';
+  window.addEventListener('message', function (event) {
+    var message = event.data;
+    if (event.source !== viewer.contentWindow || event.origin !== 'null' ||
+        !message || typeof message !== 'object' || Array.isArray(message) ||
+        Object.keys(message).length !== 2 ||
+        message.type !== 'coven-code.share.tools-visibility' ||
+        typeof message.showTools !== 'boolean') return;
+    try { localStorage.setItem(toolsPreferenceKey, message.showTools ? '1' : '0'); } catch (_) {}
+  });
+
+  // Parse and adapt untrusted HTML only inside the opaque sandbox. Existing
+  // exports keep their renderer; standalone exports are never transformed.
+  function renderIsolatedSession(content, initialShowTools, parentOrigin) {
+    function bindToolsPreference(showTools, targetOrigin) {
+      document.addEventListener('DOMContentLoaded', function () {
+        // The legacy checkbox emitted by share_export/template.js.
+        var toggle = document.querySelector('.hero-controls .toggle input[type="checkbox"]');
+        if (!toggle) return;
+        toggle.checked = showTools;
+        toggle.dispatchEvent(new Event('change'));
+        toggle.addEventListener('change', function () {
+          parent.postMessage({
+            type: 'coven-code.share.tools-visibility',
+            showTools: toggle.checked
+          }, targetOrigin);
+        });
+      }, { once: true });
+    }
+
+    var documentToShow = new DOMParser().parseFromString(content, 'text/html');
+    var adapter = documentToShow.createElement('script');
+    adapter.textContent = '(' + bindToolsPreference.toString() + ')(' +
+      JSON.stringify(initialShowTools) + ',' + JSON.stringify(parentOrigin) + ');';
+    documentToShow.head.appendChild(adapter);
+    document.open();
+    document.write('<!DOCTYPE html>\n' + documentToShow.documentElement.outerHTML);
+    document.close();
+  }
 
   function fail(title, html) {
     titleEl.textContent = title;
@@ -266,7 +307,13 @@
       var r2 = await fetch(htmlFile.raw_url);
       if (r2.ok) content = await r2.text();
     }
-    viewer.srcdoc = content;
+    var showTools = true;
+    try { showTools = localStorage.getItem(toolsPreferenceKey) !== '0'; } catch (_) {}
+    // Escape '<' so even a literal closing script tag in the gist remains
+    // data in the bootstrap, rather than executing in its place.
+    var argumentsJson = JSON.stringify([content, showTools, location.origin]).replace(/</g, '\\u003c');
+    viewer.srcdoc = '<!DOCTYPE html><script>(' + renderIsolatedSession.toString() +
+      ').apply(null,' + argumentsJson + ');<\/script>';
     document.body.classList.add('viewer-ready');
   } catch (e) {
     fail('Network error', String(e && e.message ? e.message : e));
