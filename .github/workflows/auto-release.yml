@@ -233,7 +233,7 @@ jobs:
           TAG="v${CARGO_VERSION}"
 
           # First line, minus the `--patch` token (with surrounding spaces).
-          SUBJECT="$(printf '%s' "$MSG" | head -n 1)"
+          SUBJECT="${MSG%%$'\n'*}"
           DESC="$(printf '%s' "$SUBJECT" \
                    | sed -E 's/[[:space:]]*--patch[[:space:]]*/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
           if [[ -z "$DESC" ]]; then
