@@ -68,6 +68,8 @@ pub async fn handle(
         permission_manager: Some(runtime.permission_manager.clone()),
         user_question_tx: None,
     };
+    let mut query_config = runtime.query_config.clone();
+    query_config.working_directory = session.cwd.to_str().map(str::to_owned);
 
     // Spawn the permission drainer for this turn.
     let drainer_cancel = CancellationToken::new();
@@ -92,7 +94,7 @@ pub async fn handle(
         &mut messages,
         runtime.tools.as_slice(),
         &tool_ctx,
-        &runtime.query_config,
+        &query_config,
         runtime.cost_tracker.clone(),
         Some(ev_tx),
         cancel,
