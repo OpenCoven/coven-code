@@ -373,7 +373,7 @@ impl NamedCommand for AddDirCommand {
             settings.config.workspace_paths.push(abs_path.clone());
             if let Err(e) = settings.save_sync() {
                 return CommandResult::Error(format!(
-                    "Added {} for this session, but failed to save settings: {}",
+                    "Failed to save workspace path {}: {}",
                     abs_path.display(),
                     e
                 ));
