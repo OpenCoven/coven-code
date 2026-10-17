@@ -150,16 +150,18 @@ impl SqliteSessionStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Delete a session and all of its messages.
+    /// Delete a session and all of its messages atomically.
     pub fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
-        self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             rusqlite::params![session_id],
         )?;
-        self.conn.execute(
+        transaction.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![session_id],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 }
