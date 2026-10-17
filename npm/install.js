@@ -15,6 +15,7 @@ const VERSION = pkg.version;
 const REPO = 'OpenCoven/coven-code';
 const BASE_URL = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const NATIVE_DIR = path.join(__dirname, 'native');
+const DOWNLOAD_TIMEOUT_MS = 300_000;
 
 function getPlatform() {
   const platform = process.platform;
@@ -41,31 +42,48 @@ function getPlatform() {
   );
 }
 
-async function download(url, dest, redirects = 0) {
+async function download(url, dest, redirects = 0, deadline = Date.now() + DOWNLOAD_TIMEOUT_MS) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:') {
     throw new Error(`Refusing to download non-HTTPS URL: ${url}`);
   }
 
-  const res = await new Promise((resolve, reject) => {
-    https.get(url, resolve).on('error', reject);
-  });
-  if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-    res.destroy();
-    if (redirects >= 5) {
-      throw new Error(`Too many redirects downloading ${url}`);
-    }
-    if (!res.headers.location) {
-      throw new Error(`Redirect without Location header downloading ${url}`);
-    }
-    const location = new URL(res.headers.location, url).toString();
-    return download(location, dest, redirects + 1);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error('Download timed out');
   }
-  if (res.statusCode !== 200) {
-    res.destroy();
-    throw new Error(`HTTP ${res.statusCode} downloading ${url}`);
+  let request;
+  let response;
+  let timer;
+  try {
+    const res = await new Promise((resolve, reject) => {
+      request = https.get(url, resolve).on('error', reject);
+      timer = setTimeout(() => {
+        const error = new Error('Download timed out');
+        request.destroy(error);
+        response?.destroy(error);
+      }, remaining);
+    });
+    response = res;
+    if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+      res.destroy();
+      if (redirects >= 5) {
+        throw new Error(`Too many redirects downloading ${url}`);
+      }
+      if (!res.headers.location) {
+        throw new Error(`Redirect without Location header downloading ${url}`);
+      }
+      const location = new URL(res.headers.location, url).toString();
+      return download(location, dest, redirects + 1, deadline);
+    }
+    if (res.statusCode !== 200) {
+      res.destroy();
+      throw new Error(`HTTP ${res.statusCode} downloading ${url}`);
+    }
+    await pipeline(res, fs.createWriteStream(dest));
+  } finally {
+    clearTimeout(timer);
   }
-  await pipeline(res, fs.createWriteStream(dest));
 }
 
 function sha256File(filePath) {
