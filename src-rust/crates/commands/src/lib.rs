@@ -199,6 +199,14 @@ async fn provider_for_config(
         })
 }
 
+fn utf8_byte_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn text_from_content_blocks(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
