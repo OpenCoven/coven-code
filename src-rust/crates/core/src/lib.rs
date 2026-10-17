@@ -4567,12 +4567,53 @@ pub mod history {
     }
 
     /// Save a session to `~/.coven-code/sessions/<id>.json`.
+    /// Existing targets are staged and replaced, following live symlinks and
+    /// retaining permission bits. Replacement requires directory write permission
+    /// and changes inode identity: hardlinks and open handles retain the old file.
+    /// Ownership, ACLs and xattrs are not copied. Missing targets retain direct
+    /// creation. Concurrent writers and directory crash durability are not covered.
     pub async fn save_session(session: &ConversationSession) -> anyhow::Result<()> {
         let dir = sessions_dir();
         let path = session_path(&dir, &session.id)?;
         tokio::fs::create_dir_all(&dir).await?;
         let content = serde_json::to_string_pretty(session)?;
-        tokio::fs::write(&path, content).await?;
+        let target = match tokio::fs::canonicalize(&path).await {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Preserve creation through missing paths, including dangling symlinks.
+                tokio::fs::write(&path, content).await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Rename permissions alone must not bypass the original file's write access.
+        let original = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .await?;
+        let permissions = original.metadata().await?.permissions();
+        drop(original);
+        let directory = target
+            .parent()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "session path has no parent",
+                )
+            })?
+            .to_owned();
+        let staged = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            use std::io::Write;
+            let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+            staged.write_all(content.as_bytes())?;
+            staged.as_file().set_permissions(permissions)?;
+            staged.as_file().sync_all()?;
+            Ok(staged)
+        })
+        .await??;
+        // Publish only after the await: detached staging cannot replace an existing
+        // session after cancellation. Missing-target direct writes can still finish.
+        staged.persist(target).map_err(|error| error.error)?;
         Ok(())
     }
 
