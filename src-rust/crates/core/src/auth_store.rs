@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// A stored credential for a provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StoredCredential {
     #[serde(rename = "api")]
@@ -19,6 +19,23 @@ pub enum StoredCredential {
         refresh: String,
         expires: u64,
     },
+}
+
+impl std::fmt::Debug for StoredCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey { .. } => f
+                .debug_struct("ApiKey")
+                .field("key", &"[REDACTED]")
+                .finish(),
+            Self::OAuthToken { expires, .. } => f
+                .debug_struct("OAuthToken")
+                .field("access", &"[REDACTED]")
+                .field("refresh", &"[REDACTED]")
+                .field("expires", expires)
+                .finish(),
+        }
+    }
 }
 
 /// Persistent credential store backed by `~/.coven-code/auth.json`.
@@ -115,6 +132,38 @@ impl AuthStore {
 #[cfg(test)]
 mod tests {
     use super::{AuthStore, StoredCredential};
+
+    #[test]
+    fn credential_debug_omits_secrets_but_keeps_variant_and_expiry() {
+        let api = StoredCredential::ApiKey {
+            key: "canary-api-key".to_string(),
+        };
+        let oauth = StoredCredential::OAuthToken {
+            access: "canary-access-token".to_string(),
+            refresh: "canary-refresh-token".to_string(),
+            expires: 42,
+        };
+        let mut store = AuthStore::default();
+        store.credentials.insert("api".to_string(), api.clone());
+        store.credentials.insert("oauth".to_string(), oauth.clone());
+
+        for rendered in [
+            format!("{api:?}"),
+            format!("{oauth:?}"),
+            format!("{store:?}"),
+        ] {
+            assert!(!rendered.contains("canary-api-key"), "{rendered}");
+            assert!(!rendered.contains("canary-access-token"), "{rendered}");
+            assert!(!rendered.contains("canary-refresh-token"), "{rendered}");
+        }
+        assert!(format!("{api:?}").contains("ApiKey"));
+        assert!(format!("{oauth:?}").contains("42"));
+        assert_eq!(serde_json::to_value(&api).unwrap()["key"], "canary-api-key");
+        assert_eq!(
+            serde_json::to_value(&oauth).unwrap()["access"],
+            "canary-access-token"
+        );
+    }
 
     #[test]
     fn api_key_for_regular_provider_uses_stored_key() {
