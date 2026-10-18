@@ -56,22 +56,30 @@ function Get-ExpectedChecksum([string]$ManifestPath, [string]$ArchiveName) {
     return $seen[$ArchiveName]
 }
 
-function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Request = $null) {
+# Windows PowerShell 5.1 does not always load this assembly from type literals.
+Add-Type -AssemblyName System.Net.Http
+
+function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Request = $null, [TimeSpan]$Timeout = [TimeSpan]::FromMinutes(5), [System.Net.Http.HttpClient]$HttpClient = $null) {
     $current = [Uri]$Uri
     $handler = $null
-    $client = $null
-    if ($null -eq $Request) {
+    $client = $HttpClient
+    $ownsClient = $null -eq $client
+    $deadline = [System.Threading.CancellationTokenSource]::new($Timeout)
+    if ($null -eq $Request -and $ownsClient) {
         $handler = [System.Net.Http.HttpClientHandler]::new()
         $handler.AllowAutoRedirect = $false
         $client = [System.Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
     }
     try {
         for ($redirects = 0; $redirects -le 5; $redirects++) {
+            $deadline.Token.ThrowIfCancellationRequested()
             if (-not $current.IsAbsoluteUri -or $current.Scheme -ne 'https') {
                 throw "Refusing non-HTTPS download URI: $current"
             }
             if ($null -ne $Request) {
-                $result = & $Request $current
+                $result = & $Request $current $deadline.Token
+                $deadline.Token.ThrowIfCancellationRequested()
                 $status = [int]$result.StatusCode
                 if ($status -in @(301, 302, 303, 307, 308)) {
                     if ($redirects -eq 5 -or [string]::IsNullOrEmpty($result.Location)) {
@@ -84,7 +92,7 @@ function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Requ
                 [IO.File]::WriteAllBytes($OutFile, [byte[]]$result.Bytes)
                 return
             }
-            $response = $client.GetAsync($current, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $response = $client.GetAsync($current, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $deadline.Token).GetAwaiter().GetResult()
             try {
                 $status = [int]$response.StatusCode
                 if ($status -in @(301, 302, 303, 307, 308)) {
@@ -97,15 +105,19 @@ function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Requ
                 if ($status -ne 200) { throw "HTTP $status downloading $current" }
                 $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
                 $outputStream = [IO.File]::Create($OutFile)
-                try { $inputStream.CopyTo($outputStream) } finally {
+                try { $inputStream.CopyToAsync($outputStream, 81920, $deadline.Token).GetAwaiter().GetResult() } finally {
                     $outputStream.Dispose()
                     $inputStream.Dispose()
                 }
                 return
             } finally { $response.Dispose() }
         }
+    } catch {
+        if ($deadline.IsCancellationRequested) { throw 'Download timed out' }
+        throw
     } finally {
-        if ($null -ne $client) { $client.Dispose() }
+        $deadline.Dispose()
+        if ($ownsClient -and $null -ne $client) { $client.Dispose() }
         if ($null -ne $handler) { $handler.Dispose() }
     }
     throw 'Download redirect limit exceeded'

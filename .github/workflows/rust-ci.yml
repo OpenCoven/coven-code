@@ -62,7 +62,7 @@ jobs:
           bash scripts/install-sh-checksums.test.sh
       - name: Verify PowerShell checksum failure boundaries
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: ./scripts/install-ps1-checksums.test.ps1
 
   headless-schemas:

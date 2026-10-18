@@ -81,7 +81,10 @@ function Invoke-IntegrationCase([string]$Scenario, [bool]$ShouldPass) {
     $existing = Join-Path $caseRoot 'existing.exe'
     [IO.File]::WriteAllText($existing, 'existing')
     $archiveBytes = [Text.Encoding]::UTF8.GetBytes('inert archive bytes')
-    $archiveDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($archiveBytes)).ToLowerInvariant()
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $archiveDigest = [BitConverter]::ToString($hasher.ComputeHash($archiveBytes)).Replace('-', '').ToLowerInvariant()
+    } finally { $hasher.Dispose() }
     $manifestBody = Manifest $archiveDigest
     if ($Scenario -eq 'malformed') { $manifestBody = 'not-a-manifest' }
     if ($Scenario -eq 'duplicate') { $manifestBody += "$archiveDigest  $selected`n" }
@@ -158,5 +161,105 @@ Invoke-IntegrationCase 'download_failure' $false
 Invoke-IntegrationCase 'protocol_downgrade' $false
 Invoke-IntegrationCase 'missing_location' $false
 Invoke-IntegrationCase 'redirect_limit' $false
+
+$deadlinePath = Join-Path ([System.IO.Path]::GetTempPath()) ("coven-deadline-" + [guid]::NewGuid().ToString('N'))
+$slowRequest = {
+    param([Uri]$Uri, [System.Threading.CancellationToken]$Token)
+    $null = $Token.WaitHandle.WaitOne(100)
+    return @{ StatusCode = 200; Bytes = [byte[]]@(1, 2, 3) }
+}
+$timedOut = $false
+try {
+    Invoke-HttpsDownload 'https://example.invalid/slow' $deadlinePath $slowRequest ([TimeSpan]::FromMilliseconds(50))
+} catch {
+    $timedOut = $_.Exception.Message -like '*timed out*'
+} finally {
+    Remove-Item $deadlinePath -Force -ErrorAction SilentlyContinue
+}
+if (-not $timedOut) { throw 'download request did not honor its deadline' }
+
+$fixtureAssemblies = @(
+    [System.Net.Http.HttpClient].Assembly.Location
+    [System.Net.HttpStatusCode].Assembly.Location
+    [System.Threading.Tasks.Task].Assembly.Location
+    [System.IO.Stream].Assembly.Location
+    [System.Uri].Assembly.Location
+) | Select-Object -Unique
+Add-Type -ReferencedAssemblies $fixtureAssemblies -TypeDefinition @'
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class DeadlineFixtureHandler : HttpMessageHandler {
+    public int Calls { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+        Calls++;
+        if (Calls == 1) {
+            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
+            redirect.Headers.Location = new Uri("/archive", UriKind.Relative);
+            return redirect;
+        }
+        return new HttpResponseMessage(HttpStatusCode.OK) {
+            Content = new StreamContent(new SlowBodyStream())
+        };
+    }
+}
+
+public sealed class SlowBodyStream : Stream {
+    public override bool CanRead { get { return true; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return false; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position {
+        get { throw new NotSupportedException(); }
+        set { throw new NotSupportedException(); }
+    }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) {
+        Task.Delay(300).GetAwaiter().GetResult();
+        return 0;
+    }
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) {
+        await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+        return 0;
+    }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+    public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+}
+'@
+
+$fixtureHandler = [DeadlineFixtureHandler]::new()
+$fixtureClient = [System.Net.Http.HttpClient]::new($fixtureHandler)
+$script:deadlineTempFile = $null
+$never = { throw 'timed out download crossed the extraction or install boundary' }
+$deadlineBoundaries = [pscustomobject]@{
+    Download = {
+        param([string]$Uri, [string]$OutFile)
+        $script:deadlineTempFile = $OutFile
+        Invoke-HttpsDownload $Uri $OutFile $null ([TimeSpan]::FromMilliseconds(150)) $fixtureClient
+    }
+    Expand = $never
+    Install = $never
+}
+$timedOut = $false
+try {
+    Download-And-Install '9.9.9' 'x86_64' $deadlineBoundaries
+} catch {
+    $timedOut = $_.Exception.Message -like '*timed out*'
+} finally {
+    $fixtureClient.Dispose()
+}
+if (-not $timedOut -or $fixtureHandler.Calls -ne 2) {
+    throw 'production HTTP redirect and slow body did not time out'
+}
+if (-not $script:deadlineTempFile -or (Test-Path (Split-Path $script:deadlineTempFile))) {
+    throw 'timed out download left its temporary directory behind'
+}
 
 Write-Host 'install.ps1 checksum and inert integration fixtures passed'
