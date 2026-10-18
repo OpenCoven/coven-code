@@ -1,0 +1,42 @@
+name: Session viewer browser tests
+
+on:
+  pull_request:
+    paths:
+      - 'session/**'
+      - 'scripts/test_viewer_*.py'
+      - 'src-rust/crates/core/src/share_export/**'
+      - '.github/workflows/viewer-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  viewer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install pinned browser tooling
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/viewer-tools" --no-save @playwright/cli@0.1.22
+          "$RUNNER_TEMP/viewer-tools/node_modules/.bin/playwright" install --with-deps chromium
+          cat > "$RUNNER_TEMP/viewer-browser.json" <<'JSON'
+          {"browser":{"browserName":"chromium","launchOptions":{"channel":"chromium","headless":true}}}
+          JSON
+      - name: Run offline viewer fixtures
+        shell: bash
+        env:
+          PLAYWRIGHT_MCP_CONFIG: ${{ runner.temp }}/viewer-browser.json
+        run: |
+          for fixture in scripts/test_viewer_*.py; do
+            python3 -B "$fixture" --cli "$RUNNER_TEMP/viewer-tools/node_modules/.bin/playwright-cli"
+          done
