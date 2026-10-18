@@ -364,6 +364,7 @@ impl Tool for BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,
@@ -483,6 +484,7 @@ impl BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,
