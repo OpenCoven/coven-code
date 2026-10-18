@@ -439,13 +439,14 @@ impl EnvelopeMapper {
 
 /// A spawned CLI turn: the child process, its buffered stdout, the first
 /// stdout line (already consumed during the init handshake), and the shared
-/// stderr accumulator, plus the owned stdin writer task.
+/// stderr accumulator, plus the owned stdin writer and stderr reader tasks.
 struct CliTurn {
     child: Child,
     stdin_writer: JoinSet<()>,
     stdout: BufReader<ChildStdout>,
     first_line: String,
     stderr: Arc<Mutex<String>>,
+    stderr_tasks: JoinSet<()>,
 }
 
 /// Result of launching one CLI turn. `CliTurn` is boxed to keep the variant
@@ -456,6 +457,7 @@ enum SpawnOutcome {
     /// session or a startup failure; stderr explains which.
     ExitedEarly {
         stderr: Arc<Mutex<String>>,
+        stderr_tasks: JoinSet<()>,
     },
 }
 
@@ -579,9 +581,10 @@ impl ClaudeCliProvider {
         });
 
         let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let mut stderr_tasks = JoinSet::new();
         if let Some(mut stderr) = child.stderr.take() {
             let sink = Arc::clone(&stderr_buf);
-            tokio::spawn(async move {
+            stderr_tasks.spawn(async move {
                 let mut collected = String::new();
                 if stderr.read_to_string(&mut collected).await.is_ok() {
                     *sink.lock() = collected;
@@ -614,7 +617,10 @@ impl ClaudeCliProvider {
                 resume = resume.is_some(),
                 "claude CLI exited before emitting output"
             );
-            return Ok(SpawnOutcome::ExitedEarly { stderr: stderr_buf });
+            return Ok(SpawnOutcome::ExitedEarly {
+                stderr: stderr_buf,
+                stderr_tasks,
+            });
         }
 
         Ok(SpawnOutcome::Turn(Box::new(CliTurn {
@@ -623,6 +629,7 @@ impl ClaudeCliProvider {
             stdout: reader,
             first_line,
             stderr: stderr_buf,
+            stderr_tasks,
         })))
     }
 
@@ -670,7 +677,10 @@ impl ClaudeCliProvider {
             .await?
         {
             SpawnOutcome::Turn(turn) => Ok(*turn),
-            SpawnOutcome::ExitedEarly { stderr } => {
+            SpawnOutcome::ExitedEarly {
+                stderr,
+                stderr_tasks: _stderr_tasks,
+            } => {
                 let detail = collect_stderr(&stderr).await;
                 Err(ProviderError::Other {
                     provider: self.id.clone(),
@@ -778,6 +788,8 @@ impl LlmProvider for ClaudeCliProvider {
             // Retain ownership even before the stream is first polled; dropping
             // the stream aborts a writer still blocked on the child's stdin.
             let _stdin_writer = turn.stdin_writer;
+            // Retain the stderr reader even before the stream is polled.
+            let _stderr_tasks = turn.stderr_tasks;
             let mut mapper = EnvelopeMapper::new(&fallback_model);
             let mut line = std::mem::take(&mut turn.first_line);
             loop {
