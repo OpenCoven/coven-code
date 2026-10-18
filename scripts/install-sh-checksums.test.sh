@@ -32,7 +32,7 @@ EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> '$case_dir/curl.log'
 out=''; url=''; while [ \$# -gt 0 ]; do case "\$1" in -o) out=\$2; shift 2;; http*) url=\$1; shift;; *) shift;; esac; done
-case "\$url" in */SHA256SUMS) cp '$case_dir/SHA256SUMS' "\$out";; */$ARCHIVE) cp '$PAYLOAD' "\$out";; *) exit 91;; esac
+case "\$url" in */releases/latest) printf '{"tag_name":"v9.9.9"}\n';; */SHA256SUMS) cp '$case_dir/SHA256SUMS' "\$out";; */$ARCHIVE) cp '$PAYLOAD' "\$out";; *) exit 91;; esac
 EOF
   cat > "$fake/tar" <<EOF
 #!/bin/sh
@@ -53,8 +53,10 @@ EOF
     printf '#!/bin/sh\nexit 127\n' > "$fake/shasum"
     chmod +x "$fake/sha256sum" "$fake/shasum"
   fi
+  local install_args=(--version 9.9.9 --install-dir "$install")
+  if [[ "$label" == latest ]]; then install_args=(--install-dir "$install"); fi
   set +e
-  HOME="$case_dir/home" SHELL=/bin/false PATH="$fake:/usr/bin:/bin" bash "$ROOT/install.sh" --version 9.9.9 --install-dir "$install" >"$case_dir/out" 2>&1
+  HOME="$case_dir/home" SHELL=/bin/false PATH="$fake:/usr/bin:/bin" bash "$ROOT/install.sh" "${install_args[@]}" >"$case_dir/out" 2>&1
   status=$?
   set -e
   if [[ "$expect" == pass ]]; then
@@ -67,9 +69,15 @@ EOF
   fi
   grep -q -- "--proto =https" "$case_dir/curl.log"
   grep -q -- "--proto-redir =https" "$case_dir/curl.log"
+  while IFS= read -r args; do
+    [[ " $args " == *" --connect-timeout 30 "* ]]
+    [[ " $args " == *" --max-time 300 "* ]]
+  done < "$case_dir/curl.log"
+  if [[ "$label" == latest ]]; then [[ $(wc -l < "$case_dir/curl.log") -eq 3 ]]; fi
 }
 
 run_case valid "$(manifest)" pass
+run_case latest "$(manifest)" pass
 UPPER_DIGEST=$(printf '%s' "$DIGEST" | tr '[:lower:]' '[:upper:]')
 run_case uppercase "$(manifest "$UPPER_DIGEST")" pass
 run_case mismatch "$(manifest "$(printf '%064d' 1)")" fail

@@ -92,7 +92,11 @@ if [[ -n "$local_binary" ]]; then
 else
   if [[ -z "$specific_version" ]]; then
     print_message info "Fetching latest release..."
-    specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
+    specific_version=$(curl --fail --show-error --silent --location \
+      --connect-timeout 30 --max-time 300 --proto '=https' \
+      --proto-redir '=https' --tlsv1.2 \
+      "https://api.github.com/repos/${REPO}/releases/latest" \
+      | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
   fi
   install_source="v${specific_version}"
 fi
@@ -167,10 +171,10 @@ else
   command -v awk >/dev/null 2>&1 || { print_message error "awk is required."; exit 1; }
 
   print_message info "Downloading SHA256SUMS..."
-  curl --fail --show-error --silent --location --proto '=https' \
+  curl --fail --show-error --silent --location --connect-timeout 30 --max-time 300 --proto '=https' \
     --proto-redir '=https' --tlsv1.2 "$CHECKSUM_URL" -o "${tmp_dir}/SHA256SUMS"
   print_message info "Downloading ${ARCHIVE_NAME}..."
-  curl --fail --show-error --silent --location --proto '=https' \
+  curl --fail --show-error --silent --location --connect-timeout 30 --max-time 300 --proto '=https' \
     --proto-redir '=https' --tlsv1.2 --progress-bar "$DOWNLOAD_URL" \
     -o "${tmp_dir}/${ARCHIVE_NAME}"
   if ! expected=$(expected_checksum "${tmp_dir}/SHA256SUMS" "$ARCHIVE_NAME"); then
