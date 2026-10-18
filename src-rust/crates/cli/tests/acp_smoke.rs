@@ -7,12 +7,21 @@
 //! debug binary produced by `cargo build` — Cargo provides the path via
 //! `CARGO_BIN_EXE_coven-code` (internal Cargo env for the binary target).
 
-use std::io::Write;
-use std::process::{Command, ExitStatus, Stdio};
+use std::io::Read;
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 fn binary_path() -> String {
     env!("CARGO_BIN_EXE_coven-code").to_string()
+}
+
+fn captured_output(path: &std::path::Path) -> String {
+    let file = std::fs::File::open(path).expect("open captured output");
+    let mut bytes = Vec::new();
+    file.take(16 * 1024)
+        .read_to_end(&mut bytes)
+        .expect("read captured output");
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn run_with_input(
@@ -21,6 +30,10 @@ fn run_with_input(
     settings: Option<&str>,
 ) -> (ExitStatus, String, String) {
     let scratch = tempfile::tempdir().expect("create ACP scratch home");
+    let stdin_path = scratch.path().join("stdin.jsonl");
+    std::fs::write(&stdin_path, stdin).expect("write ACP input");
+    let stdout_path = scratch.path().join("stdout.log");
+    let stderr_path = scratch.path().join("stderr.log");
     if let Some(settings) = settings {
         std::fs::write(scratch.path().join("settings.json"), settings)
             .expect("write ACP test settings");
@@ -32,9 +45,11 @@ fn run_with_input(
         .env("USERPROFILE", scratch.path())
         .env("COVEN_CODE_HOME", scratch.path())
         .env("COVEN_HOME", scratch.path().join("coven"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // File-backed input reaches EOF without blocking the timeout supervisor.
+        .stdin(std::fs::File::open(&stdin_path).expect("open ACP input"))
+        // Drain into owned files so waiting for exit cannot fill an output pipe.
+        .stdout(std::fs::File::create(&stdout_path).expect("create stdout log"))
+        .stderr(std::fs::File::create(&stderr_path).expect("create stderr log"));
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -47,32 +62,25 @@ fn run_with_input(
     }
     let mut child = command.spawn().expect("spawn coven-code acp");
 
-    {
-        let mut stdin_handle = child.stdin.take().expect("stdin");
-        stdin_handle
-            .write_all(stdin.as_bytes())
-            .expect("write stdin");
-        // Dropping stdin signals EOF — the agent will finish in-flight work
-        // and then exit cleanly.
-    }
-
     let deadline = std::time::Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait().expect("try_wait") {
-            Some(_status) => break,
+            Some(status) => break status,
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
-                panic!("coven-code acp did not exit within {timeout:?}");
+                let reaped = child.wait();
+                let stdout = captured_output(&stdout_path);
+                let stderr = captured_output(&stderr_path);
+                panic!("coven-code acp did not exit within {timeout:?}; reap: {reaped:?}\nstdout (first 16 KiB):\n{stdout}\nstderr (first 16 KiB):\n{stderr}");
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
-    }
+    };
 
-    let output = child.wait_with_output().expect("wait_with_output");
     (
-        output.status,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        status,
+        String::from_utf8_lossy(&std::fs::read(stdout_path).expect("read stdout log")).into_owned(),
+        String::from_utf8_lossy(&std::fs::read(stderr_path).expect("read stderr log")).into_owned(),
     )
 }
 
@@ -172,4 +180,21 @@ fn invalid_settings_fail_acp_startup() {
     assert!(!status.success(), "ACP ignored invalid settings: {stderr}");
     assert!(stderr.contains("Failed to load ACP settings"), "{stderr}");
     assert!(stdout.is_empty(), "ACP wrote a response: {stdout}");
+}
+
+#[test]
+fn large_response_stream_does_not_block_child_exit() {
+    let request = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"session/load\"}\n";
+    let (status, stdout, stderr) =
+        run_with_input(&request.repeat(4096), Duration::from_secs(20), None);
+    assert!(status.success(), "ACP failed: {stderr}");
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON-RPC response"))
+        .collect();
+    assert_eq!(responses.len(), 4096);
+    for response in responses {
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], -32601);
+    }
 }
