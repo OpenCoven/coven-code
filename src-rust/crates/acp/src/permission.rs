@@ -107,11 +107,33 @@ pub async fn forward_pending(
             _ => PermissionDecision::Deny,
         },
         Ok(Err(err)) => {
-            warn!(?err, "ACP permission: client returned error, denying");
+            warn!(
+                code = i32::from(err.code),
+                message_bytes = err.message.len(),
+                has_data = err.data.is_some(),
+                "ACP permission: client returned error, denying"
+            );
             PermissionDecision::Deny
         }
         Err(err) => {
-            warn!(?err, "ACP permission: send_request failed, denying");
+            if let Some(error) = err.downcast_ref::<serde_json::Error>() {
+                warn!(
+                    error_class = "json",
+                    category = ?error.classify(),
+                    line = error.line(),
+                    column = error.column(),
+                    "ACP permission: send_request failed, denying"
+                );
+            } else {
+                let io_kind = err
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind);
+                warn!(
+                    error_class = if io_kind.is_some() { "io" } else { "other" },
+                    ?io_kind,
+                    "ACP permission: send_request failed, denying"
+                );
+            }
             PermissionDecision::Deny
         }
     };
@@ -469,3 +491,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "diagnostic_tests.rs"]
+mod diagnostic_tests;
