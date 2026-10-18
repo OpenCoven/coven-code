@@ -213,6 +213,37 @@ fn strip_ansi(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+struct PtyChild {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    running: bool,
+}
+
+#[cfg(unix)]
+impl Drop for PtyChild {
+    fn drop(&mut self) {
+        if !self.running {
+            return;
+        }
+        if let Some(pid) = self
+            .child
+            .process_id()
+            .and_then(|pid| i32::try_from(pid).ok())
+        {
+            if pid >= 2 {
+                let pid = nix::unistd::Pid::from_raw(pid);
+                // portable_pty starts the command as a session leader. Kill its
+                // process group so children sharing the PTY exit as well.
+                let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+            }
+        } else {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
 async fn run_in_pty(
     script: &str,
     working_dir: &str,
@@ -236,10 +267,14 @@ async fn run_in_pty(
     cmd.args(["-c", script]);
     cmd.cwd(working_dir);
 
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn in PTY: {}", e))?;
+    let mut child = PtyChild {
+        child,
+        running: true,
+    };
 
     // Grab the reader *before* dropping slave so the fd stays valid
     let mut reader = pair
@@ -282,9 +317,15 @@ async fn run_in_pty(
         .map_err(|_| "Command timed out".to_string())?
         .map_err(|e| format!("PTY read thread panicked: {}", e))?;
 
-    let exit_code = match child.wait() {
-        Ok(status) => status.exit_code() as i32,
-        Err(_) => -1,
+    let exit_code = loop {
+        match child.child.try_wait() {
+            Ok(Some(status)) => {
+                child.running = false;
+                break status.exit_code() as i32;
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(_) => break -1,
+        }
     };
 
     Ok((raw_output, exit_code))
