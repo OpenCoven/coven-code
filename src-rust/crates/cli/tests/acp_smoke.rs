@@ -8,21 +8,44 @@
 //! `CARGO_BIN_EXE_coven-code` (internal Cargo env for the binary target).
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 fn binary_path() -> String {
     env!("CARGO_BIN_EXE_coven-code").to_string()
 }
 
-fn run_with_input(stdin: &str, timeout: Duration) -> (String, String) {
-    let mut child = Command::new(binary_path())
+fn run_with_input(
+    stdin: &str,
+    timeout: Duration,
+    settings: Option<&str>,
+) -> (ExitStatus, String, String) {
+    let scratch = tempfile::tempdir().expect("create ACP scratch home");
+    if let Some(settings) = settings {
+        std::fs::write(scratch.path().join("settings.json"), settings)
+            .expect("write ACP test settings");
+    }
+    let mut command = Command::new(binary_path());
+    command
         .arg("acp")
+        .env("HOME", scratch.path())
+        .env("USERPROFILE", scratch.path())
+        .env("COVEN_CODE_HOME", scratch.path())
+        .env("COVEN_HOME", scratch.path().join("coven"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn coven-code acp");
+        .stderr(Stdio::piped());
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "COVEN_CODE_PROVIDER",
+        "COVEN_CODE_API_BASE",
+        "COVEN_CODE_CLAUDE_BIN",
+        "COVEN_PARENT",
+    ] {
+        command.env_remove(key);
+    }
+    let mut child = command.spawn().expect("spawn coven-code acp");
 
     {
         let mut stdin_handle = child.stdin.take().expect("stdin");
@@ -47,6 +70,7 @@ fn run_with_input(stdin: &str, timeout: Duration) -> (String, String) {
 
     let output = child.wait_with_output().expect("wait_with_output");
     (
+        output.status,
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
@@ -71,7 +95,7 @@ fn find_response(stdout: &str, id: i64) -> serde_json::Value {
 fn initialize_returns_spec_compliant_response() {
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":false},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
 "#;
-    let (stdout, _stderr) = run_with_input(request, Duration::from_secs(20));
+    let (_status, stdout, _stderr) = run_with_input(request, Duration::from_secs(20), None);
     let resp = find_response(&stdout, 1);
     assert_eq!(resp["jsonrpc"], "2.0");
     let result = &resp["result"];
@@ -98,7 +122,7 @@ fn session_new_returns_session_id() {
 {{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{cwd_str}","mcpServers":[]}}}}
 "#
     );
-    let (stdout, _stderr) = run_with_input(&request, Duration::from_secs(20));
+    let (_status, stdout, _stderr) = run_with_input(&request, Duration::from_secs(20), None);
     let resp = find_response(&stdout, 2);
     let session_id = resp["result"]["sessionId"]
         .as_str()
@@ -116,7 +140,7 @@ fn session_load_returns_method_not_found() {
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"x","cwd":"/","mcpServers":[]}}
 "#;
-    let (stdout, _stderr) = run_with_input(request, Duration::from_secs(20));
+    let (_status, stdout, _stderr) = run_with_input(request, Duration::from_secs(20), None);
     let resp = find_response(&stdout, 2);
     assert_eq!(resp["error"]["code"], -32601, "should be MethodNotFound");
 }
@@ -128,7 +152,7 @@ fn cancel_notification_is_silent() {
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
 {"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"nonexistent"}}
 "#;
-    let (stdout, _stderr) = run_with_input(request, Duration::from_secs(20));
+    let (_status, stdout, _stderr) = run_with_input(request, Duration::from_secs(20), None);
     // Only the initialize response (id=1) should appear; no extra responses.
     let response_count = stdout
         .lines()
@@ -139,4 +163,13 @@ fn cancel_notification_is_silent() {
         response_count, 1,
         "unexpected extra responses in:\n{stdout}"
     );
+}
+
+#[test]
+fn invalid_settings_fail_acp_startup() {
+    let (status, stdout, stderr) =
+        run_with_input("", Duration::from_secs(20), Some("{invalid settings"));
+    assert!(!status.success(), "ACP ignored invalid settings: {stderr}");
+    assert!(stderr.contains("Failed to load ACP settings"), "{stderr}");
+    assert!(stdout.is_empty(), "ACP wrote a response: {stdout}");
 }
