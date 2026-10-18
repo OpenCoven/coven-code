@@ -44,7 +44,14 @@ impl AgentServer {
                         Err(err) => this.connection.send_error_response(id, err).await,
                     };
                     if let Err(e) = result {
-                        warn!(?e, method = %method, "ACP: failed to send response");
+                        let io_kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+                        warn!(
+                            method = diagnostic_method(&method),
+                            method_bytes = method.len(),
+                            error_class = if io_kind.is_some() { "io" } else { "other" },
+                            ?io_kind,
+                            "ACP: failed to send response"
+                        );
                     }
                 }
                 Inbound::Notification { method, params } => {
@@ -59,7 +66,11 @@ impl AgentServer {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, acp::Error> {
-        debug!(method, "ACP: dispatch request");
+        debug!(
+            method = diagnostic_method(method),
+            method_bytes = method.len(),
+            "ACP: dispatch request"
+        );
         match method {
             "initialize" => {
                 let req: acp::InitializeRequest = parse_params(params)?;
@@ -88,14 +99,22 @@ impl AgentServer {
                 serde_json::to_value(result).map_err(|_| acp::Error::internal_error())
             }
             other => {
-                warn!(method = other, "ACP: method not found");
+                warn!(
+                    method = diagnostic_method(other),
+                    method_bytes = other.len(),
+                    "ACP: method not found"
+                );
                 Err(acp::Error::method_not_found())
             }
         }
     }
 
     async fn handle_notification(self: &Arc<Self>, method: &str, params: Option<Value>) {
-        debug!(method, "ACP: dispatch notification");
+        debug!(
+            method = diagnostic_method(method),
+            method_bytes = method.len(),
+            "ACP: dispatch notification"
+        );
         match method {
             "session/cancel" => {
                 let parsed: Result<acp::CancelNotification, _> = params
@@ -108,11 +127,20 @@ impl AgentServer {
                             session.cancel_turn();
                         }
                     }
-                    Err(e) => warn!(?e, "ACP: malformed session/cancel notification"),
+                    Err(e) => warn!(
+                        category = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "ACP: malformed session/cancel notification"
+                    ),
                 }
             }
             other => {
-                warn!(method = other, "ACP: ignoring unknown notification");
+                warn!(
+                    method = diagnostic_method(other),
+                    method_bytes = other.len(),
+                    "ACP: ignoring unknown notification"
+                );
             }
         }
     }
@@ -200,6 +228,19 @@ fn validate_session_cwd(cwd: &Path) -> Result<PathBuf, acp::Error> {
         return Err(invalid("cwd must not contain control characters"));
     }
     Ok(canonical)
+}
+
+// Never return client-provided strings for diagnostics, even at DEBUG level.
+fn diagnostic_method(method: &str) -> &'static str {
+    match method {
+        "initialize" => "initialize",
+        "authenticate" => "authenticate",
+        "session/new" => "session/new",
+        "session/load" => "session/load",
+        "session/prompt" => "session/prompt",
+        "session/cancel" => "session/cancel",
+        _ => "unknown",
+    }
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, acp::Error> {
