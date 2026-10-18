@@ -1209,6 +1209,16 @@ pub fn stop_hooks_with_full_behavior(
     working_dir: std::path::PathBuf,
     goal_turn: Option<GoalTurn>,
 ) -> Vec<claurst_core::types::Message> {
+    stop_hooks_with_reaper_observer(turn_result, config, working_dir, goal_turn, None)
+}
+
+fn stop_hooks_with_reaper_observer(
+    turn_result: &claurst_core::types::Message,
+    config: &claurst_core::config::Config,
+    working_dir: std::path::PathBuf,
+    goal_turn: Option<GoalTurn>,
+    reaper_tx: Option<std::sync::mpsc::Sender<std::thread::JoinHandle<()>>>,
+) -> Vec<claurst_core::types::Message> {
     use claurst_core::config::HookEvent;
 
     let entries = match config.hooks.get(&HookEvent::Stop) {
@@ -1223,12 +1233,13 @@ pub fn stop_hooks_with_full_behavior(
         let dir = working_dir.clone();
         let text = output_text.clone();
         let goal_turn = goal_turn.clone();
+        let reaper_tx = reaper_tx.clone();
 
         tokio::task::spawn_blocking(move || {
             // The blocking pool only schedules the reaper; it never waits for
             // the hook's lifetime. Detached hooks retain their existing ability
             // to outlive the runtime (and potentially the engine process).
-            if let Err(error) = std::thread::Builder::new()
+            match std::thread::Builder::new()
                 .name("coven-stop-hook".into())
                 .spawn(move || {
                     if let Some(turn) = &goal_turn {
@@ -1246,9 +1257,13 @@ pub fn stop_hooks_with_full_behavior(
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
-                })
-            {
-                warn!(%error, "Could not start Stop hook reaper");
+                }) {
+                Ok(handle) => {
+                    if let Some(tx) = reaper_tx {
+                        let _ = tx.send(handle);
+                    }
+                }
+                Err(error) => warn!(%error, "Could not start Stop hook reaper"),
             }
         });
     }
