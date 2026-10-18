@@ -147,16 +147,64 @@ file_checksum() {
   fi
 }
 
+install_binary_and_alias() (
+  local source="$1" stage target="${INSTALL_DIR}/${APP}" alias="${INSTALL_DIR}/${ALIAS}"
+  local had_target=0 had_alias=0 installed_target=0 installed_alias=0 committed=0
+  local rollback_failed=0
+
+  if [[ -d "$target" && ! -L "$target" ]] || [[ -d "$alias" && ! -L "$alias" ]]; then
+    print_message error "Install target or alias is a directory."
+    return 1
+  fi
+  stage=$(mktemp -d "${INSTALL_DIR}/.coven-code-stage-XXXXXX") || return 1
+  # Invoked by the EXIT trap below.
+  # shellcheck disable=SC2329
+  finish_install() {
+    local status=$?
+    trap - EXIT
+    if [[ $committed -eq 0 ]]; then
+      if [[ $installed_alias -eq 1 ]]; then rm -f "$alias" || rollback_failed=1; fi
+      if [[ $installed_target -eq 1 ]]; then rm -f "$target" || rollback_failed=1; fi
+      if [[ $had_alias -eq 1 ]]; then mv "$stage/old-${ALIAS}" "$alias" || rollback_failed=1; fi
+      if [[ $had_target -eq 1 ]]; then mv "$stage/old-${APP}" "$target" || rollback_failed=1; fi
+    fi
+    if [[ $rollback_failed -eq 0 ]]; then
+      rm -rf "$stage" || rollback_failed=1
+    fi
+    if [[ $rollback_failed -ne 0 ]]; then
+      print_message error "Could not restore the prior install; backups remain at ${stage}." >&2
+      exit 1
+    fi
+    exit "$status"
+  }
+  trap finish_install EXIT
+
+  # Stage on the destination filesystem so the published binary has a new
+  # inode (important for macOS signature validation) and each move is atomic.
+  cp "$source" "$stage/$APP"
+  chmod +x "$stage/$APP"
+  ln -s "$APP" "$stage/$ALIAS" || cp "$stage/$APP" "$stage/$ALIAS"
+
+  if [[ -e "$target" || -L "$target" ]]; then
+    mv "$target" "$stage/old-${APP}"
+    had_target=1
+  fi
+  if [[ -e "$alias" || -L "$alias" ]]; then
+    mv "$alias" "$stage/old-${ALIAS}"
+    had_alias=1
+  fi
+  mv "$stage/$APP" "$target"
+  installed_target=1
+  mv "$stage/$ALIAS" "$alias"
+  installed_alias=1
+  committed=1
+)
+
 mkdir -p "$INSTALL_DIR"
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
-  # Stage then mv: overwriting an existing binary in place reuses its inode,
-  # and macOS caches signature validation per inode — the upgraded binary
-  # would be SIGKILLed (Code Signature Invalid) on launch.
-  cp "$local_binary" "${INSTALL_DIR}/${APP}.new"
-  chmod +x "${INSTALL_DIR}/${APP}.new"
-  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
+  install_binary_and_alias "$local_binary"
 else
   ARTIFACT="${APP}-${PLATFORM}-${ARCH_TAG}"
   ARCHIVE_NAME="${ARTIFACT}.tar.gz"
@@ -188,13 +236,9 @@ else
   fi
   print_message success "Verified SHA-256 for ${ARCHIVE_NAME}"
   tar -xzf "${tmp_dir}/${ARCHIVE_NAME}" -C "$tmp_dir"
-  cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}.new"
-  chmod +x "${INSTALL_DIR}/${APP}.new"
-  mv -f "${INSTALL_DIR}/${APP}.new" "${INSTALL_DIR}/${APP}"
+  install_binary_and_alias "${tmp_dir}/${APP}"
 fi
 
-ln -sf "${APP}" "${INSTALL_DIR}/${ALIAS}" || cp "${INSTALL_DIR}/${APP}" "${INSTALL_DIR}/${ALIAS}"
-chmod +x "${INSTALL_DIR}/${ALIAS}"
 # Remove any `coven` symlink left by older installers — that name belongs to
 # the Coven daemon CLI (@opencoven/cli).
 if [[ -L "${INSTALL_DIR}/coven" ]]; then

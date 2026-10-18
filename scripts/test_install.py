@@ -103,6 +103,38 @@ fi
         self.assertIn("/releases/download/v1.2.3/SHA256SUMS", requests[1])
         self.assertIn("/releases/download/v1.2.3/", requests[2])
 
+    def assert_alias_failure_preserves_install(self, *args):
+        self.target.mkdir()
+        old_binary = b"old executable\n"
+        (self.target / "coven-code").write_bytes(old_binary)
+        (self.target / "coven-cave").symlink_to("coven-code")
+        self.env["BLOCK_ALIAS"] = str(self.target / "coven-cave")
+        (self.bin / "ln").write_text("#!/bin/sh\nexit 73\n")
+        (self.bin / "cp").write_text('''#!/bin/bash
+if [[ "${!#}" == "$BLOCK_ALIAS" ]]; then exit 73; fi
+exec /bin/cp "$@"
+''')
+        (self.bin / "mv").write_text('''#!/bin/bash
+if [[ "$1" == */.coven-code-stage-*/coven-cave && "${!#}" == "$BLOCK_ALIAS" ]]; then exit 73; fi
+exec /bin/mv "$@"
+''')
+        for name in ("ln", "cp", "mv"):
+            (self.bin / name).chmod(0o755)
+
+        result = self.run_install(*args)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.target / "coven-code").read_bytes(), old_binary)
+        self.assertTrue((self.target / "coven-cave").is_symlink())
+        self.assertEqual(os.readlink(self.target / "coven-cave"), "coven-code")
+        self.assertEqual(sorted(path.name for path in self.target.iterdir()),
+                         ["coven-cave", "coven-code"])
+
+    def test_local_alias_failure_preserves_install(self):
+        self.assert_alias_failure_preserves_install("--binary", str(self.local))
+
+    def test_download_alias_failure_preserves_install(self):
+        self.assert_alias_failure_preserves_install("--version", "1.2.3")
+
 
 if __name__ == "__main__":
     unittest.main()
