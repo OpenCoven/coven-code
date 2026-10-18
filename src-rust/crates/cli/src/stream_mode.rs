@@ -251,6 +251,15 @@ fn new_session(tool_ctx: &ToolContext, model: &str) -> claurst_core::history::Co
     session
 }
 
+async fn await_transcript_task<T>(
+    handle: tokio::task::JoinHandle<T>,
+    messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
+) -> (Result<T, tokio::task::JoinError>, Vec<Message>) {
+    let result = handle.await;
+    let transcript = std::mem::take(&mut *messages.lock().await);
+    (result, transcript)
+}
+
 /// Run one chat turn: feed `messages` through the query loop, translating
 /// query events into stream-json frames. Returns the updated transcript
 /// (the query loop appends assistant/tool messages in place).
@@ -269,16 +278,20 @@ async fn run_turn(
     let started = Instant::now();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
     let cancel = CancellationToken::new();
+    // Keep ownership of the transcript outside the task so a panic cannot
+    // replace the session with an empty transcript.
+    let messages = Arc::new(tokio::sync::Mutex::new(messages));
 
     let client_clone = client.clone();
     let tools_clone = tools.clone();
     let tool_ctx_clone = tool_ctx.clone();
     let qcfg = query_config.clone();
     let tracker = cost_tracker.clone();
+    let task_messages = Arc::clone(&messages);
 
     let handle = tokio::spawn(async move {
-        let mut msgs = messages;
-        let outcome = claurst_query::run_query_loop(
+        let mut msgs = task_messages.lock().await;
+        claurst_query::run_query_loop(
             client_clone.as_ref(),
             &mut msgs,
             tools_clone.as_slice(),
@@ -289,8 +302,7 @@ async fn run_turn(
             cancel,
             None,
         )
-        .await;
-        (outcome, msgs)
+        .await
     });
 
     let mut full_text = String::new();
@@ -341,14 +353,12 @@ async fn run_turn(
         }
     }
 
-    let (outcome, msgs) = match handle.await {
-        Ok(pair) => pair,
-        Err(e) => (
-            QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
-                "query task panicked: {e}"
-            ))),
-            Vec::new(),
-        ),
+    let (result, msgs) = await_transcript_task(handle, messages).await;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
+            "query task panicked: {e}"
+        ))),
     };
 
     let (subtype, stop_reason, is_error, error): (&str, &str, bool, Option<String>) = match &outcome
@@ -457,6 +467,23 @@ mod tests {
     #[test]
     fn rejects_malformed_json() {
         assert!(parse_input_frame("{not json").is_err());
+    }
+
+    #[tokio::test]
+    async fn transcript_survives_query_task_panic() {
+        let messages = Arc::new(tokio::sync::Mutex::new(vec![Message::user("prior turn")]));
+        let task_messages = Arc::clone(&messages);
+        let handle = tokio::spawn(async move {
+            let mut transcript = task_messages.lock().await;
+            transcript.push(Message::user("current turn"));
+            panic!("controlled query failure");
+        });
+
+        let (result, transcript) = await_transcript_task(handle, messages).await;
+        assert!(result.is_err());
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].get_all_text(), "prior turn");
+        assert_eq!(transcript[1].get_all_text(), "current turn");
     }
 
     fn frame_kind(frame: &Result<InputFrame, String>) -> &'static str {
