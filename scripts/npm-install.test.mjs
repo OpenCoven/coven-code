@@ -59,6 +59,13 @@ if (process.env.SCENARIO === 'write') {
 if (process.env.SCENARIO === 'extract') {
   require('child_process').execFileSync = () => { throw new Error('fixture extraction failure'); };
 }
+if (process.env.SCENARIO === 'partial_extract') {
+  require('child_process').execFileSync = (_program, args) => {
+    const destination = args[args.indexOf('-C') + 1];
+    fs.writeFileSync(require('path').join(destination, 'coven-code'), 'partial binary');
+    throw new Error('fixture partial extraction failure');
+  };
+}
 if (process.env.SCENARIO === 'windows_quote') {
   const assert = require('node:assert/strict');
   const path = require('node:path');
@@ -72,7 +79,7 @@ if (process.env.SCENARIO === 'windows_quote') {
     const source = match[1].replace(/''/g, "'");
     const destination = match[2].replace(/''/g, "'");
     assert.ok(source.startsWith(process.env.TEMP + path.sep), source);
-    assert.equal(destination, path.join(fs.realpathSync(path.dirname(process.argv[1])), 'native'));
+    assert.equal(path.dirname(destination), path.join(fs.realpathSync(path.dirname(process.argv[1])), 'native'));
     fs.mkdirSync(destination, { recursive: true });
     fs.writeFileSync(path.join(destination, 'coven-code.exe'), 'fixture native binary');
   };
@@ -85,6 +92,7 @@ for (const [scenario, expected] of [
   ['network', /fixture network failure/], ['http', /HTTP 503/],
   ['loop', /Too many redirects/], ['insecure', /non-HTTPS/],
   ['extract', /fixture extraction failure/], ['windows_quote', null],
+  ['partial_extract', /fixture partial extraction failure/],
 ]) {
   test(scenario, () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'coven-install-fixture-'));
@@ -122,6 +130,8 @@ for (const [scenario, expected] of [
         assert.equal(result.status, 1, result.stdout + result.stderr);
         assert.match(result.stderr, /coven-code install failed:/);
         assert.match(result.stderr, expected);
+        assert.equal(fs.existsSync(path.join(pkg, 'native', windows ? 'coven-code.exe' : 'coven-code')), false,
+          'failed installation left a binary that would skip the next attempt');
       } else {
         assert.equal(result.status, 0, result.stdout + result.stderr);
         const binary = path.join(pkg, windows ? 'native/coven-code.exe' : 'native/coven-code');
@@ -129,6 +139,8 @@ for (const [scenario, expected] of [
         if (!windows) assert.ok(fs.statSync(binary).mode & 0o111);
       }
       assert.deepEqual(fs.readdirSync(downloads), [], 'temporary downloads leaked');
+      assert.deepEqual(fs.readdirSync(path.join(pkg, 'native')).filter(name => name.startsWith('.coven-code-stage-')), [],
+        'temporary extraction leaked');
     } finally {
       fs.rmSync(temp, { recursive: true, force: true });
     }

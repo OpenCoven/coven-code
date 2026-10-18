@@ -131,6 +131,7 @@ async function main() {
   fs.mkdirSync(NATIVE_DIR, { recursive: true });
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coven-code-install-'));
+  let stageDir;
   try {
     const tmpPath = path.join(tmpDir, archiveName);
     console.log(`coven-code: downloading v${VERSION} for ${process.platform}/${process.arch}`);
@@ -141,25 +142,35 @@ async function main() {
     verifyChecksum(tmpPath, archiveName);
 
     console.log('coven-code: extracting...');
+    stageDir = fs.mkdtempSync(path.join(NATIVE_DIR, '.coven-code-stage-'));
     if (archive === '.zip') {
       execFileSync('powershell', [
         '-NoProfile', '-NonInteractive', '-Command',
-        `Expand-Archive -Force -LiteralPath ${powershellLiteral(tmpPath)} -DestinationPath ${powershellLiteral(NATIVE_DIR)}`
+        `Expand-Archive -Force -LiteralPath ${powershellLiteral(tmpPath)} -DestinationPath ${powershellLiteral(stageDir)}`
       ]);
     } else {
-      execFileSync('tar', ['-xzf', tmpPath, '-C', NATIVE_DIR]);
+      execFileSync('tar', ['-xzf', tmpPath, '-C', stageDir]);
     }
 
-    if (!fs.existsSync(binaryDest)) {
-      throw new Error(`Extraction succeeded but binary not found at ${binaryDest}`);
+    const stagedBinary = path.join(stageDir, `coven-code${ext}`);
+    if (!fs.existsSync(stagedBinary)) {
+      throw new Error(`Extraction succeeded but binary not found at ${stagedBinary}`);
     }
 
     if (ext === '') {
-      fs.chmodSync(binaryDest, 0o755);
+      fs.chmodSync(stagedBinary, 0o755);
     }
+    fs.renameSync(stagedBinary, binaryDest);
 
     console.log(`coven-code: ready — run \`coven-code\` to start.`);
   } finally {
+    if (stageDir) {
+      try {
+        fs.rmSync(stageDir, { recursive: true, force: true });
+      } catch (err) {
+        console.warn(`coven-code: could not remove staging directory ${stageDir}: ${err.message}`);
+      }
+    }
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (err) {
