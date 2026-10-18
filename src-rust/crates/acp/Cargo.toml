@@ -22,3 +22,6 @@ uuid = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 agent-client-protocol-schema = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
