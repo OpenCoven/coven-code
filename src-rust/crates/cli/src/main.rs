@@ -2350,7 +2350,7 @@ async fn settle_abandoned_turn(
             session,
             command_messages,
         ) {
-            persist_interactive_session(session, owner.as_ref()).await;
+            persist_interactive_session(session, owner.as_ref(), &mut app.notifications).await;
         }
         // Keep authority until the cancelled task has drained its partial output.
         if !query_running {
@@ -2401,9 +2401,38 @@ impl InteractiveQuery {
     }
 }
 
+const SESSION_SAVE_WARNING: &str = "Session not saved; retry before exit.";
+
+async fn save_session_with_warning(
+    session: &claurst_core::history::ConversationSession,
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
+    operation: &str,
+) -> bool {
+    use claurst_tui::notifications::NotificationKind;
+    match claurst_core::history::save_session(session).await {
+        Ok(()) => {
+            notifications.notifications.retain(|notification| {
+                notification.kind != NotificationKind::Warning
+                    || notification.message != SESSION_SAVE_WARNING
+            });
+            true
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, operation, %error, "Failed to persist session");
+            notifications.push(
+                NotificationKind::Warning,
+                SESSION_SAVE_WARNING.to_owned(),
+                None,
+            );
+            false
+        }
+    }
+}
+
 async fn persist_interactive_session(
     session: &claurst_core::history::ConversationSession,
     owner: Option<&InteractiveTurn>,
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
 ) {
     // A recoverable preparation/auth failure can finish without an attempt.
     // Delay indexing its synthetic UUID until attempted; a later stale retry
@@ -2417,7 +2446,7 @@ async fn persist_interactive_session(
         })
         .and_then(|owner| owner.synthetic_uuid.as_deref());
     // JSON is primary storage; index only the finalized transcript.
-    let _ = claurst_core::history::save_session(session).await;
+    save_session_with_warning(session, notifications, "transcript update").await;
 
     // Also index into SQLite for /search support
     {
@@ -3366,10 +3395,13 @@ async fn run_interactive(
                                     session.title = Some(title.clone());
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
-                                    let _ = claurst_core::history::save_session(&session).await;
+                                    let saved = save_session_with_warning(&session, &mut app.notifications, "rename").await;
                                     claurst_tui::update_terminal_title(Some(&title));
-                                    app.status_message =
-                                        Some(format!("Session renamed to \"{}\".", title));
+                                    app.status_message = Some(if saved {
+                                        format!("Session renamed to \"{}\".", title)
+                                    } else {
+                                        "Session renamed in memory; not saved.".to_owned()
+                                    });
                                 }
                                 Some(CommandResult::RefreshProviderState) => {
                                     if app.is_streaming || current_query.is_some() {
@@ -3679,7 +3711,7 @@ async fn run_interactive(
 
                         if rollback_unattempted_turn(goal_turn.as_ref(), true, &mut messages,
                             &mut app, &mut session, &mut cmd_ctx.messages) {
-                            persist_interactive_session(&session, goal_turn.as_ref()).await;
+                            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
                         }
                         app.rate_limit_recovery.dismiss();
                         app.rate_limit_recovery.take_abandoned();
@@ -4352,7 +4384,12 @@ async fn run_interactive(
                         // Persist the session URL into the saved session record.
                         session.remote_session_url = Some(session_url.clone());
                         session.updated_at = chrono::Utc::now();
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote connection",
+                        )
+                        .await;
 
                         // Wire the BridgeSessionInfo relay so live tool/text events reach
                         // the web UI via /api/bridge/sessions. This runs alongside
@@ -4453,7 +4490,12 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                         cmd_ctx.session_title = Some(title.clone());
                         app.session_title = Some(title);
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote rename",
+                        )
+                        .await;
                     }
                     Ok(TuiBridgeEvent::Error(msg)) => {
                         app.bridge_state = BridgeConnectionState::Failed {
@@ -4519,7 +4561,8 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             ) {
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
             }
             app.rate_limit_recovery.dismiss();
             app.rate_limit_recovery.take_abandoned();
@@ -5024,7 +5067,8 @@ async fn run_interactive(
                     &mut cmd_ctx.messages,
                 );
                 *msgs_arc.lock().await = messages.clone();
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
 
                 // --- Goal continuation ---
                 // After every completed turn check if there is an active goal.
@@ -6845,3 +6889,6 @@ mod tests {
 
 #[cfg(test)]
 mod goal_dispatch_tests;
+
+#[cfg(test)]
+mod session_save_tests;
