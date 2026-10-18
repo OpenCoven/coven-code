@@ -673,9 +673,10 @@ impl NamedCommand for PrCommentsCommand {
         "coven-code pr-comments"
     }
 
-    fn execute_named(&self, _args: &[&str], _ctx: &CommandContext) -> CommandResult {
+    fn execute_named(&self, _args: &[&str], ctx: &CommandContext) -> CommandResult {
         // Step 1: Get current git remote + PR info via gh CLI
         let pr_json = std::process::Command::new("gh")
+            .current_dir(&ctx.working_dir)
             .args(["pr", "view", "--json", "number,url,headRefName,baseRefName"])
             .output();
 
@@ -704,6 +705,7 @@ impl NamedCommand for PrCommentsCommand {
 
         // Step 2: Fetch review comments via gh API
         let comments_out = std::process::Command::new("gh")
+            .current_dir(&ctx.working_dir)
             .args([
                 "api",
                 &format!("repos/{{owner}}/{{repo}}/pulls/{}/comments", pr_number),
