@@ -7955,13 +7955,17 @@ impl SlashCommand for SearchCommand {
         );
         for s in &results {
             let title = s.title.as_deref().unwrap_or("(untitled)");
+            let mut date_end = s.updated_at.len().min(10);
+            while !s.updated_at.is_char_boundary(date_end) {
+                date_end -= 1;
+            }
             out.push_str(&format!(
                 "  [{}] {} — {} ({} messages, updated {})\n",
                 utf8_byte_prefix(&s.id, 12),
                 title,
                 s.model,
                 s.message_count,
-                &s.updated_at[..s.updated_at.len().min(10)],
+                &s.updated_at[..date_end],
             ));
         }
         out.push_str("\nTip: use /resume <session-id> to continue a session.");

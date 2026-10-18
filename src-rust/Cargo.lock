@@ -823,6 +823,7 @@ dependencies = [
  "parking_lot",
  "qrcode",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
