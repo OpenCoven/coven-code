@@ -305,7 +305,12 @@
     var content = htmlFile.content || '';
     if (htmlFile.truncated && htmlFile.raw_url) {
       var r2 = await fetch(htmlFile.raw_url);
-      if (r2.ok) content = await r2.text();
+      if (!r2.ok) {
+        fail('Unable to load complete session',
+          'GitHub returned status ' + r2.status + ' for the complete session file.');
+        return;
+      }
+      content = await r2.text();
     }
     var showTools = true;
     try { showTools = localStorage.getItem(toolsPreferenceKey) !== '0'; } catch (_) {}
