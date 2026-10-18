@@ -36,7 +36,7 @@ async fn check_lifetime(cancel: bool) {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("wait.py"),
-        "import os, time\nfrom pathlib import Path\nPath('started').write_text(str(os.getpid()))\nwhile True: time.sleep(0.1)\n",
+        "import os, time\nfrom pathlib import Path\nPath('started.tmp').write_text(str(os.getpid()))\nPath('started.tmp').replace('started')\nwhile True: time.sleep(0.1)\n",
     )
     .unwrap();
     let ctx = context(directory.path());
