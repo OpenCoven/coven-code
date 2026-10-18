@@ -54,7 +54,8 @@ pub use runtime::AgentRuntime;
 pub use server::AgentServer;
 
 /// Run the ACP server on the current process' stdin / stdout. Returns when
-/// stdin reaches EOF or when the runtime fails to initialize.
+/// stdin reaches EOF, reporting runtime initialization or reader transport errors.
+/// In-flight dispatch tasks are drained before returning a reader error.
 pub async fn run_acp_server() -> anyhow::Result<()> {
     // We must NEVER write to stdout outside the protocol — every byte on
     // stdout is parsed by the client as JSON-RPC. Force logs to stderr.
@@ -66,10 +67,17 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
     let runtime = AgentRuntime::build(working_dir).await?;
     let runtime = Arc::new(runtime);
     let connection = Connection::new(tokio::io::stdout());
-    let server = AgentServer::new(connection.clone(), runtime);
+    let server = AgentServer::new(connection, runtime);
 
+    run_connection(server, tokio::io::stdin()).await
+}
+
+async fn run_connection<R>(server: Arc<AgentServer>, reader: R) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let (tx, rx) = mpsc::unbounded_channel();
-    let reader_fut = connection::run_reader(connection, tokio::io::stdin(), tx);
+    let reader_fut = connection::run_reader(server.connection.clone(), reader, tx);
 
     // Track in-flight dispatch tasks so they can finish writing their
     // responses before the runtime shuts down. The dispatch future only
@@ -78,12 +86,12 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
     let dispatch_fut = dispatch_messages(server, rx);
 
     let (reader_res, _) = tokio::join!(reader_fut, dispatch_fut);
-    if let Err(e) = reader_res {
+    if let Err(e) = &reader_res {
         error!(?e, "ACP: reader loop failed");
     }
 
     info!("ACP: server shutdown");
-    Ok(())
+    reader_res.map_err(|error| error.context("ACP reader loop failed"))
 }
 
 fn install_stderr_tracing() {
@@ -123,3 +131,5 @@ async fn dispatch_messages(
 
 #[cfg(test)]
 mod dispatch_tests;
+#[cfg(test)]
+mod reader_tests;
