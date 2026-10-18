@@ -2412,35 +2412,43 @@ mod goal_completion {
                         blocking: false,
                     }],
                 );
-                stop_hooks_with_full_behavior(
+                let (reaper_tx, reaper_rx) = std::sync::mpsc::channel();
+                stop_hooks_with_reaper_observer(
                     &Message::user("Done."),
                     &config,
                     dir.path().to_path_buf(),
                     context.for_background_work().captured().cloned(),
+                    Some(reaper_tx),
                 );
                 if revoke {
                     store.set_status("goal-query", GoalStatus::Paused).unwrap();
                 }
                 release_tx.send(()).unwrap();
                 blocker.await.unwrap();
-                // Drain the scheduling closure, then poll for the independent
-                // reaper's child until it starts or the deadline expires.
-                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                let reaper = reaper_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("Stop hook reaper was spawned");
                 let hook_path = dir.path().join("stop-hook.txt");
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                 loop {
                     let started = hook_path.exists();
-                    if revoke {
-                        assert!(!started, "revoked hook started a child");
-                    } else if started {
+                    if started || reaper.is_finished() {
                         break;
                     }
                     if tokio::time::Instant::now() >= deadline {
-                        assert_eq!(started, !revoke, "hook state at deadline");
-                        break;
+                        panic!("Stop hook reaper did not finish before deadline");
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    tokio::task::spawn_blocking(move || reaper.join()),
+                )
+                .await
+                .expect("Stop hook reaper join timed out")
+                .expect("Stop hook reaper join task failed")
+                .expect("Stop hook reaper panicked");
+                assert_eq!(hook_path.exists(), !revoke, "hook state after reaper");
             });
             runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
