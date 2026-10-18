@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use claurst_core::config::{Config, Settings};
 use claurst_core::permissions::PermissionManager;
 use claurst_core::CostTracker;
@@ -35,7 +36,12 @@ impl AgentRuntime {
     /// defaults (non-interactive, permission decisions routed back to the
     /// connected client).
     pub async fn build(working_dir: PathBuf) -> anyhow::Result<Self> {
-        let settings = Settings::load_sync().unwrap_or_default();
+        let settings = Settings::load_sync().with_context(|| {
+            format!(
+                "Failed to load ACP settings {}",
+                Settings::global_settings_path().display()
+            )
+        })?;
         let mut config = settings.effective_config();
         // Plan mode requires interactive UI — fall back to Default so the
         // ACP permission bridge can route decisions to the client.
