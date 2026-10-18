@@ -30,7 +30,6 @@ jobs:
 
     steps:
       - name: Resolve requested version
-        if: github.event_name == 'workflow_dispatch'
         id: requested_version
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
@@ -43,35 +42,17 @@ jobs:
             exit 1
           fi
 
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag_ref=refs/tags/v$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "tag_ref=refs/tags/v$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing npm packages for Coven Code $VERSION"
 
       - uses: actions/checkout@v5
         with:
           ref: ${{ steps.requested_version.outputs.tag_ref }}
           fetch-depth: 0
-
-      - name: Resolve version
-        id: version
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REQUESTED_TAG: ${{ steps.requested_version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            VERSION="${REQUESTED_TAG#v}"
-          else
-            VERSION="$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-          fi
-
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid npm publish version: $VERSION"
-            exit 1
-          fi
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing npm packages for Coven Code $VERSION"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -94,8 +75,8 @@ jobs:
       - name: Verify GitHub Release and source version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.requested_version.outputs.tag }}
+          VERSION: ${{ steps.requested_version.outputs.version }}
         run: |
           set -euo pipefail
           TAG_REF="refs/tags/$TAG"
@@ -152,7 +133,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
+          TAG="${{ steps.requested_version.outputs.tag }}"
           mkdir -p release-assets
           gh release download "$TAG" \
             --repo "${{ github.repository }}" \
@@ -192,7 +173,7 @@ jobs:
 
       - name: Publish npm packages
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.requested_version.outputs.version }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
@@ -210,9 +191,8 @@ jobs:
             publish_args=(--access public --provenance --ignore-scripts)
 
             # The pre-publish `npm view` guard above can race npm's
-            # read-after-write propagation when this workflow's two triggers
-            # (release.yml dispatch + workflow_run) fire back-to-back: the
-            # concurrency group serializes the *runs*, but a publish that
+            # read-after-write propagation when manual dispatches arrive
+            # back-to-back. The concurrency group serializes runs, but a publish that
             # landed seconds ago may not be visible to `npm view` yet. In
             # that case our own publish fails with E403 "cannot publish over
             # the previously published versions" — which means the version
