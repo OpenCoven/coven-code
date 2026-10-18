@@ -267,9 +267,15 @@ fn new_session(tool_ctx: &ToolContext, model: &str) -> claurst_core::history::Co
 async fn await_transcript_task<T>(
     handle: tokio::task::JoinHandle<T>,
     messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
+    panic_fallback: Vec<Message>,
 ) -> (Result<T, tokio::task::JoinError>, Vec<Message>) {
     let result = handle.await;
     let transcript = std::mem::take(&mut *messages.lock().await);
+    let transcript = if result.is_err() && transcript.is_empty() {
+        panic_fallback
+    } else {
+        transcript
+    };
     (result, transcript)
 }
 
@@ -291,6 +297,9 @@ async fn run_turn(
     let started = Instant::now();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
     let cancel = CancellationToken::new();
+    // Compaction temporarily moves the transcript out of the shared vector.
+    // Preserve the turn input if the query task panics during that await.
+    let panic_fallback = messages.clone();
     // Keep ownership of the transcript outside the task so a panic cannot
     // replace the session with an empty transcript.
     let messages = Arc::new(tokio::sync::Mutex::new(messages));
@@ -366,7 +375,7 @@ async fn run_turn(
         }
     }
 
-    let (result, msgs) = await_transcript_task(handle, messages).await;
+    let (result, msgs) = await_transcript_task(handle, messages, panic_fallback).await;
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(e) => QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
@@ -512,7 +521,25 @@ mod tests {
             panic!("controlled query failure");
         });
 
-        let (result, transcript) = await_transcript_task(handle, messages).await;
+        let (result, transcript) = await_transcript_task(handle, messages, Vec::new()).await;
+        assert!(result.is_err());
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].get_all_text(), "prior turn");
+        assert_eq!(transcript[1].get_all_text(), "current turn");
+    }
+
+    #[tokio::test]
+    async fn transcript_survives_panic_while_compaction_owns_messages() {
+        let fallback = vec![Message::user("prior turn"), Message::user("current turn")];
+        let messages = Arc::new(tokio::sync::Mutex::new(fallback.clone()));
+        let task_messages = Arc::clone(&messages);
+        let handle = tokio::spawn(async move {
+            let mut transcript = task_messages.lock().await;
+            let _owned = std::mem::take(&mut *transcript);
+            panic!("controlled compaction failure");
+        });
+
+        let (result, transcript) = await_transcript_task(handle, messages, fallback).await;
         assert!(result.is_err());
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].get_all_text(), "prior turn");
