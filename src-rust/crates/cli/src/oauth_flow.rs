@@ -327,9 +327,7 @@ async fn exchange_code_for_tokens(
         .context("Token exchange HTTP request failed")?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        bail!("Token exchange failed ({}): {}", status, text);
+        bail!("Token exchange failed ({})", resp.status());
     }
 
     resp.json::<TokenExchangeResponse>()
@@ -350,9 +348,7 @@ async fn create_api_key(access_token: &str) -> anyhow::Result<String> {
         .context("API key creation request failed")?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        bail!("API key creation failed ({}): {}", status, text);
+        bail!("API key creation failed ({})", resp.status());
     }
 
     let data: CreateApiKeyResponse = resp
@@ -390,9 +386,7 @@ pub async fn refresh_oauth_token(tokens: &OAuthTokens) -> anyhow::Result<OAuthTo
         .context("Token refresh HTTP request failed")?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        bail!("Token refresh failed ({}): {}", status, text);
+        bail!("Token refresh failed ({})", resp.status());
     }
 
     let token_resp: TokenExchangeResponse = resp.json().await?;

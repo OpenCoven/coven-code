@@ -208,9 +208,7 @@ async fn exchange_code_for_tokens(code: &str, verifier: &str) -> anyhow::Result<
         .map_err(|e| anyhow!("Failed to exchange code: {}", e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("Token exchange failed ({}): {}", status, body);
+        bail!("Token exchange failed ({})", resp.status());
     }
 
     let body: serde_json::Value = resp
