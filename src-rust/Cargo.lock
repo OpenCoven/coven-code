@@ -735,6 +735,7 @@ dependencies = [
  "claurst-query",
  "claurst-tools",
  "dashmap",
+ "futures",
  "parking_lot",
  "serde",
  "serde_json",
