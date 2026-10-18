@@ -46,6 +46,11 @@ class InstallerConfigDirectoryTests(unittest.TestCase):
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(self.target), self.profile.read_text())
+        self.assertIn(
+            f"fish_add_path --append --path '{self.target}'",
+            self.profile.read_text(),
+        )
+        self.assertNotIn("export PATH=", self.profile.read_text())
         self.assertEqual((self.target / "coven-code").read_bytes(), self.binary.read_bytes())
         self.assertEqual((self.target / "coven-cave").read_bytes(), self.binary.read_bytes())
 
@@ -61,6 +66,23 @@ class InstallerConfigDirectoryTests(unittest.TestCase):
         second = self.install()
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.profile.read_text(), contents)
+
+    def test_install_dir_with_quote_and_backslash_is_escaped_for_fish(self):
+        self.target = self.root / "installed'quoted\\path"
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected_line = (
+            "fish_add_path --append --path '"
+            + str(self.target).replace("\\", "\\\\").replace("'", "\\'")
+            + "'"
+        )
+        self.assertIn(
+            expected_line,
+            self.profile.read_text(),
+        )
+        repeat = self.install()
+        self.assertEqual(repeat.returncode, 0, repeat.stderr)
+        self.assertEqual(self.profile.read_text().count(expected_line), 1)
 
     def test_blocked_parent_reports_failure_without_clobbering(self):
         blocked = self.home / ".config"
