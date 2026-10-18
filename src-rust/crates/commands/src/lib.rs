@@ -1743,7 +1743,9 @@ impl SlashCommand for GoalCommand {
                     Some(s) => s,
                     None => return CommandResult::Error("Could not open goal store.".to_string()),
                 };
-                store.clear_goal(session_id).unwrap_or_default();
+                if let Err(e) = store.clear_goal(session_id) {
+                    return CommandResult::Error(format!("Failed to clear goal: {}", e));
+                }
                 return CommandResult::Message("Goal cleared.".to_string());
             }
             "complete" => {
