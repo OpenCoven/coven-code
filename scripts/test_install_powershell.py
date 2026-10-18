@@ -8,6 +8,7 @@ import unittest
 
 
 INSTALLER = Path(__file__).resolve().parents[1] / "install.ps1"
+ROLLBACK_FIXTURE = Path(__file__).resolve().with_name("install-ps1-rollback.test.ps1")
 ENGINE = b"fixture engine; never executed"
 
 
@@ -67,6 +68,32 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         for name in ("coven-code.exe", "coven-cave.exe"):
             self.assertEqual((self.target / name).read_bytes(), ENGINE)
+
+    def test_alias_failure_restores_existing_install(self):
+        for name, contents in (("coven-code.exe", "old engine"),
+                               ("coven-cave.exe", "old alias"),
+                               ("coven.exe", "old short")):
+            (self.target / name).write_text(contents)
+        env = {
+            **self.env,
+            "ROLLBACK_INSTALLER": str(INSTALLER),
+            "ROLLBACK_TARGET": str(self.target),
+            "ROLLBACK_SOURCE": str(self.source),
+        }
+        shells = ["pwsh"]
+        if shutil.which("powershell"):
+            shells.append("powershell")
+        for shell in shells:
+            for mode in ("local", "download"):
+                with self.subTest(shell=shell, mode=mode):
+                    result = subprocess.run(
+                        [shell, "-NoProfile", "-NonInteractive", "-File", str(ROLLBACK_FIXTURE)],
+                        env={**env, "ROLLBACK_MODE": mode},
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(list(self.staging.iterdir()), [],
+                                     "download or local staging leaked")
 
 
 if __name__ == "__main__":

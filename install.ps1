@@ -259,12 +259,15 @@ function Download-And-Install($desiredVersion, $arch, $Boundaries = $null) {
         exit 1
     }
 
-    if ($null -eq $Boundaries) {
-        Install-Binary $extractedExe
-    } else {
-        & $Boundaries.Install $extractedExe
+    try {
+        if ($null -eq $Boundaries) {
+            Install-Binary $extractedExe
+        } else {
+            & $Boundaries.Install $extractedExe
+        }
+    } finally {
+        Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
     }
-    Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
 }
 
 function Install-FromBinary {
@@ -290,18 +293,61 @@ function Install-Binary($source) {
     # `coven.exe` belongs to the Coven daemon CLI (@opencoven/cli); older
     # installers shipped it as an alias, so clean it up on upgrade.
     $staleShort = Join-Path $InstallDir 'coven.exe'
+    $stage = Join-Path $InstallDir ('.coven-code-stage-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
+    $newTarget = Join-Path $stage 'new-coven-code.exe'
+    $newAlias = Join-Path $stage 'new-coven-cave.exe'
+    $backups = @()
+    $published = @()
 
-    # The currently running coven-code.exe (if any) holds an exclusive file lock on
-    # Windows.  Try to swap by renaming the old one first.
-    foreach ($path in @($target, $aliasTarget, $staleShort)) {
-        if (-not (Test-Path $path)) { continue }
-        $stale = "$path.old"
-        if (Test-Path $stale) { Remove-Item -Force $stale -ErrorAction SilentlyContinue }
-        try { Move-Item -Force $path $stale } catch { }
+    try {
+        Copy-Item -LiteralPath $source -Destination $newTarget -ErrorAction Stop
+        Copy-Item -LiteralPath $source -Destination $newAlias -ErrorAction Stop
+        # Renaming first lets Windows replace an executable that cannot be
+        # overwritten in place while preserving each original for rollback.
+        foreach ($path in @($target, $aliasTarget, $staleShort)) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $backup = Join-Path $stage ('old-' + [IO.Path]::GetFileName($path))
+            Move-Item -LiteralPath $path -Destination $backup -ErrorAction Stop
+            $backups += [pscustomobject]@{ Original = $path; Backup = $backup }
+        }
+        Move-Item -LiteralPath $newTarget -Destination $target -ErrorAction Stop
+        $published += $target
+        Move-Item -LiteralPath $newAlias -Destination $aliasTarget -ErrorAction Stop
+        $published += $aliasTarget
+    } catch {
+        $failure = $_
+        $rollbackErrors = @()
+        foreach ($path in $published) {
+            try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+            catch { $rollbackErrors += $_.Exception.Message }
+        }
+        foreach ($entry in $backups) {
+            try { Move-Item -LiteralPath $entry.Backup -Destination $entry.Original -ErrorAction Stop }
+            catch { $rollbackErrors += $_.Exception.Message }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw "Install failed: $failure. Rollback failed: $($rollbackErrors -join '; '). Backups remain at $stage"
+        }
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw
     }
 
-    Copy-Item -Force $source $target
-    Copy-Item -Force $source $aliasTarget
+    # Keep the same .old upgrade backups after a successful pair replacement.
+    $keepStage = $false
+    foreach ($entry in $backups) {
+        $old = "$($entry.Original).old"
+        try {
+            if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force -ErrorAction Stop }
+            Move-Item -LiteralPath $entry.Backup -Destination $old -ErrorAction Stop
+        } catch {
+            Write-Warn "Could not retain the previous executable at $old; backup remains at ${stage}: $_"
+            $keepStage = $true
+        }
+    }
+    if (-not $keepStage) {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Write-Success "Installed: $target"
     Write-Success "Installed alias: $aliasTarget"
 }
