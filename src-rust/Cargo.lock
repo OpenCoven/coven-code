@@ -729,6 +729,7 @@ version = "0.8.0"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
+ "async-trait",
  "claurst-api",
  "claurst-core",
  "claurst-mcp",

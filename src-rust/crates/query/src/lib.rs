@@ -1893,6 +1893,11 @@ pub async fn run_query_loop(
         tool_ctx
             .current_turn
             .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+        // Check for cancellation
+        if cancel_token.is_cancelled() {
+            return QueryOutcome::Cancelled;
+        }
+
         if turn > effective_max_turns {
             info!(turns = turn, "Max turns reached");
             if let Some(ref tx) = event_tx {
@@ -1905,11 +1910,6 @@ pub async fn run_query_loop(
                 "Maximum turn limit ({}) reached",
                 effective_max_turns
             )));
-        }
-
-        // Check for cancellation
-        if cancel_token.is_cancelled() {
-            return QueryOutcome::Cancelled;
         }
 
         // Drain any pending user messages that were queued during the previous

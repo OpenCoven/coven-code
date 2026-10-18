@@ -198,30 +198,33 @@ fn failed_response_does_not_log_method_or_error_contents() {
     assert!(logs.contains("io_kind=Some(BrokenPipe)"));
 }
 
+fn permission_handler(connection: Arc<Connection>) -> AcpPermissionHandler {
+    AcpPermissionHandler {
+        connection,
+        session_id: acp::SessionId::new("fixture-session"),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        next_permission_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    }
+}
+
+fn permission_request() -> PermissionRequest {
+    PermissionRequest {
+        tool_name: "Bash".into(),
+        description: "fixture".into(),
+        details: None,
+        is_read_only: false,
+        path: None,
+        working_dir: None,
+        allowed_roots: Vec::new(),
+        context_description: None,
+    }
+}
+
 async fn permission_reply(reply: Value) -> PermissionDecision {
     let (output, writer) = tokio::io::duplex(8192);
     let connection = Connection::new(writer);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let pending = PendingPermissionRequest {
-        tool_use_id: "fixture-tool".into(),
-        reason: "fixture approval".into(),
-        decision_tx: Some(tx),
-        request: PermissionRequest {
-            tool_name: "Bash".into(),
-            description: "fixture".into(),
-            details: None,
-            is_read_only: false,
-            path: None,
-            working_dir: None,
-            allowed_roots: Vec::new(),
-            context_description: None,
-        },
-    };
-    let task = tokio::spawn(forward_pending(
-        connection.clone(),
-        acp::SessionId::new("fixture-session"),
-        pending,
-    ));
+    let handler = permission_handler(connection.clone());
+    let task = tokio::spawn(async move { handler.resolve(&permission_request()).await });
     let mut output = BufReader::new(output);
     let mut line = String::new();
     output.read_line(&mut line).await.unwrap();
@@ -235,8 +238,7 @@ async fn permission_reply(reply: Value) -> PermissionDecision {
     crate::connection::run_reader(connection, bytes.as_bytes(), inbound)
         .await
         .unwrap();
-    task.await.unwrap();
-    rx.await.unwrap()
+    task.await.unwrap()
 }
 
 #[test]
@@ -306,29 +308,9 @@ fn valid_permission_and_cancel_controls_keep_behavior() {
 #[test]
 fn permission_io_error_is_denied_without_logging_error_contents() {
     let (decision, logs) = capture(async {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let pending = PendingPermissionRequest {
-            tool_use_id: "fixture-tool".into(),
-            reason: "fixture approval".into(),
-            decision_tx: Some(tx),
-            request: PermissionRequest {
-                tool_name: "Bash".into(),
-                description: "fixture".into(),
-                details: None,
-                is_read_only: false,
-                path: None,
-                working_dir: None,
-                allowed_roots: Vec::new(),
-                context_description: None,
-            },
-        };
-        forward_pending(
-            Connection::new(FailingWriter),
-            acp::SessionId::new("fixture-session"),
-            pending,
-        )
-        .await;
-        rx.await.unwrap()
+        permission_handler(Connection::new(FailingWriter))
+            .resolve(&permission_request())
+            .await
     });
     assert!(matches!(decision, PermissionDecision::Deny));
     assert!(logs.contains("ACP permission: send_request failed, denying"));

@@ -1,7 +1,7 @@
 //! Shared agent runtime owned by the ACP server.
 //!
 //! Built once on startup and reused for every session. Per-session state
-//! (cwd, transcript, cancellation token, permission queue) is layered on
+//! (cwd, transcript, cancellation token, permission ID counter) is layered on
 //! top via `sessions::SessionState`.
 
 use std::path::PathBuf;
