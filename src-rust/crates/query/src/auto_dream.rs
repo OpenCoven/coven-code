@@ -9,10 +9,15 @@
 //!   3. Lock:     no other process mid-consolidation (stale after 1 hour)
 
 use anyhow::Result;
+use claurst_core::goal::GoalTurnContext;
+use claurst_core::tasks::{global_registry, TaskStatus};
+use claurst_tools::ToolResult;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::time::sleep;
+use tracing::warn;
 
 // Scan throttle: when time-gate passes but session-gate doesn't, the lock
 // mtime doesn't advance, so the time-gate keeps passing every turn.
@@ -58,6 +63,11 @@ pub struct ConsolidationTask {
     pub state_file: PathBuf,
     /// Path to the lock file (removed after consolidation completes).
     pub lock_file: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct BackgroundAgentLaunch {
+    agent_id: String,
 }
 
 /// Core AutoDream logic; owns path state, delegates I/O to async methods.
@@ -255,9 +265,8 @@ impl AutoDream {
         }))
     }
 
-    /// Persist the updated consolidation state and release the lock.
-    /// Call this after the consolidation subagent completes (or fails).
-    pub async fn finish_consolidation(task: &ConsolidationTask) {
+    /// Persist successful consolidation before releasing its lock.
+    pub async fn finish_consolidation(task: &ConsolidationTask) -> Result<()> {
         let updated = ConsolidationState {
             last_consolidated_at: Some(
                 std::time::SystemTime::now()
@@ -267,14 +276,76 @@ impl AutoDream {
             ),
             lock_etag: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&updated) {
-            if let Some(parent) = task.state_file.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let _ = tokio::fs::write(&task.state_file, json).await;
+        let json = serde_json::to_string_pretty(&updated)?;
+        if let Some(parent) = task.state_file.parent() {
+            fs::create_dir_all(parent).await?;
         }
+        fs::write(&task.state_file, json).await?;
         if task.lock_file.exists() {
-            let _ = tokio::fs::remove_file(&task.lock_file).await;
+            fs::remove_file(&task.lock_file).await?;
+        }
+        Ok(())
+    }
+
+    /// Keep the consolidation lock until the registered background agent finishes.
+    /// The agent remains in the registry so monitor can still show its output.
+    pub async fn finish_after_launch(
+        task: &ConsolidationTask,
+        launch: ToolResult,
+        goal_turn: &GoalTurnContext,
+        session_id: &str,
+    ) {
+        if launch.is_error {
+            warn!(error = %launch.content, "AutoDream agent failed to launch");
+            Self::release_task_lock(task).await;
+            return;
+        }
+        let agent_id = match serde_json::from_str::<BackgroundAgentLaunch>(&launch.content) {
+            Ok(response) if !response.agent_id.is_empty() => response.agent_id,
+            Ok(_) | Err(_) => {
+                warn!("AutoDream agent launch returned no task ID");
+                Self::release_task_lock(task).await;
+                return;
+            }
+        };
+
+        loop {
+            match global_registry().get(&agent_id).map(|agent| agent.status) {
+                Some(TaskStatus::Running) => {
+                    if goal_turn.require_work(session_id).is_err() {
+                        Self::release_task_lock(task).await;
+                        return;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+                Some(TaskStatus::Completed) => {
+                    if goal_turn.require_work(session_id).is_err() {
+                        Self::release_task_lock(task).await;
+                        return;
+                    }
+                    if let Err(error) = Self::finish_consolidation(task).await {
+                        warn!(%error, "AutoDream completion state could not be saved");
+                    }
+                    return;
+                }
+                Some(TaskStatus::Failed(reason)) => {
+                    warn!(%reason, "AutoDream agent failed");
+                    Self::release_task_lock(task).await;
+                    return;
+                }
+                Some(TaskStatus::Cancelled) | None => {
+                    Self::release_task_lock(task).await;
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn release_task_lock(task: &ConsolidationTask) {
+        match fs::remove_file(&task.lock_file).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(%error, "AutoDream lock could not be released"),
         }
     }
 
@@ -491,6 +562,87 @@ mod tests {
         assert!(dream.lock_file.exists());
 
         dream.release_lock().await.unwrap();
+        assert!(!dream.lock_file.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_state_write_keeps_consolidation_lock() {
+        let tmp = TempDir::new().unwrap();
+        let dream = make_dream(&tmp);
+        dream.acquire_lock().await.unwrap();
+        // A directory at the state-file path makes the write fail on every host.
+        std::fs::create_dir(&dream.state_file).unwrap();
+        let task = ConsolidationTask {
+            prompt: String::new(),
+            memory_dir: dream.memory_dir.clone(),
+            state_file: dream.state_file.clone(),
+            lock_file: dream.lock_file.clone(),
+        };
+
+        assert!(AutoDream::finish_consolidation(&task).await.is_err());
+
+        assert!(
+            dream.lock_file.exists(),
+            "failed persistence must keep the lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_agent_stamps_state_only_after_completion() {
+        let tmp = TempDir::new().unwrap();
+        let dream = make_dream(&tmp);
+        dream.acquire_lock().await.unwrap();
+        let task = ConsolidationTask {
+            prompt: String::new(),
+            memory_dir: dream.memory_dir.clone(),
+            state_file: dream.state_file.clone(),
+            lock_file: dream.lock_file.clone(),
+        };
+        let agent = claurst_core::tasks::BackgroundTask::new("subagent: memory consolidation");
+        let id = global_registry().register(agent);
+        let launch = ToolResult::success(serde_json::json!({"agent_id": id}).to_string());
+        let waiter = tokio::spawn(async move {
+            AutoDream::finish_after_launch(&task, launch, &GoalTurnContext::default(), "test")
+                .await;
+        });
+
+        tokio::pin!(waiter);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut waiter)
+                .await
+                .is_err()
+        );
+        assert!(!dream.state_file.exists());
+        assert!(dream.lock_file.exists());
+
+        global_registry().update_status(&id, TaskStatus::Completed);
+        tokio::time::timeout(Duration::from_secs(2), &mut waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dream.load_state().await.last_consolidated_at.is_some());
+        assert!(!dream.lock_file.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_background_agent_does_not_stamp_state() {
+        let tmp = TempDir::new().unwrap();
+        let dream = make_dream(&tmp);
+        dream.acquire_lock().await.unwrap();
+        let task = ConsolidationTask {
+            prompt: String::new(),
+            memory_dir: dream.memory_dir.clone(),
+            state_file: dream.state_file.clone(),
+            lock_file: dream.lock_file.clone(),
+        };
+        let agent = claurst_core::tasks::BackgroundTask::new("subagent: memory consolidation");
+        let id = global_registry().register(agent);
+        global_registry().update_status(&id, TaskStatus::Failed("test failure".to_string()));
+        let launch = ToolResult::success(serde_json::json!({"agent_id": id}).to_string());
+
+        AutoDream::finish_after_launch(&task, launch, &GoalTurnContext::default(), "test").await;
+
+        assert!(!dream.state_file.exists());
         assert!(!dream.lock_file.exists());
     }
 }

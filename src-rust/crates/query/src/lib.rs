@@ -3611,21 +3611,19 @@ pub async fn run_query_loop(
                                     return;
                                 }
                                 let agent = crate::agent_tool::AgentTool;
-                                let _result = claurst_tools::Tool::execute(
+                                let launch = claurst_tools::Tool::execute(
                                     &agent,
                                     agent_input,
                                     &ctx_for_dream,
                                 )
                                 .await;
-                                if ctx_for_dream
-                                    .goal_turn
-                                    .require_work(&ctx_for_dream.session_id)
-                                    .is_ok()
-                                {
-                                    crate::auto_dream::AutoDream::finish_consolidation(&task).await;
-                                } else {
-                                    let _ = tokio::fs::remove_file(&task.lock_file).await;
-                                }
+                                crate::auto_dream::AutoDream::finish_after_launch(
+                                    &task,
+                                    launch,
+                                    &ctx_for_dream.goal_turn,
+                                    &ctx_for_dream.session_id,
+                                )
+                                .await;
                             });
                         }
                     }
