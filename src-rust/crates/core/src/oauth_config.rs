@@ -191,7 +191,7 @@ pub mod pkce {
 // ---------------------------------------------------------------------------
 
 /// Raw OAuth token response from the token endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
@@ -201,6 +201,21 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Slim profile fetched after token exchange.
@@ -294,7 +309,7 @@ pub fn build_auth_url(
 // ---------------------------------------------------------------------------
 
 /// OpenAI Codex OAuth tokens, persisted to ~/.coven-code/codex_tokens.json
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct CodexTokens {
     pub access_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,6 +319,20 @@ pub struct CodexTokens {
     /// Unix timestamp in seconds when the access token expires
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+}
+
+impl std::fmt::Debug for CodexTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexTokens")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("account_id", &self.account_id)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Legacy single-file path: `~/.coven-code/codex_tokens.json`. Kept for
@@ -457,6 +486,42 @@ pub fn is_codex_subscriber() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_token_debug_does_not_expose_credentials() {
+        let response = TokenResponse {
+            access_token: "canary-response-access".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(42),
+            refresh_token: Some("canary-response-refresh".into()),
+            scope: Some("user:inference".into()),
+        };
+        let stored = CodexTokens {
+            access_token: "canary-stored-access".into(),
+            refresh_token: Some("canary-stored-refresh".into()),
+            account_id: Some("account-fixture".into()),
+            expires_at: Some(123),
+        };
+        let rendered = format!("{response:?} {stored:?}");
+        for secret in [
+            "canary-response-access",
+            "canary-response-refresh",
+            "canary-stored-access",
+            "canary-stored-refresh",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("account-fixture"));
+        assert!(rendered.contains("123"));
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["access_token"],
+            "canary-response-access"
+        );
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap()["access_token"],
+            "canary-stored-access"
+        );
+    }
 
     struct TestHomeGuard {
         previous: Option<std::ffi::OsString>,
