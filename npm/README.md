@@ -4,12 +4,14 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](https://github.com/OpenCoven/coven-code/blob/main/LICENSE.md)
 
 > **Recommended install:** `npm install -g @opencoven/cli` — the unified `coven` CLI installs and manages this engine for you.
-> This package (`@opencoven/coven-code`) still installs the engine binary directly and continues to work.
+> The direct `@opencoven/coven-code` package is deprecated and is not published for every engine release. Use `@opencoven/cli` for the managed engine path.
 
 **Coven Code** — open-source agentic coding TUI built in Rust.  
 OpenCoven fork of [Claurst](https://github.com/Kuberwastaken/claurst) by Kuber Mehta (GPL-3.0).
 
 ## Install
+
+For a version that was published to npm:
 
 ```bash
 npm install -g @opencoven/coven-code
