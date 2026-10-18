@@ -5,12 +5,14 @@ on:
     paths:
       - install.ps1
       - scripts/test_install_powershell.py
+      - scripts/install-ps1-rollback.test.ps1
       - .github/workflows/windows-installer-tests.yml
   push:
     branches: [main]
     paths:
       - install.ps1
       - scripts/test_install_powershell.py
+      - scripts/install-ps1-rollback.test.ps1
       - .github/workflows/windows-installer-tests.yml
 
 permissions:
