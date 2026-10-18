@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use agent_client_protocol_schema as acp;
 use claurst_core::types::Message;
-use claurst_tools::PendingPermissionStore;
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -16,7 +15,7 @@ pub struct SessionState {
     pub cwd: PathBuf,
     pub messages: parking_lot::Mutex<Vec<Message>>,
     pub cancel_token: parking_lot::Mutex<CancellationToken>,
-    pub pending_permissions: Arc<parking_lot::Mutex<PendingPermissionStore>>,
+    pub next_permission_id: Arc<std::sync::atomic::AtomicU64>,
     pub file_history: Arc<parking_lot::Mutex<claurst_core::file_history::FileHistory>>,
     pub current_turn: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -35,9 +34,7 @@ impl SessionState {
             cwd,
             messages: parking_lot::Mutex::new(Vec::new()),
             cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
-            pending_permissions: Arc::new(parking_lot::Mutex::new(
-                PendingPermissionStore::default(),
-            )),
+            next_permission_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             file_history: Arc::new(parking_lot::Mutex::new(
                 claurst_core::file_history::FileHistory::new(),
             )),
