@@ -67,9 +67,17 @@ fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
                 let msg = v
                     .get("message")
                     .ok_or_else(|| format!("`{kind}` frame missing `message`"))?;
-                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or(kind);
+                let role = match msg.get("role") {
+                    Some(role) => role
+                        .as_str()
+                        .ok_or_else(|| "frame `message.role` must be a string".to_string())?,
+                    None => kind,
+                };
+                if role != kind {
+                    return Err("frame `type` and `message.role` disagree".to_string());
+                }
                 let text = content_text(msg.get("content"));
-                if role == "assistant" {
+                if kind == "assistant" {
                     Ok(InputFrame::AssistantPrefill(text))
                 } else {
                     Ok(InputFrame::User(text))
@@ -81,12 +89,17 @@ fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
     }
 
     // Legacy coven-code shape: {"role":"user"|"assistant","content":"..."}
-    let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+    let role = match v.get("role") {
+        Some(role) => role
+            .as_str()
+            .ok_or_else(|| "frame `role` must be a string".to_string())?,
+        None => "user",
+    };
     let text = content_text(v.get("content"));
-    if role == "assistant" {
-        Ok(InputFrame::AssistantPrefill(text))
-    } else {
-        Ok(InputFrame::User(text))
+    match role {
+        "assistant" => Ok(InputFrame::AssistantPrefill(text)),
+        "user" => Ok(InputFrame::User(text)),
+        _ => Err("unsupported frame role".to_string()),
     }
 }
 
@@ -457,6 +470,26 @@ mod tests {
     #[test]
     fn rejects_malformed_json() {
         assert!(parse_input_frame("{not json").is_err());
+    }
+
+    #[test]
+    fn rejects_role_confusion_in_input_frames() {
+        for frame in [
+            r#"{"type":"user","message":{"role":"assistant","content":"prefill"}}"#,
+            r#"{"type":"assistant","message":{"role":"user","content":"run"}}"#,
+            r#"{"type":"user","message":{"role":"system","content":"run"}}"#,
+            r#"{"type":"user","message":{"role":null,"content":"run"}}"#,
+            r#"{"role":"system","content":"run"}"#,
+            r#"{"role":"tool","content":"run"}"#,
+            r#"{"role":1,"content":"run"}"#,
+        ] {
+            assert!(parse_input_frame(frame).is_err(), "accepted {frame}");
+        }
+
+        assert!(matches!(
+            parse_input_frame(r#"{"type":"assistant","message":{"role":"assistant","content":"prefill"}}"#),
+            Ok(InputFrame::AssistantPrefill(text)) if text == "prefill"
+        ));
     }
 
     fn frame_kind(frame: &Result<InputFrame, String>) -> &'static str {
