@@ -205,7 +205,15 @@ case "${SHELL:-}" in
   */fish) shell_rc="$HOME/.config/fish/config.fish" ;;
 esac
 path_line="export PATH=\"\$PATH:${INSTALL_DIR}\""
-if [[ -n "$shell_rc" ]] && ! grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
+path_check="$INSTALL_DIR"
+if [[ "${SHELL:-}" == */fish ]]; then
+  # Fish single quotes only require backslashes and single quotes to be escaped.
+  fish_dir=${INSTALL_DIR//\\/\\\\}
+  fish_dir=${fish_dir//\'/\\\'}
+  path_line="fish_add_path --append --path '${fish_dir}'"
+  path_check="$path_line"
+fi
+if [[ -n "$shell_rc" ]] && ! grep -qF "$path_check" "$shell_rc" 2>/dev/null; then
   mkdir -p "$(dirname "$shell_rc")"
   echo "" >> "$shell_rc"
   echo "# Coven Code" >> "$shell_rc"
