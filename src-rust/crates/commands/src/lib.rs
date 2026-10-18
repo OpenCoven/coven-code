@@ -5588,7 +5588,15 @@ impl SlashCommand for ShareCommand {
         } else {
             safe_id
         };
-        let tmp = std::env::temp_dir().join(format!("claurst-session-{stem}.html"));
+        let temp_dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                return CommandResult::Error(format!(
+                    "Failed to create temporary directory for session HTML: {e}"
+                ));
+            }
+        };
+        let tmp = temp_dir.path().join(format!("claurst-session-{stem}.html"));
 
         if let Err(e) = write_session_html(&tmp, &ctx.messages, &meta) {
             return CommandResult::Error(format!("Failed to render session HTML: {e}"));
@@ -5603,8 +5611,8 @@ impl SlashCommand for ShareCommand {
             .output()
             .await;
 
-        // Best-effort tmp cleanup.
-        let _ = std::fs::remove_file(&tmp);
+        // Best-effort cleanup of the owned staging directory.
+        drop(temp_dir);
 
         let output = match result {
             Ok(o) => o,
