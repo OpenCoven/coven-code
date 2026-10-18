@@ -864,7 +864,7 @@ pub mod config {
     // ---- ProviderConfig --------------------------------------------------
 
     /// Per-provider configuration: API keys, base URLs, and options.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct ProviderConfig {
         /// API key (overrides environment variable)
         pub api_key: Option<String>,
@@ -884,6 +884,19 @@ pub mod config {
         pub options: HashMap<String, serde_json::Value>,
     }
 
+    impl std::fmt::Debug for ProviderConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ProviderConfig")
+                .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+                .field("api_base", &self.api_base.as_ref().map(|_| "[REDACTED]"))
+                .field("enabled", &self.enabled)
+                .field("models_whitelist", &self.models_whitelist)
+                .field("models_blacklist", &self.models_blacklist)
+                .field("options_count", &self.options.len())
+                .finish()
+        }
+    }
+
     impl Default for ProviderConfig {
         fn default() -> Self {
             Self {
@@ -900,7 +913,7 @@ pub mod config {
     // ---- Config ----------------------------------------------------------
 
     /// Top-level configuration values, merged from CLI args + settings file + env.
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Clone, Serialize, Deserialize, Default)]
     #[serde(default)]
     pub struct Config {
         pub api_key: Option<String>,
@@ -1018,6 +1031,24 @@ pub mod config {
         pub file_injection_max_size: usize,
     }
 
+    impl std::fmt::Debug for Config {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Config")
+                .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+                .field("model", &self.model)
+                .field("max_tokens", &self.max_tokens)
+                .field("permission_mode", &self.permission_mode)
+                .field("theme", &self.theme)
+                .field("output_format", &self.output_format)
+                .field("provider", &self.provider)
+                .field("provider_count", &self.provider_configs.len())
+                .field("mcp_server_count", &self.mcp_servers.len())
+                .field("lsp_server_count", &self.lsp_servers.len())
+                .field("env_count", &self.env.len())
+                .finish()
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
     #[serde(rename_all = "camelCase")]
     pub enum PermissionMode {
@@ -1048,7 +1079,7 @@ pub mod config {
         StreamJson,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct McpServerConfig {
         pub name: String,
         pub command: Option<String>,
@@ -1059,6 +1090,19 @@ pub mod config {
         pub url: Option<String>,
         #[serde(rename = "type", default = "default_mcp_type")]
         pub server_type: String,
+    }
+
+    impl std::fmt::Debug for McpServerConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("McpServerConfig")
+                .field("name", &self.name)
+                .field("command", &self.command.as_ref().map(|_| "[REDACTED]"))
+                .field("args_count", &self.args.len())
+                .field("env_count", &self.env.len())
+                .field("url", &self.url.as_ref().map(|_| "[REDACTED]"))
+                .field("server_type", &self.server_type)
+                .finish()
+        }
     }
 
     fn default_mcp_type() -> String {
@@ -1185,7 +1229,7 @@ pub mod config {
 
     // ---- Settings --------------------------------------------------------
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Clone, Serialize, Deserialize, Default)]
     pub struct Settings {
         #[serde(default)]
         pub config: Config,
@@ -1304,6 +1348,18 @@ pub mod config {
         /// Opt-in for now; only acts when a Coven daemon socket is present.
         #[serde(default, rename = "daemonLedger")]
         pub daemon_ledger: bool,
+    }
+
+    impl std::fmt::Debug for Settings {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Settings")
+                .field("config", &self.config)
+                .field("version", &self.version)
+                .field("project_count", &self.projects.len())
+                .field("provider_count", &self.providers.len())
+                .field("command_count", &self.commands.len())
+                .finish()
+        }
     }
 
     impl Settings {
@@ -5124,7 +5180,7 @@ pub mod oauth {
     // ---- Stored token struct ----
 
     /// Persisted OAuth tokens (saved to `~/.coven-code/oauth_tokens.json`).
-    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[derive(Clone, Serialize, Deserialize, Default)]
     pub struct OAuthTokens {
         pub access_token: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -5147,6 +5203,35 @@ pub mod oauth {
         /// API key created for Console-flow users (exchanged from access token).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub api_key: Option<String>,
+    }
+
+    impl std::fmt::Debug for OAuthTokens {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("OAuthTokens")
+                .field("access_token", &"[REDACTED]")
+                .field(
+                    "refresh_token",
+                    &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+                )
+                .field("expires_at_ms", &self.expires_at_ms)
+                .field("scopes", &self.scopes)
+                .field(
+                    "account_uuid",
+                    &self.account_uuid.as_ref().map(|_| "[REDACTED]"),
+                )
+                .field("email", &self.email.as_ref().map(|_| "[REDACTED]"))
+                .field(
+                    "organization_uuid",
+                    &self.organization_uuid.as_ref().map(|_| "[REDACTED]"),
+                )
+                .field("subscription_type", &self.subscription_type)
+                .field(
+                    "oauth_client_id",
+                    &self.oauth_client_id.as_ref().map(|_| "[REDACTED]"),
+                )
+                .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+                .finish()
+        }
     }
 
     impl OAuthTokens {
@@ -5715,6 +5800,84 @@ pub mod tasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_config_debug_omits_credentials() {
+        let provider = ProviderConfig {
+            api_key: Some("canary-provider-key".into()),
+            api_base: Some("https://canary-provider-url@provider.invalid".into()),
+            options: std::collections::HashMap::from([(
+                "token".into(),
+                serde_json::json!("canary-provider-option"),
+            )]),
+            ..Default::default()
+        };
+        let mcp = McpServerConfig {
+            name: "fixture".into(),
+            command: Some("canary-mcp-command".into()),
+            args: vec!["canary-mcp-arg".into()],
+            env: std::collections::HashMap::from([("KEY".into(), "canary-mcp-env".into())]),
+            url: Some("https://canary-mcp-url@mcp.invalid".into()),
+            server_type: "stdio".into(),
+        };
+        let config = Config {
+            api_key: Some("canary-config-key".into()),
+            env: std::collections::HashMap::from([("KEY".into(), "canary-config-env".into())]),
+            provider_configs: std::collections::HashMap::from([(
+                "fixture".into(),
+                provider.clone(),
+            )]),
+            mcp_servers: vec![mcp.clone()],
+            ..Default::default()
+        };
+        let settings = Settings {
+            config: config.clone(),
+            providers: std::collections::HashMap::from([("fixture".into(), provider.clone())]),
+            commands: std::collections::HashMap::from([(
+                "fixture".into(),
+                CommandTemplate {
+                    template: "canary-command-template".into(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let tokens = OAuthTokens {
+            access_token: "canary-access".into(),
+            refresh_token: Some("canary-refresh".into()),
+            api_key: Some("canary-oauth-key".into()),
+            email: Some("canary-email@invalid".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{provider:?} {mcp:?} {config:?} {settings:?} {tokens:?}");
+        for secret in [
+            "canary-provider-key",
+            "canary-provider-url",
+            "canary-provider-option",
+            "canary-mcp-command",
+            "canary-mcp-arg",
+            "canary-mcp-env",
+            "canary-mcp-url",
+            "canary-config-key",
+            "canary-config-env",
+            "canary-command-template",
+            "canary-access",
+            "canary-refresh",
+            "canary-oauth-key",
+            "canary-email",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("fixture"));
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["config"]["api_key"],
+            "canary-config-key"
+        );
+        assert_eq!(
+            serde_json::to_value(&tokens).unwrap()["access_token"],
+            "canary-access"
+        );
+    }
 
     /// Serializes tests that mutate the process-wide `ANTHROPIC_API_KEY`
     /// environment variable. Without this, parallel test threads race on the
