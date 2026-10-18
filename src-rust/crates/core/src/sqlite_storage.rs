@@ -107,18 +107,8 @@ impl SqliteSessionStore {
              LIMIT 100",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                model: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get::<_, Option<u32>>(5)?.unwrap_or(0),
-            })
-        })?;
-
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let rows = stmt.query_map([], session_summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Full-text search across session titles and message content.
@@ -136,18 +126,8 @@ impl SqliteSessionStore {
              LIMIT 50",
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![like], |row| {
-            Ok(SessionSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                model: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get::<_, Option<u32>>(5)?.unwrap_or(0),
-            })
-        })?;
-
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let rows = stmt.query_map(rusqlite::params![like], session_summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Delete a session and all of its messages atomically.
@@ -175,6 +155,17 @@ pub struct SessionSummary {
     pub created_at: String,
     pub updated_at: String,
     pub message_count: u32,
+}
+
+fn session_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
+    Ok(SessionSummary {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        model: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        message_count: row.get::<_, Option<u32>>(5)?.unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
