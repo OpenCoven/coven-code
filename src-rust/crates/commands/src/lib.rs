@@ -1693,16 +1693,19 @@ impl SlashCommand for GoalCommand {
                     Some(s) => s,
                     None => return CommandResult::Error("Could not open goal store.".to_string()),
                 };
-                match store.get_goal(session_id) {
-                    None => return CommandResult::Message("No active goal.".to_string()),
-                    Some(g) if g.status == claurst_core::GoalStatus::Complete => {
+                match store.try_get_goal(session_id) {
+                    Ok(None) => return CommandResult::Message("No active goal.".to_string()),
+                    Ok(Some(g)) if g.status == claurst_core::GoalStatus::Complete => {
                         return CommandResult::Message("Goal is already complete.".to_string());
                     }
-                    Some(g) if g.status == claurst_core::GoalStatus::Paused => {
+                    Ok(Some(g)) if g.status == claurst_core::GoalStatus::Paused => {
                         return CommandResult::Message(
                             "Goal is already paused. Use /coven goal resume to continue."
                                 .to_string(),
                         );
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!("Failed to read goal: {e}"));
                     }
                     _ => {}
                 }
@@ -1718,16 +1721,19 @@ impl SlashCommand for GoalCommand {
                     Some(s) => s,
                     None => return CommandResult::Error("Could not open goal store.".to_string()),
                 };
-                match store.get_goal(session_id) {
-                    None => return CommandResult::Message("No goal to resume.".to_string()),
-                    Some(g) if g.status == claurst_core::GoalStatus::Active => {
+                match store.try_get_goal(session_id) {
+                    Ok(None) => return CommandResult::Message("No goal to resume.".to_string()),
+                    Ok(Some(g)) if g.status == claurst_core::GoalStatus::Active => {
                         return CommandResult::Message("Goal is already active.".to_string());
                     }
-                    Some(g) if g.status == claurst_core::GoalStatus::Complete => {
+                    Ok(Some(g)) if g.status == claurst_core::GoalStatus::Complete => {
                         return CommandResult::Message(
                             "Goal is complete. Use /coven goal <objective> to set a new one."
                                 .to_string(),
                         );
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!("Failed to read goal: {e}"));
                     }
                     _ => {}
                 }
@@ -1841,11 +1847,12 @@ fn goal_status(session_id: &str) -> CommandResult {
         Some(s) => s,
         None => return CommandResult::Error("Could not open goal store.".to_string()),
     };
-    match store.get_goal(session_id) {
-        None => CommandResult::Message(
+    match store.try_get_goal(session_id) {
+        Err(e) => CommandResult::Error(format!("Failed to read goal: {e}")),
+        Ok(None) => CommandResult::Message(
             "No active goal. Set one with:\n  /coven goal <objective>".to_string(),
         ),
-        Some(g) => {
+        Ok(Some(g)) => {
             let budget_line = g
                 .budget_display()
                 .map(|b| format!("\nBudget:  {}", b))
