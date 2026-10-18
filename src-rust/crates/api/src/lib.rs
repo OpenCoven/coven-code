@@ -936,6 +936,7 @@ pub mod client {
 
             let mut parser = SseLineParser::new();
             let mut lines = crate::sse_lines::SseLines::default();
+            let mut terminal_received = false;
 
             loop {
                 let Some(chunk_result) = (tokio::select! {
@@ -949,6 +950,11 @@ pub mod client {
                     let line = line.trim_end_matches('\r');
                     if let Some(frame) = parser.feed_line(line) {
                         if let Some(event) = Self::frame_to_event(&frame.event, &frame.data) {
+                            terminal_received |= matches!(
+                                &event,
+                                streaming::AnthropicStreamEvent::MessageStop
+                                    | streaming::AnthropicStreamEvent::Error { .. }
+                            );
                             handler.on_event(&event);
                             if tx.send(event).await.is_err() {
                                 // Receiver dropped – stop reading.
@@ -959,6 +965,11 @@ pub mod client {
                 }
             }
 
+            if !terminal_received {
+                return Err(ClaudeError::Api(
+                    "Anthropic stream ended before message_stop".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -1111,13 +1122,12 @@ pub mod client {
         async fn events(chunks: Vec<bytes::Bytes>) -> Vec<String> {
             let recorder = Arc::new(Recorder::default());
             let (tx, mut rx) = mpsc::channel(32);
-            AnthropicClient::process_sse_stream(
+            let result = AnthropicClient::process_sse_stream(
                 futures::stream::iter(chunks.into_iter().map(Ok)),
                 recorder.clone(),
                 tx,
             )
-            .await
-            .unwrap();
+            .await;
             let mut events = Vec::new();
             while let Some(event) = rx.recv().await {
                 events.push(format!("{event:?}"));
@@ -1127,6 +1137,17 @@ pub mod client {
                 *recorder.0.lock().unwrap(),
                 "callbacks and channel must match"
             );
+            if events
+                .iter()
+                .any(|event| event.starts_with("MessageStop") || event.starts_with("Error {"))
+            {
+                assert!(result.is_ok(), "terminal event must complete: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(ClaudeError::Api(message)) if message.contains("before message_stop")),
+                    "incomplete stream must fail"
+                );
+            }
             events
         }
 
@@ -1214,7 +1235,10 @@ pub mod client {
                 .unbounded_send(Ok(bytes::Bytes::from_static(b"\n")))
                 .unwrap();
             drop(input);
-            work.await.unwrap();
+            assert!(matches!(
+                work.await,
+                Err(ClaudeError::Api(message)) if message.contains("before message_stop")
+            ));
             assert!(
                 matches!(rx.recv().await, Some(streaming::AnthropicStreamEvent::ContentBlockDelta { delta: streaming::ContentDelta::TextDelta { text }, .. }) if text == "kept")
             );
