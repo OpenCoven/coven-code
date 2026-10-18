@@ -886,13 +886,33 @@ pub mod client {
                         continue;
                     }
 
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = Self::read_error_body(resp).await;
                     return Err(self.parse_api_error_with_retry(status, &text, retry_after));
                 }
 
                 // Non-retryable error – return immediately
-                let text = resp.text().await.unwrap_or_default();
+                let text = Self::read_error_body(resp).await;
                 return Err(self.parse_api_error(status, &text));
+            }
+        }
+
+        // Keep the known HTTP status and retry policy when the diagnostic body
+        // cannot be read, rather than replacing them with a transport error.
+        async fn read_error_body(response: reqwest::Response) -> String {
+            let status = response.status().as_u16();
+            match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    let failure = if error.is_timeout() {
+                        "timed out"
+                    } else {
+                        "could not be read"
+                    };
+                    format!(
+                        "HTTP {status} error response body {failure}: {}",
+                        error.without_url()
+                    )
+                }
             }
         }
 
