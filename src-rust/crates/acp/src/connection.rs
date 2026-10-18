@@ -228,7 +228,16 @@ impl Connection {
         if let Some((_, tx)) = self.pending.remove(&key) {
             let _ = tx.send(payload);
         } else {
-            warn!(?id, "ACP: received response for unknown request id");
+            let (id_kind, id_bytes) = match id {
+                acp::RequestId::Null => ("null", 0),
+                // id_to_key prefixes the formatted numeric ID with "n:".
+                acp::RequestId::Number(_) => ("number", key.len() - 2),
+                acp::RequestId::Str(value) => ("string", value.len()),
+            };
+            warn!(
+                id_kind,
+                id_bytes, "ACP: received response for unknown request id"
+            );
         }
     }
 }
@@ -331,7 +340,23 @@ where
                     break;
                 }
             } else {
-                warn!(line = %trimmed, "ACP: unrecognized JSON-RPC message shape");
+                let json_type = match &v {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(_) => "number",
+                    Value::String(_) => "string",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                };
+                warn!(
+                    json_type,
+                    bytes = trimmed.len(),
+                    has_id,
+                    has_method,
+                    has_result,
+                    has_error,
+                    "ACP: unrecognized JSON-RPC message shape"
+                );
             }
         }
         Ok(())
@@ -901,5 +926,175 @@ mod write_frame_tests {
         state.lock().unwrap().limit = None;
         send(&connection, "next").await.unwrap();
         assert_eq!(state.lock().unwrap().bytes, expected(&["first", "next"]));
+    }
+}
+
+#[cfg(test)]
+mod log_payload_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::AsyncReadExt;
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture(input: &str) -> (String, Vec<Inbound>, Vec<u8>) {
+        let logs = LogWriter(Arc::new(StdMutex::new(Vec::new())));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (inbound, wire) = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let (mut output, writer) = tokio::io::duplex(8192);
+                let connection = Connection::new(writer);
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    run_reader(connection.clone(), input.as_bytes(), tx),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let mut inbound = Vec::new();
+                while let Ok(message) = rx.try_recv() {
+                    inbound.push(message);
+                }
+                drop(connection);
+                let mut wire = Vec::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    output.read_to_end(&mut wire),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                (inbound, wire)
+            })
+        });
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        (text, inbound, wire)
+    }
+
+    #[test]
+    fn unrecognized_envelopes_log_shape_without_payload() {
+        for (value, kind) in [
+            (
+                serde_json::json!({"private_key_marker": "private_value_marker", "params":{"prompt":"private_prompt_marker"}}),
+                "object",
+            ),
+            (serde_json::json!(["private_value_marker"]), "array"),
+            (serde_json::json!("private_value_marker"), "string"),
+            (serde_json::json!(987654321), "number"),
+            (serde_json::json!(true), "boolean"),
+            (Value::Null, "null"),
+            (serde_json::json!({"id":"private_id_marker"}), "object"),
+        ] {
+            let input = format!("{value}\n");
+            let (logs, inbound, wire) = capture(&input);
+            assert!(logs.contains("ACP: unrecognized JSON-RPC message shape"));
+            assert!(
+                !logs.contains("private_"),
+                "inbound contents leaked: {logs}"
+            );
+            assert!(!logs.contains("987654321"));
+            assert!(
+                logs.contains(&format!("json_type=\"{kind}\"")),
+                "missing type: {logs}"
+            );
+            assert!(logs.contains(&format!("bytes={}", input.trim().len())));
+            assert!(logs.contains(&format!("has_id={}", value.get("id").is_some())));
+            assert!(logs.contains("has_method=false"));
+            assert!(logs.contains("has_result=false"));
+            assert!(logs.contains("has_error=false"));
+            assert!(inbound.is_empty());
+            assert!(wire.is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_response_ids_log_kind_without_values() {
+        for (id, kind, bytes) in [
+            (serde_json::json!("private_id_marker"), "string", 17),
+            (serde_json::json!("private_id_marker-é界"), "string", 23),
+            (serde_json::json!(987654321), "number", 9),
+            (Value::Null, "null", 0),
+        ] {
+            let input = format!(
+                "{}\n",
+                serde_json::json!({"id":id,"result":{"private_result_marker":true}})
+            );
+            let (logs, inbound, wire) = capture(&input);
+            assert!(logs.contains("ACP: received response for unknown request id"));
+            assert!(!logs.contains("private_"), "inbound id leaked: {logs}");
+            assert!(!logs.contains("987654321"));
+            assert!(logs.contains(&format!("id_kind=\"{kind}\"")));
+            assert!(logs.contains(&format!("id_bytes={bytes}")));
+            assert!(inbound.is_empty());
+            assert!(wire.is_empty());
+        }
+    }
+
+    #[test]
+    fn valid_payloads_and_parse_error_wire_behavior_are_preserved() {
+        let params =
+            serde_json::json!({"prompt":"private_prompt_marker","key":"private_key_marker"});
+        let input = format!(
+            "{}\n{}\n{{\"private_malformed_marker\":\n",
+            serde_json::json!({"id":"private_id_marker","method":"private_method_marker","params":params}),
+            serde_json::json!({"method":"private_notification_marker","params":params})
+        );
+        let (logs, inbound, wire) = capture(&input);
+        assert_eq!(inbound.len(), 2);
+        match &inbound[0] {
+            Inbound::Request {
+                id,
+                method,
+                params: actual,
+            } => {
+                assert!(
+                    matches!(id, acp::RequestId::Str(value) if value.as_str() == "private_id_marker")
+                );
+                assert_eq!(method, "private_method_marker");
+                assert_eq!(actual.as_ref(), Some(&params));
+            }
+            _ => panic!("request was not delivered"),
+        }
+        match &inbound[1] {
+            Inbound::Notification {
+                method,
+                params: actual,
+            } => {
+                assert_eq!(method, "private_notification_marker");
+                assert_eq!(actual.as_ref(), Some(&params));
+            }
+            _ => panic!("notification was not delivered"),
+        }
+        assert!(logs.contains("ACP: parse error"));
+        assert!(!logs.contains("private_"));
+        let response: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"jsonrpc":"2.0","id":null,"error":acp::Error::parse_error()})
+        );
+        assert!(wire.ends_with(b"\n"));
     }
 }
