@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TokenExchangeResponse {
     access_token: String,
     #[serde(default)]
@@ -27,15 +27,42 @@ struct TokenExchangeResponse {
     organization: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for TokenExchangeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenExchangeResponse")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .field("account", &self.account.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "organization",
+                &self.organization.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct CreateApiKeyResponse {
     raw_key: Option<String>,
+}
+
+impl std::fmt::Debug for CreateApiKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateApiKeyResponse")
+            .field("raw_key", &self.raw_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 // ---- Public entry point -----------------------------------------------------
 
 /// Outcome of a completed login flow.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoginResult {
     /// The credential to use: either an API key or Bearer token.
     pub credential: String,
@@ -43,6 +70,16 @@ pub struct LoginResult {
     pub use_bearer_auth: bool,
     /// Cached tokens saved to disk.
     pub tokens: OAuthTokens,
+}
+
+impl std::fmt::Debug for LoginResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResult")
+            .field("credential", &"[REDACTED]")
+            .field("use_bearer_auth", &self.use_bearer_auth)
+            .field("tokens", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Run the interactive Anthropic OAuth PKCE login flow.
@@ -451,6 +488,47 @@ async fn wait_for_auth_code_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_login_debug_omits_credentials() {
+        let response = TokenExchangeResponse {
+            access_token: "canary-response-access".into(),
+            refresh_token: Some("canary-response-refresh".into()),
+            expires_in: 42,
+            scope: Some("user:inference".into()),
+            account: Some(serde_json::json!({ "secret": "canary-account" })),
+            organization: Some(serde_json::json!({ "secret": "canary-organization" })),
+        };
+        let api_key = CreateApiKeyResponse {
+            raw_key: Some("canary-api-key".into()),
+        };
+        let login = LoginResult {
+            credential: "canary-login-credential".into(),
+            use_bearer_auth: true,
+            tokens: OAuthTokens {
+                access_token: "canary-stored-access".into(),
+                refresh_token: Some("canary-stored-refresh".into()),
+                api_key: Some("canary-stored-api-key".into()),
+                ..OAuthTokens::default()
+            },
+        };
+        let rendered = format!("{response:?} {api_key:?} {login:?}");
+        for secret in [
+            "canary-response-access",
+            "canary-response-refresh",
+            "canary-account",
+            "canary-organization",
+            "canary-api-key",
+            "canary-login-credential",
+            "canary-stored-access",
+            "canary-stored-refresh",
+            "canary-stored-api-key",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("use_bearer_auth: true"));
+        assert!(rendered.contains("expires_in: 42"));
+    }
 
     #[tokio::test]
     async fn anthropic_oauth_login_requires_first_party_client_id() {
