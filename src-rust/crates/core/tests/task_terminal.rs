@@ -1,4 +1,24 @@
 use claurst_core::tasks::{BackgroundTask, TaskRegistry, TaskStatus};
+use tokio_util::sync::CancellationToken;
+
+#[test]
+fn owned_task_cancellation_reaches_runtime_only_when_it_wins() {
+    let registry = TaskRegistry::new();
+    let cancelled_token = CancellationToken::new();
+    let cancelled_id = registry.register(
+        BackgroundTask::new("cancellable agent").with_cancel_token(cancelled_token.clone()),
+    );
+    assert!(registry.finish_if_running(&cancelled_id, TaskStatus::Cancelled));
+    assert!(cancelled_token.is_cancelled());
+
+    let completed_token = CancellationToken::new();
+    let completed_id = registry.register(
+        BackgroundTask::new("completed agent").with_cancel_token(completed_token.clone()),
+    );
+    assert!(registry.finish_if_running(&completed_id, TaskStatus::Completed));
+    assert!(!registry.finish_if_running(&completed_id, TaskStatus::Cancelled));
+    assert!(!completed_token.is_cancelled());
+}
 
 #[test]
 fn completed_and_cancelled_tasks_keep_their_terminal_state() {

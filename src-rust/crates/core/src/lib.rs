@@ -5632,6 +5632,7 @@ pub mod tasks {
     use once_cell::sync::Lazy;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     /// Current status of a background task.
@@ -5671,6 +5672,9 @@ pub mod tasks {
         pub output: Vec<String>,
         /// OS process ID, if applicable.
         pub pid: Option<u32>,
+        /// Runtime-only cancellation authority for an in-process task.
+        #[serde(skip)]
+        cancel_token: Option<CancellationToken>,
     }
 
     impl BackgroundTask {
@@ -5684,7 +5688,13 @@ pub mod tasks {
                 completed_at: None,
                 output: Vec::new(),
                 pid: None,
+                cancel_token: None,
             }
+        }
+
+        pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+            self.cancel_token = Some(token);
+            self
         }
 
         /// Return `true` if the task is still running.
@@ -5738,6 +5748,11 @@ pub mod tasks {
                 entry.status = status;
                 if entry.completed_at.is_none() {
                     entry.completed_at = Some(Utc::now());
+                }
+                if let Some(token) = entry.cancel_token.take() {
+                    if matches!(entry.status, TaskStatus::Cancelled) {
+                        token.cancel();
+                    }
                 }
                 return true;
             }

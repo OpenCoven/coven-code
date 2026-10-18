@@ -381,10 +381,12 @@ impl Tool for AgentTool {
         // Background mode: spawn and return agent_id immediately.
         // -----------------------------------------------------------------------
         if params.run_in_background {
+            let cancel = CancellationToken::new();
             let mut task = claurst_core::tasks::BackgroundTask::new(format!(
                 "subagent: {}",
                 params.description
-            ));
+            ))
+            .with_cancel_token(cancel.clone());
             task.id = agent_id.clone();
             let _ = claurst_core::tasks::global_registry().register(task);
 
@@ -399,7 +401,6 @@ impl Tool for AgentTool {
             let agent_id_bg = agent_id.clone();
 
             tokio::spawn(async move {
-                let cancel = CancellationToken::new();
                 let mut messages = vec![Message::user(prompt_bg)];
                 let outcome = run_query_loop(
                     client_bg.as_ref(),
@@ -664,6 +665,115 @@ pub fn init_team_swarm_runner() {
 mod tests {
     use super::*;
     use claurst_core::{error::ClaudeError, tasks::TaskStatus, types::UsageInfo};
+
+    #[test]
+    fn monitor_cancel_stops_background_agent_request() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent_tool::tests::background_cancel_worker",
+                "--ignored",
+            ])
+            .env("COVEN_HOME", home.path())
+            .env("COVEN_CAVE_HOME", home.path())
+            .env("COVEN_CODE_HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated home worker invoked by parent test"]
+    async fn background_cancel_worker() {
+        use claurst_core::config::{Config, PermissionMode, ProviderConfig};
+        use claurst_core::permissions::AutoPermissionHandler;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 8192];
+            let _ = stream.read(&mut request).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = started_tx.send(());
+            let mut byte = [0_u8; 1];
+            loop {
+                match stream.read(&mut byte).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            api_key: Some("test-key".to_string()),
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Config::default()
+        };
+        config.provider_configs.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_base: Some(format!("http://{addr}")),
+                ..ProviderConfig::default()
+            },
+        );
+        let ctx = ToolContext {
+            working_dir: directory.path().to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: claurst_core::cost::CostTracker::new(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            goal_turn: Default::default(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config,
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        };
+        let result = AgentTool
+            .execute(
+                json!({"description": "cancellation fixture", "prompt": "wait", "run_in_background": true}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let response: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        let id = response["agent_id"].as_str().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("background agent starts request")
+            .unwrap();
+
+        let cancelled = claurst_tools::MonitorTool
+            .execute(json!({"action": "cancel", "task_id": id}), &ctx)
+            .await;
+        assert!(!cancelled.is_error, "{}", cancelled.content);
+        tokio::time::timeout(std::time::Duration::from_secs(2), closed_rx)
+            .await
+            .expect("monitor cancellation closes background agent request")
+            .unwrap();
+    }
 
     #[test]
     fn background_success_text_does_not_determine_status() {
