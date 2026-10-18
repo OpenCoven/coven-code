@@ -339,13 +339,10 @@ impl LegacySseRmcpTransport {
             )
         })?;
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
             anyhow::bail!(
-                "MCP server '{}': legacy SSE stream returned HTTP {}: {}",
+                "MCP server '{}': legacy SSE stream returned HTTP {}",
                 self.server_name,
-                status,
-                body
+                response.status()
             );
         }
 
@@ -542,12 +539,10 @@ async fn handle_legacy_sse_http_response(
 ) -> anyhow::Result<()> {
     let status = response.status();
     if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
-        let body = response.text().await.unwrap_or_default();
         anyhow::bail!(
-            "MCP server '{}': HTTP {} from legacy SSE transport: {}",
+            "MCP server '{}': HTTP {} from legacy SSE transport",
             server_name,
-            status,
-            body
+            status
         );
     }
 
@@ -1522,6 +1517,50 @@ mod tests {
             .clone();
         let expected = format!("{url}/messages");
         assert_eq!(endpoint.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_get_failure_does_not_echo_response_body() {
+        let url = serve_single_response(
+            "401 Unauthorized",
+            "text/plain",
+            "canary-credential-in-get-error",
+        )
+        .await;
+        let config = test_sse_config(url);
+
+        let error = match LegacySseRmcpTransport::connect(&config, None, None).await {
+            Ok(_) => panic!("unauthorized SSE stream must fail"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("401"), "{rendered}");
+        assert!(
+            !rendered.contains("canary-credential-in-get-error"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_post_failure_does_not_echo_response_body() {
+        let response = fetch_response(
+            "401 Unauthorized",
+            "text/plain",
+            "canary-credential-in-post-error",
+        )
+        .await;
+        let (tx, _) = mpsc::unbounded_channel();
+        let tasks = Arc::new(StdMutex::new(Vec::new()));
+
+        let error = handle_legacy_sse_http_response("test".into(), response, tx, tasks)
+            .await
+            .expect_err("unauthorized SSE POST must fail");
+        let rendered = error.to_string();
+        assert!(rendered.contains("401"), "{rendered}");
+        assert!(
+            !rendered.contains("canary-credential-in-post-error"),
+            "{rendered}"
+        );
     }
 
     #[tokio::test]
