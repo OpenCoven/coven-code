@@ -261,6 +261,9 @@ jobs:
             cp install.ps1 release/install.ps1
           fi
 
+          # Generate this only after every archive has its final bytes.
+          node scripts/generate-release-checksums.mjs release
+
           echo "Patched release assets:"
           ls -lh release/
 
@@ -288,7 +291,16 @@ jobs:
           for f in release/*; do
             echo "→ Uploading $(basename "$f")"
           done
-          gh release upload "$PATCH_RELEASE_VERSION" release/* \
+          gh release upload "$PATCH_RELEASE_VERSION" \
+            release/coven-code-*.tar.gz \
+            release/coven-code-*.zip \
+            release/install.sh \
+            release/install.ps1 \
+            --repo "${{ github.repository }}" \
+            --clobber
+          # Publish the manifest last. A concurrent install can fail closed
+          # during replacement, but cannot accept new bytes with an old hash.
+          gh release upload "$PATCH_RELEASE_VERSION" release/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --clobber
 

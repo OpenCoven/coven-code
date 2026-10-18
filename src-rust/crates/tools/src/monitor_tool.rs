@@ -269,6 +269,7 @@ mod tests {
             permission_handler: handler,
             cost_tracker: claurst_core::cost::CostTracker::new(),
             session_id: "test-monitor".to_string(),
+            goal_turn: Default::default(),
             file_history: Arc::new(parking_lot::Mutex::new(
                 claurst_core::file_history::FileHistory::new(),
             )),

@@ -81,7 +81,9 @@ impl Tool for ListMcpResourcesTool {
             }
         };
 
-        let resources = manager.list_all_resources(params.server.as_deref()).await;
+        let resources = manager
+            .list_all_resources(Some(&ctx.working_dir), params.server.as_deref())
+            .await;
 
         if resources.is_empty() {
             return ToolResult::success(
@@ -165,7 +167,10 @@ impl Tool for ReadMcpResourceTool {
 
         debug!(server = %params.server, uri = %params.uri, "Reading MCP resource");
 
-        match manager.read_resource(&params.server, &params.uri).await {
+        match manager
+            .read_resource(Some(&ctx.working_dir), &params.server, &params.uri)
+            .await
+        {
             Ok(contents) => {
                 let json_out = serde_json::to_string_pretty(&contents).unwrap_or_default();
                 ToolResult::success(json_out)

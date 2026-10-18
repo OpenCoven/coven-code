@@ -57,6 +57,7 @@ pub async fn handle(
         permission_handler,
         cost_tracker: runtime.cost_tracker.clone(),
         session_id: session.session_id.0.to_string(),
+        goal_turn: claurst_core::goal::GoalTurnContext::pending_default(),
         file_history: session.file_history.clone(),
         current_turn: session.current_turn.clone(),
         non_interactive: false, // ACP routes permissions via the bridge

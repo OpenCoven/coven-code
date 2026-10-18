@@ -279,6 +279,8 @@ pub struct ToolContext {
     pub permission_handler: Arc<dyn PermissionHandler>,
     pub cost_tracker: Arc<CostTracker>,
     pub session_id: String,
+    /// Completion authority captured once for this logical query.
+    pub goal_turn: claurst_core::goal::GoalTurnContext,
     pub file_history: Arc<parking_lot::Mutex<claurst_core::file_history::FileHistory>>,
     pub current_turn: Arc<AtomicUsize>,
     /// If true, suppress interactive prompts (batch / CI mode).
@@ -343,9 +345,14 @@ impl ToolContext {
         &self,
         request: PermissionRequest,
     ) -> Result<(), claurst_core::error::ClaudeError> {
+        self.goal_turn
+            .require_work(&self.session_id)
+            .map_err(|error| {
+                claurst_core::error::ClaudeError::PermissionDenied(error.to_string())
+            })?;
         let interactive_reason = request.details.clone();
         let decision = self.permission_handler.request_permission(&request);
-        match decision {
+        let result = match decision {
             PermissionDecision::Allow | PermissionDecision::AllowPermanently => Ok(()),
             PermissionDecision::Ask { reason } if self.non_interactive => {
                 Err(claurst_core::error::ClaudeError::PermissionDenied(format!(
@@ -386,7 +393,11 @@ impl ToolContext {
                 "Permission denied for tool '{}'",
                 request.tool_name
             ))),
-        }
+        };
+        result?;
+        self.goal_turn
+            .require_work(&self.session_id)
+            .map_err(|error| claurst_core::error::ClaudeError::PermissionDenied(error.to_string()))
     }
 
     /// Check permissions for a tool invocation.
@@ -820,6 +831,7 @@ mod tests {
             permission_handler: handler,
             cost_tracker: claurst_core::cost::CostTracker::new(),
             session_id: "test".to_string(),
+            goal_turn: Default::default(),
             file_history: Arc::new(parking_lot::Mutex::new(
                 claurst_core::file_history::FileHistory::new(),
             )),
@@ -832,6 +844,66 @@ mod tests {
             pending_permissions: None,
             permission_manager: None,
             user_question_tx: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn goal_permission_wait_rechecks_authority_after_allow() {
+        for revoke in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("goals.sqlite");
+            let store = claurst_core::GoalStore::open(&path).unwrap();
+            store.set_goal("test", "A", None).unwrap();
+            let mut ctx = test_tool_context(Arc::new(AskPermissionHandler {
+                reason: "allow write".into(),
+            }));
+            ctx.working_dir = dir.path().to_path_buf();
+            ctx.non_interactive = false;
+            ctx.goal_turn = claurst_core::goal::GoalTurnContext::Captured(
+                store.capture_active_goal("test").unwrap(),
+            );
+            let queue = Arc::new(parking_lot::Mutex::new(PendingPermissionStore::default()));
+            ctx.pending_permissions = Some(queue.clone());
+            let worker = tokio::spawn(async move {
+                let permission = ctx.check_permission("Write", "fixture write", false);
+                if permission.is_ok() {
+                    std::fs::write(ctx.working_dir.join("after-approval.txt"), "work").unwrap();
+                }
+                permission
+            });
+            let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Some(request) = queue.lock().queue.pop_front() {
+                        break request;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await;
+            if request.is_err() {
+                queue.lock().queue.clear();
+                worker.abort();
+                let _ = worker.await;
+                panic!("permission request did not reach actual pending queue");
+            }
+            if revoke {
+                store
+                    .set_status("test", claurst_core::GoalStatus::Paused)
+                    .unwrap();
+            }
+            request
+                .unwrap()
+                .decision_tx
+                .unwrap()
+                .send(PermissionDecision::Allow)
+                .unwrap();
+            let result = worker.await.unwrap();
+            assert_eq!(
+                result.is_err(),
+                revoke,
+                "approval cannot revive goal authority"
+            );
+            assert_eq!(dir.path().join("after-approval.txt").exists(), !revoke);
         }
     }
 

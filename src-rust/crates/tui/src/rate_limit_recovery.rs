@@ -65,6 +65,7 @@ pub struct RateLimitRecoveryState {
     pub tier_switch_available: bool,
     /// Retry directive waiting to be consumed by the main loop.
     pending_retry: Option<RetryDirective>,
+    abandoned: bool,
 }
 
 impl RateLimitRecoveryState {
@@ -76,6 +77,7 @@ impl RateLimitRecoveryState {
         retry_after_secs: Option<u64>,
         tier_switch_available: bool,
     ) {
+        self.abandoned = false;
         self.visible = true;
         self.message = message;
         self.model = model;
@@ -92,9 +94,20 @@ impl RateLimitRecoveryState {
     /// Dismiss the modal and cancel any armed auto-retry. The prompt is
     /// immediately usable again.
     pub fn dismiss(&mut self) {
+        self.abandoned = true;
         self.visible = false;
         self.auto_retry_deadline = None;
         self.pending_retry = None;
+    }
+
+    /// Includes a directive whose modal has already closed.
+    pub fn is_pending(&self) -> bool {
+        self.visible || self.pending_retry.is_some()
+    }
+
+    /// Tell the caller to abandon the logical turn, even after a directive was queued.
+    pub fn take_abandoned(&mut self) -> bool {
+        std::mem::take(&mut self.abandoned)
     }
 
     /// A turn completed successfully — reset the episode so future rate

@@ -78,6 +78,14 @@ pub trait McpClientBackend: Send + Sync {
 
     /// Subscribe to raw notification payloads emitted by the backend.
     fn subscribe_to_notifications(&self) -> BoxStream<'static, anyhow::Result<Value>>;
+
+    /// Permanently stop notification ingress and forwarding, discarding queued input.
+    /// Idempotent; ordinary requests and the underlying transport remain available.
+    /// Dropping an individual notification stream does not retire the backend.
+    fn shutdown_notifications(&self);
+
+    /// Close the actual protocol transport and await owned cleanup completion.
+    async fn shutdown(&self) -> anyhow::Result<()>;
 }
 
 /// Pick the preferred backend for a configured transport type.

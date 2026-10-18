@@ -78,6 +78,7 @@ pub mod feature_flags;
 
 // MCP resource prompt template rendering with variable substitution.
 pub mod mcp_templates;
+pub mod plugin_mcp;
 
 // IDE environment detection (VS Code, Cursor, JetBrains, …).
 
@@ -912,7 +913,11 @@ pub mod config {
         pub compact_threshold: f32,
         pub verbose: bool,
         pub output_format: OutputFormat,
+        /// Explicit settings-owned servers; plugin contributions stay separate.
         pub mcp_servers: Vec<McpServerConfig>,
+        /// Discovered plugin contributions are runtime-only, never user settings.
+        #[serde(skip)]
+        pub plugin_mcp_servers: Vec<crate::plugin_mcp::PluginMcpContribution>,
         #[serde(default)]
         pub lsp_servers: Vec<crate::lsp::LspServerConfig>,
         pub allowed_tools: Vec<String>,
@@ -1600,55 +1605,131 @@ pub mod config {
     #[cfg(test)]
     pub(crate) use crate::coven_shared::COVEN_HOME_ENV_LOCK as CONFIG_HOME_ENV_LOCK;
 
-    /// The engine's home/config directory.  **Single source of truth** for all
-    /// engine state (settings, auth, projects, caches, skills).
-    ///
-    /// Precedence (highest wins):
-    ///
-    /// 1. `COVEN_CODE_TEST_HOME` (test builds only) — resolves to
-    ///    `$COVEN_CODE_TEST_HOME/.coven-code` so test suites can isolate
-    ///    without touching the real home directory.
-    /// 2. `COVEN_CODE_HOME` — explicit engine-home override; returned as-is.
-    /// 3. Under the unified coven CLI (`COVEN_HOME` set or `COVEN_PARENT=coven`)
-    ///    — resolves to `$COVEN_HOME/code` (or `~/.coven/code`).
-    /// 4. Legacy standalone default — `~/.coven-code`.
-    pub fn config_home() -> PathBuf {
-        #[cfg(test)]
-        if let Ok(home) = std::env::var("COVEN_CODE_TEST_HOME") {
-            if !home.is_empty() {
-                return PathBuf::from(home).join(".coven-code");
-            }
-        }
+    /// How the requested engine home was selected. Only managed homes migrate.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ConfigHomeSource {
+        TestOverride,
+        ExplicitOverride,
+        Managed,
+        Standalone,
+    }
 
-        // 1. Explicit engine-home override.
-        if let Ok(p) = std::env::var("COVEN_CODE_HOME") {
-            if !p.is_empty() {
-                return PathBuf::from(p);
-            }
-        }
+    #[derive(Debug, Clone)]
+    pub(crate) struct RequestedConfigHome {
+        pub(crate) path: PathBuf,
+        pub(crate) legacy: Option<PathBuf>,
+        pub(crate) source: ConfigHomeSource,
+    }
 
-        // 2. Under the unified coven CLI, live at <coven_home>/code.
-        //    coven_home = COVEN_HOME or ~/.coven.  Triggered when COVEN_HOME is
-        //    set to a NON-EMPTY value OR the parent is coven (COVEN_PARENT=coven).
-        //    An empty COVEN_HOME is treated as unset — otherwise PathBuf::from("")
-        //    would resolve to a relative "code" directory in the cwd, which could
-        //    also mis-trigger the home migration.
-        let coven_home_env = std::env::var("COVEN_HOME").ok().filter(|v| !v.is_empty());
-        let under_coven = coven_home_env.is_some()
-            || std::env::var("COVEN_PARENT").ok().as_deref() == Some("coven");
-        if under_coven {
-            let coven_home = coven_home_env
+    impl RequestedConfigHome {
+        /// Migration publishes only complete homes. Until a usable target exists,
+        /// all consumers keep reading and writing the usable legacy directory.
+        /// An independently populated target keeps its normal precedence.
+        pub(crate) fn effective_path(&self) -> PathBuf {
+            if self.source == ConfigHomeSource::Managed
+                && !crate::home_migration::has_home_data(&self.path)
+            {
+                if let Some(legacy) = &self.legacy {
+                    if crate::home_migration::has_home_data(legacy) {
+                        return legacy.clone();
+                    }
+                }
+            }
+            self.path.clone()
+        }
+    }
+
+    /// Resolve precedence independently of filesystem state and process globals.
+    pub(crate) fn resolve_config_home(
+        home: Option<&std::path::Path>,
+        test_home: Option<&str>,
+        explicit: Option<&str>,
+        coven_home: Option<&str>,
+        parent: Option<&str>,
+    ) -> RequestedConfigHome {
+        let legacy = home.map(|h| h.join(".coven-code"));
+        if let Some(test_home) = test_home.filter(|v| !v.is_empty()) {
+            return RequestedConfigHome {
+                path: PathBuf::from(test_home).join(".coven-code"),
+                legacy,
+                source: ConfigHomeSource::TestOverride,
+            };
+        }
+        if let Some(explicit) = explicit.filter(|v| !v.is_empty()) {
+            return RequestedConfigHome {
+                path: PathBuf::from(explicit),
+                legacy,
+                source: ConfigHomeSource::ExplicitOverride,
+            };
+        }
+        let coven_home = coven_home.filter(|v| !v.is_empty());
+        if coven_home.is_some() || parent == Some("coven") {
+            if let Some(coven_home) = coven_home
                 .map(PathBuf::from)
-                .or_else(|| dirs::home_dir().map(|h| h.join(".coven")));
-            if let Some(ch) = coven_home {
-                return ch.join("code");
+                .or_else(|| home.map(|h| h.join(".coven")))
+            {
+                return RequestedConfigHome {
+                    path: coven_home.join("code"),
+                    legacy,
+                    source: ConfigHomeSource::Managed,
+                };
             }
         }
+        RequestedConfigHome {
+            path: legacy
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("./.coven-code")),
+            legacy,
+            source: ConfigHomeSource::Standalone,
+        }
+    }
 
-        // 3. Legacy standalone default.
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".coven-code")
+    pub(crate) fn requested_config_home() -> RequestedConfigHome {
+        #[cfg(test)]
+        if let Some(request) = TEST_HOME_REQUEST.with(|request| request.borrow().clone()) {
+            return request;
+        }
+        #[cfg(test)]
+        let test_home = std::env::var("COVEN_CODE_TEST_HOME").ok();
+        #[cfg(not(test))]
+        let test_home: Option<String> = None;
+        resolve_config_home(
+            dirs::home_dir().as_deref(),
+            test_home.as_deref(),
+            std::env::var("COVEN_CODE_HOME").ok().as_deref(),
+            std::env::var("COVEN_HOME").ok().as_deref(),
+            std::env::var("COVEN_PARENT").ok().as_deref(),
+        )
+    }
+
+    /// The effective home for settings, auth, sessions, caches, and skills.
+    /// Test override precedes explicit COVEN_CODE_HOME, then managed COVEN_HOME
+    /// (or ~/.coven with COVEN_PARENT=coven), then standalone ~/.coven-code.
+    /// Managed homes retain usable legacy data if relocation cannot publish.
+    pub fn config_home() -> PathBuf {
+        requested_config_home().effective_path()
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static TEST_HOME_REQUEST: std::cell::RefCell<Option<RequestedConfigHome>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Scoped injection for synchronous consumer tests, including current-thread
+    /// runtimes. Never changes HOME or process-wide production configuration.
+    #[cfg(test)]
+    pub(crate) fn with_requested_home_for_test<T>(
+        request: RequestedConfigHome,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<RequestedConfigHome>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TEST_HOME_REQUEST.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let _restore = Restore(TEST_HOME_REQUEST.with(|slot| slot.replace(Some(request))));
+        f()
     }
 
     impl Settings {
@@ -1922,6 +2003,8 @@ pub mod config {
                     v.extend(over.config.mcp_servers);
                     v
                 },
+                // Settings merging cannot confer runtime plugin ownership.
+                plugin_mcp_servers: Vec::new(),
                 lsp_servers: {
                     let mut v = base.config.lsp_servers;
                     v.extend(over.config.lsp_servers);
@@ -5116,13 +5199,11 @@ pub mod oauth {
         /// `~/.coven-code/accounts/anthropic/<profile_id>/oauth_tokens.json`.
         pub async fn save_for_profile(&self, profile_id: &str) -> anyhow::Result<()> {
             let path = crate::accounts::anthropic_token_path(profile_id);
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&path, serde_json::to_string_pretty(self)?).await?;
-            // Restrict to owner-only: this file holds the Anthropic OAuth
-            // access + refresh tokens (and any minted API key).
-            crate::accounts::set_user_only_perms(&path);
+            crate::secret_file::write_secret_file_in_private_dir(
+                &path,
+                serde_json::to_string_pretty(self)?,
+            )
+            .await?;
             Ok(())
         }
 
@@ -5779,6 +5860,49 @@ mod tests {
             tokens.is_expired(),
             "Token within 5-min buffer should be considered expired"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anthropic_profile_writer_creates_private_file_and_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::config::CONFIG_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("COVEN_CODE_TEST_HOME");
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_CODE_TEST_HOME", home.path());
+        let tokens = crate::oauth::OAuthTokens {
+            access_token: "fixture-access".into(),
+            refresh_token: Some("fixture-refresh".into()),
+            scopes: vec![crate::oauth::CLAUDE_AI_INFERENCE_SCOPE.into()],
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(tokens.save_for_profile("fixture"));
+        let path = crate::accounts::anthropic_token_path("fixture");
+        match previous {
+            Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+            None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+        }
+        result.unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+        let saved: crate::oauth::OAuthTokens =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved.access_token, "fixture-access");
     }
 
     #[test]

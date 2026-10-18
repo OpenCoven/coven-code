@@ -469,6 +469,10 @@ pub struct ClaudeCliProvider {
     /// Resolved lazily so construction never fails; a missing binary
     /// surfaces the install hint when a turn is actually attempted.
     binary: Option<PathBuf>,
+    goal_authority: Option<(
+        claurst_core::goal::GoalTurn,
+        claurst_core::goal::GoalTurnPermission,
+    )>,
 }
 
 impl Default for ClaudeCliProvider {
@@ -482,6 +486,7 @@ impl ClaudeCliProvider {
         Self {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: resolve_claude_binary(),
+            goal_authority: None,
         }
     }
 
@@ -522,6 +527,38 @@ impl ClaudeCliProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some((turn, permission)) = &self.goal_authority {
+            let actual = turn.validate().map_err(|error| ProviderError::Other {
+                provider: self.id.clone(),
+                message: format!("Goal authority revoked: {error}"),
+                status: None,
+                body: None,
+            })?;
+            if actual != *permission {
+                return Err(ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: "Goal permits only its final response".into(),
+                    status: None,
+                    body: None,
+                });
+            }
+            if *permission == claurst_core::goal::GoalTurnPermission::FinalResponse {
+                // The CLI owns its native tools; ProviderRequest.tools cannot
+                // disable them. Safe mode skips ordinary customization hooks
+                // while preserving auth; managed policy hooks remain CLI-owned.
+                // https://code.claude.com/docs/en/cli-reference
+                command.args([
+                    "--safe-mode",
+                    "--tools", "",
+                    "--disallowedTools", "*",
+                    "--append-system-prompt",
+                    "The goal is complete. Provide only the final summary for the user. Do not perform further work or use tools.",
+                ]);
+            }
+        }
+        if let Some((turn, _)) = &self.goal_authority {
+            turn.mark_request_attempted();
+        }
         let mut child = command.spawn().map_err(|e| self.spawn_error(e))?;
 
         let mut stdin = child.stdin.take().ok_or_else(|| ProviderError::Other {
@@ -781,6 +818,27 @@ impl LlmProvider for ClaudeCliProvider {
         };
 
         Ok(Box::pin(s))
+    }
+
+    async fn create_message_stream_for_goal(
+        &self,
+        request: ProviderRequest,
+        turn: Option<&claurst_core::goal::GoalTurn>,
+        permission: claurst_core::goal::GoalTurnPermission,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        match turn {
+            Some(turn) => {
+                Self {
+                    id: self.id.clone(),
+                    binary: self.binary.clone(),
+                    goal_authority: Some((turn.clone(), permission)),
+                }
+                .create_message_stream(request)
+                .await
+            }
+            None => self.create_message_stream(request).await,
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

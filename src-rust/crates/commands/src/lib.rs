@@ -45,6 +45,11 @@ pub enum CommandResult {
     Message(String),
     /// Inject a message into the conversation as though the user typed it.
     UserMessage(String),
+    /// Synthetic goal work bound to the exact goal and database of its payload.
+    GoalUserMessage {
+        message: String,
+        turn: claurst_core::goal::GoalTurn,
+    },
     /// Modify the configuration.
     ConfigChange(Config),
     /// Modify the configuration and show a specific status message.
@@ -1470,7 +1475,7 @@ impl SlashCommand for StatusCommand {
         };
 
         // MCP status
-        let mcp_count = ctx.config.mcp_servers.len();
+        let mcp_count = ctx.config.effective_mcp_servers().count();
         let mcp_status = if mcp_count == 0 {
             "none configured".to_string()
         } else {
@@ -1735,13 +1740,16 @@ impl SlashCommand for GoalCommand {
                     Some(s) => s,
                     None => return CommandResult::Error("Could not open goal store.".to_string()),
                 };
-                match store.get_active_goal(session_id) {
-                    None => {
+                match store.capture_active_goal(session_id) {
+                    Err(error) => {
+                        return CommandResult::Error(format!("Could not capture goal: {error}"))
+                    }
+                    Ok(None) => {
                         return CommandResult::Message(
                             "No active goal. Set one with /coven goal <objective>.".to_string(),
                         );
                     }
-                    Some(goal) => {
+                    Ok(Some(turn)) => {
                         let audit_msg = format!(
                             "[User requested goal completion audit]\n\
                              Please review your active goal:\n\
@@ -1752,9 +1760,12 @@ impl SlashCommand for GoalCommand {
                              3. Run any tests or validation commands.\n\
                              4. If fully complete, call GoalComplete with audit_summary and evidence.\n\
                              5. If not complete, describe what remains.",
-                            goal.objective
+                            turn.goal().objective
                         );
-                        return CommandResult::UserMessage(audit_msg);
+                        return CommandResult::GoalUserMessage {
+                            message: audit_msg,
+                            turn,
+                        };
                     }
                 }
             }
@@ -1792,12 +1803,13 @@ impl SlashCommand for GoalCommand {
                 format!("Objective too long ({} chars). Max {} chars.", len, max),
             ),
             Err(e) => CommandResult::Error(format!("Failed to set goal: {}", e)),
-            Ok(goal) => {
-                // Return UserMessage so the query loop fires immediately and the
-                // model begins working toward the goal without user needing to
-                // send another message.
-                CommandResult::UserMessage(claurst_core::goal_kickoff_message(&goal))
-            }
+            Ok(goal) => match store.capture_goal_turn(session_id, &goal.id) {
+                Ok(turn) => CommandResult::GoalUserMessage {
+                    message: claurst_core::goal_kickoff_message(turn.goal()),
+                    turn,
+                },
+                Err(error) => CommandResult::Error(format!("Could not capture goal: {error}")),
+            },
         }
     }
 }
@@ -2171,35 +2183,18 @@ impl SlashCommand for UsageCommand {
 
 async fn loaded_plugin_registry(project_dir: &std::path::Path) -> claurst_plugins::PluginRegistry {
     if let Some(global) = claurst_plugins::global_plugin_registry() {
-        (*global).clone()
-    } else {
-        let registry = claurst_plugins::load_plugins(project_dir, &[]).await;
-        publish_plugin_registry(&registry);
-        registry
+        if global.matches_project(project_dir) {
+            return (*global).clone();
+        }
     }
+    let registry = claurst_plugins::load_plugins(project_dir, &[]).await;
+    publish_plugin_registry(&registry);
+    registry
 }
 
 fn publish_plugin_registry(registry: &claurst_plugins::PluginRegistry) {
     claurst_plugins::set_global_hooks(registry.build_hook_registry());
     claurst_plugins::set_global_registry(registry.clone());
-}
-
-fn merge_plugin_mcp_servers(
-    config: &mut claurst_core::config::Config,
-    registry: &claurst_plugins::PluginRegistry,
-) -> usize {
-    let mut existing_names: std::collections::HashSet<String> =
-        config.mcp_servers.iter().map(|s| s.name.clone()).collect();
-    let mut added = 0;
-
-    for mcp_server in registry.all_mcp_servers() {
-        if existing_names.insert(mcp_server.name.clone()) {
-            config.mcp_servers.push(mcp_server);
-            added += 1;
-        }
-    }
-
-    added
 }
 
 #[async_trait]
@@ -2215,7 +2210,9 @@ impl SlashCommand for PluginCommand {
     }
     fn help(&self) -> &str {
         "Usage: /plugin [list|info <name>|enable <name>|disable <name>|install <path>|reload]\n\
-         Manage Coven plugins.\n\n\
+         Manage Coven plugins. Project plugins start disabled. Enabling one trusts\n\
+         its folder for this project, including future changes; consent is stored\n\
+         in user settings. See docs/plugin-trust.md.\n\n\
          Subcommands:\n\
            /plugin              — list all installed plugins\n\
            /plugin list         — list all installed plugins\n\
@@ -2242,19 +2239,34 @@ impl SlashCommand for PluginCommand {
                 )
             }
             claurst_plugins::PluginSubCommand::Enable(name) => {
-                let registry = loaded_plugin_registry(&project_dir).await;
-                if registry.get(&name).is_none() {
+                let mut registry = loaded_plugin_registry(&project_dir).await;
+                let Some(plugin) = registry.get(&name) else {
                     return CommandResult::Error(format!(
                         "Plugin '{}' not found. Use `/plugin list` to see installed plugins.",
                         name
                     ));
+                };
+                if let Err(error) = claurst_plugins::save_plugin_enabled(&project_dir, plugin, true)
+                {
+                    return CommandResult::Error(format!(
+                        "Failed to enable plugin '{}': {error:#}",
+                        name
+                    ));
                 }
-                let mut settings = claurst_core::config::Settings::load_sync().unwrap_or_default();
-                settings.enabled_plugins.insert(name.clone());
-                settings.disabled_plugins.remove(&name);
-                let _ = settings.save_sync();
+                registry.enable(&name);
+                publish_plugin_registry(&registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
                 CommandResult::Message(format!(
-                    "Plugin '{}' enabled. Run `/plugin reload` to apply changes in this session.",
+                    "Plugin '{}' enabled. Run `/plugin reload` to refresh contributed resources.",
                     name
                 ))
             }
@@ -2265,19 +2277,35 @@ impl SlashCommand for PluginCommand {
                 )
             }
             claurst_plugins::PluginSubCommand::Disable(name) => {
-                let registry = loaded_plugin_registry(&project_dir).await;
-                if registry.get(&name).is_none() {
+                let mut registry = loaded_plugin_registry(&project_dir).await;
+                let Some(plugin) = registry.get(&name) else {
                     return CommandResult::Error(format!(
                         "Plugin '{}' not found. Use `/plugin list` to see installed plugins.",
                         name
                     ));
+                };
+                if let Err(error) =
+                    claurst_plugins::save_plugin_enabled(&project_dir, plugin, false)
+                {
+                    return CommandResult::Error(format!(
+                        "Failed to disable plugin '{}': {error:#}",
+                        name
+                    ));
                 }
-                let mut settings = claurst_core::config::Settings::load_sync().unwrap_or_default();
-                settings.disabled_plugins.insert(name.clone());
-                settings.enabled_plugins.remove(&name);
-                let _ = settings.save_sync();
+                registry.disable(&name);
+                publish_plugin_registry(&registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
                 CommandResult::Message(format!(
-                    "Plugin '{}' disabled. Run `/plugin reload` to apply changes in this session.",
+                    "Plugin '{}' disabled. Its commands and hooks are disabled in this session.",
                     name
                 ))
             }
@@ -2311,22 +2339,23 @@ impl SlashCommand for PluginCommand {
                 let old_registry = loaded_plugin_registry(&project_dir).await;
                 let (new_registry, diff) =
                     claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-                merge_plugin_mcp_servers(&mut ctx.config, &new_registry);
-                let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
                 publish_plugin_registry(&new_registry);
+                if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                if let Err(error) = ctx
+                    .config
+                    .reconcile_plugin_mcp_servers(new_registry.all_mcp_servers())
+                    .await
+                {
+                    return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+                }
+                let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
                 CommandResult::Message(summary)
             }
-            claurst_plugins::PluginSubCommand::Help => CommandResult::Message(
-                "Plugin commands:\n\
-                     /plugin              — list all installed plugins\n\
-                     /plugin list         — list all installed plugins\n\
-                     /plugin info <name>  — show plugin details\n\
-                     /plugin enable <name>   — enable a plugin\n\
-                     /plugin disable <name>  — disable a plugin\n\
-                     /plugin install <path>  — install plugin from local path\n\
-                     /plugin reload       — reload plugins from disk"
-                    .to_string(),
-            ),
+            claurst_plugins::PluginSubCommand::Help => {
+                CommandResult::Message(self.help().to_string())
+            }
         }
     }
 }
@@ -2355,9 +2384,18 @@ impl SlashCommand for ReloadPluginsCommand {
         let old_registry = loaded_plugin_registry(&project_dir).await;
         let (new_registry, diff) =
             claurst_plugins::reload_plugins(&old_registry, &project_dir, &[]).await;
-        merge_plugin_mcp_servers(&mut ctx.config, &new_registry);
-        let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
         publish_plugin_registry(&new_registry);
+        if let Err(error) = ctx.config.set_mcp_project(&project_dir).await {
+            return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+        }
+        if let Err(error) = ctx
+            .config
+            .reconcile_plugin_mcp_servers(new_registry.all_mcp_servers())
+            .await
+        {
+            return CommandResult::Error(format!("Plugin MCP retirement failed: {error}"));
+        }
+        let summary = claurst_plugins::format_reload_summary(&new_registry, &diff);
 
         CommandResult::Message(summary)
     }
@@ -2676,13 +2714,13 @@ impl SlashCommand for DoctorCommand {
 
         // ── MCP servers ─────────────────────────────────────────────────────
         lines.push("MCP Servers".to_string());
-        let mcp_count = ctx.config.mcp_servers.len();
+        let mcp_count = ctx.config.effective_mcp_servers().count();
         if mcp_count == 0 {
             lines.push("  • No MCP servers configured".to_string());
         } else if let Some(mgr) = ctx.mcp_manager.as_ref() {
             // Report live connection status from the manager
             let statuses = mgr.all_statuses();
-            for srv in ctx.config.mcp_servers.iter().take(12) {
+            for srv in ctx.config.effective_mcp_servers().take(12) {
                 let status_str = match statuses.get(&srv.name) {
                     Some(claurst_mcp::McpServerStatus::Connected { tool_count }) => {
                         format!(
@@ -2718,7 +2756,7 @@ impl SlashCommand for DoctorCommand {
             lines.push(format!(
                 "  ✓ {mcp_count} MCP server(s) configured (not yet connected):"
             ));
-            for srv in ctx.config.mcp_servers.iter().take(8) {
+            for srv in ctx.config.effective_mcp_servers().take(8) {
                 lines.push(format!("    - {}", srv.name));
             }
             if mcp_count > 8 {
@@ -4034,7 +4072,7 @@ impl SlashCommand for McpCommand {
             return McpCommand::handle_logs(server_name, ctx);
         }
 
-        if ctx.config.mcp_servers.is_empty() {
+        if ctx.config.effective_mcp_servers().next().is_none() {
             return CommandResult::Message(
                 "No MCP servers configured.\n\n\
                  To add a MCP server, edit ~/.coven-code/settings.json:\n\
@@ -4055,7 +4093,7 @@ impl SlashCommand for McpCommand {
         // /mcp status — detailed status table
         if sub == "status" {
             let mut output = String::from("MCP Server Status\n─────────────────\n");
-            for srv in &ctx.config.mcp_servers {
+            for srv in ctx.config.effective_mcp_servers() {
                 let kind = srv.server_type.as_str();
                 let endpoint = srv
                     .url
@@ -4092,9 +4130,9 @@ impl SlashCommand for McpCommand {
         let manager = ctx.mcp_manager.as_ref();
         let mut output = format!(
             "Configured MCP Servers ({})\n──────────────────────────\n",
-            ctx.config.mcp_servers.len()
+            ctx.config.effective_mcp_servers().count()
         );
-        for srv in &ctx.config.mcp_servers {
+        for srv in ctx.config.effective_mcp_servers() {
             let cmd_display = if let Some(ref url) = srv.url {
                 format!("url={}", url)
             } else if let Some(ref cmd) = srv.command {
@@ -4138,16 +4176,14 @@ impl McpCommand {
     async fn handle_auth(server_name: &str, ctx: &CommandContext) -> CommandResult {
         let srv = match ctx
             .config
-            .mcp_servers
-            .iter()
+            .effective_mcp_servers()
             .find(|s| s.name == server_name)
         {
             Some(s) => s,
             None => {
                 let configured: Vec<&str> = ctx
                     .config
-                    .mcp_servers
-                    .iter()
+                    .effective_mcp_servers()
                     .map(|s| s.name.as_str())
                     .collect();
                 return CommandResult::Error(format!(
@@ -4162,6 +4198,24 @@ impl McpCommand {
                 ));
             }
         };
+
+        if let Some(plugin) = ctx
+            .config
+            .plugin_mcp_servers
+            .iter()
+            .find(|plugin| plugin.config.name == server_name)
+        {
+            if !ctx
+                .config
+                .mcp_servers
+                .iter()
+                .any(|user| user.name == server_name)
+            {
+                if let Err(error) = plugin.check_caller(Some(&ctx.working_dir)) {
+                    return CommandResult::Error(error.to_string());
+                }
+            }
+        }
 
         let is_http = matches!(srv.server_type.as_str(), "http" | "sse");
 
@@ -4203,7 +4257,10 @@ impl McpCommand {
             if let Some(run_auth) = &ctx.mcp_auth_runner {
                 // In the interactive CLI/TUI we start browser auth in the background
                 // so the event loop stays responsive while waiting for the callback.
-                match manager.begin_auth(server_name).await {
+                match manager
+                    .begin_auth(Some(&ctx.working_dir), server_name)
+                    .await
+                {
                     Ok(session) => {
                         let auth_url = session.auth_url.clone();
                         let redirect_uri = session.redirect_uri.clone();
@@ -4227,7 +4284,10 @@ impl McpCommand {
                 }
             }
 
-            match manager.authenticate(server_name).await {
+            match manager
+                .authenticate(Some(&ctx.working_dir), server_name)
+                .await
+            {
                 Ok(result) => {
                     return CommandResult::Message(format!(
                         "MCP OAuth — '{}'\n\
@@ -4335,11 +4395,14 @@ impl McpCommand {
     /// Handle `/mcp connect <server>` — attempt to reconnect a server.
     async fn handle_connect(server_name: &str, ctx: &CommandContext) -> CommandResult {
         // Validate that the server is configured.
-        if !ctx.config.mcp_servers.iter().any(|s| s.name == server_name) {
+        if !ctx
+            .config
+            .effective_mcp_servers()
+            .any(|s| s.name == server_name)
+        {
             let names: Vec<&str> = ctx
                 .config
-                .mcp_servers
-                .iter()
+                .effective_mcp_servers()
                 .map(|s| s.name.as_str())
                 .collect();
             return CommandResult::Error(format!(
@@ -4406,11 +4469,14 @@ impl McpCommand {
     /// Handle `/mcp logs <server>` — show recent error/log information.
     fn handle_logs(server_name: &str, ctx: &CommandContext) -> CommandResult {
         // Validate server name.
-        if !ctx.config.mcp_servers.iter().any(|s| s.name == server_name) {
+        if !ctx
+            .config
+            .effective_mcp_servers()
+            .any(|s| s.name == server_name)
+        {
             let names: Vec<&str> = ctx
                 .config
-                .mcp_servers
-                .iter()
+                .effective_mcp_servers()
                 .map(|s| s.name.as_str())
                 .collect();
             return CommandResult::Error(format!(
@@ -4528,7 +4594,9 @@ impl McpCommand {
         match parts[0] {
             "resources" => {
                 let filter = parts.get(1).copied();
-                let resources = manager.list_all_resources(filter).await;
+                let resources = manager
+                    .list_all_resources(Some(&ctx.working_dir), filter)
+                    .await;
                 if resources.is_empty() {
                     return Some(CommandResult::Message(
                         "No resources available (servers may not support resources/list)."
@@ -4551,7 +4619,9 @@ impl McpCommand {
             }
             "prompts" => {
                 let filter = parts.get(1).copied();
-                let prompts = manager.list_all_prompts(filter).await;
+                let prompts = manager
+                    .list_all_prompts(Some(&ctx.working_dir), filter)
+                    .await;
                 if prompts.is_empty() {
                     return Some(CommandResult::Message(
                         "No prompt templates available (servers may not support prompts/list)."
@@ -4621,7 +4691,10 @@ impl McpCommand {
                     }
                 }
                 let arguments = if args.is_empty() { None } else { Some(args) };
-                match manager.get_prompt(server, prompt_name, arguments).await {
+                match manager
+                    .get_prompt(Some(&ctx.working_dir), server, prompt_name, arguments)
+                    .await
+                {
                     Ok(result) => {
                         let mut injected = String::new();
                         for msg in &result.messages {
@@ -11499,7 +11572,8 @@ pub async fn execute_command(input: &str, ctx: &mut CommandContext) -> Option<Co
     }
 
     // Then check plugin-defined slash commands.
-    if let Some(registry) = claurst_plugins::global_plugin_registry() {
+    if claurst_plugins::global_plugin_registry().is_some() {
+        let registry = loaded_plugin_registry(&ctx.working_dir).await;
         for cmd_def in registry.all_command_defs() {
             if cmd_def.name == cmd_name {
                 let adapter = PluginSlashCommandAdapter { def: cmd_def };
@@ -11532,6 +11606,83 @@ pub(crate) mod test_env {
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn goal_dispatch_payload_keeps_its_captured_authority() {
+        use super::{CommandContext, CommandResult, GoalCommand, SlashCommand};
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let names = [
+            "COVEN_CODE_HOME",
+            "COVEN_CODE_TEST_HOME",
+            "COVEN_CODE_GOALS",
+        ];
+        let _restore = RestoreEnv(names.map(|name| (name, std::env::var_os(name))).to_vec());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("COVEN_CODE_HOME", dir.path());
+        std::env::remove_var("COVEN_CODE_TEST_HOME");
+        std::env::remove_var("COVEN_CODE_GOALS");
+        let mut ctx = CommandContext {
+            config: Default::default(),
+            cost_tracker: claurst_core::cost::CostTracker::new(),
+            messages: vec![],
+            working_dir: dir.path().to_path_buf(),
+            session_id: "goal-payload".into(),
+            session_title: None,
+            remote_session_url: None,
+            mcp_manager: None,
+            mcp_auth_runner: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut captures = Vec::new();
+        for input in ["original objective", "complete"] {
+            let result = runtime.block_on(GoalCommand.execute(input, &mut ctx));
+            let CommandResult::GoalUserMessage { message, turn } = result else {
+                panic!("goal payload lost its captured authority: {input}: {result:?}");
+            };
+            assert!(message.contains("original objective"));
+            assert_eq!(turn.goal().objective, "original objective");
+            assert_eq!(turn.goal().session_id, ctx.session_id);
+            assert_eq!(
+                turn.store_path(),
+                claurst_core::GoalStore::default_path()
+                    .canonicalize()
+                    .unwrap()
+            );
+            captures.push(turn);
+        }
+        let store = claurst_core::GoalStore::open_default().unwrap();
+        let replacement = store
+            .set_goal(&ctx.session_id, "replacement", None)
+            .unwrap();
+        for turn in captures {
+            assert!(matches!(
+                turn.validate(),
+                Err(claurst_core::GoalError::Replaced { .. })
+            ));
+            assert!(store
+                .capture_goal_turn(&ctx.session_id, &turn.goal().id)
+                .is_err());
+        }
+        assert_eq!(
+            store.try_get_goal(&ctx.session_id).unwrap().unwrap().id,
+            replacement.id
+        );
+    }
 
     pub(crate) struct CommandEnvGuard {
         old_home: Option<String>,
@@ -11722,6 +11873,30 @@ mod tests {
                 resolution.lifecycle,
                 catalog::CommandLifecycle::Active
             ));
+        }
+    }
+
+    #[test]
+    fn plugin_toggles_resolve_to_parent_with_arguments_intact() {
+        use claurst_plugins::PluginSubCommand;
+        for command in ["plugin", "plugins"] {
+            for (args, expected) in [
+                (
+                    "enable fixture",
+                    PluginSubCommand::Enable("fixture".to_string()),
+                ),
+                (
+                    "disable fixture",
+                    PluginSubCommand::Disable("fixture".to_string()),
+                ),
+            ] {
+                let input = format!("/{command} {args}");
+                let (name, parsed_args) = claurst_tui::input::parse_slash_command(&input);
+                let resolution = resolve_catalog_command(name, parsed_args).unwrap();
+                assert_eq!(resolution.path, "plugin");
+                assert_eq!(resolution.dispatch_args, args);
+                assert_eq!(claurst_plugins::parse_plugin_args(parsed_args), expected);
+            }
         }
     }
 

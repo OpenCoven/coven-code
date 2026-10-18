@@ -14,14 +14,16 @@
 // - Connection manager with exponential-backoff reconnection
 
 use async_trait::async_trait;
-use claurst_core::config::McpServerConfig;
+use claurst_core::config::{Config, McpServerConfig};
 use claurst_core::mcp_templates::TemplateRenderer;
+use claurst_core::plugin_mcp::PluginMcpContribution;
 use claurst_core::types::ToolDefinition;
 use dashmap::DashMap;
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -30,11 +32,16 @@ pub use client::McpClient;
 pub use connection_manager::{McpConnectionManager, McpServerStatus};
 pub use types::*;
 
+#[cfg(test)]
+mod live_authority_tests;
+
 pub mod backend;
 pub mod connection_manager;
 pub mod oauth;
+mod owned_http;
+mod owned_transport;
 pub mod registry;
-pub mod rmcp_backend;
+pub(crate) mod rmcp_backend;
 
 // ---------------------------------------------------------------------------
 // Environment variable expansion
@@ -567,6 +574,8 @@ pub mod client {
         pub prompts: Vec<McpPrompt>,
         pub instructions: Option<String>,
         backend: Option<Arc<dyn backend::McpClientBackend>>,
+        pub(super) plugin: Option<PluginMcpContribution>,
+        lifetime: Option<watch::Sender<bool>>,
     }
 
     impl McpClient {
@@ -580,6 +589,8 @@ pub mod client {
                 prompts: snapshot.prompts,
                 instructions: snapshot.instructions,
                 backend: None,
+                plugin: None,
+                lifetime: None,
             }
         }
 
@@ -600,11 +611,27 @@ pub mod client {
             config: &McpServerConfig,
             auth_token: Option<String>,
         ) -> anyhow::Result<Self> {
+            Self::connect_inner(config, auth_token, None).await
+        }
+
+        async fn connect_inner(
+            config: &McpServerConfig,
+            auth_token: Option<String>,
+            shutdown: Option<watch::Receiver<bool>>,
+        ) -> anyhow::Result<Self> {
+            if shutdown.as_ref().is_some_and(|signal| *signal.borrow()) {
+                anyhow::bail!("Plugin MCP authority has been revoked");
+            }
             match config.server_type.as_str() {
-                "stdio" => Self::connect_stdio(config).await,
+                "stdio" => {
+                    let backend =
+                        crate::rmcp_backend::RmcpClientBackend::connect_stdio(config, shutdown)
+                            .await?;
+                    Ok(Self::from_backend(Arc::new(backend)))
+                }
                 "sse" => {
                     let backend = crate::rmcp_backend::RmcpClientBackend::connect_legacy_sse(
-                        config, auth_token,
+                        config, auth_token, shutdown,
                     )
                     .await?;
                     Ok(Self::from_backend(Arc::new(backend)))
@@ -628,6 +655,7 @@ pub mod client {
                             config,
                             auth_token.clone(),
                             protocol_version,
+                            shutdown.clone(),
                         )
                         .await
                         {
@@ -677,23 +705,82 @@ pub mod client {
         /// Connect to an MCP server using stdio transport. The `config` should
         /// already have env vars expanded via `expand_server_config`.
         pub async fn connect_stdio(config: &McpServerConfig) -> anyhow::Result<Self> {
-            let backend = crate::rmcp_backend::RmcpClientBackend::connect_stdio(config).await?;
+            let backend =
+                crate::rmcp_backend::RmcpClientBackend::connect_stdio(config, None).await?;
             Ok(Self::from_backend(Arc::new(backend)))
+        }
+
+        pub(super) async fn connect_plugin(
+            contribution: &PluginMcpContribution,
+            caller: Option<&Path>,
+            auth_token: Option<String>,
+        ) -> anyhow::Result<Self> {
+            let config = expand_server_config(&contribution.config);
+            let (ready, receiver) = tokio::sync::oneshot::channel();
+            let (lifetime, mut abandoned) = watch::channel(false);
+            contribution.spawn_retirement(caller, move |mut revoked| async move {
+                let (stop, shutdown) = watch::channel(*revoked.borrow());
+                let connection = Self::connect_inner(&config, auth_token, Some(shutdown));
+                tokio::pin!(connection);
+                let result = tokio::select! {
+                    biased;
+                    _ = revoked.changed() => { stop.send_replace(true); connection.await },
+                    _ = abandoned.changed() => { stop.send_replace(true); connection.await },
+                    result = &mut connection => result,
+                };
+                let client = match result {
+                    Ok(client) => client,
+                    Err(error) => {
+                        let retirement = error
+                            .downcast_ref::<crate::owned_transport::RetirementError>()
+                            .map(|error| anyhow::anyhow!(error.to_string()));
+                        let _ = ready.send(Err(error));
+                        return retirement.map_or(Ok(()), Err);
+                    }
+                };
+                let backend = Arc::clone(client.backend()?);
+                if ready.send(Ok(client)).is_ok() && !*revoked.borrow() && !*stop.borrow() {
+                    tokio::select! {
+                        _ = revoked.changed() => {},
+                        _ = abandoned.changed() => {},
+                    }
+                }
+                stop.send_replace(true);
+                backend.shutdown().await
+            })?;
+            let mut client = receiver
+                .await
+                .map_err(|_| anyhow::anyhow!("Plugin MCP connection owner stopped"))??;
+            contribution.check_caller(caller)?;
+            client.plugin = Some(contribution.clone());
+            client.lifetime = Some(lifetime);
+            Ok(client)
+        }
+
+        pub(super) async fn guard<T>(
+            &self,
+            caller: Option<&Path>,
+            operation: impl std::future::Future<Output = anyhow::Result<T>>,
+        ) -> anyhow::Result<T> {
+            match &self.plugin {
+                Some(plugin) => plugin.guard(caller, operation).await,
+                None => operation.await,
+            }
         }
 
         // ---- High-level API -----------------------------------------------
 
-        pub async fn list_tools(&self) -> anyhow::Result<Vec<McpTool>> {
-            self.backend()?.list_tools().await
+        pub async fn list_tools(&self, caller: Option<&Path>) -> anyhow::Result<Vec<McpTool>> {
+            self.guard(caller, self.backend()?.list_tools()).await
         }
 
         pub async fn call_tool(
             &self,
+            caller: Option<&Path>,
             name: &str,
             arguments: Option<Value>,
         ) -> anyhow::Result<CallToolResult> {
-            self.backend()?
-                .call_tool(name, arguments)
+            self.guard(caller, self.backend()?.call_tool(name, arguments))
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -705,18 +792,25 @@ pub mod client {
                 })
         }
 
-        pub async fn list_resources(&self) -> anyhow::Result<Vec<McpResource>> {
-            let mut resources = self.backend()?.list_resources().await?;
+        pub async fn list_resources(
+            &self,
+            caller: Option<&Path>,
+        ) -> anyhow::Result<Vec<McpResource>> {
+            let mut resources = self.guard(caller, self.backend()?.list_resources()).await?;
             apply_resource_templates(&mut resources);
             Ok(resources)
         }
 
-        pub async fn read_resource(&self, uri: &str) -> anyhow::Result<ResourceContents> {
-            self.backend()?.read_resource(uri).await
+        pub async fn read_resource(
+            &self,
+            caller: Option<&Path>,
+            uri: &str,
+        ) -> anyhow::Result<ResourceContents> {
+            self.guard(caller, self.backend()?.read_resource(uri)).await
         }
 
-        pub async fn list_prompts(&self) -> anyhow::Result<Vec<McpPrompt>> {
-            self.backend()?.list_prompts().await
+        pub async fn list_prompts(&self, caller: Option<&Path>) -> anyhow::Result<Vec<McpPrompt>> {
+            self.guard(caller, self.backend()?.list_prompts()).await
         }
 
         /// Invoke `prompts/get` with the given name and optional arguments map.
@@ -725,18 +819,30 @@ pub mod client {
         /// conversation as-is (mirrors TS `getMCPPrompt`).
         pub async fn get_prompt(
             &self,
+            caller: Option<&Path>,
             name: &str,
             arguments: Option<std::collections::HashMap<String, String>>,
         ) -> anyhow::Result<GetPromptResult> {
-            self.backend()?.get_prompt(name, arguments).await
+            self.guard(caller, self.backend()?.get_prompt(name, arguments))
+                .await
         }
 
-        pub async fn subscribe_resource(&self, uri: &str) -> anyhow::Result<()> {
-            self.backend()?.subscribe_resource(uri).await
+        pub async fn subscribe_resource(
+            &self,
+            caller: Option<&Path>,
+            uri: &str,
+        ) -> anyhow::Result<()> {
+            self.guard(caller, self.backend()?.subscribe_resource(uri))
+                .await
         }
 
-        pub async fn unsubscribe_resource(&self, uri: &str) -> anyhow::Result<()> {
-            self.backend()?.unsubscribe_resource(uri).await
+        pub async fn unsubscribe_resource(
+            &self,
+            caller: Option<&Path>,
+            uri: &str,
+        ) -> anyhow::Result<()> {
+            self.guard(caller, self.backend()?.unsubscribe_resource(uri))
+                .await
         }
 
         /// Get all tools as `ToolDefinition` objects suitable for the API.
@@ -747,13 +853,32 @@ pub mod client {
         /// Subscribe to raw JSON notifications from the active backend.
         pub fn subscribe_to_notifications(
             &self,
-        ) -> BoxStream<'static, anyhow::Result<serde_json::Value>> {
-            self.backend()
-                .expect("MCP client backend missing")
-                .subscribe_to_notifications()
+            caller: Option<&Path>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<serde_json::Value>>> {
+            let stream = match &self.plugin {
+                Some(plugin) => {
+                    plugin.authorize(caller, || Ok(self.backend()?.subscribe_to_notifications()))?
+                }
+                None => self.backend()?.subscribe_to_notifications(),
+            };
+            let Some(plugin) = &self.plugin else {
+                return Ok(stream);
+            };
+            let mut revoked = plugin.revocation();
+            Ok(Box::pin(stream.take_until(async move {
+                if !*revoked.borrow() {
+                    let _ = revoked.changed().await;
+                }
+            })))
         }
 
         // ---- Notification dispatch ----------------------------------------
+
+        pub(crate) fn shutdown_notifications(&self) {
+            if let Some(backend) = &self.backend {
+                backend.shutdown_notifications();
+            }
+        }
 
         /// Process a single notification message from the transport stream.
         /// Routes resource updates to subscribers and logs other notifications.
@@ -782,7 +907,10 @@ pub mod client {
                 "notifications/resources/updated" => {
                     let uri = raw["params"]["uri"].as_str().unwrap_or("").to_string();
                     let key = (self.server_name.clone(), uri.clone());
-                    if let Some(tx) = resource_subscriptions.get(&key) {
+                    let sender = resource_subscriptions
+                        .get(&key)
+                        .map(|entry| entry.value().clone());
+                    if let Some(tx) = sender {
                         let event = ResourceChangedEvent {
                             server_name: self.server_name.clone(),
                             uri,
@@ -826,7 +954,19 @@ pub mod client {
                 prompts: vec![],
                 instructions: None,
                 backend: None,
+                plugin: None,
+                lifetime: None,
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn from_test_plugin_backend(
+            backend: Arc<dyn backend::McpClientBackend>,
+            plugin: PluginMcpContribution,
+        ) -> Self {
+            let mut client = Self::from_backend(backend);
+            client.plugin = Some(plugin);
+            client
         }
 
         #[cfg(test)]
@@ -888,6 +1028,7 @@ pub struct McpManager {
     failed_servers: Vec<(String, String)>, // (name, error)
     /// Original (unexpanded) server configs — needed for OAuth initiation.
     server_configs: HashMap<String, McpServerConfig>,
+    plugin_authorities: HashMap<String, PluginMcpContribution>,
     /// Active resource subscriptions: (server_name, uri) → change event sender.
     pub resource_subscriptions:
         Arc<DashMap<(String, String), tokio::sync::mpsc::Sender<ResourceChangedEvent>>>,
@@ -910,6 +1051,7 @@ impl McpManager {
             notification_shutdown,
             failed_servers: Vec::new(),
             server_configs: HashMap::new(),
+            plugin_authorities: HashMap::new(),
             resource_subscriptions: Arc::new(DashMap::new()),
         }
     }
@@ -933,7 +1075,7 @@ impl McpManager {
             match expanded.server_type.as_str() {
                 "stdio" | "sse" | "http" => {
                     let auth_token = if matches!(expanded.server_type.as_str(), "sse" | "http") {
-                        manager.load_token(&expanded.name).await
+                        manager.load_token(None, &expanded.name).await
                     } else {
                         None
                     };
@@ -977,6 +1119,74 @@ impl McpManager {
             }
         }
         manager
+    }
+
+    /// Typed runtime construction. Generic connect_all remains settings-owned.
+    pub async fn connect_config(config: &Config, caller: Option<&Path>) -> Self {
+        if config.hosted_review_enabled() && !config.hosted_review.allow_mcp_servers {
+            return Self::new();
+        }
+        let mut manager = Self::connect_all(&config.mcp_servers).await;
+        for plugin in &config.plugin_mcp_servers {
+            if (config.hosted_review_enabled() && !config.hosted_review.allow_plugins)
+                || config
+                    .mcp_servers
+                    .iter()
+                    .any(|user| user.name == plugin.config.name)
+            {
+                plugin.revoke();
+                if let Err(error) = plugin.wait_retired().await {
+                    manager
+                        .failed_servers
+                        .push((plugin.config.name.clone(), error.to_string()));
+                }
+                continue;
+            }
+            if plugin.check_caller(caller).is_err() {
+                continue;
+            }
+            manager
+                .server_configs
+                .insert(plugin.config.name.clone(), plugin.config.clone());
+            manager
+                .plugin_authorities
+                .insert(plugin.config.name.clone(), plugin.clone());
+            let token = if matches!(plugin.config.server_type.as_str(), "http" | "sse") {
+                manager.load_token(caller, &plugin.config.name).await
+            } else {
+                None
+            };
+            match McpClient::connect_plugin(plugin, caller, token).await {
+                Ok(client) => {
+                    manager
+                        .clients
+                        .insert(plugin.config.name.clone(), Arc::new(client));
+                }
+                Err(error) => manager
+                    .failed_servers
+                    .push((plugin.config.name.clone(), error.to_string())),
+            }
+        }
+        manager
+    }
+
+    pub fn check_server_caller(&self, caller: Option<&Path>, server: &str) -> anyhow::Result<()> {
+        if let Some(plugin) = self.plugin_authorities.get(server) {
+            plugin.check_caller(caller)?;
+        }
+        Ok(())
+    }
+
+    async fn guard<T>(
+        &self,
+        caller: Option<&Path>,
+        server: &str,
+        operation: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        match self.plugin_authorities.get(server) {
+            Some(plugin) => plugin.guard(caller, operation).await,
+            None => operation.await,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1068,6 +1278,7 @@ impl McpManager {
     /// Tool name format: `<server_name>_<tool_name>`.
     pub async fn call_tool(
         &self,
+        caller: Option<&Path>,
         prefixed_name: &str,
         arguments: Option<Value>,
     ) -> anyhow::Result<CallToolResult> {
@@ -1075,7 +1286,7 @@ impl McpManager {
         for (server_name, client) in &self.clients {
             let prefix = format!("{}_", server_name);
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                return client.call_tool(tool_name, arguments).await;
+                return client.call_tool(caller, tool_name, arguments).await;
             }
         }
         Err(anyhow::anyhow!(
@@ -1104,7 +1315,11 @@ impl McpManager {
     }
 
     /// List all resources from all (or a specific) connected server.
-    pub async fn list_all_resources(&self, server_filter: Option<&str>) -> Vec<serde_json::Value> {
+    pub async fn list_all_resources(
+        &self,
+        caller: Option<&Path>,
+        server_filter: Option<&str>,
+    ) -> Vec<serde_json::Value> {
         let mut all = vec![];
         for (name, client) in &self.clients {
             if let Some(filter) = server_filter {
@@ -1112,7 +1327,7 @@ impl McpManager {
                     continue;
                 }
             }
-            match client.list_resources().await {
+            match client.list_resources(caller).await {
                 Ok(resources) => {
                     for r in resources {
                         all.push(serde_json::json!({
@@ -1135,6 +1350,7 @@ impl McpManager {
     /// Read a specific resource from a named server.
     pub async fn read_resource(
         &self,
+        caller: Option<&Path>,
         server_name: &str,
         uri: &str,
     ) -> anyhow::Result<serde_json::Value> {
@@ -1142,12 +1358,16 @@ impl McpManager {
             anyhow::anyhow!("MCP server '{}' not found or not connected", server_name)
         })?;
 
-        let contents = client.read_resource(uri).await?;
+        let contents = client.read_resource(caller, uri).await?;
         Ok(serde_json::to_value(&contents)?)
     }
 
     /// List all prompts from all (or a specific) connected server.
-    pub async fn list_all_prompts(&self, server_filter: Option<&str>) -> Vec<serde_json::Value> {
+    pub async fn list_all_prompts(
+        &self,
+        caller: Option<&Path>,
+        server_filter: Option<&str>,
+    ) -> Vec<serde_json::Value> {
         let mut all = vec![];
         for (name, client) in &self.clients {
             if let Some(filter) = server_filter {
@@ -1155,7 +1375,7 @@ impl McpManager {
                     continue;
                 }
             }
-            match client.list_prompts().await {
+            match client.list_prompts(caller).await {
                 Ok(prompts) => {
                     for p in prompts {
                         all.push(serde_json::json!({
@@ -1180,6 +1400,7 @@ impl McpManager {
     /// injection into the conversation (mirrors TS `getMCPPrompt`).
     pub async fn get_prompt(
         &self,
+        caller: Option<&Path>,
         server_name: &str,
         prompt_name: &str,
         arguments: Option<std::collections::HashMap<String, String>>,
@@ -1187,7 +1408,7 @@ impl McpManager {
         let client = self.clients.get(server_name).ok_or_else(|| {
             anyhow::anyhow!("MCP server '{}' not found or not connected", server_name)
         })?;
-        client.get_prompt(prompt_name, arguments).await
+        client.get_prompt(caller, prompt_name, arguments).await
     }
 
     // -----------------------------------------------------------------------
@@ -1199,7 +1420,10 @@ impl McpManager {
     /// - Returns `Authenticated` if a valid (non-expired) token exists on disk.
     /// - Returns `NotRequired` for stdio servers.
     /// - Returns `Required` for remote `http` / `sse` servers that lack a valid token.
-    pub fn auth_state(&self, server_name: &str) -> McpAuthState {
+    pub fn auth_state(&self, caller: Option<&Path>, server_name: &str) -> McpAuthState {
+        if let Err(error) = self.check_server_caller(caller, server_name) {
+            return McpAuthState::Error(error.to_string());
+        }
         let config = match self.server_configs.get(server_name) {
             Some(c) => c,
             None => return McpAuthState::NotRequired,
@@ -1241,12 +1465,21 @@ impl McpManager {
     }
 
     /// Initiate OAuth 2.0 + PKCE for an HTTP MCP server.
-    pub async fn initiate_auth(&self, server_name: &str) -> anyhow::Result<String> {
-        Ok(self.begin_auth(server_name).await?.auth_url)
+    pub async fn initiate_auth(
+        &self,
+        caller: Option<&Path>,
+        server_name: &str,
+    ) -> anyhow::Result<String> {
+        Ok(self.begin_auth(caller, server_name).await?.auth_url)
     }
 
     /// Build a full OAuth authorization session for an HTTP/SSE MCP server.
-    pub async fn begin_auth(&self, server_name: &str) -> anyhow::Result<oauth::McpAuthSession> {
+    pub async fn begin_auth(
+        &self,
+        caller: Option<&Path>,
+        server_name: &str,
+    ) -> anyhow::Result<oauth::McpAuthSession> {
+        self.check_server_caller(caller, server_name)?;
         let config = self
             .server_configs
             .get(server_name)
@@ -1259,24 +1492,26 @@ impl McpManager {
             )
         })?;
 
-        oauth::begin_mcp_auth(server_name, base_url).await
+        let mut session = self
+            .guard(
+                caller,
+                server_name,
+                oauth::begin_mcp_auth(server_name, base_url),
+            )
+            .await?;
+        session.plugin = self.plugin_authorities.get(server_name).cloned();
+        session.caller = caller.map(Path::to_path_buf);
+        Ok(session)
     }
 
     /// Run the browser-based OAuth flow and persist the resulting token.
-    pub async fn authenticate(&self, server_name: &str) -> anyhow::Result<oauth::McpAuthResult> {
-        let config = self
-            .server_configs
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown MCP server: {}", server_name))?;
-
-        let base_url = config.url.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "MCP server '{}' has no URL configured (required for OAuth)",
-                server_name
-            )
-        })?;
-
-        oauth::run_mcp_auth_flow(server_name, base_url).await
+    pub async fn authenticate(
+        &self,
+        caller: Option<&Path>,
+        server_name: &str,
+    ) -> anyhow::Result<oauth::McpAuthResult> {
+        let session = self.begin_auth(caller, server_name).await?;
+        oauth::run_mcp_auth_session(session).await
     }
 
     /// Store an OAuth access token for an MCP server.
@@ -1284,6 +1519,7 @@ impl McpManager {
     /// `expires_in` is the lifetime in seconds (as returned by the token endpoint).
     pub fn store_token(
         &self,
+        caller: Option<&Path>,
         server_name: &str,
         token: &str,
         expires_in: Option<u64>,
@@ -1295,6 +1531,7 @@ impl McpManager {
                 .as_secs()
                 + secs
         });
+        self.check_server_caller(caller, server_name)?;
         let config = self
             .server_configs
             .get(server_name)
@@ -1313,33 +1550,55 @@ impl McpManager {
             server_name: server_name.to_string(),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
         };
-        oauth::store_mcp_token(&mcp_token)
-            .map_err(|e| anyhow::anyhow!("Failed to store MCP token for '{}': {}", server_name, e))
+        let store = || {
+            oauth::store_mcp_token(&mcp_token).map_err(|e| {
+                anyhow::anyhow!("Failed to store MCP token for '{}': {}", server_name, e)
+            })
+        };
+        match self.plugin_authorities.get(server_name) {
+            Some(plugin) => plugin.authorize(caller, store),
+            None => store(),
+        }
     }
 
     /// Load the stored OAuth access token for an MCP server, if any.
     ///
     /// Returns `None` if no token is stored or the token cannot be refreshed.
-    pub async fn load_token(&self, server_name: &str) -> Option<String> {
+    pub async fn load_token(&self, caller: Option<&Path>, server_name: &str) -> Option<String> {
+        self.check_server_caller(caller, server_name).ok()?;
         let config = self.server_configs.get(server_name)?;
         let server_url = config.url.as_deref()?;
-        oauth::get_valid_mcp_access_token(server_name, server_url)
-            .await
-            .ok()
-            .flatten()
+        self.guard(
+            caller,
+            server_name,
+            oauth::get_valid_mcp_token_for(
+                server_name,
+                server_url,
+                self.plugin_authorities.get(server_name),
+                caller,
+            ),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|token| token.access_token)
     }
 
     // -----------------------------------------------------------------------
     // Notification dispatch loop
     // -----------------------------------------------------------------------
 
-    /// Stop all notification polling tasks owned by this manager.
+    /// Permanently stop notification ingress and polling tasks owned by this manager.
+    /// Queued backend input is discarded; ordinary requests remain available.
     ///
     /// This is intentionally idempotent: replacement paths may share the same
     /// manager through several runtime handles. `send_replace` is infallible
     /// and preserves the shutdown value even when no polling tasks remain.
     pub fn shutdown_notification_poll_loops(&self) {
         self.notification_shutdown.send_replace(true);
+        for client in self.clients.values() {
+            client.shutdown_notifications();
+        }
     }
 
     /// Spawn background Tokio tasks for each connected MCP client to handle
@@ -1352,7 +1611,7 @@ impl McpManager {
     /// Call this once after constructing an `Arc<McpManager>` (e.g. immediately
     /// after `McpManager::connect_all`). Each notification handler task exits
     /// when shutdown is requested, the transport closes, or the manager is dropped.
-    pub fn spawn_notification_poll_loop(self: Arc<Self>) {
+    pub fn spawn_notification_poll_loop(self: Arc<Self>, caller: Option<&Path>) {
         let clients = self.clients.clone();
 
         // Spawn a task for each client to handle notifications via the stream
@@ -1361,9 +1620,16 @@ impl McpManager {
             let manager_weak = Arc::downgrade(&self);
             let mut notification_shutdown = self.notification_shutdown.subscribe();
 
-            tokio::spawn(async move {
+            let plugin = client.plugin.clone();
+            let owned_caller = caller.map(Path::to_path_buf);
+            let worker = async move {
+                let caller = owned_caller;
                 // Subscribe to the transport's notification stream
-                let mut notification_stream = client_clone.subscribe_to_notifications();
+                let Ok(mut notification_stream) =
+                    client_clone.subscribe_to_notifications(caller.as_deref())
+                else {
+                    return;
+                };
 
                 // Process notifications from the stream
                 'poll: loop {
@@ -1401,7 +1667,12 @@ impl McpManager {
                                 None => break, // Manager dropped — shut down
                             };
                             let notification_delivery =
-                                client_clone.process_notification(raw, &resource_subscriptions);
+                                client_clone.guard(caller.as_deref(), async {
+                                    client_clone
+                                        .process_notification(raw, &resource_subscriptions)
+                                        .await;
+                                    Ok(())
+                                });
 
                             tokio::pin!(notification_delivery);
                             loop {
@@ -1415,7 +1686,7 @@ impl McpManager {
                                             Err(_) => break 'poll,
                                         }
                                     }
-                                    () = &mut notification_delivery => break,
+                                    _ = &mut notification_delivery => break,
                                 }
                             }
                         }
@@ -1429,7 +1700,24 @@ impl McpManager {
                         }
                     }
                 }
-            });
+                if client_clone.plugin.is_some() {
+                    if let Some(manager) = manager_weak.upgrade() {
+                        manager
+                            .resource_subscriptions
+                            .retain(|(server, _), _| server != &client_clone.server_name);
+                    }
+                }
+            };
+            if let Some(plugin) = plugin {
+                if let Err(error) = plugin.spawn_retirement(caller, |_| async move {
+                    worker.await;
+                    Ok(())
+                }) {
+                    debug!(%error, "Plugin notification worker denied");
+                }
+            } else {
+                tokio::spawn(worker);
+            }
         }
     }
 }
@@ -1525,6 +1813,7 @@ mod tests {
     struct SingleNotificationStream {
         notification: Option<Value>,
         delivered: Option<oneshot::Sender<()>>,
+        stopped: Option<oneshot::Sender<()>>,
     }
 
     impl futures::Stream for SingleNotificationStream {
@@ -1549,12 +1838,27 @@ mod tests {
         }
     }
 
+    impl Drop for SingleNotificationStream {
+        fn drop(&mut self) {
+            if let Some(stopped) = self.stopped.take() {
+                let _ = stopped.send(());
+            }
+        }
+    }
+
     struct QuietNotificationBackend {
         notification_stream: Mutex<Option<BoxStream<'static, anyhow::Result<Value>>>>,
     }
 
     #[async_trait]
     impl backend::McpClientBackend for QuietNotificationBackend {
+        async fn shutdown(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn shutdown_notifications(&self) {
+            // This fixture has no ingress queue; the manager drops its stream.
+        }
+
         fn kind(&self) -> backend::McpBackendKind {
             backend::McpBackendKind::Rmcp
         }
@@ -1626,7 +1930,7 @@ mod tests {
         let mut manager = McpManager::new();
         manager.clients.insert("quiet".to_string(), client);
         let manager = Arc::new(manager);
-        manager.clone().spawn_notification_poll_loop();
+        manager.clone().spawn_notification_poll_loop(None);
         tokio::time::timeout(Duration::from_secs(2), started_rx)
             .await
             .expect("notification task should start")
@@ -1652,8 +1956,9 @@ mod tests {
         let mut manager = McpManager::new();
         manager.clients.insert("quiet".to_string(), client);
         let manager = Arc::new(manager);
+        let retained_owner = manager.clone();
 
-        manager.clone().spawn_notification_poll_loop();
+        manager.clone().spawn_notification_poll_loop(None);
         tokio::time::timeout(Duration::from_secs(2), started_rx)
             .await
             .expect("quiet notification task should start")
@@ -1666,11 +1971,14 @@ mod tests {
             .await
             .expect("quiet notification task should stop promptly")
             .expect("quiet notification stream should be dropped");
+        assert_eq!(retained_owner.server_count(), 1);
+        assert!(Arc::ptr_eq(&manager, &retained_owner));
     }
 
     #[tokio::test]
     async fn notification_poll_loop_cancels_blocked_resource_delivery() {
         let (delivered_tx, delivered_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
         let backend = Arc::new(QuietNotificationBackend {
             notification_stream: Mutex::new(Some(Box::pin(SingleNotificationStream {
                 notification: Some(serde_json::json!({
@@ -1679,14 +1987,14 @@ mod tests {
                     "params": { "uri": "file:///blocked.txt" }
                 })),
                 delivered: Some(delivered_tx),
+                stopped: Some(stopped_tx),
             }))),
         });
         let client = Arc::new(McpClient::from_test_backend(backend));
-        let client_weak = Arc::downgrade(&client);
         let mut manager = McpManager::new();
         manager.clients.insert("quiet".to_string(), client);
 
-        let (subscription_tx, _subscription_rx) = tokio::sync::mpsc::channel(1);
+        let (subscription_tx, mut subscription_rx) = tokio::sync::mpsc::channel(1);
         subscription_tx
             .try_send(ResourceChangedEvent {
                 server_name: "quiet".to_string(),
@@ -1699,24 +2007,34 @@ mod tests {
         );
 
         let manager = Arc::new(manager);
-        let manager_weak = Arc::downgrade(&manager);
-        manager.clone().spawn_notification_poll_loop();
+        let retained_owner = manager.clone();
+        let resource_subscriptions = manager.resource_subscriptions.clone();
+        manager.clone().spawn_notification_poll_loop(None);
 
         tokio::time::timeout(Duration::from_secs(2), delivered_rx)
             .await
             .expect("notification should reach the poll loop")
             .expect("notification delivery signal sender");
 
-        manager.shutdown_notification_poll_loops();
-        drop(manager);
-
         tokio::time::timeout(Duration::from_secs(2), async {
-            while manager_weak.upgrade().is_some() || client_weak.upgrade().is_some() {
+            while Arc::strong_count(&resource_subscriptions) != 3 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("poll task should release the client and manager after shutdown");
+        .expect("notification delivery should be blocked on the saturated subscriber");
+
+        manager.shutdown_notification_poll_loops();
+        manager.shutdown_notification_poll_loops();
+
+        tokio::time::timeout(Duration::from_secs(2), stopped_rx)
+            .await
+            .expect("shutdown must drop the stream while manager owners remain")
+            .unwrap();
+        assert_eq!(retained_owner.server_count(), 1);
+        assert_eq!(Arc::strong_count(&resource_subscriptions), 2);
+        subscription_rx.try_recv().unwrap();
+        assert!(subscription_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1730,6 +2048,7 @@ mod tests {
                     "params": { "uri": "file:///blocked.txt" }
                 })),
                 delivered: Some(delivered_tx),
+                stopped: None,
             }))),
         });
         let client = Arc::new(McpClient::from_test_backend(backend));
@@ -1752,7 +2071,7 @@ mod tests {
         let manager = Arc::new(manager);
         let resource_subscriptions = Arc::clone(&manager.resource_subscriptions);
         let manager_weak = Arc::downgrade(&manager);
-        manager.clone().spawn_notification_poll_loop();
+        manager.clone().spawn_notification_poll_loop(None);
 
         tokio::time::timeout(Duration::from_secs(2), delivered_rx)
             .await
@@ -2012,7 +2331,7 @@ mod tests {
         };
         oauth::store_mcp_token(&token).expect("store token");
 
-        match mgr.auth_state("remote") {
+        match mgr.auth_state(None, "remote") {
             McpAuthState::Authenticated { token_expiry } => {
                 assert_eq!(token_expiry, token.expiry_datetime());
             }
@@ -2038,7 +2357,7 @@ mod tests {
         );
 
         let err = mgr
-            .store_token("stdio", "tok", None)
+            .store_token(None, "stdio", "tok", None)
             .expect_err("URL-less servers cannot store bound OAuth tokens");
 
         assert!(err.to_string().contains("has no URL configured"));
@@ -2076,6 +2395,7 @@ pub struct ResourceSubscription {
 /// (no events will ever be delivered).
 pub async fn subscribe_resource(
     manager: &McpManager,
+    caller: Option<&Path>,
     server_name: &str,
     uri: &str,
 ) -> tokio_mpsc::Receiver<ResourceChangedEvent> {
@@ -2092,15 +2412,41 @@ pub async fn subscribe_resource(
         }
     };
 
-    if let Err(e) = client.subscribe_resource(uri).await {
+    if let Err(e) = client.subscribe_resource(caller, uri).await {
         tracing::warn!(server_name, uri, error = %e, "subscribe_resource RPC failed");
         return make_dead();
     }
 
     let (tx, rx) = tokio_mpsc::channel(32);
-    manager
-        .resource_subscriptions
-        .insert((server_name.to_string(), uri.to_string()), tx);
+    let key = (server_name.to_string(), uri.to_string());
+    if let Some(plugin) = &client.plugin {
+        let subscriptions = &manager.resource_subscriptions;
+        let weak_subscriptions = Arc::downgrade(subscriptions);
+        let mut shutdown = manager.notification_shutdown.subscribe();
+        if let Err(error) = plugin.spawn_retirement(caller, |mut revoked| {
+            // Admission and insertion are atomic with withdrawal. This owner
+            // also covers public subscribers that never started a poll loop.
+            subscriptions.insert(key.clone(), tx.clone());
+            async move {
+                if !*revoked.borrow() && !*shutdown.borrow() {
+                    tokio::select! {
+                        _ = revoked.changed() => {},
+                        _ = shutdown.changed() => {},
+                        _ = tx.closed() => {},
+                    }
+                }
+                if let Some(subscriptions) = weak_subscriptions.upgrade() {
+                    subscriptions.remove_if(&key, |_, current| current.same_channel(&tx));
+                }
+                Ok(())
+            }
+        }) {
+            tracing::warn!(server_name, uri, %error, "MCP resource subscription withdrawn");
+            return make_dead();
+        }
+    } else {
+        manager.resource_subscriptions.insert(key, tx);
+    }
     tracing::info!(server_name, uri, "MCP resource subscription registered");
     rx
 }
@@ -2112,6 +2458,7 @@ pub async fn subscribe_resource(
 /// request fails.
 pub async fn unsubscribe_resource(
     manager: &McpManager,
+    caller: Option<&Path>,
     server_name: &str,
     uri: &str,
 ) -> Result<(), String> {
@@ -2123,7 +2470,7 @@ pub async fn unsubscribe_resource(
     })?;
 
     client
-        .unsubscribe_resource(uri)
+        .unsubscribe_resource(caller, uri)
         .await
         .map_err(|e| format!("unsubscribe_resource failed: {e}"))
         .map(|_| ())

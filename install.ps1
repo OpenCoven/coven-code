@@ -27,6 +27,96 @@ function Write-Warn($msg)    { Write-Host $msg -ForegroundColor Yellow }
 function Write-Err($msg)     { Write-Host $msg -ForegroundColor Red }
 function Write-Muted($msg)   { Write-Host $msg -ForegroundColor DarkGray }
 
+function Get-ExpectedChecksum([string]$ManifestPath, [string]$ArchiveName) {
+    $expectedNames = @(
+        'coven-code-linux-aarch64.tar.gz',
+        'coven-code-linux-x86_64.tar.gz',
+        'coven-code-macos-aarch64.tar.gz',
+        'coven-code-macos-x86_64.tar.gz',
+        'coven-code-windows-x86_64.zip'
+    )
+    $seen = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+    foreach ($line in [IO.File]::ReadAllLines($ManifestPath)) {
+        if ($line -notmatch '^([0-9A-Fa-f]{64})  ([A-Za-z0-9._-]+)$') {
+            throw 'SHA256SUMS contains an unsupported or malformed line'
+        }
+        $name = $Matches[2]
+        if ($expectedNames -cnotcontains $name -or $seen.ContainsKey($name)) {
+            throw 'SHA256SUMS contains an unknown or duplicate filename'
+        }
+        $seen[$name] = $Matches[1].ToLowerInvariant()
+    }
+    if ($seen.Count -ne $expectedNames.Count) {
+        throw 'SHA256SUMS is incomplete'
+    }
+    foreach ($name in $expectedNames) {
+        if (-not $seen.ContainsKey($name)) { throw 'SHA256SUMS is incomplete' }
+    }
+    if (-not $seen.ContainsKey($ArchiveName)) { throw 'SHA256SUMS does not contain the selected archive' }
+    return $seen[$ArchiveName]
+}
+
+function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Request = $null) {
+    $current = [Uri]$Uri
+    $handler = $null
+    $client = $null
+    if ($null -eq $Request) {
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        $handler.AllowAutoRedirect = $false
+        $client = [System.Net.Http.HttpClient]::new($handler)
+    }
+    try {
+        for ($redirects = 0; $redirects -le 5; $redirects++) {
+            if (-not $current.IsAbsoluteUri -or $current.Scheme -ne 'https') {
+                throw "Refusing non-HTTPS download URI: $current"
+            }
+            if ($null -ne $Request) {
+                $result = & $Request $current
+                $status = [int]$result.StatusCode
+                if ($status -in @(301, 302, 303, 307, 308)) {
+                    if ($redirects -eq 5 -or [string]::IsNullOrEmpty($result.Location)) {
+                        throw 'Download redirect limit exceeded or Location header missing'
+                    }
+                    $current = [Uri]::new($current, [string]$result.Location)
+                    continue
+                }
+                if ($status -ne 200) { throw "HTTP $status downloading $current" }
+                [IO.File]::WriteAllBytes($OutFile, [byte[]]$result.Bytes)
+                return
+            }
+            $response = $client.GetAsync($current, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            try {
+                $status = [int]$response.StatusCode
+                if ($status -in @(301, 302, 303, 307, 308)) {
+                    if ($redirects -eq 5 -or $null -eq $response.Headers.Location) {
+                        throw 'Download redirect limit exceeded or Location header missing'
+                    }
+                    $current = [Uri]::new($current, $response.Headers.Location)
+                    continue
+                }
+                if ($status -ne 200) { throw "HTTP $status downloading $current" }
+                $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $outputStream = [IO.File]::Create($OutFile)
+                try { $inputStream.CopyTo($outputStream) } finally {
+                    $outputStream.Dispose()
+                    $inputStream.Dispose()
+                }
+                return
+            } finally { $response.Dispose() }
+        }
+    } finally {
+        if ($null -ne $client) { $client.Dispose() }
+        if ($null -ne $handler) { $handler.Dispose() }
+    }
+    throw 'Download redirect limit exceeded'
+}
+
+function Assert-ArchiveChecksum([string]$ManifestPath, [string]$ArchiveName, [string]$ArchivePath) {
+    $expected = Get-ExpectedChecksum $ManifestPath $ArchiveName
+    $actual = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { throw "Checksum mismatch for $ArchiveName" }
+}
+
 function Show-Usage {
 @"
 Coven Code installer (Windows)
@@ -67,14 +157,6 @@ function Get-Arch {
     }
 }
 
-# ----- Resolve install directory -----
-if ([string]::IsNullOrEmpty($InstallDir)) {
-    $InstallDir = Join-Path $env:USERPROFILE ".coven-code\bin"
-}
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-}
-
 # ----- Resolve version (latest if not provided) -----
 function Resolve-Version {
     if (-not [string]::IsNullOrEmpty($script:Version)) {
@@ -110,38 +192,50 @@ function Check-Existing($desiredVersion) {
 }
 
 # ----- Download & extract -----
-function Download-And-Install($desiredVersion, $arch) {
+function Download-And-Install($desiredVersion, $arch, $Boundaries = $null) {
     $archive = "coven-code-windows-$arch.zip"
     $url = "https://github.com/$Repo/releases/download/v$desiredVersion/$archive"
+    $checksumUrl = "https://github.com/$Repo/releases/download/v$desiredVersion/SHA256SUMS"
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("coven-code-install-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
 
     $zipPath = Join-Path $tmpRoot $archive
+    $checksumPath = Join-Path $tmpRoot 'SHA256SUMS'
     $extractDir = Join-Path $tmpRoot "extract"
     New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
 
     Write-Info "Installing coven-code v$desiredVersion (windows-$arch)"
     Write-Muted "Downloading $url"
     try {
-        # Disable progress UI for a faster, less noisy download.
-        $oldPref = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath
-        $ProgressPreference = $oldPref
+        if ($null -eq $Boundaries) {
+            Invoke-HttpsDownload $checksumUrl $checksumPath
+            Invoke-HttpsDownload $url $zipPath
+        } else {
+            & $Boundaries.Download $checksumUrl $checksumPath
+            & $Boundaries.Download $url $zipPath
+        }
+        Assert-ArchiveChecksum $checksumPath $archive $zipPath
+        Write-Muted "Verified SHA-256 for $archive"
     } catch {
         Write-Err "Download failed: $_"
         Write-Info ("Check that release v$desiredVersion exists for windows-" + $arch + ":")
         Write-Info "  https://github.com/$Repo/releases/tag/v$desiredVersion"
         Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+        if ($null -ne $Boundaries) { throw }
         exit 1
     }
 
     Write-Muted "Extracting..."
     try {
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        if ($null -eq $Boundaries) {
+            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        } else {
+            & $Boundaries.Expand $zipPath $extractDir
+        }
     } catch {
         Write-Err "Extract failed: $_"
         Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+        if ($null -ne $Boundaries) { throw }
         exit 1
     }
 
@@ -153,7 +247,11 @@ function Download-And-Install($desiredVersion, $arch) {
         exit 1
     }
 
-    Install-Binary $extractedExe
+    if ($null -eq $Boundaries) {
+        Install-Binary $extractedExe
+    } else {
+        & $Boundaries.Install $extractedExe
+    }
     Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
 }
 
@@ -227,6 +325,16 @@ function GithubPathHint {
 }
 
 # ----- Main flow -----
+if ($env:COVEN_CODE_INSTALLER_TEST -eq '1') { return }
+
+# ----- Resolve install directory -----
+if ([string]::IsNullOrEmpty($InstallDir)) {
+    $InstallDir = Join-Path $env:USERPROFILE ".coven-code\bin"
+}
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+}
+
 Write-Info "Tip: the unified Coven CLI installs and manages this engine for you -- 'npm install -g @opencoven/cli', then run 'coven'. This standalone installer still works."
 
 if (-not [string]::IsNullOrEmpty($Binary)) {

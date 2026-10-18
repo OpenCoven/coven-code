@@ -80,7 +80,6 @@ case "$ARCH" in
 esac
 
 INSTALL_DIR="${install_dir_override:-$HOME/.coven-code/bin}"
-mkdir -p "$INSTALL_DIR"
 
 # Resolve version
 if [[ -z "$specific_version" ]]; then
@@ -99,6 +98,47 @@ fi
 ARTIFACT="${APP}-${PLATFORM}-${ARCH_TAG}"
 ARCHIVE_NAME="${ARTIFACT}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${specific_version}/${ARCHIVE_NAME}"
+CHECKSUM_URL="https://github.com/${REPO}/releases/download/v${specific_version}/SHA256SUMS"
+
+expected_checksum() {
+  local manifest="$1" selected="$2"
+  awk -v selected="$selected" '
+    BEGIN {
+      expected["coven-code-windows-x86_64.zip"] = 1
+      expected["coven-code-linux-x86_64.tar.gz"] = 1
+      expected["coven-code-linux-aarch64.tar.gz"] = 1
+      expected["coven-code-macos-x86_64.tar.gz"] = 1
+      expected["coven-code-macos-aarch64.tar.gz"] = 1
+    }
+    {
+      if (length($0) < 67 || substr($0, 65, 2) != "  ") exit 20
+      digest = substr($0, 1, 64)
+      name = substr($0, 67)
+      if (length(digest) != 64 || digest ~ /[^0-9A-Fa-f]/) exit 21
+      if (!(name in expected) || seen[name]++) exit 22
+      count++
+      if (name == selected) found = tolower(digest)
+    }
+    END {
+      if (count != 5 || length(found) != 64) exit 23
+      print found
+    }
+  ' "$manifest"
+}
+
+file_checksum() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print tolower($1)}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print tolower($1)}'
+  else
+    print_message error "SHA-256 verification requires sha256sum or shasum."
+    return 1
+  fi
+}
+
+mkdir -p "$INSTALL_DIR"
 
 if [[ -n "$local_binary" ]]; then
   print_message info "Using local binary: $local_binary"
@@ -112,8 +152,27 @@ else
   tmp_dir=$(mktemp -d -t coven-code-install-XXXXXX)
   trap 'rm -rf "$tmp_dir"' EXIT
 
+  command -v curl >/dev/null 2>&1 || { print_message error "curl is required."; exit 1; }
+  command -v tar >/dev/null 2>&1 || { print_message error "tar is required."; exit 1; }
+  command -v awk >/dev/null 2>&1 || { print_message error "awk is required."; exit 1; }
+
+  print_message info "Downloading SHA256SUMS..."
+  curl --fail --show-error --silent --location --proto '=https' \
+    --proto-redir '=https' --tlsv1.2 "$CHECKSUM_URL" -o "${tmp_dir}/SHA256SUMS"
   print_message info "Downloading ${ARCHIVE_NAME}..."
-  curl -fsSL --progress-bar "$DOWNLOAD_URL" -o "${tmp_dir}/${ARCHIVE_NAME}"
+  curl --fail --show-error --silent --location --proto '=https' \
+    --proto-redir '=https' --tlsv1.2 --progress-bar "$DOWNLOAD_URL" \
+    -o "${tmp_dir}/${ARCHIVE_NAME}"
+  if ! expected=$(expected_checksum "${tmp_dir}/SHA256SUMS" "$ARCHIVE_NAME"); then
+    print_message error "SHA256SUMS is missing, malformed, ambiguous, or incomplete."
+    exit 1
+  fi
+  actual=$(file_checksum "${tmp_dir}/${ARCHIVE_NAME}")
+  if [[ "$actual" != "$expected" ]]; then
+    print_message error "Checksum mismatch for ${ARCHIVE_NAME}."
+    exit 1
+  fi
+  print_message success "Verified SHA-256 for ${ARCHIVE_NAME}"
   tar -xzf "${tmp_dir}/${ARCHIVE_NAME}" -C "$tmp_dir"
   cp "${tmp_dir}/${APP}" "${INSTALL_DIR}/${APP}.new"
   chmod +x "${INSTALL_DIR}/${APP}.new"

@@ -460,6 +460,10 @@ pub mod client {
     pub struct AnthropicClient {
         http: reqwest::Client,
         config: ClientConfig,
+        goal_authority: Option<(
+            claurst_core::goal::GoalTurn,
+            claurst_core::goal::GoalTurnPermission,
+        )>,
     }
 
     impl AnthropicClient {
@@ -505,7 +509,61 @@ pub mod client {
                 .timeout(config.request_timeout)
                 .build()?;
 
-            Ok(Self { http, config })
+            Ok(Self {
+                http,
+                config,
+                goal_authority: None,
+            })
+        }
+
+        /// Bind all requests (including internal retries and compaction) to
+        /// the same captured goal. The shared HTTP pool and wire format stay unchanged.
+        pub fn for_goal_turn(
+            &self,
+            turn: &claurst_core::goal::GoalTurn,
+            permission: claurst_core::goal::GoalTurnPermission,
+        ) -> Self {
+            Self {
+                http: self.http.clone(),
+                config: self.config.clone(),
+                goal_authority: Some((turn.clone(), permission)),
+            }
+        }
+
+        fn check_goal_authority(
+            authority: Option<&(
+                claurst_core::goal::GoalTurn,
+                claurst_core::goal::GoalTurnPermission,
+            )>,
+        ) -> Result<(), ClaudeError> {
+            if let Some((turn, permission)) = authority {
+                let actual = turn.validate().map_err(|error| {
+                    ClaudeError::Api(format!("Goal authority revoked: {error}"))
+                })?;
+                if actual != *permission {
+                    return Err(ClaudeError::Api(
+                        "Goal permits only its final response".into(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        async fn wait_for_goal_revocation(
+            authority: Option<&(
+                claurst_core::goal::GoalTurn,
+                claurst_core::goal::GoalTurnPermission,
+            )>,
+        ) -> ClaudeError {
+            if authority.is_none() {
+                return futures::future::pending().await;
+            }
+            loop {
+                if let Err(error) = Self::check_goal_authority(authority) {
+                    return error;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
 
         /// Convenience constructor that resolves the key from config/env.
@@ -529,6 +587,7 @@ pub mod client {
             &self,
             mut request: CreateMessageRequest,
         ) -> Result<CreateMessageResponse, ClaudeError> {
+            Self::check_goal_authority(self.goal_authority.as_ref())?;
             // Deferred key validation — fail here rather than at construction
             // so that non-Anthropic provider setups don't crash on startup.
             if self.config.api_key.is_empty() && self.config.provider != Provider::Codex {
@@ -612,6 +671,7 @@ pub mod client {
             mut request: CreateMessageRequest,
             handler: Arc<dyn StreamHandler>,
         ) -> Result<mpsc::Receiver<streaming::AnthropicStreamEvent>, ClaudeError> {
+            Self::check_goal_authority(self.goal_authority.as_ref())?;
             // Deferred key validation
             if self.config.api_key.is_empty() && self.config.provider != Provider::Codex {
                 return Err(ClaudeError::Auth(
@@ -642,9 +702,16 @@ pub mod client {
 
             let (tx, rx) = mpsc::channel(256);
 
-            // Spawn a task that reads the SSE byte stream and emits events.
+            // Receiver drop still stops the SSE reader; goal revocation also
+            // stops a compaction or other consumer that has no query event loop.
+            let authority = self.goal_authority.clone();
             tokio::spawn(async move {
-                if let Err(e) = Self::process_sse_stream(resp, handler, tx.clone()).await {
+                let result = tokio::select! {
+                    biased;
+                    error = Self::wait_for_goal_revocation(authority.as_ref()) => Err(error),
+                    result = Self::process_sse_stream(resp, handler, tx.clone()) => result,
+                };
+                if let Err(e) = result {
                     let _ = tx
                         .send(streaming::AnthropicStreamEvent::Error {
                             error_type: "stream_error".into(),
@@ -744,7 +811,17 @@ pub mod client {
 
                 let req = req.body(body_str.clone());
 
-                let resp = req.send().await.map_err(ClaudeError::Http)?;
+                Self::check_goal_authority(self.goal_authority.as_ref())?;
+                let resp = tokio::select! {
+                    biased;
+                    error = Self::wait_for_goal_revocation(self.goal_authority.as_ref()) => return Err(error),
+                    response = async {
+                        if let Some((turn, _)) = &self.goal_authority {
+                            turn.mark_request_attempted();
+                        }
+                        req.send().await
+                    } => response.map_err(ClaudeError::Http)?,
+                };
                 let status = resp.status().as_u16();
 
                 // 200-299: success
@@ -776,7 +853,11 @@ pub mod client {
                             wait_secs = wait.as_secs(),
                             "Retryable API error, backing off"
                         );
-                        tokio::time::sleep(wait).await;
+                        tokio::select! {
+                            biased;
+                            error = Self::wait_for_goal_revocation(self.goal_authority.as_ref()) => return Err(error),
+                            _ = tokio::time::sleep(wait) => {},
+                        }
                         delay = (delay * 2).min(self.config.max_retry_delay);
                         continue;
                     }

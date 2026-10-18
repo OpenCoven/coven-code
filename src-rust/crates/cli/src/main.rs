@@ -10,8 +10,12 @@
 
 mod codex_oauth_flow;
 mod headless;
+#[cfg(all(test, unix))]
+mod mcp_reconnect_tests;
 mod memory_admin;
 mod oauth_flow;
+#[cfg(all(test, unix))]
+mod plugin_mcp_config_tests;
 mod stream_mode;
 mod upgrade;
 
@@ -98,7 +102,11 @@ impl Tool for McpToolWrapper {
 
         let args = if input.is_null() { None } else { Some(input) };
 
-        match self.manager.call_tool(&self.tool_def.name, args).await {
+        match self
+            .manager
+            .call_tool(Some(&ctx.working_dir), &self.tool_def.name, args)
+            .await
+        {
             Ok(result) => {
                 let text = claurst_mcp::mcp_result_to_string(&result);
                 if result.is_error {
@@ -395,32 +403,38 @@ fn handle_exit_key(
     app: &mut claurst_tui::app::App,
     key: crossterm::event::KeyEvent,
     cancel: &Option<tokio_util::sync::CancellationToken>,
+    owner: &mut Option<InteractiveTurn>,
 ) -> bool {
-    if !key
-        .modifiers
-        .contains(crossterm::event::KeyModifiers::CONTROL)
-    {
-        return false;
-    }
-
-    match key.code {
-        crossterm::event::KeyCode::Char('c') => {
-            // Cancel background task first, then let app handle state cleanup
-            if app.is_streaming {
-                if let Some(ref ct) = cancel {
-                    ct.cancel();
-                }
+    match app.handle_control_key(key) {
+        Some(interrupt) => {
+            if interrupt {
+                abandon_interactive_turn(owner, app, cancel);
             }
-            app.handle_key_event(key);
             true
         }
-        crossterm::event::KeyCode::Char('d') => {
-            app.handle_key_event(key);
-            true
-        }
-        _ => false,
+        None => false,
     }
 }
+
+fn abandon_interactive_turn(
+    owner: &mut Option<InteractiveTurn>,
+    app: &mut claurst_tui::App,
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+) {
+    if let Some(owner) = owner {
+        owner.abandoned = true;
+    }
+    app.rate_limit_recovery.dismiss();
+    if app.file_injection_dialog.visible || app.file_injection_force {
+        app.file_injection_dialog.dismiss();
+        app.file_injection_force = false;
+        app.pending_auto_submit = false;
+    }
+    if let Some(cancel) = cancel {
+        cancel.cancel();
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Perform a best-effort, non-fatal relocation of the engine home from the
@@ -741,7 +755,7 @@ async fn main() -> anyhow::Result<()> {
     let current_turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Initialize MCP servers first (needed for ToolContext.mcp_manager).
-    let mcp_manager_arc = connect_mcp_manager_arc(&config).await;
+    let mcp_manager_arc = connect_mcp_manager_arc(&config, Some(&cwd)).await;
 
     let pending_permissions = Arc::new(ParkingMutex::new(
         claurst_tools::PendingPermissionStore::default(),
@@ -765,6 +779,7 @@ async fn main() -> anyhow::Result<()> {
         permission_handler: permission_handler.clone(),
         cost_tracker: cost_tracker.clone(),
         session_id: session_id.clone(),
+        goal_turn: claurst_core::goal::GoalTurnContext::pending_default(),
         file_history: file_history.clone(),
         current_turn: current_turn.clone(),
         non_interactive: is_non_interactive,
@@ -831,13 +846,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Register plugin MCP servers into the in-memory config so they are
             // picked up by any subsequent MCP manager construction.
-            let existing_names: std::collections::HashSet<String> =
-                config.mcp_servers.iter().map(|s| s.name.clone()).collect();
-            for mcp_server in plugin_registry.all_mcp_servers() {
-                if !existing_names.contains(&mcp_server.name) {
-                    config.mcp_servers.push(mcp_server);
-                }
-            }
+            config
+                .reconcile_plugin_mcp_servers(plugin_registry.all_mcp_servers())
+                .await?;
         }
     }
 
@@ -1069,8 +1080,30 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::McpManager>> {
-    if config.mcp_servers.is_empty() {
+async fn refresh_mcp_project_config(
+    config: &mut Config,
+    project_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    config.set_mcp_project(project_dir).await?;
+    claurst_plugins::refresh_cached_plugins(project_dir).await;
+    if config.hosted_review_enabled() && !config.hosted_review.allow_plugins {
+        config.reconcile_plugin_mcp_servers(Vec::new()).await?;
+    } else if let Some(registry) = claurst_plugins::global_plugin_registry()
+        .filter(|registry| registry.matches_project(project_dir))
+    {
+        config
+            .reconcile_plugin_mcp_servers(registry.all_mcp_servers())
+            .await?;
+    }
+    Ok(())
+}
+
+async fn connect_mcp_manager_arc(
+    config: &Config,
+    caller: Option<&std::path::Path>,
+) -> Option<Arc<claurst_mcp::McpManager>> {
+    let server_count = config.effective_mcp_servers().count();
+    if server_count == 0 {
         return None;
     }
     if config.hosted_review_enabled() && !config.hosted_review.allow_mcp_servers {
@@ -1078,12 +1111,9 @@ async fn connect_mcp_manager_arc(config: &Config) -> Option<Arc<claurst_mcp::Mcp
         return None;
     }
 
-    info!(
-        count = config.mcp_servers.len(),
-        "Connecting to MCP servers"
-    );
-    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_all(&config.mcp_servers).await);
-    mcp_manager.clone().spawn_notification_poll_loop();
+    info!(count = server_count, "Connecting to MCP servers");
+    let mcp_manager = Arc::new(claurst_mcp::McpManager::connect_config(config, caller).await);
+    mcp_manager.clone().spawn_notification_poll_loop(caller);
     Some(mcp_manager)
 }
 
@@ -1106,6 +1136,31 @@ fn build_tools_with_mcp(
     }
 
     Arc::new(v)
+}
+
+fn replace_mcp_runtime(
+    new_manager: Option<Arc<claurst_mcp::McpManager>>,
+    tool_ctx: &mut ToolContext,
+    cmd_ctx: &mut claurst_commands::CommandContext,
+    app_manager: &mut Option<Arc<claurst_mcp::McpManager>>,
+) -> Arc<Vec<Box<dyn claurst_tools::Tool>>> {
+    // Startup and cron owners can retain these managers after reconnect.
+    // Retire only notifications; their ordinary requests remain available.
+    for retired in [&tool_ctx.mcp_manager, &cmd_ctx.mcp_manager, &*app_manager]
+        .into_iter()
+        .flatten()
+    {
+        if !new_manager
+            .as_ref()
+            .is_some_and(|replacement| Arc::ptr_eq(retired, replacement))
+        {
+            retired.shutdown_notification_poll_loops();
+        }
+    }
+    tool_ctx.mcp_manager = new_manager.clone();
+    cmd_ctx.mcp_manager = new_manager.clone();
+    *app_manager = new_manager.clone();
+    filter_tools_for_hosted_review(build_tools_with_mcp(new_manager), &cmd_ctx.config)
 }
 
 fn model_cache_dir() -> PathBuf {
@@ -2009,9 +2064,367 @@ fn permission_request_from_core(
     }
 }
 
+/// One submitted logical turn, retained through failures and model-switch retries.
+/// Resolved absence/failure is stored even when there is no accounting baseline.
+#[derive(Debug)]
+struct InteractiveTurn {
+    goal: claurst_core::goal::GoalTurnContext,
+    baseline: Option<GoalTurnBaseline>,
+    synthetic_uuid: Option<String>,
+    abandoned: bool,
+    awaiting_file_confirmation: bool,
+}
+
+impl InteractiveTurn {
+    fn capture(context: &mut ToolContext, tracker_total: u64) -> Self {
+        let baseline = match capture_goal_turn_baseline(context, tracker_total) {
+            Ok(baseline) => baseline,
+            Err(error) => {
+                warn!(%error, "Could not capture interactive goal turn");
+                None
+            }
+        };
+        Self {
+            goal: context.goal_turn.clone(),
+            baseline,
+            synthetic_uuid: None,
+            abandoned: false,
+            awaiting_file_confirmation: false,
+        }
+    }
+
+    fn from_goal(turn: claurst_core::goal::GoalTurn, tracker_total: u64) -> Self {
+        let baseline = Some(GoalTurnBaseline {
+            goal_id: turn.goal().id.clone(),
+            session_id: turn.goal().session_id.clone(),
+            store_path: turn.store_path().to_path_buf(),
+            tracker_total,
+            started_at: std::time::Instant::now(),
+        });
+        Self {
+            goal: claurst_core::goal::GoalTurnContext::Captured(Some(turn)),
+            baseline,
+            synthetic_uuid: None,
+            abandoned: false,
+            awaiting_file_confirmation: false,
+        }
+    }
+
+    fn prepare_context(&self, context: &mut ToolContext) {
+        context.goal_turn = self.goal.clone();
+    }
+
+    fn inject(
+        &mut self,
+        text: String,
+        messages: &mut Vec<claurst_core::types::Message>,
+        app: &mut claurst_tui::App,
+        session: &mut claurst_core::history::ConversationSession,
+    ) -> Result<(), claurst_core::GoalError> {
+        self.goal.require_work(&session.id)?;
+        let mut message = claurst_core::types::Message::user(text);
+        message.uuid = Some(uuid::Uuid::new_v4().to_string());
+        self.synthetic_uuid = message.uuid.clone();
+        messages.push(message.clone());
+        app.push_message(message);
+        session.messages = messages.clone();
+        session.updated_at = chrono::Utc::now();
+        Ok(())
+    }
+
+    fn continuation(&self, tracker_total: u64) -> claurst_query::GoalContinuation {
+        let Some(baseline) = self.baseline.as_ref().filter(|_| !self.abandoned) else {
+            return claurst_query::GoalContinuation::NoGoal;
+        };
+        let result = (|| {
+            let current = claurst_core::GoalStore::open(&baseline.store_path)
+                .and_then(|store| store.try_get_goal(&baseline.session_id))
+                .map_err(|error| error.to_string())?;
+            match decide_goal_turn_accounting(Some(baseline), current.as_ref(), tracker_total)? {
+                GoalTurnAccountingDecision::Skip => Ok(claurst_query::GoalContinuation::NoGoal),
+                GoalTurnAccountingDecision::Record { total_tokens_used } => {
+                    claurst_query::check_and_continue_goal_at_path_for_goal(
+                        &baseline.store_path,
+                        &baseline.session_id,
+                        &baseline.goal_id,
+                        total_tokens_used,
+                        baseline.started_at.elapsed().as_secs(),
+                    )
+                    .map_err(|error| error.to_string())
+                }
+            }
+        })();
+        result.unwrap_or_else(|error| claurst_query::GoalContinuation::Stop {
+            reason: claurst_query::StopReason::Error(error),
+        })
+    }
+}
+
+/// Select one logical submission, including a confirmed file-preparation retry.
+fn select_submission_turn(
+    submitted_goal: Option<claurst_core::goal::GoalTurn>,
+    previous: &mut Option<InteractiveTurn>,
+    context: &ToolContext,
+    tracker_total: u64,
+    resume_preparation: bool,
+) -> Result<InteractiveTurn, claurst_core::GoalError> {
+    if resume_preparation {
+        let mut owner = previous
+            .take()
+            .filter(|owner| owner.awaiting_file_confirmation && !owner.abandoned)
+            .ok_or_else(|| claurst_core::GoalError::NotActive {
+                session_id: context.session_id.clone(),
+            })?;
+        owner.awaiting_file_confirmation = false;
+        return Ok(owner);
+    }
+    Ok(match submitted_goal {
+        Some(turn) => InteractiveTurn::from_goal(turn, tracker_total),
+        None => InteractiveTurn::capture(&mut context.clone(), tracker_total),
+    })
+}
+
+/// Consume the real dialog result before synthesizing its resubmission event.
+fn handle_file_preparation(
+    app: &mut claurst_tui::App,
+    owner: &mut Option<InteractiveTurn>,
+) -> bool {
+    // Escape dismisses directly in App without producing an outcome.
+    if owner
+        .as_ref()
+        .is_some_and(|owner| owner.awaiting_file_confirmation)
+        && !app.file_injection_dialog.visible
+        && !app.file_injection_force
+    {
+        *owner = None;
+    }
+    let Some((outcome, input, images)) = app.file_injection_dialog.take_outcome() else {
+        return false;
+    };
+    if matches!(outcome, claurst_tui::FileInjectionOutcome::Abort) {
+        *owner = None;
+        return true;
+    }
+    app.file_injection_force = true;
+    for image in images {
+        app.prompt_input.add_image(image);
+    }
+    app.set_prompt_text(input);
+    app.pending_auto_submit = true;
+    false
+}
+
+/// Remove only the synthetic message owned by an abandoned/revoked turn that
+/// never reached a model transport. Attempted transcripts survive stale retry.
+fn rollback_unattempted_turn(
+    owner: Option<&InteractiveTurn>,
+    force: bool,
+    messages: &mut Vec<claurst_core::types::Message>,
+    app: &mut claurst_tui::App,
+    session: &mut claurst_core::history::ConversationSession,
+    command_messages: &mut Vec<claurst_core::types::Message>,
+) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    let Some(uuid) = owner.synthetic_uuid.as_deref() else {
+        return false;
+    };
+    let Some(turn) = owner.goal.captured() else {
+        return false;
+    };
+    if turn.request_attempted() || (!force && !owner.abandoned && turn.validate().is_ok()) {
+        return false;
+    }
+    let mut changed = false;
+    let mut remove_owned = |copy: &mut Vec<claurst_core::types::Message>| {
+        let before = copy.len();
+        copy.retain(|message| message.uuid.as_deref() != Some(uuid));
+        let removed = before - copy.len();
+        changed |= removed > 0;
+        removed
+    };
+    remove_owned(messages);
+    let mut visible = std::mem::take(&mut app.messages);
+    if remove_owned(&mut visible) > 0 {
+        app.replace_messages(visible);
+    } else {
+        app.messages = visible;
+    }
+    remove_owned(&mut session.messages);
+    for checkpoint in &mut session.checkpoints {
+        let removed = remove_owned(&mut checkpoint.snapshot);
+        checkpoint.message_idx = checkpoint.message_idx.saturating_sub(removed);
+    }
+    remove_owned(command_messages);
+    changed
+}
+
+fn show_rate_limit_recovery(
+    owner: Option<&InteractiveTurn>,
+    app: &mut claurst_tui::App,
+    message: Option<&str>,
+    retry_after_secs: Option<u64>,
+) {
+    while app.notifications.current_is_error() {
+        app.notifications.dismiss_current();
+    }
+    if !owner.is_some_and(|owner| owner.abandoned) {
+        app.open_rate_limit_recovery(
+            message.unwrap_or("Rate limit exceeded.").to_owned(),
+            retry_after_secs,
+        );
+    }
+}
+
+/// Called each REPL frame before retry selection or idle work.
+async fn settle_abandoned_turn(
+    owner: &mut Option<InteractiveTurn>,
+    query_running: bool,
+    messages: &mut Vec<claurst_core::types::Message>,
+    app: &mut claurst_tui::App,
+    session: &mut claurst_core::history::ConversationSession,
+    command_messages: &mut Vec<claurst_core::types::Message>,
+) {
+    if app.rate_limit_recovery.take_abandoned() {
+        if let Some(owner) = owner {
+            owner.abandoned = true;
+        }
+    }
+    if owner.as_ref().is_some_and(|owner| owner.abandoned) {
+        if rollback_unattempted_turn(
+            owner.as_ref(),
+            true,
+            messages,
+            app,
+            session,
+            command_messages,
+        ) {
+            persist_interactive_session(session, owner.as_ref()).await;
+        }
+        // Keep authority until the cancelled task has drained its partial output.
+        if !query_running {
+            *owner = None;
+        }
+    }
+}
+
+type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
+
+struct InteractiveQuery {
+    client: Arc<claurst_api::AnthropicClient>,
+    tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
+    context: ToolContext,
+    config: claurst_query::QueryConfig,
+    tracker: Arc<CostTracker>,
+    events: tokio::sync::mpsc::UnboundedSender<claurst_query::QueryEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl InteractiveQuery {
+    fn spawn(self, messages: MessagesArc) -> tokio::task::JoinHandle<claurst_query::QueryOutcome> {
+        tokio::spawn(async move {
+            if self.cancel.is_cancelled() {
+                return claurst_query::QueryOutcome::Cancelled;
+            }
+            if let Err(error) = self.context.goal_turn.validate(&self.context.session_id) {
+                return claurst_query::QueryOutcome::Error(claurst_core::error::ClaudeError::Api(
+                    format!("Goal authority revoked before dispatch: {error}"),
+                ));
+            }
+            let mut msgs = messages.lock().await.clone();
+            let outcome = claurst_query::run_query_loop(
+                self.client.as_ref(),
+                &mut msgs,
+                self.tools.as_slice(),
+                &self.context,
+                &self.config,
+                self.tracker,
+                Some(self.events),
+                self.cancel,
+                None,
+            )
+            .await;
+            *messages.lock().await = msgs;
+            outcome
+        })
+    }
+}
+
+async fn persist_interactive_session(
+    session: &claurst_core::history::ConversationSession,
+    owner: Option<&InteractiveTurn>,
+) {
+    // A recoverable preparation/auth failure can finish without an attempt.
+    // Delay indexing its synthetic UUID until attempted; a later stale retry
+    // can then roll it back without leaving an immutable search-index entry.
+    let pending_uuid = owner
+        .filter(|owner| {
+            owner
+                .goal
+                .captured()
+                .is_some_and(|turn| !turn.request_attempted())
+        })
+        .and_then(|owner| owner.synthetic_uuid.as_deref());
+    // JSON is primary storage; index only the finalized transcript.
+    let _ = claurst_core::history::save_session(session).await;
+
+    // Also index into SQLite for /search support
+    {
+        let db_path = claurst_core::config::Settings::config_dir().join("sessions.db");
+        if let Ok(store) = claurst_core::SqliteSessionStore::open(&db_path) {
+            let _ = store.save_session(&session.id, session.title.as_deref(), &session.model);
+            for msg in &session.messages {
+                if pending_uuid.is_some() && msg.uuid.as_deref() == pending_uuid {
+                    continue;
+                }
+                let content_str = match &msg.content {
+                    claurst_core::types::MessageContent::Text(t) => t.clone(),
+                    claurst_core::types::MessageContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if let claurst_core::types::ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
+                let role = match msg.role {
+                    claurst_core::types::Role::User => "user",
+                    claurst_core::types::Role::Assistant => "assistant",
+                };
+                let msg_id = msg.uuid.as_deref().unwrap_or("unknown");
+                let _ = store.save_message(&session.id, msg_id, role, &content_str, None);
+            }
+        }
+    }
+}
+
+fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
+    if !app.auto_compact_enabled
+        || app.context_window_size == 0
+        || app.is_streaming
+        || query_running
+        || app.auto_compact_running
+        || app.rate_limit_recovery.is_pending()
+        || app.file_injection_dialog.visible
+        || app.file_injection_force
+        || app.notifications.current_is_error()
+    {
+        return None;
+    }
+    let used_pct = (app.context_used_tokens as f64 / app.context_window_size as f64 * 100.0) as u64;
+    (used_pct >= u64::from(app.auto_compact_threshold)).then_some(used_pct)
+}
+
 #[derive(Debug, Clone)]
 struct GoalTurnBaseline {
     goal_id: String,
+    session_id: String,
+    store_path: PathBuf,
     tracker_total: u64,
     started_at: std::time::Instant,
 }
@@ -2023,18 +2436,19 @@ enum GoalTurnAccountingDecision {
 }
 
 fn capture_goal_turn_baseline(
-    session_id: &str,
+    tool_ctx: &mut ToolContext,
     tracker_total: u64,
 ) -> Result<Option<GoalTurnBaseline>, claurst_core::GoalError> {
-    let store = claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())?;
-    let goal = store.try_get_goal(session_id)?;
-    Ok(goal
-        .filter(|goal| goal.status == claurst_core::GoalStatus::Active)
-        .map(|goal| GoalTurnBaseline {
-            goal_id: goal.id,
-            tracker_total,
-            started_at: std::time::Instant::now(),
-        }))
+    // Capture before dispatch: the query derives its prompt and completion
+    // authority from this exact snapshot, never another mutable store read.
+    tool_ctx.goal_turn.capture(&tool_ctx.session_id)?;
+    Ok(tool_ctx.goal_turn.captured().map(|turn| GoalTurnBaseline {
+        goal_id: turn.goal().id.clone(),
+        session_id: turn.goal().session_id.clone(),
+        store_path: turn.store_path().to_path_buf(),
+        tracker_total,
+        started_at: std::time::Instant::now(),
+    }))
 }
 
 fn decide_goal_turn_accounting(
@@ -2124,6 +2538,7 @@ async fn run_interactive(
     let mut client = client;
     let mut model_registry = model_registry;
     let mut tool_ctx = tool_ctx;
+    let mut config = config;
     let mut resume_warning: Option<String> = None;
     let resume_id = if resume_id.as_deref() == Some("__last__") {
         let sessions = claurst_core::history::list_sessions().await;
@@ -2149,6 +2564,7 @@ async fn run_interactive(
                     let saved_path = std::path::PathBuf::from(saved_dir);
                     if saved_path.exists() {
                         tool_ctx.working_dir = saved_path;
+                        refresh_mcp_project_config(&mut config, &tool_ctx.working_dir).await?;
                     }
                 }
                 tool_ctx.session_id = session.id.clone();
@@ -2184,6 +2600,7 @@ async fn run_interactive(
     if !session.model.is_empty() {
         live_config.model = Some(session.model.clone());
     }
+    tool_ctx.config = live_config.clone();
     let pending_permissions = tool_ctx.pending_permissions.clone().unwrap_or_else(|| {
         Arc::new(ParkingMutex::new(
             claurst_tools::PendingPermissionStore::default(),
@@ -2451,7 +2868,6 @@ async fn run_interactive(
     // info here, where the main loop fans-out to a TUI toast + optional bell.
     let (bg_completion_tx, mut bg_completion_rx) =
         mpsc::unbounded_channel::<claurst_tools::BgTaskCompletion>();
-    type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
     let mut current_query: Option<(tokio::task::JoinHandle<QueryOutcome>, MessagesArc)> = None;
     // Active effort level (None = use model default / High).
     // Tracks the user's /effort selection; flows into qcfg each turn.
@@ -2459,7 +2875,7 @@ async fn run_interactive(
     // Start time and session-wide tracker baseline for the most recent real
     // query turn. Goal accounting converts the tracker delta into a durable,
     // goal-absolute token total only after a successful EndTurn.
-    let mut goal_turn_baseline: Option<GoalTurnBaseline> = None;
+    let mut goal_turn: Option<InteractiveTurn> = None;
 
     // Background update check: spawned once at startup; result delivered via channel.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
@@ -2503,25 +2919,8 @@ async fn run_interactive(
         app.tick_companion_pose();
         app.notifications.tick();
 
-        // Process file injection dialog outcome (if any)
-        if let Some((outcome, pending_input, pending_imgs)) =
-            app.file_injection_dialog.take_outcome()
-        {
-            use claurst_tui::FileInjectionOutcome;
-
-            if matches!(outcome, FileInjectionOutcome::Abort) {
-                // Abort: input already restored to prompt by app.rs handler
-                continue;
-            }
-
-            // InjectAll: bypass size limit on resubmission, restore stashed input+images,
-            // then synthesize Enter to send immediately.
-            app.file_injection_force = true;
-            for img in pending_imgs {
-                app.prompt_input.add_image(img);
-            }
-            app.set_prompt_text(pending_input);
-            app.pending_auto_submit = true;
+        if handle_file_preparation(&mut app, &mut goal_turn) {
+            continue;
         }
 
         // Draw the UI
@@ -2584,8 +2983,8 @@ async fn run_interactive(
                     }
                     // -------------------------------------------------------------------
 
-                    // Ctrl+C and Ctrl+D: exit confirmation handling
-                    if handle_exit_key(&mut app, key, &cancel) {
+                    // Configured interrupt and exit actions
+                    if handle_exit_key(&mut app, key, &cancel, &mut goal_turn) {
                         if app.should_exit {
                             break 'main;
                         }
@@ -2662,10 +3061,15 @@ async fn run_interactive(
                             // Fall through to submit — no second Enter needed
                         }
 
-                        let input = app.take_input();
+                        let mut input = app.take_input();
+                        if current_query.is_some() {
+                            if !input.is_empty() { app.queued_messages.push_back(input); }
+                            continue;
+                        }
                         if input.is_empty() {
                             continue;
                         }
+                        let mut submitted_goal = None;
 
                         // Check for slash command
                         if input.starts_with('/') {
@@ -2782,7 +3186,15 @@ async fn run_interactive(
                             };
                             let command_succeeded = !matches!(&cli_result, Some(CommandResult::Error(_))) && (handled_by_tui || cli_result.is_some());
                             let refresh_catalog = matches!(&cli_result, Some(CommandResult::ResumeSession(_) | CommandResult::ConfigChange(_) | CommandResult::ConfigChangeMessage(_, _)))
-                                || command_succeeded && canonical_path.as_deref() == Some("plugin reload");
+                                || command_succeeded && match canonical_path.as_deref() {
+                                    Some("plugin reload") => true,
+                                    Some("plugin") => matches!(
+                                        claurst_plugins::parse_plugin_args(&cmd_args),
+                                        claurst_plugins::PluginSubCommand::Enable(_)
+                                            | claurst_plugins::PluginSubCommand::Disable(_)
+                                    ),
+                                    _ => false,
+                                };
                             // Start optimistically true; set false for Silent/None below.
                             let mut handled_by_cli = cli_result.is_some();
 
@@ -2852,6 +3264,10 @@ async fn run_interactive(
                                         if saved_path.exists() {
                                             tool_ctx.working_dir = saved_path.clone();
                                             cmd_ctx.working_dir = saved_path;
+                                            refresh_mcp_project_config(&mut cmd_ctx.config, &tool_ctx.working_dir).await?;
+                                            app.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                            tool_ctx.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                            tool_ctx.config.project_dir = cmd_ctx.config.project_dir.clone();
                                         }
                                     }
                                     app.config.project_dir = Some(tool_ctx.working_dir.clone());
@@ -3008,6 +3424,10 @@ async fn run_interactive(
                                     );
                                     app.status_message = Some(msg);
                                 }
+                                Some(CommandResult::GoalUserMessage { message, turn }) => {
+                                    submitted_goal = Some(turn);
+                                    submit_user_msg = Some(message);
+                                }
                                 Some(CommandResult::UserMessage(msg)) => {
                                     // Queue a user-visible turn for the model.
                                     submit_user_msg = Some(msg);
@@ -3152,6 +3572,11 @@ async fn run_interactive(
                             }
 
                             if refresh_catalog {
+                                app.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                tool_ctx.config.plugin_mcp_servers = cmd_ctx.config.plugin_mcp_servers.clone();
+                                if app.mcp_view.visible {
+                                    app.refresh_mcp_view();
+                                }
                                 refresh_command_discovery(&mut app, &cmd_ctx.config, &cmd_ctx.working_dir);
                             }
                             if command_succeeded {
@@ -3162,13 +3587,37 @@ async fn run_interactive(
 
                             // If a UserMessage was queued (e.g. /compact), submit it.
                             if let Some(msg) = submit_user_msg {
-                                messages.push(claurst_core::types::Message::user(msg.clone()));
-                                app.push_message(claurst_core::types::Message::user(msg));
-                                // Fall through to the send path below.
+                                input = msg;
+                                // Fall through to the single injection/send path below.
                             } else {
                                 continue;
                             }
                         }
+
+                        if rollback_unattempted_turn(goal_turn.as_ref(), true, &mut messages,
+                            &mut app, &mut session, &mut cmd_ctx.messages) {
+                            persist_interactive_session(&session, goal_turn.as_ref()).await;
+                        }
+                        app.rate_limit_recovery.dismiss();
+                        app.rate_limit_recovery.take_abandoned();
+                        let synthetic = submitted_goal.is_some();
+                        let mut owner = match select_submission_turn(submitted_goal, &mut goal_turn,
+                            &tool_ctx, cost_tracker.total_tokens(), app.file_injection_force) {
+                            Ok(owner) => owner,
+                            Err(error) => {
+                                app.file_injection_force = false;
+                                app.status_message = Some(format!("Goal dispatch stopped: {error}"));
+                                continue;
+                            }
+                        };
+                        if synthetic {
+                            if let Err(error) = owner.inject(input.clone(), &mut messages, &mut app, &mut session) {
+                                app.status_message = Some(format!("Goal dispatch stopped: {error}"));
+                                goal_turn = None;
+                                continue;
+                            }
+                        }
+                        goal_turn = Some(owner);
 
                         // Fire UserPromptSubmit hook (non-blocking)
                         if !cmd_ctx.config.hooks.is_empty() {
@@ -3189,6 +3638,7 @@ async fn run_interactive(
                             .await;
                         }
 
+                        if !synthetic {
                         // Regular user message (with optional image attachments + file injection)
                         let pending_imgs = app.prompt_input.clear_images();
 
@@ -3245,6 +3695,7 @@ async fn run_interactive(
                                     })
                                     .collect();
 
+                                if let Some(owner) = &mut goal_turn { owner.awaiting_file_confirmation = true; }
                                 app.file_injection_dialog.show(
                                     input.clone(),
                                     pending_imgs,
@@ -3336,6 +3787,7 @@ async fn run_interactive(
                             session.updated_at = chrono::Utc::now();
                         }
 
+                        }
                         // Update terminal title from session title or first message
                         if session.title.is_some() {
                             claurst_tui::update_terminal_title(session.title.as_deref());
@@ -3371,16 +3823,6 @@ async fn run_interactive(
                         qcfg.output_style = cmd_ctx.config.effective_output_style();
                         qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                         qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
-                        // Inject active goal addendum into system prompt (if goals enabled).
-                        if let Some(goal) = claurst_core::GoalStore::open_default()
-                            .and_then(|s| s.get_active_goal(&session.id))
-                        {
-                            let addendum = claurst_core::goal_system_prompt_addendum(&goal);
-                            qcfg.append_system_prompt = Some(match qcfg.append_system_prompt {
-                                Some(existing) => format!("{}\n{}", existing, addendum),
-                                None => addendum,
-                            });
-                        }
                         // Apply active effort level. Once the user has chosen a
                         // level through any UI (model picker ←/→, the /effort
                         // dialog, or the /effort command) `app.effort_level` is
@@ -3420,42 +3862,12 @@ async fn run_interactive(
                         let tracker = cost_tracker.clone();
                         let tx = event_tx.clone();
                         let client_clone = client.clone();
-                        goal_turn_baseline = if claurst_core::goals_enabled() {
-                            match capture_goal_turn_baseline(
-                                &session.id,
-                                cost_tracker.total_tokens(),
-                            ) {
-                                Ok(baseline) => baseline,
-                                Err(error) => {
-                                    app.status_message = Some(format!(
-                                        "Goal error: could not capture turn baseline: {}",
-                                        error
-                                    ));
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                        if let Some(owner) = &goal_turn { owner.prepare_context(&mut ctx_clone); }
 
-                        let handle = tokio::spawn(async move {
-                            let mut msgs = msgs_arc_clone.lock().await.clone();
-                            let outcome = claurst_query::run_query_loop(
-                                client_clone.as_ref(),
-                                &mut msgs,
-                                tools_arc_clone.as_slice(),
-                                &ctx_clone,
-                                &qcfg,
-                                tracker,
-                                Some(tx),
-                                ct,
-                                None,
-                            )
-                            .await;
-                            // Write updated messages (with tool calls + assistant response) back
-                            *msgs_arc_clone.lock().await = msgs;
-                            outcome
-                        });
+                        let handle = InteractiveQuery {
+                            client: client_clone, tools: tools_arc_clone, context: ctx_clone,
+                            config: qcfg, tracker, events: tx, cancel: ct,
+                        }.spawn(msgs_arc_clone);
 
                         // Store the Arc so we can read messages after task completes
                         current_query = Some((handle, msgs_arc));
@@ -3779,60 +4191,61 @@ async fn run_interactive(
             );
         }
 
+        settle_abandoned_turn(
+            &mut goal_turn,
+            current_query.is_some(),
+            &mut messages,
+            &mut app,
+            &mut session,
+            &mut cmd_ctx.messages,
+        )
+        .await;
+
         // Auto-compact: when enabled and context usage reaches the configured
         // threshold with no query running, summarize through the dedicated
         // no-tools compaction path instead of starting an agentic turn.
-        if app.auto_compact_enabled
-            && app.context_window_size > 0
-            && !app.is_streaming
-            && current_query.is_none()
-            && !app.auto_compact_running
-        {
-            let used_pct =
-                (app.context_used_tokens as f64 / app.context_window_size as f64 * 100.0) as u64;
-            if used_pct >= u64::from(app.auto_compact_threshold) {
-                app.auto_compact_running = true;
-                app.status_message = Some(format!("Context {}% full — auto-compacting…", used_pct));
+        if let Some(used_pct) = select_idle_compaction(&app, current_query.is_some()) {
+            app.auto_compact_running = true;
+            app.status_message = Some(format!("Context {}% full — auto-compacting…", used_pct));
 
-                let ct = CancellationToken::new();
-                cancel = Some(ct.clone());
-                let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
-                let msgs_arc_clone = msgs_arc.clone();
-                let compact_model =
-                    claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
-                let client_clone = client.clone();
-                app.is_streaming = true;
-                goal_turn_baseline = None;
+            let ct = CancellationToken::new();
+            cancel = Some(ct.clone());
+            let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
+            let msgs_arc_clone = msgs_arc.clone();
+            let compact_model =
+                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+            let client_clone = client.clone();
+            app.is_streaming = true;
+            goal_turn = None;
 
-                let handle = tokio::spawn(async move {
-                    if ct.is_cancelled() {
-                        return QueryOutcome::Cancelled;
-                    }
+            let handle = tokio::spawn(async move {
+                if ct.is_cancelled() {
+                    return QueryOutcome::Cancelled;
+                }
 
-                    let msgs = msgs_arc_clone.lock().await.clone();
-                    match claurst_query::compact_conversation(
-                        client_clone.as_ref(),
-                        &msgs,
-                        &compact_model,
-                    )
-                    .await
-                    {
-                        Ok(compacted) => {
-                            let message = compacted
-                                .first()
-                                .cloned()
-                                .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
-                            *msgs_arc_clone.lock().await = compacted;
-                            QueryOutcome::EndTurn {
-                                message,
-                                usage: claurst_core::types::UsageInfo::default(),
-                            }
+                let msgs = msgs_arc_clone.lock().await.clone();
+                match claurst_query::compact_conversation(
+                    client_clone.as_ref(),
+                    &msgs,
+                    &compact_model,
+                )
+                .await
+                {
+                    Ok(compacted) => {
+                        let message = compacted
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
+                        *msgs_arc_clone.lock().await = compacted;
+                        QueryOutcome::EndTurn {
+                            message,
+                            usage: claurst_core::types::UsageInfo::default(),
                         }
-                        Err(err) => QueryOutcome::Error(err),
                     }
-                });
-                current_query = Some((handle, msgs_arc));
-            }
+                    Err(err) => QueryOutcome::Error(err),
+                }
+            });
+            current_query = Some((handle, msgs_arc));
         }
 
         // Drain TUI-facing bridge events.
@@ -3941,12 +4354,32 @@ async fn run_interactive(
                         app.bridge_state = BridgeConnectionState::Reconnecting { attempt };
                     }
                     Ok(TuiBridgeEvent::InboundPrompt { content, .. }) => {
+                        if current_query.is_some()
+                            || app.file_injection_dialog.visible
+                            || app.file_injection_force
+                        {
+                            app.queued_messages.push_back(content);
+                            continue;
+                        }
+                        if rollback_unattempted_turn(
+                            goal_turn.as_ref(),
+                            true,
+                            &mut messages,
+                            &mut app,
+                            &mut session,
+                            &mut cmd_ctx.messages,
+                        ) {
+                            persist_interactive_session(&session, goal_turn.as_ref()).await;
+                        }
+                        app.rate_limit_recovery.dismiss();
+                        app.rate_limit_recovery.take_abandoned();
                         // Inject the remote prompt as if the user typed it, then
                         // trigger submission automatically.
                         app.set_prompt_text(content.clone());
                         // Push as a user message and fire a query immediately.
-                        messages.push(claurst_core::types::Message::user(content.clone()));
-                        app.push_message(claurst_core::types::Message::user(content.clone()));
+                        let user_message = claurst_core::types::Message::user(content.clone());
+                        messages.push(user_message.clone());
+                        app.push_message(user_message);
                         session.messages = messages.clone();
                         session.updated_at = chrono::Utc::now();
                         app.is_streaming = true;
@@ -3956,7 +4389,7 @@ async fn run_interactive(
                         let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
                         let msgs_arc_clone = msgs_arc.clone();
                         let tools_arc_clone = tools_arc.clone();
-                        let ctx_clone = tool_ctx.clone();
+                        let mut ctx_clone = tool_ctx.clone();
                         let mut qcfg = base_query_config.clone();
                         qcfg.model = claurst_api::effective_model_for_config(
                             &cmd_ctx.config,
@@ -3966,50 +4399,26 @@ async fn run_interactive(
                         let tracker = cost_tracker.clone();
                         let tx = event_tx.clone();
                         let client_clone = client.clone();
-                        goal_turn_baseline = if claurst_core::goals_enabled() {
-                            match capture_goal_turn_baseline(
-                                &session.id,
-                                cost_tracker.total_tokens(),
-                            ) {
-                                Ok(baseline) => baseline,
-                                Err(error) => {
-                                    app.status_message = Some(format!(
-                                        "Goal error: could not capture turn baseline: {}",
-                                        error
-                                    ));
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-                        let handle = tokio::spawn(async move {
-                            let mut msgs = msgs_arc_clone.lock().await.clone();
-                            let outcome = claurst_query::run_query_loop(
-                                client_clone.as_ref(),
-                                &mut msgs,
-                                tools_arc_clone.as_slice(),
-                                &ctx_clone,
-                                &qcfg,
-                                tracker,
-                                Some(tx),
-                                ct,
-                                None,
-                            )
-                            .await;
-                            *msgs_arc_clone.lock().await = msgs;
-                            outcome
-                        });
+                        goal_turn = Some(InteractiveTurn::capture(
+                            &mut ctx_clone,
+                            cost_tracker.total_tokens(),
+                        ));
+                        let handle = InteractiveQuery {
+                            client: client_clone,
+                            tools: tools_arc_clone,
+                            context: ctx_clone,
+                            config: qcfg,
+                            tracker,
+                            events: tx,
+                            cancel: ct,
+                        }
+                        .spawn(msgs_arc_clone);
                         current_query = Some((handle, msgs_arc));
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
-                        if app.is_streaming {
-                            if let Some(ref ct) = cancel {
-                                ct.cancel();
-                            }
-                            app.is_streaming = false;
-                            app.status_message = Some("Cancelled by remote control.".to_string());
-                        }
+                        abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+                        app.is_streaming = false;
+                        app.status_message = Some("Cancelled by remote control.".to_string());
                     }
                     Ok(TuiBridgeEvent::PermissionResponse {
                         tool_use_id,
@@ -4074,10 +4483,27 @@ async fn run_interactive(
         // These are user messages received from the web UI via poll_bridge_messages
         // and injected here just like TuiBridgeEvent::InboundPrompt.
         while let Ok(content) = remote_prompt_rx.try_recv() {
-            if !app.is_streaming {
+            if app.file_injection_dialog.visible || app.file_injection_force {
+                app.queued_messages.push_back(content);
+                continue;
+            }
+            if !app.is_streaming && current_query.is_none() {
+                if rollback_unattempted_turn(
+                    goal_turn.as_ref(),
+                    true,
+                    &mut messages,
+                    &mut app,
+                    &mut session,
+                    &mut cmd_ctx.messages,
+                ) {
+                    persist_interactive_session(&session, goal_turn.as_ref()).await;
+                }
+                app.rate_limit_recovery.dismiss();
+                app.rate_limit_recovery.take_abandoned();
                 app.set_prompt_text(content.clone());
-                messages.push(claurst_core::types::Message::user(content.clone()));
-                app.push_message(claurst_core::types::Message::user(content.clone()));
+                let user_message = claurst_core::types::Message::user(content.clone());
+                messages.push(user_message.clone());
+                app.push_message(user_message);
                 session.messages = messages.clone();
                 session.updated_at = chrono::Utc::now();
                 app.is_streaming = true;
@@ -4087,7 +4513,7 @@ async fn run_interactive(
                 let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
                 let msgs_arc_clone = msgs_arc.clone();
                 let tools_arc_clone = tools_arc.clone();
-                let ctx_clone = tool_ctx.clone();
+                let mut ctx_clone = tool_ctx.clone();
                 let mut qcfg = base_query_config.clone();
                 qcfg.model =
                     claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
@@ -4095,37 +4521,20 @@ async fn run_interactive(
                 let tracker = cost_tracker.clone();
                 let tx = event_tx.clone();
                 let client_clone = client.clone();
-                goal_turn_baseline = if claurst_core::goals_enabled() {
-                    match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
-                        Ok(baseline) => baseline,
-                        Err(error) => {
-                            app.status_message = Some(format!(
-                                "Goal error: could not capture turn baseline: {}",
-                                error
-                            ));
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let handle = tokio::spawn(async move {
-                    let mut msgs = msgs_arc_clone.lock().await.clone();
-                    let outcome = claurst_query::run_query_loop(
-                        client_clone.as_ref(),
-                        &mut msgs,
-                        tools_arc_clone.as_slice(),
-                        &ctx_clone,
-                        &qcfg,
-                        tracker,
-                        Some(tx),
-                        ct,
-                        None,
-                    )
-                    .await;
-                    *msgs_arc_clone.lock().await = msgs;
-                    outcome
-                });
+                goal_turn = Some(InteractiveTurn::capture(
+                    &mut ctx_clone,
+                    cost_tracker.total_tokens(),
+                ));
+                let handle = InteractiveQuery {
+                    client: client_clone,
+                    tools: tools_arc_clone,
+                    context: ctx_clone,
+                    config: qcfg,
+                    tracker,
+                    events: tx,
+                    cancel: ct,
+                }
+                .spawn(msgs_arc_clone);
                 current_query = Some((handle, msgs_arc));
                 break; // process one prompt per frame
             }
@@ -4446,7 +4855,8 @@ async fn run_interactive(
         app.rate_limit_recovery.tick();
         if current_query.is_none() && !app.is_streaming {
             if let Some(directive) = app.rate_limit_recovery.take_retry_directive() {
-                if !messages.is_empty() {
+                if !messages.is_empty() && goal_turn.as_ref().is_some_and(|owner| !owner.abandoned)
+                {
                     app.status_message = Some(match &directive.model {
                         Some(model) => format!("Rate limit recovery — retrying on {}…", model),
                         None => "Rate limit recovery — retrying…".to_string(),
@@ -4460,7 +4870,7 @@ async fn run_interactive(
                     let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
                     let msgs_arc_clone = msgs_arc.clone();
                     let tools_arc_clone = tools_arc.clone();
-                    let ctx_clone = tool_ctx.clone();
+                    let mut ctx_clone = tool_ctx.clone();
                     let mut qcfg = base_query_config.clone();
                     qcfg.model =
                         claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
@@ -4481,38 +4891,20 @@ async fn run_interactive(
                     let tracker = cost_tracker.clone();
                     let tx = event_tx.clone();
                     let client_clone = client.clone();
-                    goal_turn_baseline = if claurst_core::goals_enabled() {
-                        match capture_goal_turn_baseline(&session.id, cost_tracker.total_tokens()) {
-                            Ok(baseline) => baseline,
-                            Err(error) => {
-                                app.status_message = Some(format!(
-                                    "Goal error: could not capture turn baseline: {}",
-                                    error
-                                ));
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
+                    if let Some(owner) = &goal_turn {
+                        owner.prepare_context(&mut ctx_clone);
+                    }
 
-                    let handle = tokio::spawn(async move {
-                        let mut msgs = msgs_arc_clone.lock().await.clone();
-                        let outcome = claurst_query::run_query_loop(
-                            client_clone.as_ref(),
-                            &mut msgs,
-                            tools_arc_clone.as_slice(),
-                            &ctx_clone,
-                            &qcfg,
-                            tracker,
-                            Some(tx),
-                            ct,
-                            None,
-                        )
-                        .await;
-                        *msgs_arc_clone.lock().await = msgs;
-                        outcome
-                    });
+                    let handle = InteractiveQuery {
+                        client: client_clone,
+                        tools: tools_arc_clone,
+                        context: ctx_clone,
+                        config: qcfg,
+                        tracker,
+                        events: tx,
+                        cancel: ct,
+                    }
+                    .spawn(msgs_arc_clone);
                     current_query = Some((handle, msgs_arc));
                 }
             }
@@ -4536,13 +4928,10 @@ async fn run_interactive(
                         retry_after_secs,
                         message,
                     })) => {
-                        while app.notifications.current_is_error() {
-                            app.notifications.dismiss_current();
-                        }
-                        app.open_rate_limit_recovery(
-                            message
-                                .clone()
-                                .unwrap_or_else(|| "Rate limit exceeded.".to_string()),
+                        show_rate_limit_recovery(
+                            goal_turn.as_ref(),
+                            &mut app,
+                            message.as_deref(),
                             *retry_after_secs,
                         );
                     }
@@ -4606,112 +4995,49 @@ async fn run_interactive(
                     }
                 }
 
-                // Save session to JSONL (primary storage)
-                let _ = claurst_core::history::save_session(&session).await;
-
-                // Also index into SQLite for /search support
-                {
-                    let db_path = claurst_core::config::Settings::config_dir().join("sessions.db");
-                    if let Ok(store) = claurst_core::SqliteSessionStore::open(&db_path) {
-                        let _ = store.save_session(
-                            &session.id,
-                            session.title.as_deref(),
-                            &session.model,
-                        );
-                        for msg in &session.messages {
-                            let content_str = match &msg.content {
-                                claurst_core::types::MessageContent::Text(t) => t.clone(),
-                                claurst_core::types::MessageContent::Blocks(blocks) => blocks
-                                    .iter()
-                                    .filter_map(|b| {
-                                        if let claurst_core::types::ContentBlock::Text { text } = b
-                                        {
-                                            Some(text.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" "),
-                            };
-                            let role = match msg.role {
-                                claurst_core::types::Role::User => "user",
-                                claurst_core::types::Role::Assistant => "assistant",
-                            };
-                            let msg_id = msg.uuid.as_deref().unwrap_or("unknown");
-                            let _ =
-                                store.save_message(&session.id, msg_id, role, &content_str, None);
-                        }
-                    }
-                }
+                rollback_unattempted_turn(
+                    goal_turn.as_ref(),
+                    false,
+                    &mut messages,
+                    &mut app,
+                    &mut session,
+                    &mut cmd_ctx.messages,
+                );
+                *msgs_arc.lock().await = messages.clone();
+                persist_interactive_session(&session, goal_turn.as_ref()).await;
 
                 // --- Goal continuation ---
                 // After every completed turn check if there is an active goal.
                 // If so, inject a continuation user message and dispatch another turn
                 // without waiting for user input.
                 if completed_end_turn && !was_auto_compact && claurst_core::goals_enabled() {
-                    let baseline = goal_turn_baseline.take();
-                    let current_goal =
-                        claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())
-                            .and_then(|store| store.try_get_goal(&session.id));
-                    let continuation = match current_goal {
-                        Ok(goal) => match decide_goal_turn_accounting(
-                            baseline.as_ref(),
-                            goal.as_ref(),
-                            cost_tracker.total_tokens(),
-                        ) {
-                            Ok(GoalTurnAccountingDecision::Skip) => {
-                                claurst_query::GoalContinuation::NoGoal
-                            }
-                            Ok(GoalTurnAccountingDecision::Record { total_tokens_used }) => {
-                                match baseline.as_ref() {
-                                    Some(baseline) => {
-                                        claurst_query::check_and_continue_goal_for_goal(
-                                            &session.id,
-                                            &baseline.goal_id,
-                                            total_tokens_used,
-                                            baseline.started_at.elapsed().as_secs(),
-                                        )
-                                    }
-                                    None => claurst_query::GoalContinuation::Stop {
-                                        reason: claurst_query::StopReason::Error(
-                                            "missing active-goal turn baseline".to_string(),
-                                        ),
-                                    },
-                                }
-                            }
-                            Err(error) => claurst_query::GoalContinuation::Stop {
-                                reason: claurst_query::StopReason::Error(error),
-                            },
-                        },
-                        Err(error) => claurst_query::GoalContinuation::Stop {
-                            reason: claurst_query::StopReason::Error(error.to_string()),
-                        },
-                    };
+                    let continuation = goal_turn
+                        .take()
+                        .map_or(claurst_query::GoalContinuation::NoGoal, |owner| {
+                            owner.continuation(cost_tracker.total_tokens())
+                        });
                     match continuation {
-                        claurst_query::GoalContinuation::Continue { message } => {
+                        claurst_query::GoalContinuation::Continue { message, turn } => {
                             // Show a subtle status notice.
                             app.status_message = Some(
                                 "Goal: continuing autonomously… (use /goal pause to stop)"
                                     .to_string(),
                             );
-                            // Update the footer badge.
-                            if let Some(goal) = claurst_core::GoalStore::open_default()
-                                .and_then(|s| s.get_active_goal(&session.id))
+                            app.active_goal_badge = Some(format!(
+                                "active · {} · {} turns",
+                                turn.goal().elapsed_display(),
+                                turn.goal().turns_used
+                            ));
+                            let mut owner =
+                                InteractiveTurn::from_goal(turn, cost_tracker.total_tokens());
+                            if let Err(error) =
+                                owner.inject(message, &mut messages, &mut app, &mut session)
                             {
-                                app.active_goal_badge = Some(format!(
-                                    "active · {} · {} turns",
-                                    goal.elapsed_display(),
-                                    goal.turns_used
-                                ));
+                                app.status_message =
+                                    Some(format!("Goal dispatch stopped: {error}"));
+                                continue;
                             }
-
-                            // Inject the continuation message into the conversation.
-                            let cont_msg = claurst_core::types::Message::user(message);
-                            messages.push(cont_msg.clone());
-                            app.push_message(cont_msg);
-                            session.messages = messages.clone();
-                            session.updated_at = chrono::Utc::now();
+                            goal_turn = Some(owner);
                             app.is_streaming = true;
                             app.streaming_text.clear();
 
@@ -4734,16 +5060,6 @@ async fn run_interactive(
                             qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                             qcfg.working_directory =
                                 Some(tool_ctx.working_dir.display().to_string());
-                            // Re-inject the goal addendum for this continuation turn.
-                            if let Some(goal) = claurst_core::GoalStore::open_default()
-                                .and_then(|s| s.get_active_goal(&session.id))
-                            {
-                                let addendum = claurst_core::goal_system_prompt_addendum(&goal);
-                                qcfg.append_system_prompt = Some(match qcfg.append_system_prompt {
-                                    Some(existing) => format!("{}\n{}", existing, addendum),
-                                    None => addendum,
-                                });
-                            }
                             let turn_effort = if app.effort_is_set {
                                 Some(app.effort_level.to_core())
                             } else {
@@ -4776,41 +5092,20 @@ async fn run_interactive(
                             let tracker = cost_tracker.clone();
                             let tx = event_tx.clone();
                             let client_clone = client.clone();
-                            goal_turn_baseline = if claurst_core::goals_enabled() {
-                                match capture_goal_turn_baseline(
-                                    &session.id,
-                                    cost_tracker.total_tokens(),
-                                ) {
-                                    Ok(baseline) => baseline,
-                                    Err(error) => {
-                                        app.status_message = Some(format!(
-                                            "Goal error: could not capture turn baseline: {}",
-                                            error
-                                        ));
-                                        None
-                                    }
-                                }
-                            } else {
-                                None
-                            };
+                            if let Some(owner) = &goal_turn {
+                                owner.prepare_context(&mut ctx_clone);
+                            }
 
-                            let handle = tokio::spawn(async move {
-                                let mut msgs = msgs_arc_clone.lock().await.clone();
-                                let outcome = claurst_query::run_query_loop(
-                                    client_clone.as_ref(),
-                                    &mut msgs,
-                                    tools_arc_clone.as_slice(),
-                                    &ctx_clone,
-                                    &qcfg,
-                                    tracker,
-                                    Some(tx),
-                                    ct,
-                                    None,
-                                )
-                                .await;
-                                *msgs_arc_clone.lock().await = msgs;
-                                outcome
-                            });
+                            let handle = InteractiveQuery {
+                                client: client_clone,
+                                tools: tools_arc_clone,
+                                context: ctx_clone,
+                                config: qcfg,
+                                tracker,
+                                events: tx,
+                                cancel: ct,
+                            }
+                            .spawn(msgs_arc_clone);
                             current_query = Some((handle, msgs_arc));
                         }
                         claurst_query::GoalContinuation::Stop { reason } => {
@@ -4823,8 +5118,15 @@ async fn run_interactive(
                             app.active_goal_badge = None;
                         }
                     }
-                } else {
-                    goal_turn_baseline = None;
+                } else if completed_end_turn
+                    || was_auto_compact
+                    || matches!(
+                        &query_outcome,
+                        Ok(QueryOutcome::Cancelled | QueryOutcome::BudgetExceeded { .. })
+                    )
+                    || goal_turn.as_ref().is_some_and(|owner| owner.abandoned)
+                {
+                    goal_turn = None;
                 }
             }
         }
@@ -4833,8 +5135,7 @@ async fn run_interactive(
             if let Some(server_name) = app.take_pending_mcp_panel_auth() {
                 let server_config = cmd_ctx
                     .config
-                    .mcp_servers
-                    .iter()
+                    .effective_mcp_servers()
                     .find(|server| server.name == server_name);
                 let supports_panel_auth = server_config.is_some_and(|server| {
                     matches!(server.server_type.as_str(), "http" | "sse")
@@ -4847,7 +5148,10 @@ async fn run_interactive(
                         server_name
                     ));
                 } else if let Some(manager) = app.mcp_manager.clone() {
-                    match manager.begin_auth(&server_name).await {
+                    match manager
+                        .begin_auth(Some(&cmd_ctx.working_dir), &server_name)
+                        .await
+                    {
                         Ok(session) => {
                             let auth_url = session.auth_url.clone();
                             let redirect_uri = session.redirect_uri.clone();
@@ -4872,12 +5176,13 @@ async fn run_interactive(
         }
 
         if !app.is_streaming && current_query.is_none() && app.take_pending_mcp_reconnect() {
-            let new_mcp_manager = connect_mcp_manager_arc(&cmd_ctx.config).await;
-            tool_ctx.mcp_manager = new_mcp_manager.clone();
-            app.mcp_manager = new_mcp_manager.clone();
-            tools_arc = filter_tools_for_hosted_review(
-                build_tools_with_mcp(new_mcp_manager.clone()),
-                &cmd_ctx.config,
+            let new_mcp_manager =
+                connect_mcp_manager_arc(&cmd_ctx.config, Some(&cmd_ctx.working_dir)).await;
+            tools_arc = replace_mcp_runtime(
+                new_mcp_manager.clone(),
+                &mut tool_ctx,
+                &mut cmd_ctx,
+                &mut app.mcp_manager,
             );
             if app.mcp_view.visible {
                 app.refresh_mcp_view();
@@ -4892,7 +5197,7 @@ async fn run_interactive(
                     && !cmd_ctx.config.hosted_review.allow_mcp_servers
                 {
                     "MCP servers are disabled in hosted review mode.".to_string()
-                } else if cmd_ctx.config.mcp_servers.is_empty() {
+                } else if cmd_ctx.config.effective_mcp_servers().next().is_none() {
                     "No MCP servers configured.".to_string()
                 } else {
                     format!(
@@ -6084,6 +6389,8 @@ mod tests {
     fn accounting_baseline(id: &str, tracker_total: u64) -> GoalTurnBaseline {
         GoalTurnBaseline {
             goal_id: id.to_string(),
+            session_id: "session".to_string(),
+            store_path: PathBuf::from("unused-accounting-fixture.sqlite"),
             tracker_total,
             started_at: std::time::Instant::now(),
         }
@@ -6152,4 +6459,91 @@ mod tests {
 
         assert!(error.contains("tracker moved backwards"));
     }
+
+    fn goal_capture_context(path: PathBuf) -> ToolContext {
+        ToolContext {
+            working_dir: path.parent().unwrap().to_path_buf(),
+            permission_mode: PermissionMode::Default,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::Default,
+            }),
+            cost_tracker: CostTracker::new(),
+            session_id: "session".to_string(),
+            goal_turn: claurst_core::goal::GoalTurnContext::Pending(path),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        }
+    }
+
+    #[test]
+    fn goal_baseline_and_query_context_share_one_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        let store = claurst_core::GoalStore::open(&path).unwrap();
+        let original = store
+            .set_goal("session", "original prompt A", None)
+            .unwrap();
+        let mut ctx = goal_capture_context(path.clone());
+        let baseline = capture_goal_turn_baseline(&mut ctx, 17).unwrap().unwrap();
+        store
+            .set_goal("session", "replacement prompt B", None)
+            .unwrap();
+        let again = capture_goal_turn_baseline(&mut ctx, 21).unwrap().unwrap();
+        let captured = ctx.goal_turn.captured().unwrap();
+        assert_eq!(captured.goal(), &original);
+        assert_eq!(baseline.goal_id, original.id);
+        assert_eq!(again.goal_id, baseline.goal_id);
+        assert_eq!(baseline.session_id, captured.goal().session_id);
+        assert_eq!(baseline.store_path, captured.store_path());
+        assert_eq!(baseline.store_path, std::fs::canonicalize(path).unwrap());
+        assert_eq!(baseline.tracker_total, 17);
+        assert!(claurst_core::goal_system_prompt_addendum(captured.goal())
+            .contains("original prompt A"));
+    }
+
+    #[test]
+    fn goal_baseline_empty_or_failed_capture_cannot_adopt_later_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        for initially_fails in [false, true] {
+            let parent = dir
+                .path()
+                .join(if initially_fails { "failed" } else { "empty" });
+            if initially_fails {
+                std::fs::write(&parent, "not a directory").unwrap();
+            } else {
+                std::fs::create_dir(&parent).unwrap();
+            }
+            let path = parent.join("goals.sqlite");
+            let mut ctx = goal_capture_context(path.clone());
+            let first = capture_goal_turn_baseline(&mut ctx, 10);
+            if initially_fails {
+                assert!(first.is_err());
+                std::fs::remove_file(&parent).unwrap();
+                std::fs::create_dir(&parent).unwrap();
+            } else {
+                assert!(first.unwrap().is_none());
+            }
+            let store = claurst_core::GoalStore::open(&path).unwrap();
+            let later = store.set_goal("session", "later B", None).unwrap();
+            let retry = capture_goal_turn_baseline(&mut ctx, 20);
+            if initially_fails {
+                assert!(retry.is_err());
+            } else {
+                assert!(retry.unwrap().is_none());
+            }
+            assert!(ctx.goal_turn.captured().is_none());
+            assert_eq!(store.try_get_goal("session").unwrap().unwrap(), later);
+        }
+    }
 }
+
+#[cfg(test)]
+mod goal_dispatch_tests;

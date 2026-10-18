@@ -107,7 +107,10 @@ impl Tool for McpAuthTool {
         }
 
         // 2. Run the full OAuth flow and persist the resulting token.
-        match manager.authenticate(&params.server_name).await {
+        match manager
+            .authenticate(Some(&ctx.working_dir), &params.server_name)
+            .await
+        {
             Ok(result) => ToolResult::success(
                 json!({
                     "status": "authenticated",

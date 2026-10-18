@@ -316,12 +316,10 @@ fn codex_tokens_path() -> std::path::PathBuf {
 /// `~/.coven-code/accounts/codex/<profile_id>/codex_tokens.json`.
 pub fn save_codex_tokens_for_profile(tokens: &CodexTokens, profile_id: &str) -> anyhow::Result<()> {
     let path = crate::accounts::codex_token_path(profile_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(tokens)?)?;
-    // Restrict to owner-only: this file holds the Codex access + refresh tokens.
-    crate::accounts::set_user_only_perms(&path);
+    crate::secret_file::write_secret_file_sync_in_private_dir(
+        &path,
+        serde_json::to_string_pretty(tokens)?,
+    )?;
     Ok(())
 }
 
@@ -460,6 +458,34 @@ pub fn is_codex_subscriber() -> bool {
 mod tests {
     use super::*;
 
+    struct TestHomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestHomeGuard {
+        fn new(path: &std::path::Path) -> Self {
+            let lock = crate::config::CONFIG_HOME_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let previous = std::env::var_os("COVEN_CODE_TEST_HOME");
+            std::env::set_var("COVEN_CODE_TEST_HOME", path);
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("COVEN_CODE_TEST_HOME", value),
+                None => std::env::remove_var("COVEN_CODE_TEST_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn test_prod_config_urls_are_https() {
         assert!(PROD_OAUTH.token_url.starts_with("https://"));
@@ -517,6 +543,39 @@ mod tests {
         assert!(url.contains("state456"));
         assert!(url.contains("S256"));
         assert!(url.contains("localhost"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_profile_writer_creates_private_file_and_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::new(home.path());
+        let tokens = CodexTokens {
+            access_token: "fixture-access".into(),
+            refresh_token: Some("fixture-refresh".into()),
+            account_id: Some("fixture-account".into()),
+            expires_at: Some(123),
+        };
+
+        save_codex_tokens_for_profile(&tokens, "fixture").unwrap();
+
+        let path = crate::accounts::codex_token_path("fixture");
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(
+            load_codex_tokens_for_profile("fixture")
+                .unwrap()
+                .access_token,
+            "fixture-access"
+        );
     }
 
     #[test]

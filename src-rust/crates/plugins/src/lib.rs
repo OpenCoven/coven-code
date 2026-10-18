@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod marketplace;
 pub mod plugin;
 pub mod registry;
+mod trust;
 
 // Re-export the most commonly used items at the crate root.
 pub use hooks::{register_plugin_hooks, HookOutcome, HookRegistry, RegisteredHook};
@@ -24,46 +25,31 @@ pub use plugin::{
     CommandRunAction, LoadedPlugin, PluginCommandDef, PluginError, PluginSource, ReloadDiff,
 };
 pub use registry::PluginRegistry;
+pub use trust::save_plugin_enabled;
 
 // ---------------------------------------------------------------------------
 // Capability enforcement
 // ---------------------------------------------------------------------------
 
-/// Check whether a plugin command is allowed to execute based on its declared
-/// capability grants and the capability the action requires.
-///
-/// # Policy
-/// - If the manifest has **no `capabilities` field** (`None`), the plugin
-///   predates capability enforcement and is trusted unconditionally (backwards
-///   compatibility with existing plugins).
-/// - If the manifest declares an explicit list (even an empty one), the
-///   required capability **must** appear in that list.
-///
-/// Returns `Ok(())` when execution is permitted, or `Err(reason)` when it
-/// should be blocked.  The caller should convert `Err` into a `ToolResult::error`.
+/// Effectful actions require an explicit manifest capability. Missing and empty
+/// grants deny those actions; static responses require no grant.
 pub fn check_plugin_capability(def: &PluginCommandDef) -> Result<(), String> {
-    // Determine what capability this action needs.
-    let required = match def.run_action.required_capability() {
-        None => return Ok(()), // StaticResponse — no capability needed.
-        Some(cap) => cap,
+    let Some(required) = def.run_action.required_capability() else {
+        return Ok(());
     };
-
-    match &def.plugin_capabilities {
-        // No `capabilities` field — old-style manifest, allow everything.
-        None => Ok(()),
-        // Explicit capability list — enforce it.
-        Some(granted) => {
-            if granted.iter().any(|g| g.as_str() == required) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Plugin '{}' is not allowed to use capability '{}'. \
-                     Add '{}' to the 'capabilities' list in its manifest to enable this action.",
-                    def.plugin_name, required, required
-                ))
-            }
-        }
+    if has_capability(def.plugin_capabilities.as_deref(), required) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Plugin '{}' is not allowed to use capability '{}'. \
+             Add '{}' to the 'capabilities' list in its manifest to enable this action.",
+            def.plugin_name, required, required
+        ))
     }
+}
+
+pub(crate) fn has_capability(granted: Option<&[String]>, required: &str) -> bool {
+    granted.is_some_and(|grants| grants.iter().any(|grant| grant == required))
 }
 
 use once_cell::sync::Lazy;
@@ -96,6 +82,23 @@ pub fn global_plugin_registry() -> Option<Arc<PluginRegistry>> {
     GLOBAL_PLUGIN_REGISTRY.read().clone()
 }
 
+/// Refresh active plugins after a project transition without activating startup discovery.
+/// A matching registry retains its existing plugins, including explicit extra paths.
+pub async fn refresh_cached_plugins(project_dir: &std::path::Path) {
+    let Some(registry) = global_plugin_registry() else {
+        return;
+    };
+    if registry.matches_project(project_dir) {
+        return;
+    }
+
+    // Retire the previous project's hooks before discovering the new project.
+    set_global_hooks(HookRegistry::new());
+    let registry = load_plugins(project_dir, &[]).await;
+    set_global_hooks(registry.build_hook_registry());
+    set_global_registry(registry);
+}
+
 /// Store the hook registry built from loaded plugins into a process-global
 /// static so that `run_global_pre_tool_hook` / `run_global_post_tool_hook`
 /// can access it from anywhere without passing the registry around.
@@ -110,6 +113,7 @@ pub fn set_global_hooks(registry: HookRegistry) {
 pub fn run_global_pre_tool_hook(
     tool_name: &str,
     tool_input: &serde_json::Value,
+    working_dir: &Path,
 ) -> hooks::HookOutcome {
     let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
@@ -136,7 +140,7 @@ pub fn run_global_pre_tool_hook(
                 continue;
             }
         }
-        match hooks::run_hook_sync(hook, &event_json) {
+        match hooks::run_hook_sync(hook, &event_json, working_dir) {
             hooks::HookOutcome::Deny(reason) => return hooks::HookOutcome::Deny(reason),
             hooks::HookOutcome::Allow | hooks::HookOutcome::Error(_) => {}
         }
@@ -152,6 +156,7 @@ pub fn run_global_post_tool_hook(
     tool_input: &serde_json::Value,
     tool_output: &str,
     is_error: bool,
+    working_dir: &Path,
 ) {
     let registry = match GLOBAL_HOOK_REGISTRY.read().clone() {
         Some(r) => r,
@@ -179,7 +184,7 @@ pub fn run_global_post_tool_hook(
                 continue;
             }
         }
-        hooks::run_hook_sync(hook, &event_json);
+        hooks::run_hook_sync(hook, &event_json, working_dir);
     }
 }
 
@@ -194,6 +199,8 @@ pub fn run_global_post_tool_hook(
 /// 2. `<project_dir>/.coven-code/plugins/`  (project-local)
 /// 3. Any paths listed in `extra_paths`
 ///
+/// Project plugins are discovered but disabled until the user grants folder
+/// trust with `/plugin enable`. Only engine-global settings authorize them.
 /// Returns a fully populated `PluginRegistry`.  Errors encountered during
 /// loading are stored in `registry.errors` rather than propagated, so the
 /// caller always gets a usable registry even when individual plugins fail.
@@ -202,16 +209,7 @@ pub async fn load_plugins(
     extra_paths: &[std::path::PathBuf],
 ) -> PluginRegistry {
     let mut registry = PluginRegistry::new();
-    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
-
-    // 1. User-global plugins directory.
-    search_dirs.push(default_user_plugins_dir());
-
-    // 2. Project-local plugins directory.
-    search_dirs.push(project_plugins_dir(project_dir));
-
-    // 3. Extra paths (from --plugin-dir or settings).
-    search_dirs.extend_from_slice(extra_paths);
+    registry.project_root = project_dir.canonicalize().ok();
 
     // User plugins.
     {
@@ -235,6 +233,7 @@ pub async fn load_plugins(
         registry.extend(plugins, errors);
     }
 
+    trust::apply_saved_state(&mut registry, project_dir);
     registry
 }
 
@@ -356,6 +355,10 @@ pub fn format_plugin_list(registry: &PluginRegistry) -> String {
         out.push('\n');
     }
 
+    if all.iter().any(|p| p.source == PluginSource::Project) {
+        out.push_str("\nProject plugins require `/plugin enable <name>` to trust their folder for this project, including future changes.\n");
+    }
+
     if registry.error_count() > 0 {
         out.push_str(&format!(
             "\n{} plugin{} failed to load. Use `/plugin info <name>` for details.\n",
@@ -396,6 +399,9 @@ pub fn format_plugin_info(registry: &PluginRegistry, name: &str) -> String {
             ));
             out.push_str(&format!("Source: {}\n", p.source_id));
             out.push_str(&format!("Path: {}\n", p.path.display()));
+            if p.source == PluginSource::Project {
+                out.push_str("Trust: `/plugin enable` authorizes this folder for this project, including future changes.\n");
+            }
 
             // Count commands.
             let cmd_defs = loader::collect_command_defs(p);
@@ -664,7 +670,7 @@ mod tests {
         let reg = load_plugins(tmp.path(), &[]).await;
         assert_eq!(reg.plugin_count(), 1);
         assert!(reg.get("test-plugin").is_some());
-        assert!(reg.is_enabled("test-plugin"));
+        assert!(!reg.is_enabled("test-plugin"));
     }
 
     #[test]
