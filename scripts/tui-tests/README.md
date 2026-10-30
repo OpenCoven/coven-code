@@ -26,8 +26,25 @@ COVEN_BIN=/usr/local/bin/coven-code scripts/tui-tests/run.sh
 scripts/tui-tests/run.sh 03 05
 ```
 
-Exit code is `0` only if every assertion passed, `1` otherwise — suitable for
-a release gate or CI step.
+Exit code is `0` only when at least one assertion passed and no assertion or
+case execution failed. A nonzero case return, a case reporting no assertions
+or skips, or a skipped-only run exits `1`. Case-file load errors and unmatched
+filters exit `2`; a partially loaded case catalog is never executed.
+
+Partial local runs can still pass executed headless checks while explicitly
+reporting interactive skips. They are not full terminal acceptance. CI sets
+`REQUIRE_TMUX=1` so a missing terminal dependency cannot silently skip that gate.
+
+## Harness regression checks
+
+```bash
+python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
+```
+
+These tests exercise the actual runner and assertion library with synthetic
+case inputs and an inert tmux executable. They need no engine, tmux server,
+credentials or network, and do not establish real-binary terminal acceptance.
+CI runs them before building and exercising the real engine.
 
 ## CI
 
