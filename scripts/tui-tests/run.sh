@@ -74,6 +74,11 @@ for f in "$HERE"/cases/*.sh; do
   fi
   # shellcheck source=/dev/null
   source "$f"
+  load_rc=$?
+  if [ "$load_rc" -ne 0 ]; then
+    warn "Failed to load case file: $(basename "$f") (exit $load_rc)."
+    exit 2
+  fi
 done
 
 if [ "${#REGISTERED_CASES[@]}" -eq 0 ]; then
@@ -81,9 +86,26 @@ if [ "${#REGISTERED_CASES[@]}" -eq 0 ]; then
 fi
 
 for case_fn in "${REGISTERED_CASES[@]}"; do
+  # A case can fail before reaching an assertion. Do not let the final
+  # summary erase its exit status or borrow checks from an earlier case.
+  CURRENT_CASE="$case_fn"
+  checks_before=$TESTS_RUN
   "$case_fn"
+  case_rc=$?
+  if [ "$case_rc" -ne 0 ]; then
+    _fail "case returned nonzero status: $case_rc"
+  elif [ "$TESTS_RUN" -eq "$checks_before" ]; then
+    _fail "case reported no assertions or skips"
+  fi
   have_tmux && command tmux -L "$TUI_SOCKET" kill-session -t "$TUI_SESSION" 2>/dev/null || true
 done
+
+# Partial local runs remain supported, but skipped-only execution is not
+# evidence that the binary passed any check.
+if [ "$TESTS_PASS" -eq 0 ] && [ "$TESTS_FAIL" -eq 0 ]; then
+  CURRENT_CASE="suite"
+  _fail "No assertions passed; a skipped-only run is not successful."
+fi
 
 print_summary
 exit "$SUITE_RC"
