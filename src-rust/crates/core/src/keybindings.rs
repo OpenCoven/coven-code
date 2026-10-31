@@ -615,9 +615,10 @@ pub struct FixedRoute {
 }
 
 /// Chat keys that work whatever keybindings.json says. Keep in step with
-/// the Enter handling in the CLI event loop and the fallback keys in
-/// `App::handle_key_event`; `ctrl+c` needs no entry because it is in
-/// [`NON_REBINDABLE`].
+/// the Enter handling in the CLI event loop and the fallback key match in
+/// `App::handle_key_event` that runs when no binding resolves. `ctrl+c`
+/// needs no entry because it is in [`NON_REBINDABLE`]; `?` (help on an
+/// empty prompt) is conditional and deliberately not counted.
 pub const CHAT_FIXED_ROUTES: &[FixedRoute] = &[
     FixedRoute {
         chord: "enter",
@@ -627,6 +628,26 @@ pub const CHAT_FIXED_ROUTES: &[FixedRoute] = &[
     FixedRoute {
         chord: "f1",
         action: "openHelp",
+        precedence: RoutePrecedence::WhenUnbound,
+    },
+    FixedRoute {
+        chord: "ctrl+r",
+        action: "historySearch",
+        precedence: RoutePrecedence::WhenUnbound,
+    },
+    FixedRoute {
+        chord: "ctrl+u",
+        action: "killToStart",
+        precedence: RoutePrecedence::WhenUnbound,
+    },
+    FixedRoute {
+        chord: "ctrl+w",
+        action: "killWord",
+        precedence: RoutePrecedence::WhenUnbound,
+    },
+    FixedRoute {
+        chord: "alt+d",
+        action: "deleteWord",
         precedence: RoutePrecedence::WhenUnbound,
     },
 ];
@@ -972,6 +993,23 @@ mod tests {
             ("f1", Some("redraw"), Some("Chat")),
         ]));
         assert_eq!(both.unreachable_essential_actions(), vec!["openHelp"]);
+    }
+
+    #[test]
+    fn unbinding_a_key_the_app_also_handles_itself_is_not_a_change() {
+        // App::handle_key_event handles these chords itself when no binding
+        // resolves them, so unbinding leaves them working.
+        for chord in ["ctrl+r", "ctrl+u", "ctrl+w", "alt+d"] {
+            let unbound = KeybindingResolver::new(&user(&[(chord, None, None)]));
+            assert!(
+                unbound.conflicts().is_empty(),
+                "{chord}: {:?}",
+                unbound.conflicts()
+            );
+        }
+        // Binding one to another action does change it.
+        let rebound = KeybindingResolver::new(&user(&[("ctrl+r", Some("redraw"), None)]));
+        assert_eq!(rebound.conflicts().len(), 1);
     }
 
     #[test]
