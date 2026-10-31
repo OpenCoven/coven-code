@@ -597,45 +597,52 @@ pub struct KeybindingResolver {
     user_chords: Vec<String>,
 }
 
-/// Every key context, for checking a Global binding everywhere it applies.
-pub const ALL_CONTEXTS: &[KeyContext] = &[
-    KeyContext::Global,
-    KeyContext::Chat,
-    KeyContext::Autocomplete,
-    KeyContext::Confirmation,
-    KeyContext::Help,
-    KeyContext::Transcript,
-    KeyContext::HistorySearch,
-    KeyContext::Task,
-    KeyContext::ThemePicker,
-    KeyContext::Settings,
-    KeyContext::Tabs,
-    KeyContext::Attachments,
-    KeyContext::Footer,
-    KeyContext::MessageSelector,
-    KeyContext::DiffDialog,
-    KeyContext::ModelPicker,
-    KeyContext::Select,
-    KeyContext::Plugin,
+/// Whether a key the interactive loop handles itself wins over bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutePrecedence {
+    /// Handled before any binding resolves; a binding cannot change it.
+    BeforeBindings,
+    /// Handled only when no binding resolves the chord to an action.
+    WhenUnbound,
+}
+
+/// A key the interactive loop handles in Chat outside binding resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedRoute {
+    pub chord: &'static str,
+    pub action: &'static str,
+    pub precedence: RoutePrecedence,
+}
+
+/// Chat keys that work whatever keybindings.json says. Keep in step with
+/// the Enter handling in the CLI event loop and the fallback keys in
+/// `App::handle_key_event`; `ctrl+c` needs no entry because it is in
+/// [`NON_REBINDABLE`].
+pub const CHAT_FIXED_ROUTES: &[FixedRoute] = &[
+    FixedRoute {
+        chord: "enter",
+        action: "submit",
+        precedence: RoutePrecedence::BeforeBindings,
+    },
+    FixedRoute {
+        chord: "f1",
+        action: "openHelp",
+        precedence: RoutePrecedence::WhenUnbound,
+    },
 ];
 
-/// Actions that must remain reachable from the keyboard in their context.
-pub const ESSENTIAL_ACTIONS: &[(&str, KeyContext)] = &[
-    ("submit", KeyContext::Chat),
-    ("interrupt", KeyContext::Global),
-    ("openCommandPalette", KeyContext::Chat),
-    ("openHelp", KeyContext::Global),
-    ("yes", KeyContext::Confirmation),
-    ("no", KeyContext::Confirmation),
-];
+/// Actions that must stay reachable from the Chat composer, the context
+/// where bindings are dispatched after every dialog has read its own keys.
+/// Permission prompts read y/n/Esc directly, so they are not listed.
+pub const ESSENTIAL_ACTIONS: &[&str] = &["submit", "interrupt", "openCommandPalette", "openHelp"];
 
-/// A user binding that changes what an already-bound chord does.
+/// A user binding that leaves a Chat chord doing something other than its
+/// default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingConflict {
     /// Chord as written in keybindings.json.
     pub chord: String,
-    pub context: KeyContext,
-    /// Action the chord resolved to before this binding.
+    /// Default action of the chord.
     pub replaced: String,
     /// Action it resolves to now; `None` when the user unbound it.
     pub by: Option<String>,
@@ -693,62 +700,73 @@ impl KeybindingResolver {
         })
     }
 
-    /// Contexts a binding defined in `context` applies to.
-    fn applies_in(context: &KeyContext) -> &[KeyContext] {
-        if *context == KeyContext::Global {
-            ALL_CONTEXTS
-        } else {
-            std::slice::from_ref(context)
+    /// What `chord` does in Chat with the first `limit` bindings, including
+    /// the keys the interactive loop handles itself.
+    fn chat_effect(&self, limit: usize, chord: &[ParsedKeystroke]) -> Option<String> {
+        let route = |precedence: RoutePrecedence| {
+            CHAT_FIXED_ROUTES.iter().find(|route| {
+                route.precedence == precedence && parse_chord(route.chord).as_deref() == Some(chord)
+            })
+        };
+        if let Some(route) = route(RoutePrecedence::BeforeBindings) {
+            return Some(route.action.to_string());
         }
+        self.resolve_in(limit, &KeyContext::Chat, chord)
+            .and_then(|binding| binding.action.clone())
+            .or_else(|| route(RoutePrecedence::WhenUnbound).map(|r| r.action.to_string()))
     }
 
-    /// User bindings that change what an already-bound chord does in any
-    /// context the binding applies to (every context for a Global binding).
+    /// Chat chords whose final effect differs from their default effect,
+    /// one entry per chord. Later entries that restore a default cancel
+    /// earlier changes, and keys the loop handles first never conflict.
     pub fn conflicts(&self) -> Vec<BindingConflict> {
+        let mut seen: Vec<&[ParsedKeystroke]> = Vec::new();
         let mut conflicts = Vec::new();
-        for (offset, chord_text) in self.user_chords.iter().enumerate() {
-            let index = self.default_count + offset;
-            let binding = &self.bindings[index];
-            for context in Self::applies_in(&binding.context) {
-                let before = self
-                    .resolve_in(index, context, &binding.chord)
-                    .and_then(|b| b.action.as_ref());
-                let after = self
-                    .resolve_in(index + 1, context, &binding.chord)
-                    .and_then(|b| b.action.as_ref());
-                if let Some(previous) = before {
-                    if after != Some(previous) {
-                        conflicts.push(BindingConflict {
-                            chord: chord_text.clone(),
-                            context: context.clone(),
-                            replaced: previous.clone(),
-                            by: after.cloned(),
-                        });
-                    }
+        let user = self.bindings[self.default_count..].iter();
+        for (binding, chord_text) in user.zip(&self.user_chords) {
+            let applies = matches!(binding.context, KeyContext::Chat | KeyContext::Global);
+            if !applies || seen.contains(&binding.chord.as_slice()) {
+                continue;
+            }
+            seen.push(&binding.chord);
+            let before = self.chat_effect(self.default_count, &binding.chord);
+            let after = self.chat_effect(self.bindings.len(), &binding.chord);
+            if let Some(replaced) = before {
+                if after.as_ref() != Some(&replaced) {
+                    conflicts.push(BindingConflict {
+                        chord: chord_text.clone(),
+                        replaced,
+                        by: after,
+                    });
                 }
             }
         }
         conflicts
     }
 
-    /// A chord that resolves to `action` in `context` under the full binding
-    /// set, formatted for display. The most recently defined working chord
-    /// wins, so hints follow the user's configuration.
-    pub fn reachable_chord(&self, action: &str, context: &KeyContext) -> Option<String> {
-        self.bindings
+    /// A chord that reaches `action` in Chat now, formatted for display. The
+    /// most recently defined working binding wins, so hints follow the
+    /// user's configuration; keys the loop handles itself come last.
+    pub fn reachable_chord(&self, action: &str) -> Option<String> {
+        let reaches = |chord: &[ParsedKeystroke]| {
+            self.chat_effect(self.bindings.len(), chord).as_deref() == Some(action)
+        };
+        let bound = self
+            .bindings
             .iter()
             .rev()
-            .filter(|candidate| {
-                candidate.action.as_deref() == Some(action)
-                    && (&candidate.context == context || candidate.context == KeyContext::Global)
-            })
-            .find(|candidate| {
-                self.resolve_in(self.bindings.len(), context, &candidate.chord)
-                    .is_some_and(|resolved| resolved.action.as_deref() == Some(action))
-            })
-            .map(|binding| {
-                binding
-                    .chord
+            .filter(|b| matches!(b.context, KeyContext::Chat | KeyContext::Global))
+            .filter(|b| b.action.as_deref() == Some(action))
+            .map(|b| b.chord.clone());
+        let fixed = CHAT_FIXED_ROUTES
+            .iter()
+            .filter(|route| route.action == action)
+            .filter_map(|route| parse_chord(route.chord));
+        bound
+            .chain(fixed)
+            .find(|chord| reaches(chord))
+            .map(|chord| {
+                chord
                     .iter()
                     .map(prettify_keystroke)
                     .collect::<Vec<_>>()
@@ -756,12 +774,12 @@ impl KeybindingResolver {
             })
     }
 
-    /// Essential actions no chord resolves to in their context.
+    /// Essential actions no key reaches in Chat.
     pub fn unreachable_essential_actions(&self) -> Vec<&'static str> {
         ESSENTIAL_ACTIONS
             .iter()
-            .filter(|(action, context)| self.reachable_chord(action, context).is_none())
-            .map(|(action, _)| *action)
+            .copied()
+            .filter(|action| self.reachable_chord(action).is_none())
             .collect()
     }
 
@@ -856,107 +874,121 @@ mod tests {
         let resolver = KeybindingResolver::new(&UserKeybindings::default());
         assert!(resolver.conflicts().is_empty());
         assert!(resolver.unreachable_essential_actions().is_empty());
+        assert_eq!(resolver.reachable_chord("submit").as_deref(), Some("Enter"));
         assert_eq!(
-            resolver
-                .reachable_chord("submit", &KeyContext::Chat)
-                .as_deref(),
-            Some("Enter")
+            resolver.reachable_chord("openHelp").as_deref(),
+            Some("Alt+H")
         );
     }
 
     #[test]
-    fn overriding_a_bound_chord_is_reported_as_a_conflict() {
+    fn overriding_a_bound_chat_chord_is_reported_once_as_a_conflict() {
         let overrides = user(&[
-            ("enter", Some("newline"), Some("Chat")),
-            ("f1", Some("openHelp"), None),
-            ("", Some("submit"), None),
+            ("ctrl+k", Some("newline"), Some("Chat")),
+            ("ctrl+k", Some("redraw"), Some("Chat")),
+            ("f9", Some("openHelp"), None),
         ]);
         let resolver = KeybindingResolver::new(&overrides);
         assert_eq!(
             resolver.conflicts(),
             vec![BindingConflict {
-                chord: "enter".to_string(),
-                context: KeyContext::Chat,
-                replaced: "submit".to_string(),
-                by: Some("newline".to_string()),
+                chord: "ctrl+k".to_string(),
+                replaced: "openCommandPalette".to_string(),
+                by: Some("redraw".to_string()),
             }]
         );
-        // Enter no longer submits and nothing else does.
-        assert_eq!(resolver.unreachable_essential_actions(), vec!["submit"]);
-        // The new chord is what hints show.
         assert_eq!(
-            resolver
-                .reachable_chord("openHelp", &KeyContext::Chat)
-                .as_deref(),
-            Some("F1")
+            resolver.unreachable_essential_actions(),
+            vec!["openCommandPalette"]
         );
+        // The newest working chord is what hints show.
+        assert_eq!(resolver.reachable_chord("openHelp").as_deref(), Some("F9"));
     }
 
     #[test]
-    fn a_global_binding_conflicts_in_every_context_it_overrides() {
-        // `y` answers Confirmation prompts by default; a Global `y` wins there
-        // at runtime, so it must be reported against Confirmation.
-        let overrides = user(&[("y", Some("customAction"), None)]);
-        let resolver = KeybindingResolver::new(&overrides);
-        let conflicts = resolver.conflicts();
-        assert!(
-            conflicts
-                .iter()
-                .any(|c| c.context == KeyContext::Confirmation
-                    && c.replaced == "yes"
-                    && c.by.as_deref() == Some("customAction")),
-            "{conflicts:?}"
-        );
-        let mut probe = KeybindingResolver::new(&overrides);
-        let y = parse_keystroke("y").expect("y");
-        assert!(matches!(
-            probe.process(y, &KeyContext::Confirmation),
-            KeybindingResult::Action(action) if action == "customAction"
-        ));
-    }
-
-    #[test]
-    fn rebinding_an_essential_action_elsewhere_keeps_it_reachable() {
-        let overrides = user(&[
-            ("enter", Some("newline"), Some("Chat")),
-            ("ctrl+s", Some("submit"), Some("Chat")),
+    fn a_later_entry_that_restores_the_default_cancels_the_conflict() {
+        let restored = user(&[
+            ("ctrl+k", Some("newline"), Some("Chat")),
+            ("ctrl+k", Some("openCommandPalette"), Some("Chat")),
         ]);
-        let resolver = KeybindingResolver::new(&overrides);
-        assert_eq!(resolver.conflicts().len(), 1);
+        let resolver = KeybindingResolver::new(&restored);
+        assert!(resolver.conflicts().is_empty());
         assert!(resolver.unreachable_essential_actions().is_empty());
-        assert_eq!(
-            resolver
-                .reachable_chord("submit", &KeyContext::Chat)
-                .as_deref(),
-            Some("Ctrl+S")
-        );
     }
 
     #[test]
-    fn unbinding_makes_an_essential_action_unreachable() {
-        let unbound = user(&[("alt+h", None, None)]);
-        let resolver = KeybindingResolver::new(&unbound);
-        let conflicts = resolver.conflicts();
-        assert!(!conflicts.is_empty());
-        assert!(conflicts.iter().all(|c| c.by.is_none()));
-        assert_eq!(resolver.unreachable_essential_actions(), vec!["openHelp"]);
+    fn keys_the_loop_handles_itself_are_never_reported_as_changed() {
+        // The CLI submits on Enter before bindings resolve, so rebinding it
+        // changes nothing a user would see.
+        let enter = user(&[("enter", Some("newline"), Some("Chat"))]);
+        let resolver = KeybindingResolver::new(&enter);
+        assert!(resolver.conflicts().is_empty());
+        assert_eq!(resolver.reachable_chord("submit").as_deref(), Some("Enter"));
+        // Permission prompts read y/n themselves; a Global `y` does not
+        // touch Chat, so there is nothing to report.
+        let y = user(&[("y", Some("customAction"), None)]);
+        assert!(KeybindingResolver::new(&y).conflicts().is_empty());
+    }
+
+    #[test]
+    fn a_chat_override_of_a_global_chord_moves_the_hint_to_the_fallback() {
+        // Alt+H is Global help, but a Chat binding wins while composing.
+        let shadowed = user(&[("alt+h", Some("openSearch"), Some("Chat"))]);
+        let resolver = KeybindingResolver::new(&shadowed);
+        assert_eq!(
+            resolver.conflicts(),
+            vec![BindingConflict {
+                chord: "alt+h".to_string(),
+                replaced: "openHelp".to_string(),
+                by: Some("openSearch".to_string()),
+            }]
+        );
+        assert_eq!(resolver.reachable_chord("openHelp").as_deref(), Some("F1"));
+    }
+
+    #[test]
+    fn unbinding_makes_an_essential_action_unreachable_only_without_a_fallback() {
+        let palette = KeybindingResolver::new(&user(&[("ctrl+k", None, None)]));
+        assert_eq!(
+            palette.conflicts(),
+            vec![BindingConflict {
+                chord: "ctrl+k".to_string(),
+                replaced: "openCommandPalette".to_string(),
+                by: None,
+            }]
+        );
+        assert_eq!(
+            palette.unreachable_essential_actions(),
+            vec!["openCommandPalette"]
+        );
+
+        // F1 still opens help when Alt+H is unbound ...
+        let help = KeybindingResolver::new(&user(&[("alt+h", None, None)]));
+        assert!(help.unreachable_essential_actions().is_empty());
+        assert_eq!(help.reachable_chord("openHelp").as_deref(), Some("F1"));
+        // ... but not once F1 is bound to something else.
+        let both = KeybindingResolver::new(&user(&[
+            ("alt+h", None, None),
+            ("f1", Some("redraw"), Some("Chat")),
+        ]));
+        assert_eq!(both.unreachable_essential_actions(), vec!["openHelp"]);
     }
 
     #[test]
     fn a_shorter_chord_shadows_a_longer_one() {
-        // `ctrl+x ctrl+s` would submit, but `ctrl+x` resolves first.
+        // `ctrl+x ctrl+p` would open the palette, but `ctrl+x` resolves first.
         let shadowed = user(&[
-            ("enter", Some("newline"), Some("Chat")),
-            ("ctrl+x ctrl+s", Some("submit"), Some("Chat")),
+            ("ctrl+k", Some("newline"), Some("Chat")),
+            ("ctrl+x ctrl+p", Some("openCommandPalette"), Some("Chat")),
             ("ctrl+x", Some("redraw"), Some("Chat")),
         ]);
         assert_eq!(
             KeybindingResolver::new(&shadowed).unreachable_essential_actions(),
-            vec!["submit"]
+            vec!["openCommandPalette"]
         );
         let without_prefix = user(&[
-            ("enter", Some("newline"), Some("Chat")),
-            ("ctrl+x ctrl+s", Some("submit"), Some("Chat")),
+            ("ctrl+k", Some("newline"), Some("Chat")),
+            ("ctrl+x ctrl+p", Some("openCommandPalette"), Some("Chat")),
         ]);
         assert!(KeybindingResolver::new(&without_prefix)
             .unreachable_essential_actions()

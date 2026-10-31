@@ -2321,13 +2321,10 @@ pub mod config {
                 notifications: over.notifications || base.notifications,
                 show_turn_duration: over.show_turn_duration || base.show_turn_duration,
                 reduce_motion: over.reduce_motion || base.reduce_motion,
-                // Appearance is one presentation unit: a layer that sets it
-                // replaces the lower layer's value whole.
-                next_appearance: if over.next_appearance.is_default() {
-                    base.next_appearance
-                } else {
-                    over.next_appearance
-                },
+                next_appearance: crate::appearance::NextAppearanceSettings::merge(
+                    base.next_appearance,
+                    over.next_appearance,
+                ),
                 terminal_progress_bar: over.terminal_progress_bar || base.terminal_progress_bar,
                 show_cwd: over.show_cwd || base.show_cwd,
                 show_git_branch: over.show_git_branch || base.show_git_branch,

@@ -193,8 +193,9 @@ fn attributes(role: Role) -> Modifier {
 fn named(role: Role) -> (Color, Option<Color>) {
     match role {
         Role::Text | Role::Evidence => (Color::Reset, None),
-        Role::TextMuted => (Color::Gray, None),
-        Role::TextSubtle | Role::Border => (Color::DarkGray, None),
+        // Gray and DarkGray vanish on light or Solarized palettes; muted
+        // tiers use the terminal's own text color, dimmed (see `style`).
+        Role::TextMuted | Role::TextSubtle | Role::Border => (Color::Reset, None),
         Role::Identity | Role::Presence => (Color::Magenta, None),
         Role::Action => (Color::White, Some(Color::Magenta)),
         Role::Focus | Role::Link => (Color::LightMagenta, None),
@@ -237,6 +238,9 @@ impl Appearance {
                 }
                 if role == Role::Selection {
                     style = style.add_modifier(Modifier::REVERSED);
+                }
+                if matches!(role, Role::TextMuted | Role::TextSubtle | Role::Border) {
+                    style = style.add_modifier(Modifier::DIM);
                 }
             }
             ColorMode::TrueColor | ColorMode::Ansi256 => {
@@ -341,9 +345,9 @@ impl Appearance {
                     _ => Scheme::Dark,
                 }),
         };
-        // Brand colors assume a known canvas. On an unknown background, named
-        // colors follow the terminal's own palette and stay legible on light
-        // and dark alike; an explicit theme restores the Brand palette.
+        // Brand colors assume a known canvas. On an unknown background, use
+        // the terminal's own palette instead (text tiers become dimmed
+        // default text); an explicit theme restores the Brand palette.
         let color = match (color, scheme) {
             (ColorMode::TrueColor | ColorMode::Ansi256, None) => ColorMode::Ansi16,
             (color, _) => color,

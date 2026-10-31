@@ -10,7 +10,7 @@
 use serde::de::Deserializer;
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 macro_rules! choice {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
@@ -61,6 +61,9 @@ choice!(
     LayoutChoice { Focus => "focus", Work => "work", Inspect => "inspect" }
 );
 
+/// Keys this version reads.
+const KEYS: &[&str] = &["theme", "colorMode", "glyphs", "density", "layout", "hints"];
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NextAppearanceSettings {
     pub theme: ThemeChoice,
@@ -75,8 +78,8 @@ pub struct NextAppearanceSettings {
     preserved: BTreeMap<String, serde_json::Value>,
     /// Known keys whose value was rejected, in file order.
     rejected: Vec<String>,
-    /// Whether `hints` was set explicitly (so defaults are not written out).
-    hints_set: bool,
+    /// Keys this layer set to a valid value, so merging knows which win.
+    set: BTreeSet<&'static str>,
     /// A non-object value, kept so saving settings never rewrites it.
     unparsed: Option<serde_json::Value>,
 }
@@ -89,6 +92,44 @@ impl NextAppearanceSettings {
 
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Combine two settings layers key by key: each key `over` set to a
+    /// valid value wins; everything else, including unknown keys, comes
+    /// from `base` unless `over` carries it. A layer that could not be read
+    /// as an object changes nothing.
+    pub fn merge(base: Self, over: Self) -> Self {
+        if over.unparsed.is_some() {
+            return base;
+        }
+        let mut merged = base;
+        for key in &over.set {
+            match *key {
+                "theme" => merged.theme = over.theme,
+                "colorMode" => merged.color = over.color,
+                "glyphs" => merged.glyphs = over.glyphs,
+                "density" => merged.density = over.density,
+                "layout" => merged.layout = over.layout,
+                "hints" => merged.hints = over.hints,
+                _ => {}
+            }
+            merged.set.insert(*key);
+            merged.preserved.remove(*key);
+            merged.rejected.retain(|rejected| rejected.as_str() != *key);
+        }
+        for (key, value) in over.preserved {
+            // A rejected higher value never hides a valid lower one.
+            if !merged.set.contains(key.as_str()) {
+                merged.preserved.insert(key, value);
+            }
+        }
+        for key in over.rejected {
+            if !merged.set.contains(key.as_str()) && !merged.rejected.contains(&key) {
+                merged.rejected.push(key);
+            }
+        }
+        merged.unparsed = None;
+        merged
     }
 }
 
@@ -120,14 +161,17 @@ impl<'de> Deserialize<'de> for NextAppearanceSettings {
                     .map(|v| settings.layout = v),
                 "hints" => value.as_bool().map(|v| {
                     settings.hints = v;
-                    settings.hints_set = true;
                 }),
                 _ => {
                     settings.preserved.insert(key, value);
                     continue;
                 }
             };
-            if accepted.is_none() {
+            if accepted.is_some() {
+                if let Some(known) = KEYS.iter().find(|known| **known == key) {
+                    settings.set.insert(known);
+                }
+            } else {
                 settings.rejected.push(key.clone());
                 settings.preserved.insert(key, value);
             }
@@ -179,7 +223,7 @@ impl Serialize for NextAppearanceSettings {
                 map.serialize_entry(key, value)?;
             }
         }
-        if self.hints_set {
+        if self.set.contains("hints") {
             map.serialize_entry("hints", &self.hints)?;
         }
         for (key, value) in &self.preserved {
@@ -193,6 +237,37 @@ impl Serialize for NextAppearanceSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layers_merge_per_field_and_the_higher_layer_wins_each_key() {
+        let user: NextAppearanceSettings =
+            serde_json::from_str(r#"{"colorMode":"256","theme":"dark","oldKey":1}"#).unwrap();
+        let project: NextAppearanceSettings =
+            serde_json::from_str(r#"{"hints":true,"theme":"light","newKey":2}"#).unwrap();
+        let merged = NextAppearanceSettings::merge(user.clone(), project);
+        assert_eq!(merged.color, ColorChoice::Ansi256, "user key survives");
+        assert_eq!(merged.theme, ThemeChoice::Light, "project key wins");
+        assert!(merged.hints);
+        assert_eq!(
+            serde_json::to_value(&merged).unwrap(),
+            serde_json::json!({"colorMode":"256","theme":"light","hints":true,"oldKey":1,"newKey":2})
+        );
+
+        // An invalid higher value keeps the lower layer's valid one, once.
+        let invalid: NextAppearanceSettings = serde_json::from_str(r#"{"theme":"plaid"}"#).unwrap();
+        let merged = NextAppearanceSettings::merge(user.clone(), invalid);
+        assert_eq!(merged.theme, ThemeChoice::Dark);
+        assert_eq!(serde_json::to_value(&merged).unwrap()["theme"], "dark");
+
+        // A layer that does not set the key, or cannot be read, changes nothing.
+        let empty = NextAppearanceSettings::default();
+        assert_eq!(NextAppearanceSettings::merge(user.clone(), empty), user);
+        let unreadable: NextAppearanceSettings = serde_json::from_str(r#""dark""#).unwrap();
+        assert_eq!(
+            NextAppearanceSettings::merge(user.clone(), unreadable),
+            user
+        );
+    }
 
     #[test]
     fn valid_values_round_trip_and_defaults_stay_out_of_the_file() {

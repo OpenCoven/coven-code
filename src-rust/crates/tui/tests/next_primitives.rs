@@ -472,45 +472,80 @@ fn bindings(entries: &[(&str, Option<&str>, Option<&str>)]) -> UserKeybindings {
 }
 
 #[test]
-fn key_hints_come_from_the_configurable_bindings_and_surface_conflicts() {
-    let KeyHints::Hints(defaults) = KeyHints::resolve(&UserKeybindings::default()) else {
-        panic!("defaults should produce plain hints");
-    };
-    let defaults = defaults.join(" ");
+fn key_hints_show_the_working_chord_and_report_only_real_changes() {
+    let defaults = KeyHints::resolve(&UserKeybindings::default());
+    assert!(defaults.unreachable.is_empty());
+    let text = defaults.parts.join(" ");
     assert!(
-        defaults.contains("send") && defaults.contains("commands"),
-        "{defaults}"
+        text.contains("Enter send")
+            && text.contains("Ctrl+K commands")
+            && text.contains("Alt+H help"),
+        "{text}"
     );
 
-    let rebound = bindings(&[("f1", Some("openHelp"), None)]);
-    let KeyHints::Hints(text) = KeyHints::resolve(&rebound) else {
-        panic!("a new chord is not a conflict");
-    };
-    let text = text.join(" ");
-    assert!(text.contains("help"), "{text}");
-    assert!(
-        text.contains("F1 help"),
-        "hint follows the user's binding: {text}"
-    );
+    // A new chord moves the hint.
+    let rebound = KeyHints::resolve(&bindings(&[("f9", Some("openHelp"), None)]));
+    assert!(rebound.parts.join(" ").contains("F9 help"), "{rebound:?}");
 
+    // Enter always submits in the composer, so rebinding it is not a change.
+    let enter = bindings(&[("enter", Some("newline"), Some("Chat"))]);
+    assert!(KeyHints::resolve(&enter)
+        .parts
+        .join(" ")
+        .contains("Enter send"));
+    assert!(key_conflict_notices(&enter).is_empty());
+
+    // Losing the palette key keeps the other hints and adds the warning.
+    let palette = bindings(&[("ctrl+k", Some("newline"), Some("Chat"))]);
+    let hints = KeyHints::resolve(&palette);
+    assert_eq!(hints.unreachable, vec!["openCommandPalette"]);
+    assert!(hints.parts.join(" ").contains("Enter send"), "{hints:?}");
     assert_eq!(
-        KeyHints::resolve(&bindings(&[("enter", Some("newline"), Some("Chat"))])),
-        KeyHints::Unreachable(vec!["submit"])
-    );
-    let moved = bindings(&[
-        ("enter", Some("newline"), Some("Chat")),
-        ("ctrl+s", Some("submit"), Some("Chat")),
-    ]);
-    // A conflict does not hide the hints; they show the chord that works.
-    let KeyHints::Hints(text) = KeyHints::resolve(&moved) else {
-        panic!("submit is still reachable");
-    };
-    assert!(text.join(" ").contains("Ctrl+S send"), "{text:?}");
-    assert_eq!(
-        key_conflict_notices(&moved),
-        vec!["Key enter in Chat now newline (was submit)".to_string()]
+        key_conflict_notices(&palette),
+        vec!["Key ctrl+k now newline (was openCommandPalette)".to_string()]
     );
     assert!(key_conflict_notices(&UserKeybindings::default()).is_empty());
+}
+
+#[test]
+fn presentation_settings_reach_the_rendered_frame_through_from_settings() {
+    let settings: Settings = serde_json::from_str(
+        r#"{"reduceMotion":true,"nextAppearance":{"theme":"light","colorMode":"truecolor","glyphs":"ascii","density":"compact","hints":true}}"#,
+    )
+    .expect("settings parse");
+    let presentation = NextPresentation::from_settings(
+        &settings,
+        &bindings(&[("ctrl+k", Some("newline"), Some("Chat"))]),
+        env(&[("LANG", "en_US.UTF-8")]),
+    );
+    assert_eq!(presentation.appearance.scheme, Scheme::Light);
+    assert_eq!(presentation.appearance.color, ColorMode::TrueColor);
+    assert_eq!(presentation.appearance.glyphs, Glyphs::Ascii);
+    assert_eq!(presentation.appearance.motion, Motion::Reduced);
+
+    let app = next_app(presentation, &["first", "second"]);
+    let buffer = draw_next(&app, 80, 24);
+    let text = text_of(&buffer);
+    assert!(text.is_ascii(), "{text}");
+    assert!(text.contains("no key reaches openCommandPalette"), "{text}");
+    // Compact density: no blank row between entries.
+    let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let first = rows
+        .iter()
+        .position(|row| *row == "first")
+        .expect("first entry");
+    assert_eq!(rows[first + 1], "you", "{text}");
+    // Light scheme paints Brand light text.
+    assert!(buffer
+        .content
+        .iter()
+        .any(|cell| cell.fg == Color::Rgb(0x1A, 0x13, 0x20)));
+
+    let quiet: Settings = serde_json::from_str("{}").expect("settings parse");
+    let presentation =
+        NextPresentation::from_settings(&quiet, &UserKeybindings::default(), env(&[]));
+    assert_eq!(presentation.hints, None, "hints are opt-in");
+    assert_eq!(presentation.appearance.motion, Motion::Full);
 }
 
 fn next_app(presentation: NextPresentation, messages: &[&str]) -> App {

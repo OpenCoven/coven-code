@@ -18,7 +18,7 @@ pub mod style;
 use crate::app::App;
 use crate::application::view::{EntryRole, ToolActivityState, TranscriptView};
 use claurst_core::appearance::Density;
-use claurst_core::keybindings::{KeyContext, KeybindingResolver, UserKeybindings};
+use claurst_core::keybindings::{KeybindingResolver, UserKeybindings};
 use primitives::Status;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -32,49 +32,46 @@ pub const PREVIEW_LABEL: &str = "Coven · preview";
 
 /// Content of the optional key-hint row, resolved through the configurable
 /// keybinding system.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KeyHints {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeyHints {
     /// `<keys> <label>` parts, joined with the appearance's separator.
-    Hints(Vec<String>),
-    /// User bindings leave essential actions without any key.
-    Unreachable(Vec<&'static str>),
+    pub parts: Vec<String>,
+    /// Essential actions no key reaches; shown after the hints.
+    pub unreachable: Vec<&'static str>,
 }
 
 impl KeyHints {
     pub fn resolve(user: &UserKeybindings) -> Self {
         let resolver = KeybindingResolver::new(user);
-        let unreachable = resolver.unreachable_essential_actions();
-        if !unreachable.is_empty() {
-            return Self::Unreachable(unreachable);
-        }
-        // Hints show the chord that actually reaches each action now.
-        let hint = |action: &str, context: KeyContext, label: &str| {
-            resolver
-                .reachable_chord(action, &context)
-                .map(|keys| format!("{keys} {label}"))
-        };
-        let parts: Vec<String> = [
-            hint("submit", KeyContext::Chat, "send"),
-            hint("openCommandPalette", KeyContext::Chat, "commands"),
-            hint("openHelp", KeyContext::Global, "help"),
+        // Hints show the chord that reaches each action from the composer now.
+        let parts = [
+            ("submit", "send"),
+            ("openCommandPalette", "commands"),
+            ("openHelp", "help"),
         ]
         .into_iter()
-        .flatten()
+        .filter_map(|(action, label)| {
+            resolver
+                .reachable_chord(action)
+                .map(|keys| format!("{keys} {label}"))
+        })
         .collect();
-        Self::Hints(parts)
+        Self {
+            parts,
+            unreachable: resolver.unreachable_essential_actions(),
+        }
     }
 }
 
-/// One line per user binding that changed what an already-bound chord does.
+/// One line per composer chord whose final effect differs from its default.
 pub fn key_conflict_notices(user: &UserKeybindings) -> Vec<String> {
     KeybindingResolver::new(user)
         .conflicts()
         .into_iter()
         .map(|conflict| {
             format!(
-                "Key {} in {:?} now {} (was {})",
+                "Key {} now {} (was {})",
                 conflict.chord,
-                conflict.context,
                 conflict.by.as_deref().unwrap_or("unbound"),
                 conflict.replaced
             )
@@ -301,21 +298,26 @@ fn status_line(appearance: &Appearance, view: &TranscriptView, frame_count: u64)
 }
 
 fn hints_line(appearance: &Appearance, hints: &KeyHints) -> Line<'static> {
-    match hints {
-        KeyHints::Hints(parts) => Line::from(Span::styled(
-            parts.join(&format!(
-                " {} ",
-                primitives::Mark::Separator.glyph(appearance.glyphs)
-            )),
-            appearance.style(Role::TextSubtle),
-        )),
-        KeyHints::Unreachable(actions) => primitives::status_message(
-            appearance,
-            Status::Blocked,
-            "unreachable",
-            &format!("no key reaches {}", actions.join(", ")),
-        ),
+    let separator = format!(" {} ", primitives::Mark::Separator.glyph(appearance.glyphs));
+    let mut spans = vec![Span::styled(
+        hints.parts.join(&separator),
+        appearance.style(Role::TextSubtle),
+    )];
+    if !hints.unreachable.is_empty() {
+        if !hints.parts.is_empty() {
+            spans.push(Span::styled(separator, appearance.style(Role::TextSubtle)));
+        }
+        spans.extend(
+            primitives::status_message(
+                appearance,
+                Status::Blocked,
+                "unreachable",
+                &format!("no key reaches {}", hints.unreachable.join(", ")),
+            )
+            .spans,
+        );
     }
+    Line::from(spans)
 }
 
 #[cfg(test)]
