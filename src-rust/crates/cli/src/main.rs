@@ -2361,13 +2361,32 @@ async fn settle_abandoned_turn(
 
 type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
 
+/// Tag one turn's events with its session generation and deliver them to the
+/// bounded interactive queue in order. Waits for queue space rather than
+/// dropping; ends when the turn's sender is dropped or the loop is gone.
+async fn forward_scoped_events(
+    mut turn_rx: tokio::sync::mpsc::UnboundedReceiver<claurst_query::QueryEvent>,
+    events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
+    generation: claurst_tui::application::SessionGeneration,
+) {
+    while let Some(event) = turn_rx.recv().await {
+        let scoped = claurst_tui::application::ScopedQueryEvent { generation, event };
+        if events.send(scoped).await.is_err() {
+            break;
+        }
+    }
+}
+
 struct InteractiveQuery {
     client: Arc<claurst_api::AnthropicClient>,
     tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
     context: ToolContext,
     config: claurst_query::QueryConfig,
     tracker: Arc<CostTracker>,
-    events: tokio::sync::mpsc::UnboundedSender<claurst_query::QueryEvent>,
+    events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
+    /// Session generation this turn belongs to; every event it emits is
+    /// tagged with it so a replaced conversation never receives them.
+    generation: claurst_tui::application::SessionGeneration,
     cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -2383,18 +2402,23 @@ impl InteractiveQuery {
                 ));
             }
             let mut msgs = messages.lock().await.clone();
-            let outcome = claurst_query::run_query_loop(
+            // The query loop owns `turn_tx` and drops it when it returns, which
+            // ends the forwarder; joining both keeps the worker's lifetime
+            // covering delivery of every event it produced.
+            let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+            let forward = forward_scoped_events(turn_rx, self.events, self.generation);
+            let run = claurst_query::run_query_loop(
                 self.client.as_ref(),
                 &mut msgs,
                 self.tools.as_slice(),
                 &self.context,
                 &self.config,
                 self.tracker,
-                Some(self.events),
+                Some(turn_tx),
                 self.cancel,
                 None,
-            )
-            .await;
+            );
+            let (outcome, ()) = tokio::join!(run, forward);
             *messages.lock().await = msgs;
             outcome
         })
@@ -2658,10 +2682,28 @@ async fn run_interactive(
         ))
     });
 
+    // Renderer selection is interactive-only: report an unsupported value
+    // before the terminal takes over stderr.
+    let renderer_selection = claurst_tui::application::select_renderer(
+        std::env::var(claurst_tui::application::UI_SELECTOR_ENV)
+            .ok()
+            .as_deref(),
+    );
+    if let Some(warning) = &renderer_selection.warning {
+        eprintln!("warning: {warning}");
+    }
+    let renderer = renderer_selection.renderer;
+
     // Set up terminal
     let mut terminal = setup_terminal()?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    // The stderr warning is covered by the alternate screen; repeat it where
+    // the user can read it.
+    if let Some(warning) = renderer_selection.warning {
+        app.notifications
+            .push(claurst_tui::NotificationKind::Warning, warning, Some(15));
+    }
     refresh_command_discovery(&mut app, &live_config, &tool_ctx.working_dir);
     if let Some(warning) = resume_warning {
         app.status_message = Some(warning);
@@ -2935,7 +2977,10 @@ async fn run_interactive(
 
     // Current cancel token (replaced each turn)
     let mut cancel: Option<CancellationToken> = None;
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<claurst_tui::application::ScopedQueryEvent>(
+        claurst_tui::application::QUERY_EVENT_QUEUE_CAPACITY,
+    );
+    let mut session_scope = claurst_tui::application::SessionScope::default();
     // Background bash tasks with notify_on_complete send their terminal-state
     // info here, where the main loop fans-out to a TUI toast + optional bell.
     let (bg_completion_tx, mut bg_completion_rx) =
@@ -3007,7 +3052,10 @@ async fn run_interactive(
         }
 
         // Draw the UI
-        terminal.draw(|f| render_app(f, &app))?;
+        terminal.draw(|f| match renderer {
+            claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
+            claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
+        })?;
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
@@ -3287,6 +3335,7 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
+                                    session_scope.advance();
                                     messages.clear();
                                     app.replace_messages(Vec::new());
                                     session.messages.clear();
@@ -3294,6 +3343,7 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    session_scope.advance();
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     messages = new_msgs.clone();
                                     app.replace_messages(new_msgs);
@@ -3327,6 +3377,7 @@ async fn run_interactive(
                                         Some("Select what to import from ~/.claude.".to_string());
                                 }
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
+                                    session_scope.advance();
                                     session = resumed_session;
                                     messages = session.messages.clone();
                                     app.replace_messages(messages.clone());
@@ -3949,7 +4000,8 @@ async fn run_interactive(
 
                         let handle = InteractiveQuery {
                             client: client_clone, tools: tools_arc_clone, context: ctx_clone,
-                            config: qcfg, tracker, events: tx, cancel: ct,
+                            config: qcfg, tracker, events: tx,
+                            generation: session_scope.current(), cancel: ct,
                         }.spawn(msgs_arc_clone);
 
                         // Store the Arc so we can read messages after task completes
@@ -4082,6 +4134,8 @@ async fn run_interactive(
                         }
                     }
                     if !app.is_streaming && app.messages.len() < messages.len() {
+                        // An in-App rewind replaced the visible conversation.
+                        session_scope.advance();
                         messages = app.messages.clone();
                         session.messages = messages.clone();
                         session.updated_at = chrono::Utc::now();
@@ -4166,10 +4220,11 @@ async fn run_interactive(
         }
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
-        while let Ok(evt) = event_rx.try_recv() {
+        while let Ok(scoped) = event_rx.try_recv() {
+            let evt = &scoped.event;
             // Forward to bridge before consuming (clone only what we need).
             if let Some(ref runtime) = bridge_runtime {
-                let outbound: Option<BridgeOutbound> = match &evt {
+                let outbound: Option<BridgeOutbound> = match evt {
                     QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                         delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                         index,
@@ -4215,7 +4270,7 @@ async fn run_interactive(
             // Also forward to the BridgeSessionInfo relay channel (best-effort).
             // This drives the post_bridge_event relay task spawned on Connected.
             if bridge_session_info.is_some() {
-                let relay_payload: Option<String> = match &evt {
+                let relay_payload: Option<String> = match evt {
                     QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                         delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                         ..
@@ -4260,7 +4315,10 @@ async fn run_interactive(
                     let _ = relay_ev_tx.try_send(payload);
                 }
             }
-            app.handle_query_event(evt);
+            // Machine consumers above see every event; presentation only
+            // admits events from the current session generation.
+            let effects = session_scope.apply(&mut app, scoped);
+            claurst_tui::application::perform_effects(&effects);
         }
 
         // Drain background-task completion events: surface a toast and
@@ -4554,6 +4612,7 @@ async fn run_interactive(
                 config: qcfg,
                 tracker,
                 events: tx,
+                generation: session_scope.current(),
                 cancel: ct,
             }
             .spawn(msgs_arc_clone);
@@ -4922,6 +4981,7 @@ async fn run_interactive(
                         config: qcfg,
                         tracker,
                         events: tx,
+                        generation: session_scope.current(),
                         cancel: ct,
                     }
                     .spawn(msgs_arc_clone);
@@ -5123,6 +5183,7 @@ async fn run_interactive(
                                 config: qcfg,
                                 tracker,
                                 events: tx,
+                                generation: session_scope.current(),
                                 cancel: ct,
                             }
                             .spawn(msgs_arc_clone);
@@ -5924,6 +5985,53 @@ fn remote_connection_notification(session_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_forwarder_delivers_every_event_in_order_under_backpressure() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut receiver) = tokio::sync::mpsc::channel(1);
+        let mut scope = claurst_tui::application::SessionScope::default();
+        let generation = scope.advance();
+        for n in 0..200 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status(format!("event {n}")))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let forward = tokio::spawn(forward_scoped_events(turn_rx, events, generation));
+        let mut received = Vec::new();
+        while let Some(scoped) = receiver.recv().await {
+            assert_eq!(scoped.generation, generation);
+            match scoped.event {
+                claurst_query::QueryEvent::Status(text) => received.push(text),
+                other => panic!("unexpected event {other:?}"),
+            }
+            // Slow consumer: the queue stays full while the forwarder waits.
+            tokio::task::yield_now().await;
+        }
+        forward.await.unwrap();
+        let expected: Vec<String> = (0..200).map(|n| format!("event {n}")).collect();
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
+    async fn scoped_forwarder_stops_when_the_interactive_loop_is_gone() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        turn_tx
+            .send(claurst_query::QueryEvent::Status("orphan".into()))
+            .unwrap();
+        // The sender stays alive: the forwarder must end on the closed queue,
+        // not wait for the turn to finish.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forward_scoped_events(turn_rx, events, Default::default()),
+        )
+        .await
+        .expect("forwarder must stop once the interactive queue is closed");
+        drop(turn_tx);
+    }
 
     #[test]
     fn remote_notification_two_byte_boundary() {

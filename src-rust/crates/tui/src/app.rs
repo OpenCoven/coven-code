@@ -7314,8 +7314,22 @@ impl App {
         self.invalidate_transcript();
     }
 
-    /// Process a query event from the agentic loop.
+    /// Process a query event from the agentic loop and perform the external
+    /// effects it requests.
     pub fn handle_query_event(&mut self, event: QueryEvent) {
+        let effects = self.apply_query_event(event);
+        crate::application::perform_effects(&effects);
+    }
+
+    /// Apply a query event to presentation state.
+    ///
+    /// External effects are returned instead of performed so the interactive
+    /// loop, not the reducer step, owns them.
+    pub fn apply_query_event(
+        &mut self,
+        event: QueryEvent,
+    ) -> Vec<crate::application::PresentationEffect> {
+        let mut effects = Vec::new();
         // Auto-dismiss error modal when assistant responds
         match &event {
             QueryEvent::Stream(_) | QueryEvent::TurnComplete { .. } => {
@@ -7481,7 +7495,7 @@ impl App {
                         );
                     }
                     if self.bell_on_complete {
-                        ring_terminal_bell();
+                        effects.push(crate::application::PresentationEffect::RingBell);
                     }
                 }
             }
@@ -7540,6 +7554,7 @@ impl App {
 
         // Update token count from tracker.
         self.token_count = self.cost_tracker.total_tokens() as u32;
+        effects
     }
 
     // -------------------------------------------------------------------
@@ -7926,6 +7941,42 @@ mod tests {
         let mut app = App::new(config, cost_tracker);
         app.install_command_catalog(test_command_catalog());
         app
+    }
+
+    #[test]
+    fn turn_completion_bell_is_returned_as_an_effect_not_performed() {
+        use crate::application::PresentationEffect;
+        let complete = || QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".to_string(),
+            usage: None,
+        };
+
+        let mut app = make_app();
+        app.bell_on_complete = true;
+        app.completion_toast_min_secs = 0;
+        app.turn_start = Some(std::time::Instant::now());
+        assert_eq!(
+            app.apply_query_event(complete()),
+            vec![PresentationEffect::RingBell]
+        );
+
+        let mut quiet = make_app();
+        quiet.bell_on_complete = false;
+        quiet.completion_toast_min_secs = 0;
+        quiet.turn_start = Some(std::time::Instant::now());
+        assert!(quiet.apply_query_event(complete()).is_empty());
+
+        let mut cancelled = make_app();
+        cancelled.bell_on_complete = true;
+        cancelled.completion_toast_min_secs = 0;
+        assert!(cancelled
+            .apply_query_event(QueryEvent::TurnComplete {
+                turn: 1,
+                stop_reason: "aborted".to_string(),
+                usage: None,
+            })
+            .is_empty());
     }
 
     fn test_command_catalog() -> Vec<CommandPaletteEntry> {
