@@ -1304,6 +1304,14 @@ pub mod config {
         /// Whether to reduce motion in UI. Defaults to false.
         #[serde(default, rename = "reduceMotion")]
         pub reduce_motion: bool,
+        /// Presentation-only appearance for the Next renderer. Never affects
+        /// permissions, providers, identity or stored state.
+        #[serde(
+            default,
+            rename = "nextAppearance",
+            skip_serializing_if = "crate::appearance::NextAppearanceSettings::is_default"
+        )]
+        pub next_appearance: crate::appearance::NextAppearanceSettings,
         /// Whether to show terminal progress bars. Defaults to true.
         #[serde(default = "default_true", rename = "terminalProgressBar")]
         pub terminal_progress_bar: bool,
@@ -2313,6 +2321,13 @@ pub mod config {
                 notifications: over.notifications || base.notifications,
                 show_turn_duration: over.show_turn_duration || base.show_turn_duration,
                 reduce_motion: over.reduce_motion || base.reduce_motion,
+                // Appearance is one presentation unit: a layer that sets it
+                // replaces the lower layer's value whole.
+                next_appearance: if over.next_appearance.is_default() {
+                    base.next_appearance
+                } else {
+                    over.next_appearance
+                },
                 terminal_progress_bar: over.terminal_progress_bar || base.terminal_progress_bar,
                 show_cwd: over.show_cwd || base.show_cwd,
                 show_git_branch: over.show_git_branch || base.show_git_branch,
@@ -5642,6 +5657,7 @@ pub use oauth::OAuthTokens;
 // ---------------------------------------------------------------------------
 pub mod accounts;
 pub mod analytics;
+pub mod appearance;
 pub mod bash_classifier;
 pub mod codex_oauth;
 pub mod context_collapse;

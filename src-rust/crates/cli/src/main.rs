@@ -2733,6 +2733,11 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
+    app.next_presentation = claurst_tui::next::NextPresentation::from_settings(
+        &settings,
+        &claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir()),
+        |name| std::env::var(name).ok(),
+    );
 
     // Register this session in the Coven daemon ledger (best-effort, opt-in).
     // The id is captured here so that a mid-run /resume (which rebinds session.id)
