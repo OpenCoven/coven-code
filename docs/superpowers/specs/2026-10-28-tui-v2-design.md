@@ -3,8 +3,8 @@
 Issue: [#407](https://github.com/OpenCoven/coven-code/issues/407), under
 [epic #406](https://github.com/OpenCoven/coven-code/issues/406).
 Inspected 2026-10-29. The filename follows #407's requested deliverable name;
-it is not an October 28 execution claim. Status: independently source-reviewed documentation candidate;
-maintainer acceptance and fresh executable baseline remain pending.
+it is not an October 28 execution claim. Status: accepted #407 design baseline (2026-10-31), with the executable Classic
+baseline recorded in the compatibility matrix ledger.
 
 Read with the [capability matrix](../../tui-v2/capability-matrix.md) and
 [compatibility matrix](../../tui-v2/compatibility-matrix.md). Those documents
@@ -76,7 +76,7 @@ These are initial #410 design thresholds, to be verified with #417 cell tests:
 
 | Available cells | Layout rule | Reason |
 |---|---|---|
-| Width < 80 or height < 24 | Focus; detail replaces the main content temporarily; retain draft and return position | Avoid a sidebar starving transcript/composer; 40x12 is an existing safety fixture |
+| Width < 80 or height < 24 | Focus only (Work and Inspect render as a full-screen replacement of the main pane); retain draft and return position | Avoid a sidebar starving transcript/composer; 40x12 is an existing safety fixture |
 | Width >= 80 and height >= 24, with width < 120 or height < 32 | Focus or Work main pane; inspector replaces main pane | 80 columns cannot reliably contain 72-column text plus useful detail |
 | Width >= 120 and height >= 32 | Optional 72-column transcript + 1-column separator + at least 40-column inspector, with remaining cells for padding | Both regions retain useful content; never open a second inspector automatically |
 
@@ -204,11 +204,12 @@ The existing palette also has action `#A78BFA`, info `#C4B5FD`, deuteranopia,
 light/dark and named themes. Do not globally replace violet literals or remove
 accessibility palettes. Web contrast pairs assume known RGB backgrounds; terminal
 ANSI/256-color palettes and transparency require separate validation. Preserve
-terminal-owned fonts. Use the monochrome crown/lotus asset where supported;
-use plain `Coven` text for cell/ASCII fallback, not an invented or retired glyph.
+terminal-owned fonts. The canonical mark is SVG-only (`web/assets/mark.svg`), and no terminal
+graphics protocol is qualified, so cell renderers use plain `Coven` text for cell/ASCII fallback, not an invented or retired glyph.
 
 #409 must wire semantic roles through actual renderers; merely changing the
-palette file is insufficient. NO_COLOR, ASCII/Unicode fallback, reduced motion,
+palette file is insufficient. NO_COLOR (currently read nowhere), ASCII/Unicode fallback, reduced motion (wire the
+existing persisted `reduceMotion` setting, which no renderer reads today; do not add a second setting),
 configurable shortcuts and focus cues are required v2 work with #417 evidence,
 not certified current behavior. The inspected render/App/figures paths do not
 establish complete support. Translate UI contract focus/failure/progress semantics;
@@ -217,8 +218,11 @@ DOM hooks and CSS token values are not a terminal implementation.
 ## Dependency readiness and review limits
 
 #408 and #409 are the next implementation candidates after acceptance of these
-three source baselines. They can use nonoverlapping ownership (application seam
-versus Brand primitives), coordinating shared `App`/settings/keybindings files.
+three source baselines. File ownership: #408 owns `tui/src/application/`, App/CLI event and effect
+plumbing in `tui/src/app.rs` and `cli/src/main.rs`, and the renderer selector. #409
+owns `tui/src/next/` styling/primitives, `theme_colors.rs` and presentation-only
+appearance settings in core. Shared edits to `app.rs`, settings or `keybindings.rs`
+land in #408 first; #409 rebases onto it and consumes its view model.
 They do not wait on #420 or M3. #417 harness planning can begin alongside them;
 its execution depends on stable seam/primitives and later M1 journeys.
 
@@ -229,13 +233,8 @@ resolve immutable selection/privacy gaps; #416 stays operation-gated. #418 and
 all default-switch/release decisions require exact packaged/native evidence.
 Issue closure alone does not satisfy any gate.
 
-This session inspected source and retained synthetic fixtures, not a running
-terminal. Cargo and tmux are unavailable and Git checkout transport failed.
-Fresh Classic/Next captures, startup/input/render/RSS measurements, real-daemon
-journeys and native acceptance were not executed. The compatibility matrix records
-repeatable commands and the baseline evidence ledger. Keep #407's executable
-baseline acceptance unchecked until that evidence is attached; do not describe the
-whole issue or epic as completed based on this PR.
-
-Independent source/buildability review found no remaining blocking documentation
-findings. This is not maintainer design acceptance or executable qualification.
+The Classic executable baseline (targeted suites, real-binary tmux journeys, cold
+start and RSS samples) is recorded in the compatibility matrix ledger. Next does
+not exist at this baseline, so Classic/Next comparisons begin with #408. Real-daemon
+journeys and native-platform acceptance remain #412/#417/#418 work. Accepting this
+baseline does not complete the epic or any downstream gate.

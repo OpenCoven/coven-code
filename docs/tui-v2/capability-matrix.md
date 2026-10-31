@@ -6,8 +6,8 @@ Read with the [design](../superpowers/specs/2026-10-28-tui-v2-design.md) and
 
 ## Evidence and revisions
 
-`S` means implementation inspected and named tests/fixtures located, **not executed
-in this session**. `P` means proposed presentation or adapter. `U` means unsupported
+`S` means implementation inspected and named tests/fixtures located; only the
+suites listed in the compatibility matrix ledger are claimed as executed. `P` means proposed presentation or adapter. `U` means unsupported
 or unqualified for the specified terminal operation; it does not mean the entire
 producer is absent. No row is fresh live-integration acceptance. Owner names are
 architectural domains, not newly assigned people.
@@ -24,12 +24,9 @@ architectural domains, not newly assigned people.
 | OpenCoven/brand | `798e2f5f2f1a69f5d156ccc0a9aafc4f7da55fc8` | [stable web profile 1.0.0; canonical role values](https://github.com/OpenCoven/brand/blob/798e2f5f2f1a69f5d156ccc0a9aafc4f7da55fc8/web/profile.json) |
 | OpenCoven/ui | `141a407aeeb73a42837524183de0515f87ff3c45` | [portable interaction semantics, not product authority](https://github.com/OpenCoven/ui/blob/141a407aeeb73a42837524183de0515f87ff3c45/contracts/web-interactions.v1.json) |
 
-Coven Code main was freshly resolved and matches #407's original `87239e7` baseline.
-PR #419 has a scope-only description and no delivered #407 documents; it is not
-accepted implementation evidence. Open engine PRs #402-#405 and #397 are not main.
-`src-rust/.claude/CLAUDE.md` is referenced by root instructions but absent from the
-recursive tracked tree at this revision (and returns 404); root `AGENTS.md` and
-`CLAUDE.md` were read. No nested tracked AGENTS/CLAUDE instructions were found.
+Coven Code engine baseline: `87239e7`. Unmerged engine PRs are not part of this
+baseline. `src-rust/.claude/CLAUDE.md` is referenced by root instructions but absent
+from the tracked tree at this revision; root `AGENTS.md` and `CLAUDE.md` apply.
 A missing README is not used as evidence of an absent producer: Psyche was
 located through its actual crates and `docs/ARCHITECTURE.md`/`docs/CLI.md`.
 
@@ -246,7 +243,7 @@ fixtures. No blanket missing-product claim is made.
 
 | Intended v2 action | Canonical producer / inspected interface | Supported boundary and required gate |
 |---|---|---|
-| Negotiate daemon session/event/action support | [health and same-instance negotiation](https://github.com/OpenCoven/coven/blob/6b5caaecf98fd0a7cd8ee62878979161e697079a/docs/daemon/capabilities-handshake.md) | Daemon advertises capabilities and structured errors. Engine core DaemonHealth drops capability fields; #408/#412 adapter must retain/check exact required fields and IPC peer identity. No UI grants. |
+| Negotiate daemon session/event/action support | [health and same-instance negotiation](https://github.com/OpenCoven/coven/blob/6b5caaecf98fd0a7cd8ee62878979161e697079a/docs/daemon/capabilities-handshake.md) | Daemon advertises capabilities and structured errors. Engine core DaemonHealth drops capability fields; The #412 adapter (not #408) must retain/check exact required fields and IPC peer identity. No UI grants. |
 | Inspect/create/send/cancel daemon sessions | [DaemonClient methods](https://github.com/OpenCoven/coven-code/blob/87239e77acfd42dcbd2492c0ba36817626124549/src-rust/crates/core/src/coven_daemon.rs) | Legacy engine client supports these over Unix IPC, with non-Unix unavailability. Bound/adopted Psyche requests require their own proof contracts, not the legacy request shape. |
 | Canonical task create/plan/start/pause/cancel/retry/resume, dependency and lane inspection | [CovenPort](https://github.com/OpenCoven/psyche/blob/1e47b40dbbb9db21962b4884afe49763321f04b0/crates/psyche-coven/src/port.rs) | Typed negotiate/adopt/lookup/reconcile/inspect/events/result/terminate exists; core graph/node/execution and durable store exist. This is a boundary toward Coven, not a discovered terminal-facing task CRUD API. Runtime composition alone does not establish scheduler/lane service or TUI adapter. #413 blocked on Psyche #11/#12 and exact consumer profile; #19 is a different process-attempt consumer, not automatically this terminal. |
 | Research execution and resumable cited artifacts | [WebSearch and WebFetch](https://github.com/OpenCoven/coven-code/blob/87239e77acfd42dcbd2492c0ba36817626124549/src-rust/crates/tools/src/web_search.rs) | Existing web tools, stash links/attachments and review memory-citation validation are reusable. No qualified canonical research task/artifact API was identified in the inspected terminal/producer interfaces. #414 inherits #413; do not infer claim-to-web-source validation from memory-ID citation tests. |

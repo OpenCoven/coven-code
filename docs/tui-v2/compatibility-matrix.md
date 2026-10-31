@@ -5,9 +5,10 @@ For [#407](https://github.com/OpenCoven/coven-code/issues/407), inspected
 All producer SHAs are in the [capability matrix](capability-matrix.md).
 Read with the [design](../superpowers/specs/2026-10-28-tui-v2-design.md).
 
-This is a preserve/adapt/defer contract for future implementation. Documentation
-validation was executed; Rust, PTY and producer integration tests were not run in
-this environment. Test names below identify inspected coverage, not fresh passes.
+This is a preserve/adapt/defer contract for future implementation. The Classic
+executable baseline is recorded in the evidence ledger below; producer integration
+was not exercised. Test names below identify coverage; only the ledger's suites
+are claimed as fresh passes.
 No changes to runtime, Classic, storage, environment or wire behavior are made here.
 
 ## Public invocation, streams and exits
@@ -115,7 +116,7 @@ through a presentation toggle or expand its available tools.
 | Save failures | Do not equate current in-memory state with a successful durable save; future projections must retain warning/unknown state | Current paths plus open #403 persistence-warning PR; its proposed correction is not main or an excuse to fold an unreviewed runtime fix into #407 |
 | Daemon socket | ENGINE-CONTRACT preserves inherited `COVEN_DAEMON_SOCKET`; current older engine DaemonClient discovers coven_home()/coven.sock on Unix and is unavailable on non-Unix | `core/src/coven_daemon.rs`; socket-inheritance fixture proves no side effect, not that every method honors an override. Do not promise Windows IPC parity from the canonical producer's named-pipe client alone |
 | Daemon ledger | Opt-in `daemonLedger`, best-effort external session registration/completion; errors do not abort the coding session | ENGINE-CONTRACT endpoints and RegisterExternalSession/complete_session tests; not a daemon-owned process, lease or kill guarantee |
-| Health/capabilities | Current engine health DTO retains api/coven version and process metadata, not capability fields | Existing core client vs canonical health negotiation; #408/#412 must implement richer typed projection before new dependent operations |
+| Health/capabilities | Current engine health DTO retains api/coven version and process metadata, not capability fields | Existing core client vs canonical health negotiation; #412 owns the richer typed projection and must land it before new dependent operations; #408 leaves daemon health/negotiation unchanged |
 | `COVEN_CODE_PROVIDER`, `COVEN_CODE_API_BASE`, `--api-key` and provider-owned credentials | Existing Claude direct/keyless local CLI and Codex transport selection stays engine-owned; no OAuth-token import from another CLI | CLI/API registry and auth fast paths; preserve configuration precedence and private storage. No new provider introduced |
 | `COVEN_CODE_HOSTED_REVIEW`, `COVEN_CODE_HOSTED_REPAIR` | Isolation/tool restrictions continue to apply regardless of renderer | CLI/main/headless/memory_admin; hosted-mode stash refusals in commands tests |
 | `COVEN_GIT_TOKEN` | Trusted structured-worker environment channel; absent from brief/result, clone URLs and diagnostics | Headless contract v3; do not move credential data into TUI state, logs or fixtures |
@@ -131,11 +132,11 @@ through a presentation toggle or expand its available tools.
 |---|---|---|
 | Current commands | Preserve all active/advanced paths, active aliases, grouped routes, argument-rich forms and dynamic precedence; preserve rejection of removed paths | Capability matrix inventory; command registry/reference tests, App preflight and dispatch parity |
 | Keybindings | Preserve configured action resolution; Ctrl+K uses existing palette; F2 familiar behavior and input/history/copy/reader actions remain | core keybindings.rs and golden; App palette/reader/Unicode/paste-burst tests. Add v2 bindings only through configurable system |
-| Classic/Next | **Proposed** engine-owned `COVEN_CODE_UI=classic|next`; absent from baseline, Classic remains default | #408 must define unset=classic, classic=classic, next=qualified preview; invalid values warn on stderr and fall back to Classic only on interactive route. Machine routes ignore renderer selection and keep bytes/exits. This is a design decision for review, not current parsing |
+| Classic/Next | **Proposed** engine-owned `COVEN_CODE_UI=classic|next`; absent from baseline, Classic remains default | #408 defines unset=classic, classic=classic, next=opt-in preview (always compiled; labeled preview until #417/#418 qualify it). The value is read only on the interactive route: there an invalid value prints a stderr warning naming the accepted values and Classic starts. Headless, stream-json, ACP and named-command routes never read it, so their bytes/exits are unchanged for any value. This is a design decision for review, not current parsing |
 | Legacy selector | Do not repurpose `COVEN_LEGACY_TUI` (outer Coven dispatch compatibility) for engine Classic/Next | #406 constraint; absence in inspected engine files is not proof of absence in outer Coven |
 | Runtime features | Preserve build-time feature forwarding and effective defaults; no renderer makes disabled tools or paths available | CLI/core/TUI Cargo manifests. Explicitly exercise default, supported steer and voice builds before advertising them |
 | Voice | Feature-gated microphone/transcription remains explicit; plain v types into composer, not recording; existing toggle input remains | lib.rs issue_49 tests, voice_capture.rs/core voice.rs; #372 sensitive transcription error redaction remains open |
-| Accessibility | Preserve deuteranopia/light/dark/named alternatives and terminal fonts; adapt semantic Brand roles; text/shape focus and status cues | #409/#417 must prove actual render path, NO_COLOR, ASCII/Unicode and reduced-motion behavior; palette presence alone is insufficient |
+| Accessibility | Preserve deuteranopia/light/dark/named alternatives and terminal fonts; adapt semantic Brand roles; text/shape focus and status cues | #409/#417 must prove actual render path, NO_COLOR, ASCII/Unicode and reduced-motion behavior; palette presence alone is insufficient. Current gaps at baseline: the persisted `reduceMotion` setting (core `Settings::reduce_motion`, settings screen toggle) exists but no renderer reads it, and `NO_COLOR` is read nowhere. #409 wires the existing setting rather than adding a second one |
 | Terminal safety | Preserve restoration guard and existing input semantics; sanitize untrusted text at actual PTY boundary | #417 handles controls/OSC52/link injection, resize, keyboard/mouse, failures, panic and cleanup-capable exit; SIGKILL/host loss cannot guarantee cleanup |
 | Privacy | No memory preview, diagnostic, export or provider submission by browsing alone; no hidden mutation or new durable cache | #415 producer-backed privacy canaries and scope-generation tests; deliberate render can remain in terminal captures |
 | Rollback | Classic preview selection rollback; separately retain prior binary, selected managed engine pin and settings/data backup | #418 must exercise same-data Classic/Next switch and packaged binary/settings rollback; standalone binary replacement does not necessarily change Coven's selected engine |
@@ -159,25 +160,24 @@ home/project/model/frame state. They are retained source artifacts, not captures
 or performance measurements produced on this host. Do not regenerate them merely
 to accept an unintended change.
 
-| Evidence | Exact scope / result in this session | Missing proof |
+| Evidence | Exact scope / result | Missing proof |
 |---|---|---|
-| Source revisions | Engine and eight canonical producer/default-branch trees pinned in capability matrix | Executable/packaged binary identities not available |
-| Catalog cross-check | Every default registry active/advanced/removed row and active alias mapped; source handlers and actual beyond-catalog arguments inspected | Executed registry tests and command effects |
-| Documentation checks | Whitespace, reference-path/tree validation, source-symbol and registry inventory checks; record exact output in PR | No behavior changes tested by these checks |
-| Rust / terminal tooling | `command -v cargo` and `command -v tmux` returned no executable; Git checkout transport could not authenticate | Build, Rust suites, actual PTY captures and measurements not run |
-| Current host baseline | Linux documentation-inspection host; no terminal emulator/PTY session selected | Terminal name/version, native OS qualification, font/color settings and hardware workload samples |
-| Performance | No measurements; #417 targets remain targets: input-to-paint p95 <16 ms, render p95 <33 ms, cold usable frame <=10% over Classic, comparable RSS <=15% over Classic absent reviewed justification | Comparable sampled Classic and Next on same hardware/terminal/settings and exact binaries |
+| Source revisions | Engine `87239e7` and eight canonical producer trees pinned in capability matrix | Packaged binary identities (#418) |
+| Catalog cross-check | Every default registry active/advanced/removed row and active alias mapped; `slash_command_registry` passes (below) | Per-command effect journeys |
+| Targeted suites (2026-10-31) | `slash_command_registry` 2/2, `keybindings_golden` 1/1, `classic_baselines` 4/4, `engine_contract` 17/17, `acp_smoke` 6/6 passed with `--locked`; `uv run scripts/test-headless-schemas.py` 4/4 OK | Windows (engine contract is Unix-gated) |
+| Real-binary tmux journeys (2026-10-31) | Debug `coven-code` 0.8.0 built `--locked` at `87239e7` (sha256 prefix `bdfa608d3f53167a`), `scripts/tui-tests/run.sh` with `REQUIRE_TMUX=1`, disposable `HOME` seeded `{"hasCompletedOnboarding": true}`. 120x40: 48/48 checks passed, 0 skipped. 80x24: 40/42; the help overlay wraps command rows across its columns so `/session resume` is not rendered, and the paste-burst case that waits on that overlay fails with it. Recorded as a Classic 80x24 limitation for #410, not changed here | 40x12 real-terminal journeys; permission, cancellation and resume journeys need a fake-provider PTY fixture (#417) |
+| Host | macOS 27.0.1 arm64 (Apple M5 Max), tmux 3.8, `TERM=xterm-256color`, cargo 1.99.1 | Linux/Windows terminals, other emulators, font/color settings |
+| Performance (2026-10-31, Classic debug build) | Cold launch to first frame containing the footer (`F2 familiar`), 120x40, 20 samples, 5 ms capture polling via `tmux capture-pane`, quiet host: p50 946 ms, p95 1633 ms, min 577 ms. RSS 1 s after first frame: p50 88320 KiB, max 94736 KiB. A run with a concurrent cargo build measured p50 3076 ms and is discarded as contaminated | Release-build numbers; input-to-paint and render percentiles need in-process instrumentation (#417). #417 targets remain: input-to-paint p95 <16 ms, render p95 <33 ms, Next cold frame <=10% over Classic, RSS <=15% over Classic on the same binary profile |
 | Producer behavior | Contracts, implementation modules, DTOs and test sources inspected | Real-daemon task/dependency/recovery, reveal/context-selection and protected-operation runtime evidence |
 
-#407's fresh execution/performance criterion remains **unmet**. This PR may receive
-source/design review independently; do not close the issue or mark runtime/native
-acceptance passed on that basis. After maintainer acceptance, #408/#409 can begin
-the source-bound seam/primitives work; preview exposure still needs #417/#418.
+The capture-polling method bounds first-frame time from above by roughly one poll
+interval plus `capture-pane` latency; compare Classic and Next only with the same
+method, binary profile and host. No Next numbers exist until #408.
 
 ### Repeatable execution recipe for a complete checkout
 
 Run the following from `src-rust/` in an isolated checkout on a host with the
-repository's required Rust toolchain. These commands are **not reported as run**:
+repository's required Rust toolchain. The ledger above records their 2026-10-31 results:
 
 ```sh
 cargo test -p claurst-commands --test slash_command_registry --locked
