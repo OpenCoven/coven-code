@@ -28,6 +28,9 @@ pub enum Mark {
     Pending,
     Blocked,
     Evidence,
+    /// Diff line markers; the sign carries the meaning without color.
+    Added,
+    Removed,
 }
 
 impl Mark {
@@ -36,8 +39,8 @@ impl Mark {
             Mark::Identity => ("▍", "|"),
             Mark::Selected => ("›", ">"),
             Mark::Unselected => (" ", " "),
-            Mark::Collapsed => ("▸", "+"),
-            Mark::Expanded => ("▾", "-"),
+            Mark::Collapsed => ("▸", "[+]"),
+            Mark::Expanded => ("▾", "[-]"),
             Mark::Prompt => ("›", ">"),
             Mark::Crumb => ("/", "/"),
             Mark::Separator => ("·", "-"),
@@ -45,7 +48,9 @@ impl Mark {
             Mark::Verified => ("✓", "[ok]"),
             Mark::Pending => ("…", "[..]"),
             Mark::Blocked => ("✕", "[x]"),
-            Mark::Evidence => ("·", "[?]"),
+            Mark::Evidence => ("○", "[?]"),
+            Mark::Added => ("+", "+"),
+            Mark::Removed => ("-", "-"),
         };
         match glyphs {
             Glyphs::Unicode => unicode,
@@ -148,31 +153,52 @@ pub fn tool_row(
 
 /// A list row with a selection marker that does not depend on color.
 pub fn list_item(appearance: &Appearance, text: &str, selected: bool) -> Line<'static> {
-    let (mark, role) = if selected {
-        (Mark::Selected, Role::Selection)
+    let (mark, mark_role, role) = if selected {
+        (Mark::Selected, Role::Focus, Role::Selection)
     } else {
-        (Mark::Unselected, Role::Text)
+        (Mark::Unselected, Role::Text, Role::Text)
     };
     Line::from(vec![
-        span(
-            appearance,
-            Role::Focus,
-            format!("{} ", mark.glyph(appearance.glyphs)),
-        ),
+        span(appearance, mark_role, mark.glyph(appearance.glyphs)),
+        span(appearance, Role::Text, " "),
         span(appearance, role, text.to_string()),
     ])
 }
 
-/// Composer input line.
-pub fn composer(appearance: &Appearance, draft: &str) -> Line<'static> {
-    Line::from(vec![
-        span(
-            appearance,
-            Role::Focus,
-            format!("{} ", Mark::Prompt.glyph(appearance.glyphs)),
-        ),
-        span(appearance, Role::Text, draft.to_string()),
-    ])
+/// Composer input lines: the first carries the prompt glyph (the only part
+/// with the focus style), continuation lines align under the text.
+pub fn composer(appearance: &Appearance, draft: &str) -> Vec<Line<'static>> {
+    draft
+        .split('\n')
+        .enumerate()
+        .map(|(index, text)| {
+            let lead = if index == 0 {
+                span(
+                    appearance,
+                    Role::Focus,
+                    Mark::Prompt.glyph(appearance.glyphs),
+                )
+            } else {
+                span(appearance, Role::Text, " ")
+            };
+            Line::from(vec![lead, span(appearance, Role::Text, format!(" {text}"))])
+        })
+        .collect()
+}
+
+/// One line of a diff: the `+`/`-` marker carries the meaning, the color
+/// only reinforces it.
+pub fn diff_line(appearance: &Appearance, added: bool, text: &str) -> Line<'static> {
+    let (mark, role) = if added {
+        (Mark::Added, Role::DiffAdded)
+    } else {
+        (Mark::Removed, Role::DiffRemoved)
+    };
+    Line::from(span(
+        appearance,
+        role,
+        format!("{}{text}", mark.glyph(appearance.glyphs)),
+    ))
 }
 
 /// Horizontal rule of `width` cells.

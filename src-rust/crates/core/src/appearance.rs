@@ -77,6 +77,8 @@ pub struct NextAppearanceSettings {
     rejected: Vec<String>,
     /// Whether `hints` was set explicitly (so defaults are not written out).
     hints_set: bool,
+    /// A non-object value, kept so saving settings never rewrites it.
+    unparsed: Option<serde_json::Value>,
 }
 
 impl NextAppearanceSettings {
@@ -97,6 +99,7 @@ impl<'de> Deserialize<'de> for NextAppearanceSettings {
         let serde_json::Value::Object(map) = value else {
             // Not an object: keep nothing typed, but never fail settings load.
             settings.rejected.push(String::new());
+            settings.unparsed = Some(value);
             return Ok(settings);
         };
         for (key, value) in map {
@@ -135,6 +138,9 @@ impl<'de> Deserialize<'de> for NextAppearanceSettings {
 
 impl Serialize for NextAppearanceSettings {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(value) = &self.unparsed {
+            return value.serialize(serializer);
+        }
         let mut map = serializer.serialize_map(None)?;
         let typed: [(&str, Option<&str>); 5] = [
             (

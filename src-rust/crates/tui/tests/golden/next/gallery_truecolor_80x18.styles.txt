@@ -3,16 +3,18 @@ cccccccccceeeccccccceeebbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddd
 cccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 eebbbbbfffffffffdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 eebbbbbggggggddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-hhiiiiiiiiiiiiiiiiiiiddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-hhbbbbbbbbbbbddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+hbiiiiiiiiiiiiiiiiiiiddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+bbbbbbbbbbbbbddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 jjjjjjjjjjcccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 kkbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
-hhbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 lllllllllllllllddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-hhbbbbbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-hhiiiiiiiidddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-mmmmmmmcccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddd
+mmmmmmmmmmmmmmmddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+hbbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+nnnnnnnnnnnnnnnddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+bbbbbbbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+hbiiiiiiiidddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ooooooocccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddd
 ccccccccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddddd
 --- legend ---
 a fg=Rgb(142, 61, 255) bg=Reset mod=BOLD
@@ -26,5 +28,7 @@ h fg=Rgb(201, 167, 255) bg=Reset mod=BOLD | UNDERLINED
 i fg=Rgb(247, 243, 250) bg=Rgb(33, 26, 43) mod=NONE
 j fg=Rgb(147, 230, 180) bg=Rgb(17, 40, 27) mod=NONE
 k fg=Rgb(91, 75, 105) bg=Reset mod=NONE
-l fg=Rgb(255, 180, 172) bg=Reset mod=BOLD
-m fg=Rgb(255, 180, 172) bg=Rgb(50, 21, 23) mod=BOLD
+l fg=Rgb(255, 180, 172) bg=Reset mod=NONE
+m fg=Rgb(147, 230, 180) bg=Reset mod=NONE
+n fg=Rgb(255, 180, 172) bg=Reset mod=BOLD
+o fg=Rgb(255, 180, 172) bg=Rgb(50, 21, 23) mod=BOLD

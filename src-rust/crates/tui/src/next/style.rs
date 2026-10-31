@@ -249,9 +249,24 @@ impl Appearance {
                 if let Some(bg) = paint.bg {
                     style = style.bg(color(bg));
                 }
+                if self.color == ColorMode::Ansi256 {
+                    if let Some(bg) = xterm256_fill_override(role, self.scheme) {
+                        style = style.bg(Color::Indexed(bg));
+                    }
+                }
             }
         }
         style
+    }
+}
+
+/// Fills whose nearest xterm index loses the pair's contrast; each value is
+/// the nearest index that keeps 4.5:1 with the role's approximated text.
+fn xterm256_fill_override(role: Role, scheme: Scheme) -> Option<u8> {
+    match (role, scheme) {
+        // #8E3DFF maps to 99, where white text drops to 4.1:1; 98 keeps 4.5:1.
+        (Role::Action, Scheme::Dark) => Some(98),
+        _ => None,
     }
 }
 
@@ -313,18 +328,27 @@ impl Appearance {
             ColorChoice::Ansi16 => ColorMode::Ansi16,
             ColorChoice::None => ColorMode::NoColor,
         };
+        // `None` when the theme is `auto` and the terminal does not report
+        // its background.
         let scheme = match settings.theme {
-            ThemeChoice::Dark => Scheme::Dark,
-            ThemeChoice::Light => Scheme::Light,
+            ThemeChoice::Dark => Some(Scheme::Dark),
+            ThemeChoice::Light => Some(Scheme::Light),
             // COLORFGBG is "fg;bg" (sometimes "fg;x;bg"); 7 and 15 are light.
-            ThemeChoice::Auto => match set("COLORFGBG")
+            ThemeChoice::Auto => set("COLORFGBG")
                 .and_then(|value| value.rsplit(';').next().map(str::to_string))
-                .as_deref()
-            {
-                Some("7" | "15") => Scheme::Light,
-                _ => Scheme::Dark,
-            },
+                .map(|bg| match bg.as_str() {
+                    "7" | "15" => Scheme::Light,
+                    _ => Scheme::Dark,
+                }),
         };
+        // Brand colors assume a known canvas. On an unknown background, named
+        // colors follow the terminal's own palette and stay legible on light
+        // and dark alike; an explicit theme restores the Brand palette.
+        let color = match (color, scheme) {
+            (ColorMode::TrueColor | ColorMode::Ansi256, None) => ColorMode::Ansi16,
+            (color, _) => color,
+        };
+        let scheme = scheme.unwrap_or(Scheme::Dark);
         let glyphs = match settings.glyphs {
             GlyphChoice::Unicode => Glyphs::Unicode,
             GlyphChoice::Ascii => Glyphs::Ascii,
@@ -334,7 +358,15 @@ impl Appearance {
                     .or_else(|| set("LANG"))
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                if term != "dumb" && (locale.contains("utf-8") || locale.contains("utf8")) {
+                // CJK locales draw East Asian ambiguous-width marks (›, …,
+                // ─) two cells wide, which breaks alignment.
+                let ambiguous_wide = ["ja", "ko", "zh"]
+                    .iter()
+                    .any(|prefix| locale.starts_with(prefix));
+                if term != "dumb"
+                    && !ambiguous_wide
+                    && (locale.contains("utf-8") || locale.contains("utf8"))
+                {
                     Glyphs::Unicode
                 } else {
                     Glyphs::Ascii

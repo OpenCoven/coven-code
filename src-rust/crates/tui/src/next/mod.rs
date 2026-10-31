@@ -18,7 +18,7 @@ pub mod style;
 use crate::app::App;
 use crate::application::view::{EntryRole, ToolActivityState, TranscriptView};
 use claurst_core::appearance::Density;
-use claurst_core::keybindings::{display_binding_for, KeybindingResolver, UserKeybindings};
+use claurst_core::keybindings::{KeyContext, KeybindingResolver, UserKeybindings};
 use primitives::Status;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -38,12 +38,6 @@ pub enum KeyHints {
     Hints(Vec<String>),
     /// User bindings leave essential actions without any key.
     Unreachable(Vec<&'static str>),
-    /// A user binding changed what an already-bound chord does.
-    Conflict {
-        chord: String,
-        replaced: String,
-        by: Option<String>,
-    },
 }
 
 impl KeyHints {
@@ -53,20 +47,16 @@ impl KeyHints {
         if !unreachable.is_empty() {
             return Self::Unreachable(unreachable);
         }
-        if let Some(conflict) = resolver.conflicts(user).into_iter().next() {
-            return Self::Conflict {
-                chord: conflict.chord,
-                replaced: conflict.replaced,
-                by: conflict.by,
-            };
-        }
-        let hint = |action: &str, label: &str| {
-            display_binding_for(user, action).map(|keys| format!("{keys} {label}"))
+        // Hints show the chord that actually reaches each action now.
+        let hint = |action: &str, context: KeyContext, label: &str| {
+            resolver
+                .reachable_chord(action, &context)
+                .map(|keys| format!("{keys} {label}"))
         };
         let parts: Vec<String> = [
-            hint("submit", "send"),
-            hint("openCommandPalette", "commands"),
-            hint("openHelp", "help"),
+            hint("submit", KeyContext::Chat, "send"),
+            hint("openCommandPalette", KeyContext::Chat, "commands"),
+            hint("openHelp", KeyContext::Global, "help"),
         ]
         .into_iter()
         .flatten()
@@ -75,23 +65,30 @@ impl KeyHints {
     }
 }
 
+/// One line per user binding that changed what an already-bound chord does.
+pub fn key_conflict_notices(user: &UserKeybindings) -> Vec<String> {
+    KeybindingResolver::new(user)
+        .conflicts()
+        .into_iter()
+        .map(|conflict| {
+            format!(
+                "Key {} in {:?} now {} (was {})",
+                conflict.chord,
+                conflict.context,
+                conflict.by.as_deref().unwrap_or("unbound"),
+                conflict.replaced
+            )
+        })
+        .collect()
+}
+
 /// Presentation-only preferences for Next, resolved once at startup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NextPresentation {
     pub appearance: Appearance,
     pub density: Density,
     /// `None` when the hint row is turned off.
     pub hints: Option<KeyHints>,
-}
-
-impl Default for NextPresentation {
-    fn default() -> Self {
-        Self {
-            appearance: Appearance::default(),
-            density: Density::default(),
-            hints: None,
-        }
-    }
 }
 
 impl NextPresentation {
@@ -147,6 +144,17 @@ pub fn render_next(frame: &mut Frame, app: &App) {
     let view = TranscriptView::project(app);
     let area = frame.area();
     let hint_rows = u16::from(presentation.hints.is_some());
+    let width = usize::from(area.width.max(1));
+    let mut composer: Vec<Line<'static>> = primitives::composer(appearance, &view.draft)
+        .into_iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect();
+    // The draft grows the composer up to a third of the screen; past that the
+    // newest lines stay visible, as in the transcript.
+    let composer_limit = usize::from((area.height / 3).max(1));
+    let overflow = composer.len().saturating_sub(composer_limit);
+    composer.drain(..overflow);
+    let composer_rows = u16::try_from(composer.len()).unwrap_or(1) + 1;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -154,7 +162,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(hint_rows),
-            Constraint::Length(2),
+            Constraint::Length(composer_rows),
         ])
         .split(area);
 
@@ -171,10 +179,11 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         frame.render_widget(Paragraph::new(hints_line(appearance, hints)), rows[3]);
     }
     frame.render_widget(
-        Paragraph::new(vec![
-            primitives::rule(appearance, rows[4].width),
-            primitives::composer(appearance, &view.draft),
-        ]),
+        Paragraph::new(
+            std::iter::once(primitives::rule(appearance, rows[4].width))
+                .chain(composer)
+                .collect::<Vec<_>>(),
+        ),
         rows[4],
     );
 
@@ -223,45 +232,35 @@ fn transcript_lines(presentation: &NextPresentation, view: &TranscriptView) -> V
     lines
 }
 
-/// Split `text` into chunks of at most `width` display cells. A character
-/// wider than the whole width still gets its own chunk.
-fn wrap_cells(text: &str, width: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cells > width && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
-            used = 0;
-        }
-        current.push(ch);
-        used += cells;
-    }
-    chunks.push(current);
-    chunks
-}
-
-/// Wrap a line to `width` cells. Lines that fit keep their spans; longer
-/// lines are body text and wrap with the style of their first span.
+/// Wrap a line to `width` cells, keeping each span's style on the cells it
+/// covers.
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if line.width() <= width {
         return vec![line];
     }
-    let style = line
-        .spans
-        .first()
-        .map(|span| span.style)
-        .unwrap_or_default();
-    let text: String = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    wrap_cells(&text, width)
-        .into_iter()
-        .map(|chunk| Line::from(Span::styled(chunk, style)))
-        .collect()
+    let mut lines = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for span in line.spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > width && used > 0 {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                used = 0;
+            }
+            text.push(ch);
+            used += cells;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    lines.push(Line::from(spans));
+    lines
 }
 
 fn render_transcript(
@@ -316,18 +315,38 @@ fn hints_line(appearance: &Appearance, hints: &KeyHints) -> Line<'static> {
             "unreachable",
             &format!("no key reaches {}", actions.join(", ")),
         ),
-        KeyHints::Conflict {
-            chord,
-            replaced,
-            by,
-        } => primitives::status_message(
-            appearance,
-            Status::Pending,
-            "key conflict",
-            &format!(
-                "{chord} now {} (was {replaced})",
-                by.as_deref().unwrap_or("unbound")
-            ),
-        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::{Color, Style};
+
+    #[test]
+    fn wrapping_keeps_each_span_style_on_both_sides_of_the_break() {
+        let red = Style::default().fg(Color::Red);
+        let blue = Style::default().fg(Color::Blue);
+        let line = Line::from(vec![Span::styled("abcd", red), Span::styled("efgh", blue)]);
+        let wrapped = wrap_line(line, 3);
+        let rows: Vec<Vec<(String, Style)>> = wrapped
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| (span.content.to_string(), span.style))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec![("abc".to_string(), red)],
+                vec![("d".to_string(), red), ("ef".to_string(), blue)],
+                vec![("gh".to_string(), blue)],
+            ]
+        );
+        // A character wider than the whole width still gets its own row.
+        assert_eq!(wrap_line(Line::from("漢字"), 1).len(), 2);
     }
 }

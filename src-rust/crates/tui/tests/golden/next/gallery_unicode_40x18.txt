@@ -2,11 +2,13 @@
 coven-code / session / tools
 you
 ▸ Bash … running
-▾ Read · done
+▾ Read ○ done
 › Resume last session
   Start fresh
 ✓ verified receipt 7f3a
 ─ Diff
+-let total = 1;
++let total = 2;
 ────────────────────────────────────────
 › draft text
 Run cargo test?

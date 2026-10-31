@@ -22,10 +22,10 @@ use claurst_tui::next::style::{
     canvas, contrast_ratio, paint, xterm256_rgb, Appearance, ColorMode, Glyphs, Motion, Role,
     Scheme, ALL_ROLES,
 };
-use claurst_tui::next::{KeyHints, NextPresentation};
+use claurst_tui::next::{key_conflict_notices, KeyHints, NextPresentation};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
@@ -58,9 +58,11 @@ fn gallery(appearance: &Appearance, width: u16) -> Vec<Line<'static>> {
         primitives::list_item(appearance, "Start fresh", false),
         primitives::status_message(appearance, Status::Verified, "verified", "receipt 7f3a"),
         primitives::inspector_title(appearance, "Diff"),
+        primitives::diff_line(appearance, false, "let total = 1;"),
+        primitives::diff_line(appearance, true, "let total = 2;"),
         primitives::rule(appearance, width),
-        primitives::composer(appearance, "draft text"),
     ];
+    lines.extend(primitives::composer(appearance, "draft text"));
     lines.extend(primitives::confirmation(
         appearance,
         "Run cargo test?",
@@ -148,7 +150,7 @@ fn assert_golden(name: &str, actual: &str) {
 #[test]
 fn primitive_gallery_matches_goldens_across_glyph_sets_sizes_and_color_modes() {
     for (glyphs, glyph_name) in [(Glyphs::Unicode, "unicode"), (Glyphs::Ascii, "ascii")] {
-        for (width, height) in [(40u16, 16u16), (80, 16)] {
+        for (width, height) in [(40u16, 18u16), (80, 18)] {
             let look = appearance(ColorMode::TrueColor, glyphs);
             let buffer = render(gallery(&look, width), width, height);
             assert_golden(
@@ -159,9 +161,9 @@ fn primitive_gallery_matches_goldens_across_glyph_sets_sizes_and_color_modes() {
     }
     for (mode, name) in MODES {
         let look = appearance(mode, Glyphs::Unicode);
-        let buffer = render(gallery(&look, 80), 80, 16);
+        let buffer = render(gallery(&look, 80), 80, 18);
         assert_golden(
-            &format!("gallery_{name}_80x16.styles.txt"),
+            &format!("gallery_{name}_80x18.styles.txt"),
             &styles_of(&buffer),
         );
     }
@@ -215,7 +217,11 @@ fn brand_contrast_pairs_meet_their_profile_minimums() {
 }
 
 #[test]
-fn xterm256_approximations_keep_text_roles_legible() {
+fn xterm256_approximations_keep_every_text_bearing_role_legible() {
+    let indexed = |color: Option<Color>, role: Role| match color {
+        Some(Color::Indexed(index)) => xterm256_rgb(index),
+        other => panic!("{role:?} should resolve to an indexed color, got {other:?}"),
+    };
     for scheme in [Scheme::Dark, Scheme::Light] {
         let look = Appearance {
             color: ColorMode::Ansi256,
@@ -223,21 +229,25 @@ fn xterm256_approximations_keep_text_roles_legible() {
             glyphs: Glyphs::Unicode,
             motion: Motion::Full,
         };
-        let bg = xterm256_rgb(claurst_tui::next::style::nearest_xterm256(canvas(scheme)));
-        for role in [
-            Role::Text,
-            Role::TextMuted,
-            Role::TextSubtle,
-            Role::Focus,
-            Role::Presence,
-        ] {
-            let Some(Color::Indexed(index)) = look.style(role).fg else {
-                panic!("{role:?} should resolve to an indexed color");
+        let canvas_rgb = xterm256_rgb(claurst_tui::next::style::nearest_xterm256(canvas(scheme)));
+        for role in ALL_ROLES {
+            let style = look.style(role);
+            let fg = indexed(style.fg, role);
+            // Filled roles are read against their own fill, the rest against
+            // the canvas; the identity mark and borders are not text.
+            let bg = match style.bg {
+                Some(bg) => indexed(Some(bg), role),
+                None => canvas_rgb,
             };
-            let ratio = contrast_ratio(xterm256_rgb(index), bg);
+            let minimum = match role {
+                Role::Identity => 3.0,
+                Role::Border => continue,
+                _ => 4.5,
+            };
+            let ratio = contrast_ratio(fg, bg);
             assert!(
-                ratio >= 4.5,
-                "{role:?} {scheme:?} index {index}: {ratio:.2}"
+                ratio >= minimum,
+                "{role:?} {scheme:?}: {ratio:.2} < {minimum}"
             );
         }
     }
@@ -251,7 +261,7 @@ fn no_color_mode_emits_no_color_and_keeps_meaning_in_text_and_attributes() {
         assert_eq!(style.fg, None, "{role:?}");
         assert_eq!(style.bg, None, "{role:?}");
     }
-    let buffer = render(gallery(&look, 80), 80, 16);
+    let buffer = render(gallery(&look, 80), 80, 18);
     for cell in &buffer.content {
         assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));
     }
@@ -267,7 +277,7 @@ fn no_color_mode_emits_no_color_and_keeps_meaning_in_text_and_attributes() {
 fn ascii_glyphs_never_emit_non_ascii_cells() {
     for (mode, _) in MODES {
         let look = appearance(mode, Glyphs::Ascii);
-        let text = text_of(&render(gallery(&look, 80), 80, 16));
+        let text = text_of(&render(gallery(&look, 80), 80, 18));
         assert!(text.is_ascii(), "{mode:?}:\n{text}");
         assert!(text.contains("> Resume last session"), "{text}");
         assert!(text.contains("[ok] verified"), "{text}");
@@ -297,6 +307,29 @@ fn status_is_never_conveyed_by_color_alone() {
             };
             assert_eq!(text, format!("{} word", mark.glyph(glyphs)));
         }
+        // Every status, and the plain separator, has its own shape.
+        let shapes: Vec<&str> = [
+            Mark::Verified,
+            Mark::Pending,
+            Mark::Blocked,
+            Mark::Evidence,
+            Mark::Separator,
+        ]
+        .iter()
+        .map(|mark| mark.glyph(glyphs))
+        .collect();
+        let unique: std::collections::BTreeSet<&str> = shapes.iter().copied().collect();
+        assert_eq!(unique.len(), shapes.len(), "{shapes:?}");
+
+        let look = appearance(ColorMode::NoColor, glyphs);
+        let diff = |added| -> String {
+            primitives::diff_line(&look, added, "x")
+                .spans
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect()
+        };
+        assert_eq!((diff(true).as_str(), diff(false).as_str()), ("+x", "-x"));
     }
 }
 
@@ -339,12 +372,28 @@ fn appearance_resolution_follows_settings_then_environment() {
     );
     // An empty NO_COLOR does not count as set.
     assert_eq!(
-        resolve(&[("NO_COLOR", ""), ("COLORTERM", "truecolor")]).color,
+        resolve(&[
+            ("NO_COLOR", ""),
+            ("COLORTERM", "truecolor"),
+            ("COLORFGBG", "15;0")
+        ])
+        .color,
+        ColorMode::TrueColor
+    );
+    // Brand colors need a known canvas: an unreported background falls back
+    // to the terminal's named palette unless the theme is explicit.
+    assert_eq!(
+        resolve(&[("COLORTERM", "truecolor")]).color,
+        ColorMode::Ansi16
+    );
+    let dark: NextAppearanceSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+    assert_eq!(
+        Appearance::resolve(&dark, false, env(&[("COLORTERM", "truecolor")])).color,
         ColorMode::TrueColor
     );
     assert_eq!(resolve(&[("TERM", "dumb")]).color, ColorMode::NoColor);
     assert_eq!(
-        resolve(&[("TERM", "xterm-256color")]).color,
+        resolve(&[("TERM", "xterm-256color"), ("COLORFGBG", "0;15")]).color,
         ColorMode::Ansi256
     );
     assert_eq!(resolve(&[("TERM", "xterm")]).color, ColorMode::Ansi16);
@@ -352,6 +401,9 @@ fn appearance_resolution_follows_settings_then_environment() {
     assert_eq!(resolve(&[("COLORFGBG", "15;0")]).scheme, Scheme::Dark);
     assert_eq!(resolve(&[("LANG", "en_US.UTF-8")]).glyphs, Glyphs::Unicode);
     assert_eq!(resolve(&[("LANG", "C")]).glyphs, Glyphs::Ascii);
+    // Ambiguous-width marks are two cells wide under CJK locales.
+    assert_eq!(resolve(&[("LANG", "ja_JP.UTF-8")]).glyphs, Glyphs::Ascii);
+    assert_eq!(resolve(&[("LC_ALL", "zh_CN.UTF-8")]).glyphs, Glyphs::Ascii);
     assert_eq!(resolve(&[]).motion, Motion::Full);
     assert_eq!(
         Appearance::resolve(&auto, true, env(&[])).motion,
@@ -391,6 +443,11 @@ fn appearance_settings_live_inside_settings_without_breaking_or_dropping_anythin
     let wrong_type: Settings = serde_json::from_str(r#"{"nextAppearance":"dark","showCwd":false}"#)
         .expect("settings parse");
     assert!(!wrong_type.show_cwd, "other settings still load");
+    assert_eq!(
+        serde_json::to_value(&wrong_type).expect("serialize")["nextAppearance"],
+        serde_json::json!("dark"),
+        "a value this version cannot read is written back unchanged"
+    );
 
     let untouched: serde_json::Value =
         serde_json::to_value(Settings::default()).expect("serialize defaults");
@@ -425,25 +482,35 @@ fn key_hints_come_from_the_configurable_bindings_and_surface_conflicts() {
         "{defaults}"
     );
 
-    let rebound = bindings(&[("ctrl+g", Some("openHelp"), None)]);
+    let rebound = bindings(&[("f1", Some("openHelp"), None)]);
     let KeyHints::Hints(text) = KeyHints::resolve(&rebound) else {
         panic!("a new chord is not a conflict");
     };
     let text = text.join(" ");
     assert!(text.contains("help"), "{text}");
-    assert_ne!(text, defaults, "hint follows the user's binding");
+    assert!(
+        text.contains("F1 help"),
+        "hint follows the user's binding: {text}"
+    );
 
     assert_eq!(
         KeyHints::resolve(&bindings(&[("enter", Some("newline"), Some("Chat"))])),
         KeyHints::Unreachable(vec!["submit"])
     );
-    assert!(matches!(
-        KeyHints::resolve(&bindings(&[
-            ("enter", Some("newline"), Some("Chat")),
-            ("ctrl+s", Some("submit"), Some("Chat")),
-        ])),
-        KeyHints::Conflict { .. }
-    ));
+    let moved = bindings(&[
+        ("enter", Some("newline"), Some("Chat")),
+        ("ctrl+s", Some("submit"), Some("Chat")),
+    ]);
+    // A conflict does not hide the hints; they show the chord that works.
+    let KeyHints::Hints(text) = KeyHints::resolve(&moved) else {
+        panic!("submit is still reachable");
+    };
+    assert!(text.join(" ").contains("Ctrl+S send"), "{text:?}");
+    assert_eq!(
+        key_conflict_notices(&moved),
+        vec!["Key enter in Chat now newline (was submit)".to_string()]
+    );
+    assert!(key_conflict_notices(&UserKeybindings::default()).is_empty());
 }
 
 fn next_app(presentation: NextPresentation, messages: &[&str]) -> App {
@@ -529,4 +596,43 @@ fn next_wraps_wide_and_combining_text_by_cell_width_without_loss() {
             assert_eq!(rendered, compact, "{width}x{height}: {sample}");
         }
     }
+}
+
+#[test]
+fn next_composer_grows_with_the_draft_and_styles_only_the_prompt_glyph() {
+    let look = appearance(ColorMode::TrueColor, Glyphs::Unicode);
+    let mut app = next_app(
+        NextPresentation {
+            appearance: look,
+            ..NextPresentation::default()
+        },
+        &[],
+    );
+    app.prompt_input.text = format!("first line\n{}\nlast line", "x".repeat(70));
+    let buffer = draw_next(&app, 30, 24);
+    let text = text_of(&buffer);
+    let rows: Vec<&str> = text.lines().collect();
+    let composer_start = rows
+        .iter()
+        .position(|row| row.starts_with("› first line"))
+        .unwrap_or_else(|| panic!("composer missing:\n{text}"));
+    // 1 + ceil(72 / 30) + 1 rows of draft, all visible, ending with the last.
+    assert!(
+        rows[composer_start..]
+            .iter()
+            .any(|row| row.trim_end() == "  last line"),
+        "{text}"
+    );
+    let xs: usize = rows[composer_start..]
+        .iter()
+        .map(|row| row.matches('x').count())
+        .sum();
+    assert_eq!(xs, 70, "the wrapped draft is drawn in full:\n{text}");
+
+    // Only the prompt glyph carries the focus attributes.
+    let width = usize::from(buffer.area.width);
+    let prompt = &buffer.content[composer_start * width];
+    let after = &buffer.content[composer_start * width + 1];
+    assert!(prompt.modifier.contains(Modifier::UNDERLINED));
+    assert!(!after.modifier.contains(Modifier::UNDERLINED));
 }
