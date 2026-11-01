@@ -2578,6 +2578,50 @@ fn refresh_command_discovery(app: &mut claurst_tui::App, config: &Config, cwd: &
     ));
 }
 
+/// How often an open Work page re-reads the session goal from SQLite.
+const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Copy the engine-local work stores into `app.work_sources` for display.
+///
+/// The background registry and the model task list are in memory and are
+/// copied every call. The session goal is read from SQLite at most every
+/// [`WORK_GOAL_REFRESH`], and at once when the session changes, so a goal
+/// from another session is never shown.
+fn refresh_work_sources(
+    app: &mut claurst_tui::app::App,
+    session_id: &str,
+    last_goal_read: &mut Option<(std::time::Instant, String)>,
+    mut read_goal: impl FnMut(&str) -> Option<Result<claurst_core::goal::Goal, String>>,
+) {
+    app.work_sources.background = claurst_core::tasks::global_registry().list();
+    app.work_sources.model_tasks = claurst_tools::TASK_STORE
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    let due = match last_goal_read {
+        Some((at, id)) => id != session_id || at.elapsed() >= WORK_GOAL_REFRESH,
+        None => true,
+    };
+    if due {
+        app.work_sources.goal = read_goal(session_id);
+        *last_goal_read = Some((std::time::Instant::now(), session_id.to_string()));
+    }
+}
+
+/// The current session's goal for display, `None` when goals are disabled
+/// or the session has none.
+fn read_session_goal(session_id: &str) -> Option<Result<claurst_core::goal::Goal, String>> {
+    if !claurst_core::goals_enabled() {
+        return None;
+    }
+    match claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())
+        .and_then(|store| store.try_get_goal(session_id))
+    {
+        Ok(goal) => goal.map(Ok),
+        Err(error) => Some(Err(error.to_string())),
+    }
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -3049,6 +3093,7 @@ async fn run_interactive(
         })
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
+    let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(error) = log.take_error() {
@@ -3067,6 +3112,17 @@ async fn run_interactive(
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
             continue;
+        }
+
+        // Snapshot the engine-local work stores while the Next Work page is
+        // open, so the frame below never shows an older session's goal.
+        if app.next_shell.inspector == Some(claurst_tui::next::InspectorPage::Work) {
+            refresh_work_sources(
+                &mut app,
+                &tool_ctx.session_id,
+                &mut work_goal_read,
+                read_session_goal,
+            );
         }
 
         // Draw the UI
@@ -7014,6 +7070,89 @@ mod tests {
             assert!(ctx.goal_turn.captured().is_none());
             assert_eq!(store.try_get_goal("session").unwrap().unwrap(), later);
         }
+    }
+
+    fn work_goal(session_id: &str) -> claurst_core::goal::Goal {
+        claurst_core::goal::Goal {
+            id: format!("goal-{session_id}"),
+            session_id: session_id.to_string(),
+            objective: format!("objective of {session_id}"),
+            status: claurst_core::goal::GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_secs: 0,
+            turns_used: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_work_snapshot_rereads_the_goal_at_once_on_a_session_switch_and_throttles_otherwise() {
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut last = None;
+        let mut reads = Vec::new();
+        {
+            let mut reader = |id: &str| {
+                reads.push(id.to_string());
+                (id == "session-a").then(|| Ok(work_goal(id)))
+            };
+            refresh_work_sources(&mut app, "session-a", &mut last, &mut reader);
+            refresh_work_sources(&mut app, "session-a", &mut last, &mut reader);
+            assert_eq!(
+                app.work_sources
+                    .goal
+                    .as_ref()
+                    .map(|goal| goal.as_ref().unwrap().id.clone()),
+                Some("goal-session-a".to_string())
+            );
+            refresh_work_sources(&mut app, "session-b", &mut last, &mut reader);
+        }
+        assert_eq!(
+            reads,
+            ["session-a", "session-b"],
+            "throttled within a session"
+        );
+        assert!(
+            app.work_sources.goal.is_none(),
+            "session-a's goal is not shown in session-b"
+        );
+    }
+
+    #[test]
+    fn the_work_snapshot_copies_the_in_memory_stores() {
+        let id = format!("work-snapshot-{}", std::process::id());
+        let now = chrono::Utc::now();
+        claurst_tools::TASK_STORE.insert(
+            id.clone(),
+            claurst_tools::Task {
+                id: id.clone(),
+                subject: "snapshot me".to_string(),
+                description: String::new(),
+                status: claurst_tools::TaskStatus::Pending,
+                owner: None,
+                blocks: Vec::new(),
+                blocked_by: Vec::new(),
+                metadata: None,
+                output: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        refresh_work_sources(&mut app, "session-a", &mut None, |_| None);
+        claurst_tools::TASK_STORE.remove(&id);
+        assert!(app
+            .work_sources
+            .model_tasks
+            .iter()
+            .any(|task| task.id == id));
     }
 }
 

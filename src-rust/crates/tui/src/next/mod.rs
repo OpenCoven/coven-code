@@ -134,14 +134,17 @@ pub enum InspectorPage {
     Activity,
     /// Workspace, session, model and credential context.
     Session,
+    /// Engine-local background tasks, model tasks and the session goal.
+    Work,
     /// Destinations of the shared navigation model and their availability.
     Views,
 }
 
 impl InspectorPage {
-    pub const ALL: [InspectorPage; 3] = [
+    pub const ALL: [InspectorPage; 4] = [
         InspectorPage::Activity,
         InspectorPage::Session,
+        InspectorPage::Work,
         InspectorPage::Views,
     ];
 
@@ -149,6 +152,7 @@ impl InspectorPage {
         match self {
             InspectorPage::Activity => "Activity",
             InspectorPage::Session => "Session",
+            InspectorPage::Work => "Work",
             InspectorPage::Views => "Views",
         }
     }
@@ -858,6 +862,7 @@ fn render_inspector(
     let body = match page {
         InspectorPage::Activity => activity_page(appearance, app, view),
         InspectorPage::Session => session_page(appearance, app),
+        InspectorPage::Work => work_page(appearance, app),
         InspectorPage::Views => views_page(appearance, app),
     };
     let key = |action: &str| {
@@ -1012,6 +1017,95 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     ]
 }
 
+fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
+    use crate::application::work::{WorkStateKind, WorkView};
+
+    let view = WorkView::from_sources(&app.work_sources);
+    // The source note leads, so it stays visible however far the page scrolls.
+    let mut lines = vec![
+        primitives::status_message(
+            appearance,
+            Status::Evidence,
+            "engine-local",
+            "in this process; only the session goal is saved",
+        ),
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "unavailable",
+            "canonical tasks, lanes and leases need Psyche #11/#12 (#413)",
+        ),
+        Line::default(),
+    ];
+    if let Some(error) = &view.goal_error {
+        lines.push(primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "unreadable",
+            &format!("session goal: {error}"),
+        ));
+        lines.push(Line::default());
+    }
+    if view.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "There is no engine-local work in this session.".to_string(),
+            appearance.style(Role::TextMuted),
+        )));
+        return lines;
+    }
+    for item in &view.items {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", item.origin.label()),
+                appearance.style(Role::TextMuted),
+            ),
+            Span::styled(item.title.clone(), appearance.style(Role::Text)),
+        ]));
+        let status = match item.kind {
+            WorkStateKind::Open => Status::Pending,
+            WorkStateKind::Done => Status::Verified,
+            WorkStateKind::Failed => Status::Blocked,
+            WorkStateKind::Stopping => Status::Pending,
+        };
+        let mut state = Line::from(Span::styled(
+            format!("{:<12}", "State"),
+            appearance.style(Role::TextMuted),
+        ));
+        state
+            .spans
+            .extend(primitives::status_message(appearance, status, &item.state, "").spans);
+        lines.push(state);
+        lines.push(field(appearance, "Id", item.id.clone()));
+        if let Some(owner) = &item.owner {
+            lines.push(field(appearance, "Owner", owner.clone()));
+        }
+        if !item.blocked_by.is_empty() {
+            lines.push(field(appearance, "Blocked by", item.blocked_by.join(", ")));
+        }
+        for missing in &item.missing_blockers {
+            let mut line = Line::from(Span::styled(
+                format!("{:<12}", ""),
+                appearance.style(Role::TextMuted),
+            ));
+            line.spans.extend(
+                primitives::status_message(
+                    appearance,
+                    Status::Blocked,
+                    "missing",
+                    &format!("{missing} matches no listed task"),
+                )
+                .spans,
+            );
+            lines.push(line);
+        }
+        for (name, value) in &item.detail {
+            lines.push(field(appearance, name, value.clone()));
+        }
+        lines.push(Line::default());
+    }
+    lines
+}
+
 fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     let view = |name: &str, detail: &str| {
         let mut line = Line::from(Span::styled(
@@ -1025,7 +1119,22 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     };
     let mut lines = vec![
         primitives::list_item(appearance, "Chat      current", true),
-        view("Work", "needs a qualified task producer (#413)"),
+        {
+            let mut line = Line::from(Span::styled(
+                format!("  {:<10}", "Work"),
+                appearance.style(Role::Text),
+            ));
+            line.spans.extend(
+                primitives::status_message(
+                    appearance,
+                    Status::Pending,
+                    "local only",
+                    "Work page; canonical tasks wait on #413",
+                )
+                .spans,
+            );
+            line
+        },
         view("Research", "needs a qualified research lifecycle (#414)"),
         view("Memory", "needs a qualified memory reader (#415)"),
         Line::default(),
