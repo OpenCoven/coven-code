@@ -1034,14 +1034,14 @@ fn research_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
         primitives::status_message(
             appearance,
             Status::Evidence,
-            "tool activity",
-            "this session's searches and fetches, not a research job",
+            "tool calls",
+            "not a research job",
         ),
         primitives::status_message(
             appearance,
             Status::Blocked,
             "unavailable",
-            "jobs, citations and export need a research producer (#414)",
+            "research jobs (#414)",
         ),
     ]
 }
@@ -1084,6 +1084,9 @@ fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
                 "interrupted",
                 "the turn stopped before a result".to_string(),
             ),
+            SourceOutcome::NoResult => {
+                (Status::Pending, "unknown", "no result recorded".to_string())
+            }
         };
         let mut state = Line::from(Span::styled(
             format!("{:<12}", "State"),
@@ -1107,6 +1110,16 @@ fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
                 appearance,
                 "Text",
                 "may be cached or model-extracted (#433)".to_string(),
+            ));
+        }
+        if item.origin == SourceOrigin::Search
+            && item.outcome == SourceOutcome::Returned
+            && item.hits.is_empty()
+        {
+            lines.push(field(
+                appearance,
+                "Hits",
+                "none parsed (output format not recognised)".to_string(),
             ));
         }
         for hit in &item.hits {

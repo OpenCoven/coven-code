@@ -215,3 +215,65 @@ fn the_research_page_renders_at_small_fixtures() {
         assert!(!draw(&app, width, height).is_empty());
     }
 }
+
+#[test]
+fn a_failed_fetch_never_shows_credentials_or_query() {
+    let mut app = next_app();
+    app.messages = vec![
+        call(
+            "toolu_401",
+            "WebFetch",
+            json!({"url": "https://user:secret@api.example.com/v1?token=abc"}),
+        ),
+        result(
+            "toolu_401",
+            "HTTP 401 Unauthorized when fetching https://user:secret@api.example.com/v1?token=abc",
+            true,
+        ),
+    ];
+    app.next_shell.inspector = Some(InspectorPage::Research);
+    let text = draw(&app, 160, 30);
+    assert!(text.contains("HTTP 401"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(!text.contains("token=abc"), "{text}");
+}
+
+#[test]
+fn a_search_whose_output_is_not_parsed_says_so() {
+    let mut app = next_app();
+    app.messages = vec![
+        call("toolu_ddg", "WebSearch", json!({"query": "ratatui"})),
+        result(
+            "toolu_ddg",
+            "**Wikipedia**\nRatatui is a library\nURL: https://example.com/\n\n- related\n  https://example.com/r\n",
+            false,
+        ),
+    ];
+    app.next_shell.inspector = Some(InspectorPage::Research);
+    let text = draw(&app, 100, 30);
+    assert!(text.contains("none parsed"), "{text}");
+}
+
+#[test]
+fn a_call_without_a_result_after_the_next_prompt_is_not_pending() {
+    let mut app = next_app();
+    app.messages = vec![
+        call(
+            "toolu_cut",
+            "WebFetch",
+            json!({"url": "https://example.com/slow"}),
+        ),
+        claurst_core::types::Message::user("next prompt"),
+    ];
+    app.next_shell.inspector = Some(InspectorPage::Research);
+    let text = draw(&app, 80, 24);
+    assert!(!text.contains("no result yet"), "{text}");
+    assert!(text.contains("no result recorded"), "{text}");
+}
+
+#[test]
+fn at_40x12_the_scope_note_and_the_first_row_stay_visible() {
+    let text = draw(&research_app(), 40, 12);
+    assert!(text.contains("not a research job"), "{text}");
+    assert!(text.contains("[search]"), "{text}");
+}

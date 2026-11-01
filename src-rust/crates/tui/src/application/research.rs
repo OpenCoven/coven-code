@@ -9,10 +9,11 @@
 //! text and are labeled unverified; retrieval time, final URL, status on
 //! success and content hash are not recorded by the tools (#433), so they are
 //! never shown as known. Source text is untrusted data: it is made terminal
-//! safe, kept to one row, and never interpreted.
+//! safe, has its newlines removed, and is never interpreted.
 
 use super::view::terminal_safe;
-use claurst_core::types::{ContentBlock, Message, MessageContent, ToolResultContent};
+use claurst_core::types::{ContentBlock, Message, MessageContent, Role, ToolResultContent};
+use std::borrow::Cow;
 
 /// Which tool produced a source row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +38,13 @@ pub enum SourceOutcome {
     Pending,
     /// The tool returned without an error.
     Returned,
-    /// The tool returned an error; the text is one row.
+    /// The tool returned an error; one line, with every URL in display form.
     Failed(String),
     /// The turn was interrupted before a result arrived.
     Interrupted,
+    /// A later message exists and no result was recorded. The engine does not
+    /// add a result for a call that never finished, so this is not running.
+    NoResult,
 }
 
 /// A search hit as parsed from the search tool's text output.
@@ -76,15 +80,9 @@ impl ResearchView {
     /// Build rows from the transcript. `interrupted` holds the tool-use ids
     /// the interactive loop marked interrupted.
     pub fn from_messages(messages: &[Message], interrupted: &[String]) -> Self {
-        let blocks = || {
-            messages.iter().flat_map(|message| match &message.content {
-                MessageContent::Blocks(blocks) => blocks.as_slice(),
-                MessageContent::Text(_) => &[],
-            })
-        };
         // One pass over the results, so a long transcript stays linear.
         let mut results = std::collections::HashMap::new();
-        for block in blocks() {
+        for block in messages.iter().flat_map(blocks_of) {
             if let ContentBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -96,14 +94,17 @@ impl ResearchView {
                     .or_insert((content, is_error.unwrap_or(false)));
             }
         }
-        let result_of = |id: &str| {
-            results
-                .get(id)
-                .map(|(content, is_error)| (result_text(content), *is_error))
-        };
+        let last = messages.len().saturating_sub(1);
+        let calls = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == Role::Assistant)
+            .flat_map(|(index, message)| {
+                blocks_of(message).iter().map(move |block| (index, block))
+            });
 
         let mut items = Vec::new();
-        for block in blocks() {
+        for (index, block) in calls {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
@@ -120,23 +121,29 @@ impl ResearchView {
             };
             let mut http_status = None;
             let mut hits = Vec::new();
-            let outcome = match result_of(id) {
-                Some((text, true)) => {
+            let outcome = match results.get(id.as_str()) {
+                Some((content, true)) => {
+                    let text = result_text(content);
                     http_status = text
                         .strip_prefix("HTTP ")
                         .and_then(|rest| rest.split_whitespace().next())
                         .and_then(|code| code.parse().ok());
-                    SourceOutcome::Failed(shorten(&one_line(&text), ERROR_MAX_CHARS))
+                    // Redact before shortening: a cut inside the userinfo
+                    // would leave no `@` to strip it by.
+                    SourceOutcome::Failed(shorten(&one_line(&redact_urls(&text)), ERROR_MAX_CHARS))
                 }
-                Some((text, false)) => {
+                Some((content, false)) => {
+                    // A fetch body can be large and is never shown; only a
+                    // search's text is read.
                     if origin == SourceOrigin::Search {
-                        hits = parse_numbered_hits(&text);
+                        hits = parse_numbered_hits(&result_text(content));
                     }
                     SourceOutcome::Returned
                 }
                 None if interrupted.iter().any(|stopped| stopped == id) => {
                     SourceOutcome::Interrupted
                 }
+                None if index < last => SourceOutcome::NoResult,
                 None => SourceOutcome::Pending,
             };
             items.push(SourceItem {
@@ -152,26 +159,69 @@ impl ResearchView {
     }
 }
 
-/// Longest error text kept on a row.
-const ERROR_MAX_CHARS: usize = 160;
-
-fn result_text(content: &ToolResultContent) -> String {
-    match content {
-        ToolResultContent::Text(text) => text.clone(),
-        ToolResultContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+fn blocks_of(message: &Message) -> &[ContentBlock] {
+    match &message.content {
+        MessageContent::Blocks(blocks) => blocks.as_slice(),
+        MessageContent::Text(_) => &[],
     }
 }
 
+/// Longest error text kept on a row.
+const ERROR_MAX_CHARS: usize = 160;
+
+fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
+    match content {
+        ToolResultContent::Text(text) => Cow::Borrowed(text),
+        ToolResultContent::Blocks(blocks) => Cow::Owned(
+            blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    }
+}
+
+/// Error text with each `scheme://…` token replaced by its [`display_url`]
+/// form, so a failed request never shows credentials or a query string.
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(found) = rest.find("://") {
+        let start = rest[..found]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |at| at + 1);
+        let end = rest[found..]
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\''))
+            .map_or(rest.len(), |at| found + at);
+        out.push_str(&rest[..start]);
+        if start == found {
+            // No scheme before `://`; keep the separator and move on.
+            out.push_str("://");
+            rest = &rest[found + 3..];
+            continue;
+        }
+        let url = &rest[start..end];
+        // A trailing `:` belongs to the sentence ("Failed to fetch URL: …").
+        let (url, colon) = match url.strip_suffix(':') {
+            Some(url) => (url, ":"),
+            None => (url, ""),
+        };
+        out.push_str(&display_url(url));
+        out.push_str(colon);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Hits in the search tool's numbered form: a `N. **title**` line directly
-/// followed by a `URL: …` line. Any other `URL:` line is not a hit, so text
-/// inside a snippet cannot add one without a numbered title above it.
+/// followed by a `URL: …` line. A bare `URL:` line is not a hit. The tool does
+/// not escape titles or snippets, so a snippet holding that two-line shape can
+/// still add a row; that is why every hit is labelled unverified.
 fn parse_numbered_hits(text: &str) -> Vec<SearchHit> {
     let mut hits = Vec::new();
     let mut lines = text.lines().peekable();
@@ -202,15 +252,15 @@ fn numbered_title(line: &str) -> Option<&str> {
 }
 
 /// A URL shown without credentials, query or fragment, which can carry
-/// secrets. Text that is not an `http(s)` URL is shown as is, made safe.
+/// secrets. Text without a `scheme://` is shown as is, made safe. A backslash
+/// ends the host, as it does for the HTTP client, so `a.com\@b.com` shows
+/// `a.com`, the host actually contacted.
 pub fn display_url(raw: &str) -> String {
     let raw = raw.trim();
-    let Some((scheme, rest)) = raw.split_once("://").filter(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    }) else {
+    let Some((scheme, rest)) = raw.split_once("://") else {
         return one_line(raw);
     };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     let host = authority
         .rsplit_once('@')
@@ -341,12 +391,13 @@ mod tests {
                 "Failed to fetch https://nowhere.invalid/: dns error\nmore",
                 true,
             ),
+            call("stopped", "WebSearch", json!({"query": "cancelled"})),
+            // The newest message: its call may still be running.
             call(
                 "pending",
                 "WebFetch",
                 json!({"url": "https://example.com/slow"}),
             ),
-            call("stopped", "WebSearch", json!({"query": "cancelled"})),
         ];
         let view = ResearchView::from_messages(&messages, &["stopped".to_string()]);
         let by = |id: &str| view.items.iter().find(|item| item.reference == id).unwrap();
@@ -367,6 +418,89 @@ mod tests {
         assert_eq!(display_url("http://example.com"), "http://example.com");
         assert_eq!(display_url("file:///etc/passwd"), "file:///etc/passwd");
         assert_eq!(display_url("not a url\u{1b}[2J"), "not a url^[[2J");
+    }
+
+    #[test]
+    fn failed_fetch_errors_never_show_credentials_or_query() {
+        let messages = vec![
+            call("f401", "WebFetch", json!({"url": "https://user:secret@api.x/v1?token=abc"})),
+            result(
+                "f401",
+                "HTTP 401 Unauthorized when fetching https://user:secret@api.x/v1?token=abc",
+                true,
+            ),
+            call("fnet", "WebFetch", json!({"url": "https://u:pw@h.example/?t=1"})),
+            result(
+                "fnet",
+                "Failed to fetch https://u:pw@h.example/?t=1: error sending request for url (https://u:pw@h.example/?t=1)",
+                true,
+            ),
+        ];
+        let view = ResearchView::from_messages(&messages, &[]);
+        for item in &view.items {
+            let SourceOutcome::Failed(text) = &item.outcome else {
+                panic!("{item:?}");
+            };
+            for secret in ["secret", "token", "pw@", "t=1"] {
+                assert!(!text.contains(secret), "{secret:?} in {text:?}");
+            }
+        }
+        assert_eq!(view.items[0].http_status, Some(401));
+        let SourceOutcome::Failed(text) = &view.items[0].outcome else {
+            unreachable!()
+        };
+        assert!(text.contains("https://api.x/v1?…"), "{text}");
+    }
+
+    #[test]
+    fn a_long_error_is_redacted_before_it_is_shortened() {
+        let padding = "x".repeat(ERROR_MAX_CHARS - 20);
+        let error = format!("{padding} https://user:hunter2secret@h.example/");
+        let messages = vec![
+            call("f", "WebFetch", json!({"url": "https://h.example/"})),
+            result("f", &error, true),
+        ];
+        let view = ResearchView::from_messages(&messages, &[]);
+        let SourceOutcome::Failed(text) = &view.items[0].outcome else {
+            panic!()
+        };
+        assert!(!text.contains("hunter"), "{text}");
+    }
+
+    #[test]
+    fn a_backslash_ends_the_host_so_it_cannot_be_spoofed() {
+        let shown = display_url("https://evil.com\\@good.com/");
+        assert!(shown.starts_with("https://evil.com"), "{shown}");
+        assert!(!shown.starts_with("https://good.com"), "{shown}");
+    }
+
+    #[test]
+    fn other_schemes_never_show_credentials_or_query() {
+        assert_eq!(display_url("ftp://u:p@h/?tok"), "ftp://h/?…");
+    }
+
+    #[test]
+    fn a_call_with_no_result_after_a_later_turn_is_not_pending() {
+        let messages = vec![
+            call(
+                "cut",
+                "WebFetch",
+                json!({"url": "https://example.com/slow"}),
+            ),
+            Message::user("next prompt"),
+        ];
+        let view = ResearchView::from_messages(&messages, &[]);
+        assert_eq!(view.items[0].outcome, SourceOutcome::NoResult);
+    }
+
+    #[test]
+    fn a_tool_use_in_a_user_message_is_not_listed() {
+        let messages = vec![Message::user_blocks(vec![ContentBlock::ToolUse {
+            id: "u1".to_string(),
+            name: "WebFetch".to_string(),
+            input: json!({"url": "https://example.com/"}),
+        }])];
+        assert!(ResearchView::from_messages(&messages, &[]).items.is_empty());
     }
 
     #[test]
