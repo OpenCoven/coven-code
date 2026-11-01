@@ -178,25 +178,26 @@ pub const NEXT_ONLY_ACTIONS: &[&str] = &[
 const INSPECTOR_SCROLL_STEP: usize = 5;
 
 /// Transcript rows measured by the last Next frame, used to keep a scrolled
-/// reader on the same content while output arrives below.
+/// reader on the same content while rows arrive, disappear or rewrap.
 #[derive(Debug, Clone, Copy, Default)]
 struct ReadingAnchor {
     width: u16,
     total: usize,
-    /// Growth not yet folded into `App::scroll_offset`.
-    unsettled: usize,
-    /// Growth since the reader scrolled away; drives the activity notice.
+    /// Row offset from the bottom where the reader actually is, not yet
+    /// folded into `App::scroll_offset` (may be negative).
+    unsettled: i64,
+    /// Rows that arrived since the reader scrolled away.
     unseen: usize,
 }
 
-/// Navigation state of the Next shell. Lives on [`App`] but only Next reads
-/// or changes it.
 #[derive(Debug, Default)]
 pub struct ShellState {
     /// The one open inspector page, if any. It owns Escape and Tab; the
     /// composer keeps every other key, so the draft is never stranded.
     pub inspector: Option<InspectorPage>,
     pub inspector_scroll: usize,
+    /// Largest useful `inspector_scroll` for the last drawn page.
+    inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
 }
 
@@ -225,27 +226,33 @@ impl ShellState {
                 self.inspector_scroll = self.inspector_scroll.saturating_sub(INSPECTOR_SCROLL_STEP);
             }
             "scrollInspectorDown" => {
-                self.inspector_scroll = self.inspector_scroll.saturating_add(INSPECTOR_SCROLL_STEP);
+                self.inspector_scroll = self
+                    .inspector_scroll
+                    .saturating_add(INSPECTOR_SCROLL_STEP)
+                    .min(self.inspector_scroll_max.get());
             }
             "jumpToLive" => self.anchor.set(ReadingAnchor::default()),
             _ => {}
         }
     }
 
-    pub(crate) fn take_unsettled_growth(&self) -> usize {
+    /// Signed row correction the loop adds to `App::scroll_offset`.
+    pub(crate) fn take_unsettled_rows(&self) -> i64 {
         let mut anchor = self.anchor.get();
-        let growth = std::mem::take(&mut anchor.unsettled);
+        let rows = std::mem::take(&mut anchor.unsettled);
         self.anchor.set(anchor);
-        growth
+        rows
     }
 
     /// First visible row of a `total`-row transcript in a `height`-row pane,
     /// and how many rows arrived since the reader scrolled away.
     ///
-    /// `scroll_offset` counts rows above the bottom, so new output would
-    /// otherwise push a scrolled reader's text upward. Growth measured at an
-    /// unchanged width is added to the offset until the loop settles it.
-    /// A width change rewraps everything, so it re-measures instead.
+    /// `scroll_offset` counts rows above the bottom, so rows added or removed
+    /// below a scrolled reader would move their text. Those changes are
+    /// added to the offset until the loop settles them. A width change
+    /// rewraps everything, so the offset is scaled to the new row count; the
+    /// result is clamped to the scrollable range so later steps take effect
+    /// immediately.
     fn window(
         &self,
         total: usize,
@@ -255,6 +262,7 @@ impl ShellState {
         scroll_offset: usize,
     ) -> (usize, usize) {
         let mut anchor = self.anchor.get();
+        let max_scroll = total.saturating_sub(height);
         let offset = if auto_scroll {
             anchor = ReadingAnchor {
                 width,
@@ -263,17 +271,24 @@ impl ShellState {
             };
             0
         } else {
-            if anchor.width == width && total > anchor.total {
-                let growth = total - anchor.total;
-                anchor.unsettled += growth;
-                anchor.unseen += growth;
-            }
+            let as_rows = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+            let current = as_rows(scroll_offset).saturating_add(anchor.unsettled);
+            let wanted = if anchor.total == 0 {
+                // Nothing measured yet: take the offset as given.
+                current
+            } else if anchor.width == width {
+                anchor.unseen += total.saturating_sub(anchor.total);
+                current.saturating_add(as_rows(total) - as_rows(anchor.total))
+            } else {
+                current.saturating_mul(as_rows(total)) / as_rows(anchor.total)
+            };
+            let clamped = wanted.clamp(0, as_rows(max_scroll));
+            anchor.unsettled = clamped - as_rows(scroll_offset);
             anchor.width = width;
             anchor.total = total;
-            scroll_offset.saturating_add(anchor.unsettled)
+            usize::try_from(clamped).unwrap_or(0)
         };
         self.anchor.set(anchor);
-        let max_scroll = total.saturating_sub(height);
         (max_scroll - offset.min(max_scroll), anchor.unseen)
     }
 }
@@ -362,15 +377,21 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         );
     }
 
-    // Keep the newest composer rows when the draft outgrows its rows.
-    let overflow = composer
-        .len()
-        .saturating_sub(usize::from(layout.composer.height));
-    composer.drain(..overflow);
-    frame.render_widget(Paragraph::new(composer), layout.composer);
+    // When the draft outgrows its rows, keep the newest rows unless that
+    // would hide the cursor; then scroll just far enough to show it.
     let (row, column) = composer_cursor(&view.draft, view.draft_cursor, width);
-    if row < draft_rows && row >= overflow {
-        if let (Ok(y), Ok(x)) = (u16::try_from(row - overflow), u16::try_from(column)) {
+    let visible = usize::from(layout.composer.height);
+    let mut first = composer.len().saturating_sub(visible);
+    if row < draft_rows {
+        first = first.min(row);
+        if row >= first + visible {
+            first = row + 1 - visible;
+        }
+    }
+    composer.drain(..first);
+    frame.render_widget(Paragraph::new(composer), layout.composer);
+    if row < draft_rows && row >= first {
+        if let (Ok(y), Ok(x)) = (u16::try_from(row - first), u16::try_from(column)) {
             if y < layout.composer.height && x < area.width {
                 frame.set_cursor_position((layout.composer.x + x, layout.composer.y + y));
             }
@@ -389,30 +410,32 @@ const COMPOSER_LEAD: usize = 2;
 /// Wrapped (row, column) of the cursor at byte `cursor` of `draft`, using
 /// the same cell-width wrapping as [`wrap_line`].
 fn composer_cursor(draft: &str, cursor: usize, width: usize) -> (usize, usize) {
+    // Walk one composer line the way `wrap_line` breaks it: a character that
+    // would cross the edge starts the next row.
+    let walk = |text: &str| {
+        let mut row = 0;
+        let mut used = COMPOSER_LEAD.min(width);
+        for ch in text.chars() {
+            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > width && used > 0 {
+                row += 1;
+                used = 0;
+            }
+            used += cells;
+        }
+        (row, used)
+    };
     let cursor = cursor.min(draft.len());
     let before = draft.get(..cursor).unwrap_or(draft);
     let line_start = before.rfind('\n').map_or(0, |index| index + 1);
-    let mut row: usize = draft[..line_start]
+    let earlier_rows: usize = draft[..line_start]
         .split_terminator('\n')
-        .map(|line| {
-            let cells = COMPOSER_LEAD + unicode_width::UnicodeWidthStr::width(line);
-            cells.div_ceil(width).max(1)
-        })
+        .map(|line| walk(line).0 + 1)
         .sum();
-    let mut used = COMPOSER_LEAD.min(width);
-    for ch in before[line_start..].chars() {
-        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cells > width && used > 0 {
-            row += 1;
-            used = 0;
-        }
-        used += cells;
-    }
-    if used >= width {
-        (row + 1, 0)
-    } else {
-        (row, used)
-    }
+    let (row, used) = walk(&before[line_start..]);
+    // A full row keeps the cursor on its last cell rather than on a row
+    // that belongs to the next line.
+    (earlier_rows + row, used.min(width.saturating_sub(1)))
 }
 
 fn project_name(app: &App) -> String {
@@ -635,10 +658,9 @@ fn render_inspector(
     let footer_rows = footer.len().min(height);
     header.truncate(height - footer_rows);
     let body_rows = height - footer_rows - header.len();
-    let scroll = app
-        .next_shell
-        .inspector_scroll
-        .min(body.len().saturating_sub(body_rows));
+    let scroll_max = body.len().saturating_sub(body_rows);
+    app.next_shell.inspector_scroll_max.set(scroll_max);
+    let scroll = app.next_shell.inspector_scroll.min(scroll_max);
     let mut lines = header;
     lines.extend(body.into_iter().skip(scroll).take(body_rows));
     lines.resize(height - footer_rows, Line::default());
@@ -837,6 +859,8 @@ fn status_line(appearance: &Appearance, app: &App, view: &TranscriptView) -> Lin
     }
     let mut spans = if view.permission.is_some() {
         primitives::status_label(appearance, Status::Pending, "awaiting permission")
+    } else if app.voice_recording {
+        primitives::status_label(appearance, Status::Pending, "recording voice")
     } else if view.is_streaming {
         vec![Span::styled(
             format!(

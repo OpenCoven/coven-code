@@ -477,3 +477,153 @@ fn transcript_text_is_selectable_in_next() {
     let rows = app.last_row_text.borrow();
     assert!(rows.values().any(|row| row.contains("answer 001")));
 }
+
+fn row_of(text: &str, needle: &str) -> Option<usize> {
+    text.lines().position(|line| line.contains(needle))
+}
+
+#[test]
+fn the_reading_row_stays_fixed_while_rows_arrive_and_disappear_below() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    app.handle_key_event(key(KeyCode::PageUp, KeyModifiers::NONE));
+    let first = text_of(&draw(&app, 80, 24).0);
+    app.settle_scroll_anchor();
+    let anchor = first
+        .lines()
+        .find(|line| line.starts_with("answer "))
+        .expect("history visible")
+        .to_string();
+    let at = row_of(&first, &anchor);
+
+    apply(&mut app, delta(&"streamed line\n".repeat(30)));
+    let grown = text_of(&draw(&app, 80, 24).0);
+    app.settle_scroll_anchor();
+    assert_eq!(
+        row_of(&grown, &anchor),
+        at,
+        "growth moved the reader:\n{grown}"
+    );
+
+    // Cancelling clears the live text: rows vanish below the reader.
+    app.streaming_text.clear();
+    let shrunk = text_of(&draw(&app, 80, 24).0);
+    app.settle_scroll_anchor();
+    assert_eq!(
+        row_of(&shrunk, &anchor),
+        at,
+        "shrinking moved the reader:\n{shrunk}"
+    );
+}
+
+#[test]
+fn rewrapping_keeps_the_reader_near_their_text_and_over_scroll_is_clamped() {
+    let mut app = next_app();
+    with_history(&mut app, 60);
+    app.scroll_offset = 40;
+    app.auto_scroll = false;
+    let wide = text_of(&draw(&app, 120, 40).0);
+    app.settle_scroll_anchor();
+    let anchor = wide
+        .lines()
+        .find(|line| line.starts_with("answer "))
+        .expect("history")
+        .to_string();
+    // Opening the inspector in Split narrows the transcript; closing it
+    // widens it again. The reader stays on the same stretch of history.
+    app.handle_key_event(alt('i'));
+    let narrow = text_of(&draw(&app, 120, 40).0);
+    app.settle_scroll_anchor();
+    assert!(narrow.contains(&anchor), "{narrow}");
+    app.handle_key_event(alt('i'));
+    let back = text_of(&draw(&app, 120, 40).0);
+    app.settle_scroll_anchor();
+    assert!(back.contains(&anchor), "{back}");
+
+    // An offset past the top is clamped, so the next step down moves.
+    app.scroll_offset = 100_000;
+    let top = text_of(&draw(&app, 80, 24).0);
+    app.settle_scroll_anchor();
+    assert!(
+        app.scroll_offset < 100_000,
+        "over-scroll settled to the range"
+    );
+    app.handle_key_event(key(KeyCode::PageDown, KeyModifiers::NONE));
+    let moved = text_of(&draw(&app, 80, 24).0);
+    assert_ne!(
+        top, moved,
+        "the first PageDown after over-scroll takes effect"
+    );
+}
+
+#[test]
+fn the_cursor_row_stays_visible_and_exact_in_long_wrapped_and_wide_drafts() {
+    let mut app = next_app();
+    let lines: Vec<String> = (0..12).map(|n| format!("line-{n:02}")).collect();
+    app.set_prompt_text(lines.join("\n"));
+    // Cursor at the end of line-02.
+    app.prompt_input.cursor = lines[..3].iter().map(|l| l.len() + 1).sum::<usize>() - 1;
+    let (buffer, cursor) = draw(&app, 80, 24);
+    let (x, y) = cursor.expect("cursor visible in a draft taller than the composer");
+    let row = text_of(&buffer)
+        .lines()
+        .nth(usize::from(y))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        row.contains("line-02"),
+        "cursor row is the edited line: {row}"
+    );
+    assert_eq!(x, 2 + 7);
+
+    // A wide character that would cross the edge wraps early; the cursor
+    // on the next logical line must account for that extra row.
+    app.set_prompt_text(format!("a{}b\nxyz", "漢".repeat(78)));
+    let (buffer, cursor) = draw(&app, 80, 24);
+    let (x, y) = cursor.expect("cursor");
+    let row = text_of(&buffer)
+        .lines()
+        .nth(usize::from(y))
+        .unwrap_or_default()
+        .to_string();
+    assert!(row.contains("xyz"), "cursor row: {row}");
+    assert_eq!(x, 2 + 3);
+}
+
+#[test]
+fn a_settled_cancellation_reports_its_outcome_and_remote_cancels_wait_too() {
+    let mut app = next_app();
+    apply(&mut app, delta("working"));
+    app.handle_key_event(esc());
+    assert!(app.take_cancellation_request());
+    // The loop clears the status when the worker finishes, then settles.
+    app.status_message = None;
+    app.settle_cancellation();
+    let text = text_of(&draw(&app, 80, 24).0);
+    assert!(text.contains("Cancelled."), "{text}");
+
+    let mut remote = next_app();
+    apply(&mut remote, delta("working"));
+    remote.note_cancellation_sent();
+    let text = text_of(&draw(&remote, 80, 24).0);
+    assert!(text.contains("cancelling"), "{text}");
+}
+
+#[test]
+fn inspector_scrolling_is_bounded_and_voice_recording_is_visible() {
+    let mut app = next_app();
+    app.handle_key_event(alt('i'));
+    let _ = draw(&app, 120, 40);
+    for _ in 0..10 {
+        app.handle_key_event(key(KeyCode::PageDown, KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.next_shell.inspector_scroll, 0,
+        "a short page does not scroll"
+    );
+
+    let mut voice = next_app();
+    voice.voice_recording = true;
+    let text = text_of(&draw(&voice, 80, 24).0);
+    assert!(text.contains("recording voice"), "{text}");
+}

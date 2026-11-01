@@ -3178,18 +3178,30 @@ impl App {
         true
     }
 
-    /// The loop calls this once no turn worker is running any more.
+    /// Record a cancellation the loop performed without a key request
+    /// (remote control), so it is shown pending until the worker stops.
+    pub fn note_cancellation_sent(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    }
+
+    /// The loop calls this once no turn worker is running any more. A
+    /// pending cancellation becomes the confirmed outcome.
     pub fn settle_cancellation(&mut self) {
+        if self.cancellation != crate::application::TurnCancellation::Idle {
+            self.status_message = Some("Cancelled.".to_string());
+        }
         self.cancellation = crate::application::TurnCancellation::Idle;
     }
 
-    /// Fold transcript growth the Next renderer measured while the reader
+    /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
     pub fn settle_scroll_anchor(&mut self) {
-        let growth = self.next_shell.take_unsettled_growth();
+        let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
-            self.scroll_offset = self.scroll_offset.saturating_add(growth);
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add_signed(isize::try_from(rows).unwrap_or(0));
         }
     }
 

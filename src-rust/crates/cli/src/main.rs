@@ -4510,6 +4510,9 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+                        if current_query.is_some() {
+                            app.note_cancellation_sent();
+                        }
                         app.is_streaming = false;
                         app.status_message = Some("Cancelled by remote control.".to_string());
                     }

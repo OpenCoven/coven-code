@@ -8,8 +8,10 @@
 # The turn runs through the engine's keyless Claude transport against a fake
 # `claude` that answers once and then keeps the turn running, so streaming,
 # reading position and cancellation are exercised with no network or model.
-# This proves the shell journey only; it is not evidence for tool, approval,
-# task, research or memory behavior.
+# The terminal is resized between steps (120x40, 80x24, 40x12, back to
+# 120x40). A final Classic segment checks that Escape stops a running turn
+# there too. This proves the shell journey only; it is not evidence for tool,
+# approval, task, research or memory behavior.
 
 register_case tc_next_shell
 
@@ -22,7 +24,7 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake","model":"fa
 i=1; text=""
 while [ "$i" -le 60 ]; do text="${text}fake line $i\\n"; i=$((i + 1)); done
 printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"model\":\"fake-model\",\"content\":[{\"type\":\"text\",\"text\":\"${text}\"}]}}"
-sleep 30
+sleep 6
 touch "$FAKE_CLAUDE_DONE"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":1}}'
 FAKE
@@ -59,6 +61,7 @@ tc_next_shell() {
     assert_absent "$s" "Coven v" "Next draws its own shell, not Classic's welcome"
 
     # ---- draft and the one inspector ------------------------------------
+    _tmux resize-window -t "$TUI_SESSION" -x 80 -y 24
     tui_type "draft one"
     if wait_for "draft not sent" 5; then _pass "a typed draft is visibly unsent"
     else _fail "a typed draft is visibly unsent" "$(tui_capture)"; fi
@@ -87,17 +90,23 @@ tc_next_shell() {
     tui_keys C-u
 
     # ---- submit, stream, scroll away, resize, back to live ---------------
+    _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40
     tui_type "stream please"; tui_keys Enter
     if wait_for "fake line 60" 15; then _pass "the response streams into the transcript"
     else _fail "the response streams into the transcript" "$(tui_capture)"; fi
     tui_keys PageUp
     if wait_for "scrolled up" 5; then _pass "scrolling away shows the way back to live"
     else _fail "scrolling away shows the way back to live" "$(tui_capture)"; fi
-    _tmux resize-window -t "$TUI_SESSION" -x 80 -y 24
-    tui_settle
-    s="$(tui_capture)"
-    assert_contains "$s" "scrolled up" "reading position survives a resize to 80x24"
-    assert_contains "$s" "working" "the turn is still running after the resize"
+    local size
+    for size in "80 24" "40 12"; do
+      _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
+      tui_settle
+      s="$(tui_capture)"
+      assert_contains "$s" "scrolled up" "the scrolled view survives a resize to ${size/ /x}"
+      assert_contains "$s" "fake line" "transcript text is still shown at ${size/ /x}"
+      assert_contains "$s" "working" "the turn is still running at ${size/ /x}"
+    done
+    _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40
     tui_keys M-l
     if wait_absent "scrolled up" 5; then _pass "Alt+L jumps back to live output"
     else _fail "Alt+L jumps back to live output" "$(tui_capture)"; fi
@@ -115,8 +124,11 @@ tc_next_shell() {
     else
       _pass "the cancelled turn's claude process exits"
     fi
+    # The fake finishes 6s after answering; give it the time it would need.
+    sleep 7
     if [ -e "$scratch/done" ]; then _fail "the cancelled turn did not run to completion"
     else _pass "the cancelled turn did not run to completion"; fi
+    assert_contains "$(tui_capture)" "Cancelled." "the settled outcome is shown"
 
     # ---- quit and terminal restoration -----------------------------------
     tui_keys C-c; sleep 0.3; tui_keys C-c
@@ -130,6 +142,32 @@ tc_next_shell() {
       "quitting restores the cursor"
     assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{mouse_any_flag}')" "0" \
       "quitting turns mouse reporting off"
+  fi
+  tui_stop
+
+  # ---- Classic: Escape stops the running turn as well ----------------------
+  rm -f "$scratch/done"
+  TUI_LAUNCH_PREFIX="${TUI_LAUNCH_PREFIX/COVEN_CODE_UI=next/COVEN_CODE_UI=classic}"
+  TUI_BOOT_STRING="$saved_boot"
+  if tui_start; then
+    tui_type "stream please"; tui_keys Enter
+    if wait_for "fake line 60" 15; then
+      tui_keys Escape
+      local tries=0
+      while pgrep -f "$scratch/bin/claude" >/dev/null 2>&1 && [ "$tries" -lt 10 ]; do
+        sleep 0.5; tries=$((tries + 1))
+      done
+      if pgrep -f "$scratch/bin/claude" >/dev/null 2>&1; then
+        _fail "Classic: Escape stops the turn's claude process"
+      else
+        _pass "Classic: Escape stops the turn's claude process"
+      fi
+      sleep 7
+      if [ -e "$scratch/done" ]; then _fail "Classic: the cancelled turn did not complete"
+      else _pass "Classic: the cancelled turn did not complete"; fi
+    else
+      _fail "Classic: the response streams" "$(tui_capture)"
+    fi
   fi
   tui_stop
 
