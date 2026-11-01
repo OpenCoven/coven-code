@@ -18,11 +18,11 @@ ddddddddddddddddddddk...........................................................
 ddccccccccddddddddddk..kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk.........................................kdddddddddddddddddddd
 ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
 ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
-ddddddddddddddddddddk....rrr.......................................................................kdddddddddddddddddddd
-ddddddddddddddddddddk....rrr.......................................................................kdddddddddddddddddddd
-ddddddddddddddddddddk....rrr.......................................................................kdddddddddddddddddddd
-ddddddddddddddddddddk....rrr.......................................................................kdddddddddddddddddddd
-ddddddddddddddddddddk....ppp.ssssssss..............................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....ppp.rrrrrrrrrrrrrrr.......................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
+ddddddddddddddddddddk....sss.......................................................................kdddddddddddddddddddd
 ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
 ddddddddddddddddddddk..............................................................................kdddddddddddddddddddd
 ddddddddddddddddddddkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkdddddddddddddddddddd
@@ -56,8 +56,8 @@ n fg=Rgb(235, 235, 240) bg=Rgb(23, 23, 31) mod=NONE
 o fg=Rgb(236, 236, 241) bg=Rgb(23, 23, 31) mod=NONE
 p fg=Green bg=Reset mod=BOLD
 q fg=White bg=Reset mod=BOLD
-r fg=DarkGray bg=Reset mod=NONE
-s fg=Reset bg=Reset mod=BOLD
+r fg=Reset bg=Reset mod=BOLD
+s fg=DarkGray bg=Reset mod=NONE
 t fg=Yellow bg=Rgb(10, 10, 14) mod=BOLD
 u fg=Rgb(0, 0, 0) bg=Rgb(139, 92, 246) mod=BOLD
 v fg=Rgb(161, 161, 170) bg=Rgb(10, 10, 14) mod=NONE

@@ -4276,7 +4276,16 @@ async fn run_interactive(
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
                         let tool_use_id = pending.tool_use_id.clone();
-                        app.permission_request = Some(permission_request_from_core(&pending));
+                        let request = permission_request_from_core(&pending);
+                        // Next guards approvals against stray keys (#411);
+                        // Classic keeps its existing dialog behavior.
+                        app.permission_request = Some(
+                            if app.renderer == claurst_tui::application::UiRenderer::Next {
+                                request.guarded()
+                            } else {
+                                request
+                            },
+                        );
                         pending_permissions
                             .lock()
                             .waiting
@@ -4565,7 +4574,9 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-                        if current_query.is_some() {
+                        if current_query.is_some()
+                            && app.renderer == claurst_tui::application::UiRenderer::Next
+                        {
                             app.note_cancellation_sent();
                             app.interrupt_tool_rows();
                         }

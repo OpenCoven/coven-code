@@ -3406,6 +3406,11 @@ impl App {
     /// Clear the live tool rows of a turn being cancelled, keeping the ones
     /// still running as evidence of what the cancel interrupted.
     pub fn interrupt_tool_rows(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic clears its tool rows on cancel, as it always has.
+            self.tool_use_blocks.clear();
+            return;
+        }
         let running = self
             .tool_use_blocks
             .drain(..)
@@ -3431,6 +3436,14 @@ impl App {
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
+    /// Ask the loop to cancel the running turn through its token. Next only:
+    /// Classic keeps its existing cancel behavior unchanged.
+    fn request_turn_cancellation(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.cancellation = crate::application::TurnCancellation::Requested;
+        }
+    }
+
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -5407,7 +5420,7 @@ impl App {
                 self.streaming_thinking.clear();
                 self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
-                self.cancellation = crate::application::TurnCancellation::Requested;
+                self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(true);
             }
 
@@ -5440,7 +5453,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
-                    self.cancellation = crate::application::TurnCancellation::Requested;
+                    self.request_turn_cancellation();
                     self.complete_current_turn_snapshot(true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
@@ -6231,7 +6244,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
-                    self.cancellation = crate::application::TurnCancellation::Requested;
+                    self.request_turn_cancellation();
                 } else {
                     // Handle exit confirmation: require two exit key presses within 2 seconds.
                     // Always clear the prompt input on Ctrl+C.
@@ -9371,18 +9384,13 @@ role = "Research"
             kind: ContextMenuKind::Selection,
         });
 
-        // Focus opens on deny, the last option (#411); Up moves off it.
-        let deny = app
-            .permission_request
-            .as_ref()
-            .map(|request| request.selected_option);
-        app.handle_key_event(press_key(KeyCode::Up, KeyModifiers::empty()));
+        app.handle_key_event(press_key(KeyCode::Down, KeyModifiers::empty()));
 
         assert_eq!(
             app.permission_request
                 .as_ref()
                 .map(|request| request.selected_option),
-            deny.map(|index| index - 1)
+            Some(1)
         );
         assert_eq!(
             app.context_menu_state
