@@ -10,6 +10,7 @@
 //!
 //! [`App`]: crate::App
 
+pub mod memory;
 pub mod research;
 pub mod view;
 pub mod work;

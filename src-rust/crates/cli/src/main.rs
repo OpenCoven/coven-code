@@ -2578,6 +2578,75 @@ fn refresh_command_discovery(app: &mut claurst_tui::App, config: &Config, cwd: &
     ));
 }
 
+/// How often an open Memory page re-reads the Coven daemon.
+const MEMORY_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The Memory page's daemon read in flight, if any, and when the last one
+/// finished.
+#[derive(Default)]
+struct MemoryPoll {
+    in_flight: Option<std::sync::mpsc::Receiver<claurst_tui::application::memory::MemorySnapshot>>,
+    last_read: Option<std::time::Instant>,
+}
+
+/// Keep `app.memory_snapshot` for the Next Memory page (#415).
+///
+/// While the page is open the daemon is read off the UI thread, at most
+/// every [`MEMORY_REFRESH`]. When the page is closed the snapshot and any
+/// read in flight are dropped: private reads are not kept, and a late answer
+/// is discarded rather than shown later.
+fn refresh_memory_snapshot(
+    app: &mut claurst_tui::app::App,
+    page_open: bool,
+    poll: &mut MemoryPoll,
+    spawn_read: impl FnOnce() -> std::sync::mpsc::Receiver<
+        claurst_tui::application::memory::MemorySnapshot,
+    >,
+) {
+    use claurst_tui::application::memory::MemorySnapshot;
+    use std::sync::mpsc::TryRecvError;
+
+    if !page_open {
+        app.memory_snapshot = MemorySnapshot::NotRead;
+        *poll = MemoryPoll::default();
+        return;
+    }
+    if let Some(receiver) = &poll.in_flight {
+        let finished = match receiver.try_recv() {
+            Ok(snapshot) => Some(snapshot),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(MemorySnapshot::Failed(
+                "the memory read stopped without an answer".to_string(),
+            )),
+        };
+        if let Some(snapshot) = finished {
+            app.memory_snapshot = snapshot;
+            poll.in_flight = None;
+            poll.last_read = Some(std::time::Instant::now());
+        }
+        return;
+    }
+    let due = poll
+        .last_read
+        .is_none_or(|at| at.elapsed() >= MEMORY_REFRESH);
+    if due {
+        poll.in_flight = Some(spawn_read());
+    }
+}
+
+/// Start one blocking daemon memory read on its own thread.
+fn spawn_memory_read() -> std::sync::mpsc::Receiver<claurst_tui::application::memory::MemorySnapshot>
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Resolve the socket on this thread (it reads env vars); only the
+    // blocking reads run on the worker.
+    let client = claurst_core::coven_daemon::DaemonClient::new();
+    std::thread::spawn(move || {
+        let _ = sender.send(claurst_tui::application::memory::read_memory(client));
+    });
+    receiver
+}
+
 /// How often an open Work page re-reads the session goal from SQLite.
 const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -3119,6 +3188,7 @@ async fn run_interactive(
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
+    let mut memory_poll = MemoryPoll::default();
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(error) = log.take_error() {
@@ -3149,6 +3219,17 @@ async fn run_interactive(
                 read_session_goal,
             );
         }
+
+        // Read familiar memory only while the Next Memory page is open; drop
+        // it as soon as the page closes. Classic never reads it.
+        let memory_page_open = renderer == claurst_tui::application::UiRenderer::Next
+            && app.next_shell.inspector == Some(claurst_tui::next::InspectorPage::Memory);
+        refresh_memory_snapshot(
+            &mut app,
+            memory_page_open,
+            &mut memory_poll,
+            spawn_memory_read,
+        );
 
         // Draw the UI
         terminal.draw(|f| match renderer {
@@ -7110,6 +7191,70 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
         }
+    }
+
+    #[test]
+    fn an_open_memory_page_reads_off_thread_once_per_refresh() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        assert!(poll.in_flight.is_some(), "a read started");
+        assert_eq!(app.memory_snapshot, MemorySnapshot::NotRead);
+        // Still in flight: no second read is started.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("second read"));
+        sender.send(MemorySnapshot::Offline).unwrap();
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("second read"));
+        assert_eq!(app.memory_snapshot, MemorySnapshot::Offline);
+        // Fresh: no new read until the refresh interval passes.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("too soon"));
+        poll.last_read = Some(std::time::Instant::now() - MEMORY_REFRESH * 2);
+        let (_again, again_rx) = std::sync::mpsc::channel();
+        let mut again_rx = Some(again_rx);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
+        assert!(poll.in_flight.is_some(), "re-read after the interval");
+    }
+
+    #[test]
+    fn closing_the_memory_page_drops_the_snapshot_and_a_late_answer() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        app.memory_snapshot = MemorySnapshot::UpdateRequired;
+        refresh_memory_snapshot(&mut app, false, &mut poll, || panic!("closed"));
+        assert_eq!(app.memory_snapshot, MemorySnapshot::NotRead);
+        assert!(poll.in_flight.is_none() && poll.last_read.is_none());
+        assert!(
+            sender.send(MemorySnapshot::Offline).is_err(),
+            "late answer has nowhere to land"
+        );
+    }
+
+    #[test]
+    fn a_memory_read_that_dies_is_reported_not_left_reading() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel::<MemorySnapshot>();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        drop(sender);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("retry storm"));
+        assert!(matches!(app.memory_snapshot, MemorySnapshot::Failed(_)));
     }
 
     #[test]

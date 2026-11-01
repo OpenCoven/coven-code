@@ -956,6 +956,9 @@ pub struct App {
     /// Snapshot of the engine-local work stores for the Next Work page,
     /// refreshed by the interactive loop. Display only; it grants nothing.
     pub work_sources: crate::application::work::WorkSources,
+    /// Familiar memory read for the Next Memory page; cleared when the page
+    /// closes so private reads are not kept.
+    pub memory_snapshot: crate::application::memory::MemorySnapshot,
 
     // ---- Thinking block expansion state ----------------------------------
     /// Set of thinking block content hashes that are expanded.
@@ -1407,6 +1410,7 @@ impl App {
             agent_type_badge: None,
             active_goal_badge: None,
             work_sources: Default::default(),
+            memory_snapshot: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
             last_selectable_area: Cell::new(ratatui::layout::Rect::default()),

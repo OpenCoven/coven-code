@@ -138,16 +138,19 @@ pub enum InspectorPage {
     Work,
     /// This session's web search and fetch activity.
     Research,
+    /// Familiar memory read from the Coven daemon, read only.
+    Memory,
     /// Destinations of the shared navigation model and their availability.
     Views,
 }
 
 impl InspectorPage {
-    pub const ALL: [InspectorPage; 5] = [
+    pub const ALL: [InspectorPage; 6] = [
         InspectorPage::Activity,
         InspectorPage::Session,
         InspectorPage::Work,
         InspectorPage::Research,
+        InspectorPage::Memory,
         InspectorPage::Views,
     ];
 
@@ -157,6 +160,7 @@ impl InspectorPage {
             InspectorPage::Session => "Session",
             InspectorPage::Work => "Work",
             InspectorPage::Research => "Research",
+            InspectorPage::Memory => "Memory",
             InspectorPage::Views => "Views",
         }
     }
@@ -867,6 +871,7 @@ fn render_inspector(
     match page {
         InspectorPage::Work => header.extend(work_scope_notes(appearance)),
         InspectorPage::Research => header.extend(research_scope_notes(appearance)),
+        InspectorPage::Memory => header.extend(memory_scope_notes(appearance)),
         _ => {}
     }
     let body = match page {
@@ -874,6 +879,7 @@ fn render_inspector(
         InspectorPage::Session => session_page(appearance, app),
         InspectorPage::Work => work_page(appearance, app),
         InspectorPage::Research => research_page(appearance, app),
+        InspectorPage::Memory => memory_page(appearance, app),
         InspectorPage::Views => views_page(appearance, app),
     };
     let key = |action: &str| {
@@ -1044,6 +1050,161 @@ fn research_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
             "research jobs (#414)",
         ),
     ]
+}
+
+/// What the Memory page's rows are, and what it cannot do yet.
+fn memory_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
+    vec![
+        primitives::status_message(
+            appearance,
+            Status::Evidence,
+            "read only",
+            "daemon reads, no fallback",
+        ),
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "unavailable",
+            "reveal, selection (#415)",
+        ),
+    ]
+}
+
+fn memory_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
+    use crate::application::memory::MemorySnapshot;
+    use crate::application::view::terminal_safe;
+    use claurst_core::coven_daemon::MemoryPreview;
+
+    let safe = |text: &str| terminal_safe(text).replace('\n', " ");
+    // `/memory` is a different, engine-local surface: instruction files.
+    let not_here = field(
+        appearance,
+        "Not here",
+        "/memory is Local instructions".to_string(),
+    );
+    let notice = |status, word: &str, detail: &str| {
+        vec![
+            primitives::status_message(appearance, status, word, detail),
+            Line::default(),
+            not_here.clone(),
+        ]
+    };
+    let (rows, overview) = match &app.memory_snapshot {
+        MemorySnapshot::NotRead => {
+            return notice(Status::Pending, "reading", "asking the Coven daemon")
+        }
+        MemorySnapshot::Offline => {
+            return notice(
+                Status::Blocked,
+                "offline",
+                "daemon unreachable; no disk reads",
+            )
+        }
+        MemorySnapshot::UpdateRequired => {
+            return notice(
+                Status::Blocked,
+                "update required",
+                "this Coven daemon has no memory read API",
+            )
+        }
+        MemorySnapshot::Failed(reason) => return notice(Status::Blocked, "unavailable", reason),
+        MemorySnapshot::Loaded { rows, overview } => (rows, overview),
+    };
+
+    let mut lines = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "The daemon reports no familiar memory.".to_string(),
+            appearance.style(Role::TextMuted),
+        )));
+        lines.push(Line::default());
+    }
+    // Rows first, so a small terminal still shows an entry.
+    for row in rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "[familiar memory] ".to_string(),
+                appearance.style(Role::TextMuted),
+            ),
+            Span::styled(safe(&row.familiar_id), appearance.style(Role::Text)),
+            Span::styled(
+                " (unverified)".to_string(),
+                appearance.style(Role::TextMuted),
+            ),
+        ]));
+        match &row.preview {
+            MemoryPreview::Withheld => lines.push(field(
+                appearance,
+                "Preview",
+                "withheld: not cleared by the producer".to_string(),
+            )),
+            MemoryPreview::Allowed { title, excerpt } => {
+                lines.push(field(appearance, "Title", safe(title)));
+                if !excerpt.is_empty() {
+                    lines.push(field(appearance, "Excerpt", safe(excerpt)));
+                }
+            }
+        }
+        lines.push(field(appearance, "Reference", safe(&row.id)));
+        lines.push(field(
+            appearance,
+            "Updated",
+            row.updated_at
+                .as_deref()
+                .map_or("unknown".to_string(), safe),
+        ));
+        lines.push(field(
+            appearance,
+            "Source",
+            row.source_label
+                .as_deref()
+                .map_or("unknown".to_string(), safe),
+        ));
+        lines.push(field(
+            appearance,
+            "Check",
+            format!(
+                "{} (producer label, not attested)",
+                safe(&row.verification_state)
+            ),
+        ));
+        lines.push(Line::default());
+    }
+    let count = |value: Option<u64>| value.map_or("unknown".to_string(), |n| n.to_string());
+    match overview {
+        Ok(overview) => {
+            lines.push(field(
+                appearance,
+                "Entries",
+                format!(
+                    "{} entries in {} familiars",
+                    count(overview.entries),
+                    count(overview.familiars)
+                ),
+            ));
+            lines.push(field(
+                appearance,
+                "Index",
+                format!(
+                    "check {}; changes {}",
+                    safe(overview.verification_state.as_deref().unwrap_or("unknown")),
+                    if overview.mutations {
+                        "offered by the daemon, not here"
+                    } else {
+                        "off"
+                    },
+                ),
+            ));
+        }
+        Err(reason) => lines.push(primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "no overview",
+            reason,
+        )),
+    }
+    lines.push(not_here);
+    lines
 }
 
 fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
@@ -1228,16 +1389,6 @@ fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
 }
 
 fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
-    let view = |name: &str, detail: &str| {
-        let mut line = Line::from(Span::styled(
-            format!("  {name:<10}"),
-            appearance.style(Role::Text),
-        ));
-        line.spans.extend(
-            primitives::status_message(appearance, Status::Blocked, "unavailable", detail).spans,
-        );
-        line
-    };
     let mut lines = vec![
         primitives::list_item(appearance, "Chat      current", true),
         {
@@ -1272,7 +1423,22 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             );
             line
         },
-        view("Memory", "needs a qualified memory reader (#415)"),
+        {
+            let mut line = Line::from(Span::styled(
+                format!("  {:<10}", "Memory"),
+                appearance.style(Role::Text),
+            ));
+            line.spans.extend(
+                primitives::status_message(
+                    appearance,
+                    Status::Pending,
+                    "read only",
+                    "Memory page; reveal and selection wait on #415",
+                )
+                .spans,
+            );
+            line
+        },
         Line::default(),
     ];
     let palette = app

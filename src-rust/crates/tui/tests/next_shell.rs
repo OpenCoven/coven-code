@@ -449,18 +449,20 @@ fn images_fall_back_to_filename_and_type_text() {
 }
 
 #[test]
-fn unavailable_views_explain_their_blocker_instead_of_faking_integrations() {
+fn views_name_their_limits_instead_of_faking_integrations() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Views);
     let text = text_of(&draw(&app, 80, 24).0);
-    // Work and Research have local-only pages; see next_work.rs and
-    // next_research.rs.
-    let memory = text
-        .lines()
-        .find(|line| line.contains("Memory"))
-        .unwrap_or_else(|| panic!("Memory missing:\n{text}"));
-    assert!(memory.contains("unavailable"), "{memory}");
-    assert!(memory.contains("#415"), "{memory}");
+    // Work, Research and Memory have limited pages; see next_work.rs,
+    // next_research.rs and next_memory.rs. None claims to be complete.
+    for (name, issue) in [("Work", "#413"), ("Research", "#414"), ("Memory", "#415")] {
+        let line = text
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("{name} missing:\n{text}"));
+        assert!(line.contains(issue), "{line}");
+        assert!(!line.contains("current"), "{line}");
+    }
     assert!(
         text.contains("Ctrl+K"),
         "commands stay discoverable:\n{text}"

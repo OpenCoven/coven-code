@@ -114,6 +114,49 @@ pub struct RegisterExternalSession {
 // Raw JSON shapes (private — only used for deserialization)
 // ---------------------------------------------------------------------------
 
+/// One familiar-memory row from `GET /api/v1/memory`, as the terminal may
+/// hold it. The relative `path` is never parsed. The title and excerpt are
+/// kept only when the producer classified the entry and said no reveal is
+/// required; otherwise they are dropped here, so no later layer can show,
+/// log or export them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySummary {
+    /// Opaque id from the daemon; not a content revision.
+    pub id: String,
+    /// Familiar directory name as the daemon reports it; not an identity.
+    pub familiar_id: String,
+    pub updated_at: Option<String>,
+    pub source_label: Option<String>,
+    /// The producer's verification label, as given; not an attestation.
+    pub verification_state: String,
+    pub preview: MemoryPreview,
+}
+
+/// What a list row may show of an entry's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryPreview {
+    /// Unclassified, or the producer requires reveal: nothing is kept.
+    Withheld,
+    /// The producer classified the entry and said no reveal is required.
+    Allowed { title: String, excerpt: String },
+}
+
+/// `GET /api/v1/memory/overview`. A missing count stays unknown, never zero;
+/// a missing capability reads as absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryOverview {
+    pub entries: Option<u64>,
+    pub familiars: Option<u64>,
+    pub last_updated_at: Option<String>,
+    pub detail: bool,
+    pub verification: bool,
+    pub attestation_metadata: bool,
+    pub supersession_history: bool,
+    pub mutations: bool,
+    /// The index verification state as given, such as `unavailable`.
+    pub verification_state: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct RawFamiliar {
     #[serde(default)]
@@ -532,6 +575,17 @@ impl DaemonClient {
             .collect())
     }
 
+    /// Read familiar-memory summary rows. Read only; see [`MemorySummary`]
+    /// for what is kept.
+    pub fn memory_list(&self) -> Result<Vec<MemorySummary>, DaemonError> {
+        parse_memory_list(&self.get("/api/v1/memory")?)
+    }
+
+    /// Read the familiar-memory overview: counts and capability state.
+    pub fn memory_overview(&self) -> Result<MemoryOverview, DaemonError> {
+        parse_memory_overview(&self.get("/api/v1/memory/overview")?)
+    }
+
     /// Fetch non-archived sessions.
     pub fn active_sessions(&self) -> Result<Vec<DaemonSession>, DaemonError> {
         let body = self.get("/api/v1/sessions")?;
@@ -802,6 +856,107 @@ fn url_quote(input: &str) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawMemorySource {
+    label: Option<String>,
+}
+
+/// `path` is deliberately absent: it is never read into the terminal.
+#[derive(Deserialize)]
+struct RawMemorySummary {
+    id: String,
+    familiar_id: String,
+    title: Option<String>,
+    updated_at_iso: Option<String>,
+    excerpt: Option<String>,
+    source: Option<RawMemorySource>,
+    privacy_classification: Option<String>,
+    reveal_required: Option<bool>,
+    verification_state: Option<String>,
+}
+
+fn parse_memory_list(body: &str) -> Result<Vec<MemorySummary>, DaemonError> {
+    let raw: Vec<RawMemorySummary> =
+        serde_json::from_str(body).map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+    Ok(raw
+        .into_iter()
+        .map(|row| {
+            // Fail closed: only a producer classification together with an
+            // explicit "no reveal required" lets text through.
+            let classified = row
+                .privacy_classification
+                .as_deref()
+                .is_some_and(|class| !class.trim().is_empty());
+            let preview = if classified && row.reveal_required == Some(false) {
+                MemoryPreview::Allowed {
+                    title: row.title.unwrap_or_default(),
+                    excerpt: row.excerpt.unwrap_or_default(),
+                }
+            } else {
+                MemoryPreview::Withheld
+            };
+            MemorySummary {
+                id: row.id,
+                familiar_id: row.familiar_id,
+                updated_at: row.updated_at_iso,
+                source_label: row.source.and_then(|source| source.label),
+                verification_state: row
+                    .verification_state
+                    .unwrap_or_else(|| "unknown".to_string()),
+                preview,
+            }
+        })
+        .collect())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawMemoryTotals {
+    entries: Option<u64>,
+    familiars: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawMemoryCapabilities {
+    detail: bool,
+    verification: bool,
+    attestation_metadata: bool,
+    supersession_history: bool,
+    mutations: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawMemoryVerification {
+    state: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawMemoryOverview {
+    totals: RawMemoryTotals,
+    last_updated_at: Option<String>,
+    capabilities: RawMemoryCapabilities,
+    verification: RawMemoryVerification,
+}
+
+fn parse_memory_overview(body: &str) -> Result<MemoryOverview, DaemonError> {
+    let raw: RawMemoryOverview =
+        serde_json::from_str(body).map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+    Ok(MemoryOverview {
+        entries: raw.totals.entries,
+        familiars: raw.totals.familiars,
+        last_updated_at: raw.last_updated_at,
+        detail: raw.capabilities.detail,
+        verification: raw.capabilities.verification,
+        attestation_metadata: raw.capabilities.attestation_metadata,
+        supersession_history: raw.capabilities.supersession_history,
+        mutations: raw.capabilities.mutations,
+        verification_state: raw.verification.state,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -1181,5 +1336,140 @@ mod tests {
             "expected camelCase exitCode, got: {body}"
         );
         assert!(!body.contains("\"exit_code\""), "snake_case leaked: {body}");
+    }
+
+    const MEMORY_CANARY: &str = "CANARY-7f3a-private";
+
+    fn memory_row(classification: &str, reveal_required: &str) -> String {
+        format!(
+            r#"{{"id":"d251bc66-3e45-5d03-8d78-1e76919642f9","familiar_id":"sage","title":"{MEMORY_CANARY} title","path":"sage/{MEMORY_CANARY}.md","updated_at":"4m ago","updated_at_iso":"2026-07-26T09:56:00Z","excerpt":"{MEMORY_CANARY} excerpt","source":{{"kind":"coven-origin","label":"Coven origin"}},"privacy_classification":{classification},"reveal_required":{reveal_required},"verification_state":"unknown"}}"#
+        )
+    }
+
+    #[test]
+    fn unclassified_or_reveal_required_memory_keeps_no_title_or_excerpt() {
+        for (classification, reveal) in [
+            ("null", "null"),
+            ("null", "false"),
+            ("\"private\"", "true"),
+            ("\"private\"", "null"),
+            ("\"\"", "false"),
+        ] {
+            let body = format!("[{}]", memory_row(classification, reveal));
+            let rows = parse_memory_list(&body).unwrap();
+            assert_eq!(rows.len(), 1, "{classification} {reveal}");
+            assert_eq!(rows[0].preview, MemoryPreview::Withheld);
+            let held = format!("{:?}", rows[0]);
+            assert!(!held.contains(MEMORY_CANARY), "{held}");
+        }
+    }
+
+    #[test]
+    fn a_classified_entry_without_reveal_keeps_its_preview_but_never_the_path() {
+        let body = format!("[{}]", memory_row("\"public\"", "false"));
+        let rows = parse_memory_list(&body).unwrap();
+        let row = &rows[0];
+        assert_eq!(row.id, "d251bc66-3e45-5d03-8d78-1e76919642f9");
+        assert_eq!(row.familiar_id, "sage");
+        assert_eq!(row.updated_at.as_deref(), Some("2026-07-26T09:56:00Z"));
+        assert_eq!(row.source_label.as_deref(), Some("Coven origin"));
+        assert_eq!(row.verification_state, "unknown");
+        assert!(
+            matches!(&row.preview, MemoryPreview::Allowed { title, .. } if title.ends_with(" title"))
+        );
+        assert!(!format!("{row:?}").contains(".md"), "path kept: {row:?}");
+    }
+
+    #[test]
+    fn a_memory_row_without_an_id_fails_the_read() {
+        let body = r#"[{"familiar_id":"sage","verification_state":"unknown"}]"#;
+        assert!(parse_memory_list(body).is_err());
+    }
+
+    #[test]
+    fn the_memory_overview_keeps_missing_counts_unknown_and_capabilities_off() {
+        let full = r#"{"generated_at":"2026-07-26T10:00:00Z","totals":{"entries":3,"familiars":2,"verified":0,"needs_review":0,"unknown":3},"last_updated_at":"2026-07-26T09:56:00Z","capabilities":{"detail":true,"verification":false,"attestation_metadata":false,"supersession_history":false,"mutations":false},"verification":{"state":"unavailable"}}"#;
+        let overview = parse_memory_overview(full).unwrap();
+        assert_eq!(overview.entries, Some(3));
+        assert_eq!(overview.familiars, Some(2));
+        assert!(overview.detail && !overview.mutations && !overview.verification);
+        assert_eq!(overview.verification_state.as_deref(), Some("unavailable"));
+
+        let sparse = parse_memory_overview(r#"{"capabilities":{}}"#).unwrap();
+        assert_eq!(sparse.entries, None);
+        assert!(!sparse.detail && !sparse.mutations);
+    }
+
+    #[cfg(unix)]
+    fn serve_once(
+        response: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        DaemonClient,
+        std::thread::JoinHandle<String>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        (dir, DaemonClient { sock_path: sock }, server)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_list_is_a_get_and_withholds_unclassified_text() {
+        let (_dir, client, server) = serve_once(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n[{\"id\":\"d251bc66-3e45-5d03-8d78-1e76919642f9\",\"familiar_id\":\"sage\",\"title\":\"CANARY-7f3a-private\",\"excerpt\":\"CANARY-7f3a-private\",\"privacy_classification\":null,\"reveal_required\":null,\"verification_state\":\"unknown\"}]",
+        );
+        let rows = client.memory_list().unwrap();
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("GET /api/v1/memory HTTP/1.0"),
+            "{request}"
+        );
+        assert_eq!(rows[0].preview, MemoryPreview::Withheld);
+        assert!(!format!("{rows:?}").contains(MEMORY_CANARY));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_older_daemon_without_memory_reads_reports_not_found() {
+        let (_dir, client, server) = serve_once(
+            "HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"error\":{\"code\":\"not_found\",\"message\":\"no route\"}}",
+        );
+        let error = client.memory_overview().unwrap_err();
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("GET /api/v1/memory/overview HTTP/1.0"),
+            "{request}"
+        );
+        assert_eq!(error.status(), Some(404));
+    }
+
+    /// Opt-in evidence against a real daemon whose `COVEN_HOME` holds only
+    /// synthetic memory containing `CANARY-7f3a-private`. Never point this at
+    /// a home with real memory. Run with
+    /// `COVEN_HOME=<disposable home> cargo test -p claurst-core --lib live_daemon -- --ignored`.
+    #[test]
+    #[ignore = "needs a disposable Coven daemon with synthetic memory"]
+    fn live_daemon_memory_reads_withhold_unclassified_text() {
+        let client = DaemonClient::new().expect("daemon socket in COVEN_HOME");
+        let rows = client.memory_list().expect("memory list");
+        assert!(!rows.is_empty(), "synthetic memory expected");
+        let held = format!("{rows:?}");
+        assert!(!held.contains(MEMORY_CANARY), "{held}");
+        assert!(!held.contains(".md"), "path kept: {held}");
+        assert!(rows
+            .iter()
+            .all(|row| row.preview == MemoryPreview::Withheld));
+        let overview = client.memory_overview().expect("memory overview");
+        assert!(!overview.mutations, "{overview:?}");
+        eprintln!("live rows={} overview={overview:?}", rows.len());
     }
 }
