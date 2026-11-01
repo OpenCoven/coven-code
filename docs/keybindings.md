@@ -75,6 +75,8 @@ These bindings are active when focus is in the chat input field.
 | `Ctrl+G` | goToLine | Jump to a specific line |
 | `Ctrl+.` | jumpToNextError | Jump to next error / issue |
 | `Ctrl+Shift+.` | jumpToPreviousError | Jump to previous error / issue |
+| `Alt+I` | toggleInspector | Next renderer only: open or close the inspector |
+| `Alt+L` | jumpToLive | Next renderer only: return a scrolled transcript to live output |
 
 > `Ctrl+A` previously opened the model picker; it now moves the cursor to the line start (matching Emacs/readline). The model picker is now `Ctrl+Shift+A`. Old `keybindings.json` files are auto-migrated.
 
@@ -92,6 +94,21 @@ These bindings are active when Coven Code is displaying a yes/no confirmation pr
 
 ---
 
+### Inspector Context (Next renderer)
+
+Active while the Next renderer's inspector is open (`COVEN_CODE_UI=next`). It
+is layered over the chat context: keys it does not bind keep their chat
+meaning, so the draft stays editable and `Enter` still submits. Classic leaves
+the `Alt+I` and `Alt+L` chords unbound.
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `Escape` / `Alt+I` | closeInspector | Close the inspector and return to the transcript |
+| `Tab` | nextInspectorPage | Next page (Activity, Session, Views) |
+| `Shift+Tab` | previousInspectorPage | Previous page |
+| `Page Up` | scrollInspectorUp | Scroll the inspector up |
+| `Page Down` | scrollInspectorDown | Scroll the inspector down |
+
 ## Keybinding Contexts
 
 Coven Code uses a context system so that the same key can have different effects depending on where focus is. A binding in a more specific context takes precedence over a binding in a broader context.
@@ -101,6 +118,7 @@ Coven Code uses a context system so that the same key can have different effects
 | `global` | Always active regardless of focus |
 | `chat` | Active when the chat input field has focus |
 | `confirmation` | Active when a permission confirmation dialog is open |
+| `inspector` | Active while the Next inspector is open; layered over `chat` |
 | `modelPicker` | Active inside the model selection overlay |
 | `commandPalette` | Active inside the slash command palette overlay |
 | `search` | Active while the inline search bar is open |
@@ -299,9 +317,9 @@ In vim insert mode, `Enter` also submits. Use `Shift+Enter` for newlines in vim 
 
 ### ESC During Streaming
 
-Pressing `Escape` while the model is streaming a response interrupts the stream. The partial response is preserved in the conversation history and the model stops generating. The input field regains focus and you can send a follow-up message.
+Pressing `Escape` while the model is streaming a response cancels the turn, the same way `Ctrl+C` does: the runtime stops the model request and any tool calls in progress. The input field regains focus and you can send a follow-up message.
 
-This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` also signals any tool calls in progress to abort (via `AbortController`), while `Escape` only stops the stream and allows running tools to finish.
+The Next renderer shows `cancelling` until the runtime has actually stopped the turn. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
 

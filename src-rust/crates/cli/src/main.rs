@@ -434,6 +434,9 @@ fn abandon_interactive_turn(
     if let Some(cancel) = cancel {
         cancel.cancel();
     }
+    // This is the cancellation a key may have requested; it now waits on
+    // the worker, which the loop settles once the turn has stopped.
+    app.take_cancellation_request();
 }
 
 #[tokio::main]
@@ -2735,6 +2738,7 @@ async fn run_interactive(
     app.bell_on_complete = settings.bell_on_complete;
     let user_keybindings =
         claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
+    app.renderer = renderer;
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
@@ -3069,6 +3073,7 @@ async fn run_interactive(
             claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
             claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
         })?;
+        app.settle_scroll_anchor();
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
@@ -5003,6 +5008,12 @@ async fn run_interactive(
             }
         }
 
+        // Escape and the interrupt key record a cancel request in the App;
+        // perform it through the turn's token so the runtime actually stops.
+        if app.take_cancellation_request() && current_query.is_some() {
+            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+        }
+
         // Check if query task is done; sync messages from the task
         let task_finished = current_query
             .as_ref()
@@ -5223,6 +5234,11 @@ async fn run_interactive(
                     goal_turn = None;
                 }
             }
+        }
+
+        // A cancel is confirmed only once no worker is left running.
+        if current_query.is_none() {
+            app.settle_cancellation();
         }
 
         if !app.is_streaming && current_query.is_none() {

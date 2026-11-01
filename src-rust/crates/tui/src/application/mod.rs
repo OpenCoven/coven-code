@@ -99,6 +99,21 @@ pub fn perform_effects(effects: &[PresentationEffect]) {
     }
 }
 
+/// Where a user's request to cancel the running turn stands.
+///
+/// Presentation records the request; the interactive loop performs it
+/// through the turn's cancellation token and settles it once the worker has
+/// actually stopped. Until then the request is pending, not done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnCancellation {
+    #[default]
+    Idle,
+    /// Asked for by a key; the loop has not acted yet.
+    Requested,
+    /// The loop cancelled the turn's token; the worker has not finished.
+    AwaitingRuntime,
+}
+
 /// Interactive renderer selected by [`UI_SELECTOR_ENV`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiRenderer {

@@ -24,6 +24,8 @@ pub enum Mark {
     /// Inline separator between related items.
     Separator,
     Rule,
+    /// Vertical rule between side-by-side panes.
+    Divider,
     Verified,
     Pending,
     Blocked,
@@ -45,6 +47,7 @@ impl Mark {
             Mark::Crumb => ("/", "/"),
             Mark::Separator => ("·", "-"),
             Mark::Rule => ("─", "-"),
+            Mark::Divider => ("│", "|"),
             Mark::Verified => ("✓", "[ok]"),
             Mark::Pending => ("…", "[..]"),
             Mark::Blocked => ("✕", "[x]"),
