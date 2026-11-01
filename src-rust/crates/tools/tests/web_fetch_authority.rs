@@ -1,8 +1,7 @@
 use claurst_core::config::{Config, PermissionMode, Settings};
 use claurst_core::permissions::{
-    AutoPermissionHandler, ManagedAutoPermissionHandler, PermissionAction,
-    PermissionDecision, PermissionHandler, PermissionManager, PermissionRequest,
-    PermissionRule, PermissionScope,
+    AutoPermissionHandler, ManagedAutoPermissionHandler, PermissionAction, PermissionDecision,
+    PermissionHandler, PermissionManager, PermissionRequest, PermissionRule, PermissionScope,
 };
 use claurst_tools::{PermissionLevel, Tool, ToolContext, WebFetchTool};
 use serde_json::json;
@@ -85,7 +84,7 @@ async fn legacy_handlers_do_not_silently_authorize_webfetch() {
         PermissionMode::Plan,
         PermissionMode::AcceptEdits,
     ] {
-        let handler = Arc::new(AutoPermissionHandler { mode });
+        let handler = Arc::new(AutoPermissionHandler { mode: mode.clone() });
         let ctx = context(handler, mode);
         // A rejected permission must win before even an unsupported URL is used.
         // This fixture performs no external network IO on the unpatched backend.
@@ -95,7 +94,8 @@ async fn legacy_handlers_do_not_silently_authorize_webfetch() {
         assert!(result.is_error);
         assert!(
             result.content.contains("Permission denied"),
-            "mode {mode:?} reached the HTTP client: {}",
+            "mode {:?} reached the HTTP client: {}",
+            ctx.permission_mode,
             result.content
         );
     }
