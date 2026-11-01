@@ -266,7 +266,6 @@ fn classic_does_not_observe_next_only_keys() {
 #[test]
 fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending() {
     for (renderer, cancel_key) in [
-        (UiRenderer::Classic, esc()),
         (UiRenderer::Next, esc()),
         (
             UiRenderer::Next,
@@ -296,6 +295,18 @@ fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending()
             let text = text_of(&draw(&app, 80, 24).0);
             assert!(!text.contains("cancelling"), "{text}");
         }
+    }
+    // Classic keeps its existing cancel handling: no runtime request, and
+    // nothing for the loop to settle.
+    for cancel_key in [esc(), key(KeyCode::Char('c'), KeyModifiers::CONTROL)] {
+        let mut classic = next_app();
+        classic.renderer = UiRenderer::Classic;
+        classic.push_message(Message::user("run it".to_string()));
+        apply(&mut classic, delta("working on it"));
+        classic.handle_key_event(cancel_key);
+        assert!(!classic.is_streaming);
+        assert!(!classic.take_cancellation_request(), "{cancel_key:?}");
+        assert_eq!(classic.cancellation, TurnCancellation::Idle);
     }
     // Esc while idle does not invent a cancellation.
     let mut idle = next_app();
