@@ -2794,7 +2794,9 @@ async fn run_interactive(
     }
     app.replace_messages(initial_messages.clone());
     app.enter_session_scope(&session.id);
-    app.session_title = session.title.clone();
+    if app.renderer == claurst_tui::application::UiRenderer::Next {
+        app.session_title = session.title.clone();
+    }
     app.ownership = match &ledger_session_id {
         Some(id) => claurst_tui::application::SessionOwnership::LedgerPending {
             session_id: id.clone(),
@@ -3076,8 +3078,11 @@ async fn run_interactive(
         }
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_companion_pose();
-        // The session browser's list loads in the background.
-        app.poll_session_list();
+        // The session browser's list loads in the background (Next only;
+        // Classic's browser is unchanged).
+        if app.renderer == claurst_tui::application::UiRenderer::Next {
+            app.poll_session_list();
+        }
         app.notifications.tick();
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
@@ -3458,7 +3463,9 @@ async fn run_interactive(
                                         Arc::new(std::sync::atomic::AtomicUsize::new(0));
                                     cmd_ctx.session_id = session.id.clone();
                                     cmd_ctx.session_title = session.title.clone();
-                                    app.session_title = session.title.clone();
+                                    if app.renderer == claurst_tui::application::UiRenderer::Next {
+            app.session_title = session.title.clone();
+        }
                                     if let Some(saved_dir) = session.working_dir.as_ref() {
                                         let saved_path = std::path::PathBuf::from(saved_dir);
                                         if saved_path.exists() {
@@ -3483,7 +3490,9 @@ async fn run_interactive(
                                     session.title = Some(title.clone());
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
-                                    app.session_title = session.title.clone();
+                                    if app.renderer == claurst_tui::application::UiRenderer::Next {
+            app.session_title = session.title.clone();
+        }
                                     let _ = claurst_core::history::save_session(&session).await;
                                     claurst_tui::update_terminal_title(Some(&title));
                                     app.status_message =

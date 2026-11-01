@@ -342,3 +342,30 @@ fn notes_and_turn_metadata_do_not_follow_into_another_session() {
     let frame = draw(&app, 120, 40);
     assert!(!frame.contains("note only about A"), "{frame}");
 }
+
+#[test]
+fn classic_session_behavior_is_unchanged() {
+    let mut app = next_app();
+    app.renderer = UiRenderer::Classic;
+    app.push_system_message(
+        "note".to_string(),
+        claurst_tui::app::SystemMessageStyle::Info,
+    );
+    type_text(&mut app, "draft");
+    app.session_browser.open(vec![entry("session-b")]);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.take_pending_resume(),
+        None,
+        "Classic Enter does not resume"
+    );
+    assert!(app.session_browser.visible);
+    press(&mut app, KeyCode::Esc);
+
+    app.enter_session_scope("session-b");
+    assert_eq!(app.prompt_input.text, "draft", "Classic keeps its composer");
+    assert!(
+        !app.system_annotations.is_empty(),
+        "Classic keeps its notes"
+    );
+}

@@ -3346,6 +3346,12 @@ impl App {
     /// position, drop views that belong to it, and restore `id`'s own draft
     /// and position. A restored draft is shown, never sent.
     pub fn enter_session_scope(&mut self, id: &str) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic keeps its existing resume behavior; only the bound id
+            // is recorded.
+            self.session_id = Some(id.to_string());
+            return;
+        }
         if self.resume_saved_view {
             self.forget_synthetic_resume();
         }
@@ -4925,7 +4931,8 @@ impl App {
             match self.session_browser.mode {
                 SessionBrowserMode::Browse => match key.code {
                     KeyCode::Esc => self.session_browser.close(),
-                    KeyCode::Enter => {
+                    // Next only (#412); Classic's browser is unchanged.
+                    KeyCode::Enter if self.renderer == crate::application::UiRenderer::Next => {
                         if let Some(id) = self
                             .session_browser
                             .selected_session()
@@ -4944,7 +4951,9 @@ impl App {
                     KeyCode::Enter => {
                         if let Some((id, name)) = self.session_browser.confirm_rename() {
                             // Only the shown session's title is the header's.
-                            if self.session_id.as_deref() == Some(id.as_str()) {
+                            if self.renderer == crate::application::UiRenderer::Classic
+                                || self.session_id.as_deref() == Some(id.as_str())
+                            {
                                 self.session_title = Some(name.clone());
                             }
                             self.status_message = Some(format!("Renamed to: {}", name));
