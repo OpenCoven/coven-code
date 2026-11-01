@@ -859,6 +859,10 @@ fn render_inspector(
         primitives::inspector_title(appearance, page.title()),
         Line::from(tabs),
     ];
+    if page == InspectorPage::Work {
+        // In the header, so scrolling the rows never hides what they are.
+        header.extend(work_scope_notes(appearance));
+    }
     let body = match page {
         InspectorPage::Activity => activity_page(appearance, app, view),
         InspectorPage::Session => session_page(appearance, app),
@@ -1017,17 +1021,14 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     ]
 }
 
-fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
-    use crate::application::work::{WorkStateKind, WorkView};
-
-    let view = WorkView::from_sources(&app.work_sources);
-    // The source note leads, so it stays visible however far the page scrolls.
-    let mut lines = vec![
+/// What the Work page's rows are, and what it cannot show yet.
+fn work_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
+    vec![
         primitives::status_message(
             appearance,
             Status::Evidence,
             "engine-local",
-            "in this process; only the session goal is saved",
+            "in-memory tasks span this process, not just this session",
         ),
         primitives::status_message(
             appearance,
@@ -1035,8 +1036,14 @@ fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             "unavailable",
             "canonical tasks, lanes and leases need Psyche #11/#12 (#413)",
         ),
-        Line::default(),
-    ];
+    ]
+}
+
+fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
+    use crate::application::work::{WorkStateKind, WorkView};
+
+    let view = WorkView::from_sources(&app.work_sources);
+    let mut lines = Vec::new();
     if let Some(error) = &view.goal_error {
         lines.push(primitives::status_message(
             appearance,
@@ -1048,7 +1055,7 @@ fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     }
     if view.items.is_empty() {
         lines.push(Line::from(Span::styled(
-            "There is no engine-local work in this session.".to_string(),
+            "There is no engine-local work in this process.".to_string(),
             appearance.style(Role::TextMuted),
         )));
         return lines;
@@ -1066,6 +1073,7 @@ fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             WorkStateKind::Done => Status::Verified,
             WorkStateKind::Failed => Status::Blocked,
             WorkStateKind::Stopping => Status::Pending,
+            WorkStateKind::Limited => Status::Pending,
         };
         let mut state = Line::from(Span::styled(
             format!("{:<12}", "State"),

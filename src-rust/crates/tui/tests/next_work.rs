@@ -166,7 +166,14 @@ fn an_empty_page_and_an_unreadable_goal_say_so() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Work);
     let empty = draw(&app, 80, 24);
-    assert!(empty.contains("no engine-local work"), "{empty}");
+    assert!(
+        empty.contains("no engine-local work in this process"),
+        "{empty}"
+    );
+    assert!(
+        empty.contains("not just this session"),
+        "says the in-memory stores are process-wide:\n{empty}"
+    );
 
     app.work_sources.goal = Some(Err("database is locked".to_string()));
     let failed = draw(&app, 80, 24);
@@ -192,13 +199,94 @@ fn the_work_page_offers_no_action_on_the_work() {
     let mut app = next_app();
     app.work_sources = sample_sources();
     app.next_shell.inspector = Some(InspectorPage::Work);
-    let before = format!("{:?}", app.work_sources.model_tasks);
-    for code in [KeyCode::Enter, KeyCode::Char('x'), KeyCode::Delete] {
+    let tasks_before = claurst_tools::TASK_STORE.len();
+    let background_before = claurst_core::tasks::global_registry().list().len();
+    for code in [KeyCode::Enter, KeyCode::Delete, KeyCode::Backspace] {
         app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
     }
-    assert_eq!(format!("{:?}", app.work_sources.model_tasks), before);
+    assert_eq!(claurst_tools::TASK_STORE.len(), tasks_before);
+    assert_eq!(
+        claurst_core::tasks::global_registry().list().len(),
+        background_before
+    );
+    assert!(
+        app.take_input().is_empty(),
+        "no text or command would be submitted"
+    );
     let text = draw(&app, 80, 40).to_lowercase();
     for verb in ["retry", "resume", "start "] {
         assert!(!text.contains(verb), "offers {verb:?}:\n{text}");
     }
+}
+
+#[test]
+fn the_scope_notes_stay_visible_when_the_page_scrolls() {
+    let mut app = next_app();
+    app.work_sources = sample_sources();
+    app.next_shell.inspector = Some(InspectorPage::Work);
+    draw(&app, 80, 24);
+    for _ in 0..20 {
+        app.next_shell.apply_action("scrollInspectorDown");
+    }
+    let text = draw(&app, 80, 24);
+    assert!(text.contains("engine-local"), "{text}");
+    assert!(text.contains("Psyche #11/#12"), "{text}");
+}
+
+#[test]
+fn the_work_page_renders_at_small_fixtures_without_losing_the_way_back() {
+    let mut app = next_app();
+    app.work_sources = sample_sources();
+    app.next_shell.inspector = Some(InspectorPage::Work);
+    let medium = draw(&app, 40, 12);
+    assert!(medium.contains("engine-local"), "{medium}");
+    assert!(medium.contains("Esc"), "{medium}");
+    for (width, height) in [(20, 6), (1, 1)] {
+        let text = draw(&app, width, height);
+        assert!(!text.is_empty(), "{width}x{height}");
+    }
+}
+
+#[test]
+fn a_budget_limited_goal_is_not_shown_as_a_failure() {
+    let mut app = next_app();
+    let mut sources = sample_sources();
+    if let Some(Ok(goal)) = sources.goal.as_mut() {
+        goal.status = GoalStatus::BudgetLimited;
+    }
+    app.work_sources = sources;
+    app.next_presentation.appearance.color = ColorMode::TrueColor;
+    app.next_shell.inspector = Some(InspectorPage::Work);
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).expect("terminal");
+    terminal
+        .draw(|frame| claurst_tui::next::render_next(frame, &app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let text = text_of(&buffer);
+    let row = text
+        .lines()
+        .position(|line| line.contains("budget limited"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let column = text
+        .lines()
+        .nth(row)
+        .unwrap()
+        .find("budget limited")
+        .unwrap();
+    let limited = buffer[(column as u16, row as u16)].fg;
+    let failed_row = text
+        .lines()
+        .position(|line| line.contains("unavailable"))
+        .unwrap();
+    let failed_column = text
+        .lines()
+        .nth(failed_row)
+        .unwrap()
+        .find("unavailable")
+        .unwrap();
+    let blocked = buffer[(failed_column as u16, failed_row as u16)].fg;
+    assert_ne!(
+        limited, blocked,
+        "budget limited uses the pending color, not blocked"
+    );
 }

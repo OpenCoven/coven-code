@@ -52,6 +52,8 @@ pub enum WorkStateKind {
     Failed,
     /// A stop was signalled or requested, but exit is not confirmed.
     Stopping,
+    /// Stopped at a limit such as a token budget; not a failure.
+    Limited,
 }
 
 /// One display row.
@@ -197,7 +199,7 @@ impl WorkView {
                 let (state, kind) = match goal.status {
                     GoalStatus::Active => ("active", WorkStateKind::Open),
                     GoalStatus::Paused => ("paused", WorkStateKind::Open),
-                    GoalStatus::BudgetLimited => ("budget limited", WorkStateKind::Failed),
+                    GoalStatus::BudgetLimited => ("budget limited", WorkStateKind::Limited),
                     GoalStatus::Complete => ("complete (reported)", WorkStateKind::Done),
                 };
                 let budget = match goal.token_budget {
@@ -223,7 +225,7 @@ impl WorkView {
                     detail,
                 ));
             }
-            Some(Err(error)) => goal_error = Some(terminal_safe(error)),
+            Some(Err(error)) => goal_error = Some(one_line(error)),
             None => {}
         }
 
@@ -231,6 +233,8 @@ impl WorkView {
     }
 }
 
+// Allowed: one call site per store, each naming every display field of the
+// row; a builder struct would only restate these parameters.
 #[allow(clippy::too_many_arguments)]
 fn item(
     origin: WorkOrigin,
@@ -393,7 +397,7 @@ mod tests {
         assert_eq!(state("gone"), None, "deleted model tasks are not listed");
         assert_eq!(
             state("Ship the Work view"),
-            Some(("budget limited", WorkStateKind::Failed))
+            Some(("budget limited", WorkStateKind::Limited))
         );
     }
 
@@ -416,6 +420,48 @@ mod tests {
         });
         assert!(failed.items.is_empty());
         assert_eq!(failed.goal_error.as_deref(), Some("database is locked"));
+    }
+
+    #[test]
+    fn rows_are_ordered_by_start_or_creation_time_within_each_store() {
+        let mut late = model_task("b-late", "late", ModelTaskStatus::Pending, &[]);
+        late.created_at = Utc.with_ymd_and_hms(2026, 11, 1, 13, 0, 0).unwrap();
+        let early = model_task("z-early", "early", ModelTaskStatus::Pending, &[]);
+        let view = WorkView::from_sources(&WorkSources {
+            background: vec![
+                background("second", BackgroundStatus::Running, 30),
+                background("first", BackgroundStatus::Running, 10),
+            ],
+            model_tasks: vec![late, early],
+            goal: None,
+        });
+        let titles: Vec<_> = view.items.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, ["first", "second", "early", "late"]);
+    }
+
+    #[test]
+    fn a_blocker_that_was_deleted_is_missing() {
+        let view = WorkView::from_sources(&WorkSources {
+            model_tasks: vec![
+                model_task("old", "old", ModelTaskStatus::Deleted, &[]),
+                model_task("new", "new", ModelTaskStatus::Pending, &["old"]),
+            ],
+            ..WorkSources::default()
+        });
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(view.items[0].missing_blockers, ["old"]);
+    }
+
+    #[test]
+    fn a_multi_line_goal_error_stays_on_one_row() {
+        let view = WorkView::from_sources(&WorkSources {
+            goal: Some(Err("disk I/O error\nat goals.sqlite".into())),
+            ..WorkSources::default()
+        });
+        assert_eq!(
+            view.goal_error.as_deref(),
+            Some("disk I/O error at goals.sqlite")
+        );
     }
 
     #[test]

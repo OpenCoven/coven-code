@@ -2584,26 +2584,48 @@ const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2)
 /// Copy the engine-local work stores into `app.work_sources` for display.
 ///
 /// The background registry and the model task list are in memory and are
-/// copied every call. The session goal is read from SQLite at most every
-/// [`WORK_GOAL_REFRESH`], and at once when the session changes, so a goal
-/// from another session is never shown.
+/// copied every call; each background task keeps only its last output line,
+/// which is all the Work page shows. The session goal is read from SQLite at
+/// most every [`WORK_GOAL_REFRESH`], so a goal changed within the session can
+/// show its previous state for up to that long. It is re-read at once when
+/// the session changes, so a goal from another session is never shown. A
+/// failed read keeps this session's last good goal (a locked store is
+/// expected while another process writes) and reports the error only when
+/// there is nothing to keep.
 fn refresh_work_sources(
     app: &mut claurst_tui::app::App,
     session_id: &str,
     last_goal_read: &mut Option<(std::time::Instant, String)>,
     mut read_goal: impl FnMut(&str) -> Option<Result<claurst_core::goal::Goal, String>>,
 ) {
-    app.work_sources.background = claurst_core::tasks::global_registry().list();
+    app.work_sources.background = claurst_core::tasks::global_registry()
+        .list()
+        .into_iter()
+        .map(|mut task| {
+            let keep_from = task.output.len().saturating_sub(1);
+            task.output.drain(..keep_from);
+            task
+        })
+        .collect();
     app.work_sources.model_tasks = claurst_tools::TASK_STORE
         .iter()
         .map(|entry| entry.value().clone())
         .collect();
-    let due = match last_goal_read {
-        Some((at, id)) => id != session_id || at.elapsed() >= WORK_GOAL_REFRESH,
-        None => true,
+    let (due, same_session) = match last_goal_read {
+        Some((at, id)) => (
+            id != session_id || at.elapsed() >= WORK_GOAL_REFRESH,
+            id == session_id,
+        ),
+        None => (true, false),
     };
     if due {
-        app.work_sources.goal = read_goal(session_id);
+        let read = read_goal(session_id);
+        let keep_previous = same_session
+            && matches!(read, Some(Err(_)))
+            && matches!(app.work_sources.goal, Some(Ok(_)));
+        if !keep_previous {
+            app.work_sources.goal = read;
+        }
         *last_goal_read = Some((std::time::Instant::now(), session_id.to_string()));
     }
 }
@@ -2614,10 +2636,13 @@ fn read_session_goal(session_id: &str) -> Option<Result<claurst_core::goal::Goal
     if !claurst_core::goals_enabled() {
         return None;
     }
-    match claurst_core::GoalStore::open(&claurst_core::GoalStore::default_path())
-        .and_then(|store| store.try_get_goal(session_id))
-    {
-        Ok(goal) => goal.map(Ok),
+    let path = claurst_core::GoalStore::default_path();
+    match claurst_core::GoalStore::open_read_only_nowait(&path) {
+        Ok(None) => None,
+        Ok(Some(store)) => match store.try_get_goal(session_id) {
+            Ok(goal) => goal.map(Ok),
+            Err(error) => Some(Err(error.to_string())),
+        },
         Err(error) => Some(Err(error.to_string())),
     }
 }
@@ -7120,6 +7145,58 @@ mod tests {
             app.work_sources.goal.is_none(),
             "session-a's goal is not shown in session-b"
         );
+    }
+
+    #[test]
+    fn a_failed_goal_read_keeps_this_sessions_last_goal_but_not_another_sessions() {
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut last = None;
+        refresh_work_sources(&mut app, "session-a", &mut last, |id| {
+            Some(Ok(work_goal(id)))
+        });
+        let expired = std::time::Instant::now() - WORK_GOAL_REFRESH * 2;
+        last = Some((expired, "session-a".to_string()));
+        refresh_work_sources(&mut app, "session-a", &mut last, |_| {
+            Some(Err("database is locked".to_string()))
+        });
+        assert!(
+            matches!(&app.work_sources.goal, Some(Ok(goal)) if goal.id == "goal-session-a"),
+            "a locked store keeps the last goal"
+        );
+        refresh_work_sources(&mut app, "session-b", &mut last, |_| {
+            Some(Err("database is locked".to_string()))
+        });
+        assert!(
+            matches!(&app.work_sources.goal, Some(Err(_))),
+            "session-a's goal is not kept for session-b"
+        );
+    }
+
+    #[test]
+    fn the_work_snapshot_keeps_only_the_last_background_output_line() {
+        let registry = claurst_core::tasks::global_registry();
+        let task = claurst_core::tasks::BackgroundTask::new("chatty");
+        let id = task.id.clone();
+        registry.register(task);
+        for n in 0..5 {
+            registry.append_output(&id, &format!("line {n}"));
+        }
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        refresh_work_sources(&mut app, "session-a", &mut None, |_| None);
+        registry.complete(&id);
+        let snapshot = app
+            .work_sources
+            .background
+            .iter()
+            .find(|task| task.id == id)
+            .expect("snapshot");
+        assert_eq!(snapshot.output, ["line 4"]);
     }
 
     #[test]
