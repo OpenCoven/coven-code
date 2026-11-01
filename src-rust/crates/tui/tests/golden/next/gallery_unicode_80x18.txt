@@ -1,0 +1,18 @@
+▍ Coven · preview
+coven-code / session / tools
+you
+▸ Bash … running
+▾ Read ○ done
+› Resume last session
+  Start fresh
+✓ verified receipt 7f3a
+─ Diff
+-let total = 1;
++let total = 2;
+────────────────────────────────────────────────────────────────────────────────
+› draft text
+Run cargo test?
+  [y] Allow once
+› [n] Deny
+✕ error provider unavailable
+Retry with /account status

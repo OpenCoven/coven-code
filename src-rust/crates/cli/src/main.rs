@@ -2733,6 +2733,19 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
+    let user_keybindings =
+        claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
+    app.next_presentation =
+        claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
+            std::env::var(name).ok()
+        });
+    // Next shows the chord that works now; say once which bindings changed.
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
+            app.notifications
+                .push(claurst_tui::NotificationKind::Info, notice, Some(10));
+        }
+    }
 
     // Register this session in the Coven daemon ledger (best-effort, opt-in).
     // The id is captured here so that a mid-run /resume (which rebinds session.id)
