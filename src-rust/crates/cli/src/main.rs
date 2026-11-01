@@ -2035,16 +2035,14 @@ fn handle_bridge_permission_response(
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
     tool_use_id: &str,
     response: claurst_bridge::PermissionResponseKind,
-) {
+) -> Option<(String, bool)> {
     if !dialog
         .as_ref()
         .is_some_and(|pr| pr.tool_use_id == tool_use_id)
     {
-        return;
+        return None;
     }
-    let Some(mut pending) = pending_permissions.waiting.remove(tool_use_id) else {
-        return;
-    };
+    let mut pending = pending_permissions.waiting.remove(tool_use_id)?;
 
     use claurst_bridge::PermissionResponseKind;
     use claurst_core::permissions::PermissionDecision;
@@ -2055,10 +2053,13 @@ fn handle_bridge_permission_response(
         }
         PermissionResponseKind::Deny => PermissionDecision::Deny,
     };
+    let allowed = matches!(decision, PermissionDecision::Allow);
     if let Some(tx) = pending.decision_tx.take() {
         let _ = tx.send(decision);
     }
     *dialog = None;
+    // The decision belongs to the model call that asked, when known.
+    Some((pending.call_id.unwrap_or(pending.tool_use_id), allowed))
 }
 
 fn permission_request_from_core(
@@ -4067,6 +4068,12 @@ async fn run_interactive(
                                     }
                                     _ => claurst_core::permissions::PermissionDecision::Allow,
                                 };
+                                // Shown beside the tool's execution state; an
+                                // allowed call is not a successful one.
+                                app.record_permission_decision(
+                                    pending.call_id.as_deref().unwrap_or(&tool_use_id),
+                                    selected_key != Some('n'),
+                                );
 
                                 if let Some(manager) = tool_ctx.permission_manager.as_ref() {
                                     if let Ok(mut manager) = manager.lock() {
@@ -4512,6 +4519,7 @@ async fn run_interactive(
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
                         if current_query.is_some() {
                             app.note_cancellation_sent();
+                            app.interrupt_tool_rows();
                         }
                         app.is_streaming = false;
                         app.status_message = Some("Cancelled by remote control.".to_string());
@@ -4520,12 +4528,15 @@ async fn run_interactive(
                         tool_use_id,
                         response,
                     }) => {
-                        handle_bridge_permission_response(
+                        let decided = handle_bridge_permission_response(
                             &mut app.permission_request,
                             &mut pending_permissions.lock(),
                             &tool_use_id,
                             response,
                         );
+                        if let Some((call_id, allowed)) = decided {
+                            app.record_permission_decision(&call_id, allowed);
+                        }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
                         session.title = Some(title.clone());
@@ -6123,6 +6134,7 @@ mod tests {
         (
             claurst_tools::PendingPermissionRequest {
                 tool_use_id: id.into(),
+                call_id: None,
                 request: claurst_core::permissions::PermissionRequest {
                     tool_name: "Write".into(),
                     description: "Write a file".into(),
@@ -6160,6 +6172,28 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(expected));
             assert!(dialog.is_none());
             assert!(store.waiting.is_empty());
+        }
+    }
+
+    #[test]
+    fn bridge_permission_decisions_belong_to_the_model_call_that_asked() {
+        use claurst_bridge::PermissionResponseKind as Response;
+
+        for (call_id, response, expected) in [
+            (Some("toolu_model"), Response::Allow, ("toolu_model", true)),
+            (Some("toolu_model"), Response::Deny, ("toolu_model", false)),
+            (None, Response::AllowSession, ("perm-1", true)),
+        ] {
+            let (mut pending, _rx) = bridge_permission_fixture("perm-1");
+            pending.call_id = call_id.map(str::to_string);
+            let mut dialog = Some(permission_request_from_core(&pending));
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.waiting.insert("perm-1".into(), pending);
+
+            let decided =
+                handle_bridge_permission_response(&mut dialog, &mut store, "perm-1", response);
+
+            assert_eq!(decided, Some((expected.0.to_string(), expected.1)));
         }
     }
 

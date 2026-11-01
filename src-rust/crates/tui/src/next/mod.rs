@@ -19,7 +19,7 @@ pub mod primitives;
 pub mod style;
 
 use crate::app::App;
-use crate::application::view::{EntryRole, ToolActivityState, TranscriptView};
+use crate::application::view::{EntryRole, ToolActivity, ToolActivityState, TranscriptView};
 use crate::application::TurnCancellation;
 use claurst_core::appearance::Density;
 use claurst_core::keybindings::{KeyContext, KeybindingResolver, UserKeybindings};
@@ -118,7 +118,9 @@ impl NextPresentation {
 /// which are checked here without changing the list Classic's Enter gating
 /// relies on.
 pub fn delegates_to_classic(app: &App) -> bool {
-    app.any_modal_open()
+    // Next draws a pending permission request itself (#411) unless another
+    // surface is open too, in which case Classic's precedence applies.
+    app.modal_open_besides_permission()
         || app.familiar_switcher_open
         || app.effort_picker.visible
         || app.notifications.current_is_error()
@@ -328,9 +330,12 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         )
     }));
     let hint_rows = u16::from(presentation.hints.is_some());
+    // A pending approval takes the whole main pane at every size; the
+    // inspector keeps its state and returns once the request is decided.
+    let approval = view.permission.as_ref();
     let layout = layout::plan(
         area,
-        app.next_shell.inspector.is_some(),
+        app.next_shell.inspector.is_some() && approval.is_none(),
         hint_rows,
         u16::try_from(composer.len()).unwrap_or(u16::MAX),
     );
@@ -339,7 +344,12 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         Paragraph::new(workspace_line(appearance, app, area.width)),
         layout.header,
     );
-    match layout.transcript {
+    if let (Some(request), Some(main)) = (approval, layout.transcript) {
+        let panel = approval_lines(appearance, app, request);
+        let lines = fit_approval(appearance, panel, width, usize::from(main.height));
+        frame.render_widget(Paragraph::new(lines), main);
+    }
+    match layout.transcript.filter(|_| approval.is_none()) {
         Some(transcript) => {
             app.last_msg_area.set(transcript);
             app.last_selectable_area.set(transcript);
@@ -519,12 +529,11 @@ fn transcript_lines(presentation: &NextPresentation, view: &TranscriptView) -> V
             lines.push(Line::default());
         }
     }
-    for tool in &view.tools {
-        let (status, word) = tool_status(tool.state);
-        lines.push(primitives::tool_row(
-            appearance, &tool.name, status, word, false,
-        ));
-    }
+    lines.extend(
+        view.tools
+            .iter()
+            .map(|tool| tool_line(appearance, tool, false)),
+    );
     if !view.live_text.is_empty() {
         lines.push(primitives::transcript_label(appearance, "coven"));
         lines.extend(view.live_text.lines().map(text));
@@ -538,6 +547,239 @@ fn tool_status(state: ToolActivityState) -> (Status, &'static str) {
         ToolActivityState::Running => (Status::Pending, "running"),
         ToolActivityState::Done => (Status::Evidence, "done"),
         ToolActivityState::Error => (Status::Blocked, "error"),
+        ToolActivityState::CancelRequested => (Status::Pending, "cancel requested"),
+        ToolActivityState::Cancelled => (Status::Blocked, "cancelled"),
+    }
+}
+
+/// One tool row: operation, safe target and state. A permission decision
+/// is shown next to the execution state, never in place of it: an allowed
+/// call is still running until the tool reports its result.
+fn tool_line(appearance: &Appearance, tool: &ToolActivity, expanded: bool) -> Line<'static> {
+    let label = match &tool.target {
+        Some(target) => format!("{} {target}", tool.name),
+        None => tool.name.clone(),
+    };
+    let (status, word) = tool_status(tool.state);
+    let (status, word) = match (tool.allowed, tool.state) {
+        (Some(false), _) => (Status::Blocked, "denied".to_string()),
+        (Some(true), ToolActivityState::Running) => (status, format!("allowed, {word}")),
+        _ => (status, word.to_string()),
+    };
+    primitives::tool_row(appearance, &label, status, &word, expanded)
+}
+
+/// Rows of input shown per tool in the inspector before truncation.
+const DETAIL_OUTPUT_LINES: usize = 6;
+const DETAIL_INPUT_CHARS: usize = 300;
+
+fn tool_detail(appearance: &Appearance, tool: &ToolActivity) -> Vec<Line<'static>> {
+    let indent = |name: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("    {name:<8}"), appearance.style(Role::TextMuted)),
+            Span::styled(value, appearance.style(Role::Text)),
+        ])
+    };
+    let mut input: String = tool.input.chars().take(DETAIL_INPUT_CHARS).collect();
+    if tool.input.chars().count() > DETAIL_INPUT_CHARS {
+        input.push_str(" … (truncated)");
+    }
+    let mut lines = vec![indent("input", input.replace('\n', " "))];
+    if let Some(output) = &tool.output {
+        let mut shown = output.lines();
+        for (index, line) in shown.by_ref().take(DETAIL_OUTPUT_LINES).enumerate() {
+            let name = if index == 0 { "output" } else { "" };
+            lines.push(indent(name, line.to_string()));
+        }
+        let rest = shown.count();
+        if rest > 0 {
+            lines.push(indent("", format!("… {rest} more line(s) not shown")));
+        }
+    }
+    lines.push(indent(
+        "owner",
+        "engine-local tool in this coven-code process".to_string(),
+    ));
+    lines
+}
+
+/// Next's approval surface. It replaces the main pane while a request is
+/// pending, keeps the draft visible below it, focuses deny by default and
+/// names who enforces the decision. Keys are still read by the loop's
+/// permission handler; this only draws.
+/// The parts of the approval panel, in screen order, before fitting.
+struct ApprovalPanel {
+    title: Line<'static>,
+    /// Every line of the request's input; never silently shortened.
+    preview: Vec<Line<'static>>,
+    danger: Option<Line<'static>>,
+    options: Vec<Line<'static>>,
+    details: Vec<Line<'static>>,
+}
+
+/// Fit the approval panel into `height` rows. Options are never dropped;
+/// then the danger note and title; then as much input as fits, with an
+/// explicit count of hidden rows; then supporting details.
+fn fit_approval(
+    appearance: &Appearance,
+    panel: ApprovalPanel,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let wrap = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {
+        lines
+            .into_iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect()
+    };
+    let options = wrap(panel.options);
+    let danger = wrap(panel.danger.into_iter().collect());
+    let title = wrap(vec![panel.title]);
+    let preview = wrap(panel.preview);
+    let mut details = wrap(panel.details);
+
+    let mut budget = height;
+    let mut take = |rows: &[Line<'static>]| -> bool {
+        if rows.len() <= budget {
+            budget -= rows.len();
+            true
+        } else {
+            false
+        }
+    };
+    let show_options = take(&options);
+    let show_danger = take(&danger);
+    let show_title = take(&title);
+    let shown_preview = if preview.len() <= budget {
+        preview.len()
+    } else {
+        // Reserve one row to say how much of the input is hidden.
+        budget.saturating_sub(1)
+    };
+    budget -= shown_preview.min(budget);
+    let hidden = preview.len() - shown_preview;
+    let marker = if hidden > 0 && budget > 0 {
+        budget -= 1;
+        wrap_line(
+            primitives::status_message(
+                appearance,
+                Status::Blocked,
+                &format!("{hidden} more input rows hidden"),
+                "enlarge the terminal to read all of it before approving",
+            ),
+            width,
+        )
+        .into_iter()
+        .take(1)
+        .collect()
+    } else {
+        Vec::new()
+    };
+    details.truncate(budget);
+
+    let mut lines = Vec::with_capacity(height);
+    if show_title {
+        lines.extend(title);
+    }
+    lines.extend(preview.into_iter().take(shown_preview));
+    lines.extend(marker);
+    if show_danger {
+        lines.extend(danger);
+    }
+    if show_options {
+        lines.extend(options);
+    } else {
+        // Too small for every option: keep the focused end, deny.
+        let skip = options.len().saturating_sub(height);
+        lines.extend(options.into_iter().skip(skip));
+    }
+    lines.extend(details);
+    lines.truncate(height);
+    lines
+}
+
+fn approval_lines(
+    appearance: &Appearance,
+    app: &App,
+    request: &crate::application::view::PendingPermission,
+) -> ApprovalPanel {
+    let title = primitives::inspector_title(
+        appearance,
+        &format!("Approve {} (engine-local)", request.tool_name),
+    );
+    let preview = request
+        .input_preview
+        .iter()
+        .flat_map(|preview| preview.lines())
+        .map(|line| {
+            Line::from(Span::styled(
+                line.to_string(),
+                appearance.style(Role::Sensitive),
+            ))
+        })
+        .collect();
+    let options: Vec<(char, &str)> = request
+        .options
+        .iter()
+        .map(|(key, label)| (*key, label.as_str()))
+        .collect();
+    let options = primitives::confirmation(appearance, "", &options, request.selected_option, true)
+        .into_iter()
+        .skip(1)
+        .collect();
+    let danger = (!request.danger.is_empty()).then(|| {
+        Line::from(Span::styled(
+            request.danger.clone(),
+            appearance.style(Role::Sensitive),
+        ))
+    });
+    let mut details = Vec::new();
+    let armed = app.permission_request.as_ref().is_none_or(|pending| {
+        pending.quiet_since.elapsed() >= crate::dialogs::PERMISSION_ARM_DELAY
+    });
+    if !armed {
+        details.push(primitives::status_message(
+            appearance,
+            Status::Pending,
+            "arming",
+            "keys typed before this appeared are ignored",
+        ));
+    }
+    if !request.description.is_empty() {
+        details.push(Line::from(Span::styled(
+            request.description.clone(),
+            appearance.style(Role::TextMuted),
+        )));
+    }
+    details.push(field(appearance, "Project", project_name(app)));
+    details.push(field(
+        appearance,
+        "Enforced by",
+        "this coven-code process; no daemon protection applies".to_string(),
+    ));
+    let consequence = |key: char| match key {
+        'y' => Some("this call only"),
+        'Y' => Some("this tool or path for the rest of this session"),
+        'p' => Some("saves a persistent allow rule to settings for future sessions"),
+        'P' => Some("commands with this prefix for the rest of this session"),
+        'n' => Some("the call is refused and the model is told"),
+        _ => None,
+    };
+    for (key, _) in &request.options {
+        if let Some(text) = consequence(*key) {
+            details.push(field(appearance, &format!("[{key}]"), text.to_string()));
+        }
+    }
+    details.push(Line::from(Span::styled(
+        "Allowing authorizes the call; its result is shown when the tool finishes.",
+        appearance.style(Role::TextSubtle),
+    )));
+    ApprovalPanel {
+        title,
+        preview,
+        danger,
+        options,
+        details,
     }
 }
 
@@ -700,10 +942,8 @@ fn activity_page(appearance: &Appearance, app: &App, view: &TranscriptView) -> V
         )));
     }
     for tool in &view.tools {
-        let (status, word) = tool_status(tool.state);
-        lines.push(primitives::tool_row(
-            appearance, &tool.name, status, word, false,
-        ));
+        lines.push(tool_line(appearance, tool, true));
+        lines.extend(tool_detail(appearance, tool));
     }
     if !app.queued_messages.is_empty() {
         lines.push(field(

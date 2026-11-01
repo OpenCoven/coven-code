@@ -174,9 +174,27 @@ pub enum PermissionLevel {
 #[derive(Debug)]
 pub struct PendingPermissionRequest {
     pub tool_use_id: String,
+    /// The model's tool-use id for the call that asked, when known. Distinct
+    /// from `tool_use_id`, which keys this request and may be synthetic.
+    pub call_id: Option<String>,
     pub request: claurst_core::permissions::PermissionRequest,
     pub reason: String,
     pub decision_tx: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+}
+
+tokio::task_local! {
+    static CURRENT_TOOL_CALL: String;
+}
+
+/// Run `future` as the execution of the model tool call `call_id`, so a
+/// permission request it raises can be attributed to that call.
+pub async fn with_tool_call<F: std::future::Future>(call_id: String, future: F) -> F::Output {
+    CURRENT_TOOL_CALL.scope(call_id, future).await
+}
+
+/// The model tool call being executed by the current task, if any.
+pub fn current_tool_call() -> Option<String> {
+    CURRENT_TOOL_CALL.try_with(Clone::clone).ok()
 }
 
 #[derive(Default)]
@@ -379,6 +397,7 @@ impl ToolContext {
                         self.session_id,
                         self.current_turn.fetch_add(1, Ordering::Relaxed)
                     ),
+                    call_id: current_tool_call(),
                     request,
                     reason: interactive_reason.unwrap_or(reason),
                     decision_tx: Some(tx),
@@ -799,6 +818,23 @@ pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn each_concurrent_tool_call_sees_its_own_call_id() {
+        assert_eq!(super::current_tool_call(), None);
+        let probe = || async {
+            tokio::task::yield_now().await;
+            super::current_tool_call()
+        };
+        let (first, second) = futures::future::join(
+            super::with_tool_call("toolu_a".to_string(), probe()),
+            super::with_tool_call("toolu_b".to_string(), probe()),
+        )
+        .await;
+        assert_eq!(first.as_deref(), Some("toolu_a"));
+        assert_eq!(second.as_deref(), Some("toolu_b"));
+        assert_eq!(super::current_tool_call(), None);
+    }
+
     use super::*;
 
     struct AskPermissionHandler {

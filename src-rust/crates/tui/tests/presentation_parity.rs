@@ -125,7 +125,7 @@ fn both_renderers_show_the_projected_transcript_and_live_output() {
     }
     let next = draw(&app, UiRenderer::Next, 120, 40);
     assert!(next.contains(claurst_tui::next::PREVIEW_LABEL), "{next}");
-    assert!(next.contains("▸ Read ○ done"), "{next}");
+    assert!(next.contains("▸ Read ENGINE-CONTRACT.md ○ done"), "{next}");
 }
 
 fn bash_request(id: &str) -> PermissionRequest {
@@ -162,9 +162,13 @@ fn drive(renderer: UiRenderer) -> Outgoing {
     draw(&app, renderer, 120, 40);
     let submitted = app.take_input();
 
-    app.permission_request = Some(bash_request("toolu-parity-2"));
+    let mut request = bash_request("toolu-parity-2");
+    // Old enough that decision keys count (#411 arming delay).
+    request.quiet_since -= claurst_tui::dialogs::PERMISSION_ARM_DELAY;
+    app.permission_request = Some(request);
     let mut confirmed = false;
-    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
+    // Focus starts on deny (last option): up, up, down lands on the prefix rule.
+    for code in [KeyCode::Up, KeyCode::Up, KeyCode::Down, KeyCode::Enter] {
         draw(&app, renderer, 120, 40);
         let request = app.permission_request.as_mut().expect("pending request");
         confirmed = handle_permission_key(request, key(code));
@@ -194,18 +198,19 @@ fn renderers_produce_identical_outgoing_operations_for_the_same_input() {
     assert_eq!(classic.submitted, "run the tests");
     assert_eq!(
         classic.permission,
-        Some(("toolu-parity-2".to_string(), 1, true))
+        Some(("toolu-parity-2".to_string(), 3, true))
     );
     assert_eq!(classic.view.draft, "next draft");
 }
 
 #[test]
-fn next_draws_permission_requests_through_classic() {
+fn next_draws_permission_requests_itself_unless_another_surface_is_open() {
     let (mut app, _) = replay(trace());
     app.permission_request = Some(bash_request("toolu-parity-3"));
-    assert!(claurst_tui::next::delegates_to_classic(&app));
+    // #411: Next owns the approval surface.
+    assert!(!claurst_tui::next::delegates_to_classic(&app));
     let next = draw(&app, UiRenderer::Next, 120, 40);
-    assert_eq!(next, draw(&app, UiRenderer::Classic, 120, 40));
+    assert!(next.contains("cargo test --workspace"), "{next}");
     let request = app.permission_request.as_ref().expect("request");
     for option in &request.options {
         assert!(
@@ -214,6 +219,13 @@ fn next_draws_permission_requests_through_classic() {
             option.label
         );
     }
+    // With another input-owning surface open, Classic's precedence applies.
+    app.help_overlay.visible = true;
+    assert!(claurst_tui::next::delegates_to_classic(&app));
+    assert_eq!(
+        draw(&app, UiRenderer::Next, 120, 40),
+        draw(&app, UiRenderer::Classic, 120, 40)
+    );
 }
 
 /// Opens one input-owning surface on an App.
