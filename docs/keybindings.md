@@ -317,9 +317,11 @@ In vim insert mode, `Enter` also submits. Use `Shift+Enter` for newlines in vim 
 
 ### ESC During Streaming
 
-Pressing `Escape` while the model is streaming a response cancels the turn, the same way `Ctrl+C` does: the runtime stops the model request and any tool calls in progress. The input field regains focus and you can send a follow-up message.
+Pressing `Escape` while the model is streaming a response interrupts the stream. The partial response is preserved in the conversation history and the model stops generating. The input field regains focus and you can send a follow-up message.
 
-The Next renderer shows `cancelling` until the runtime has actually stopped the turn. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
+This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` also signals any tool calls in progress to abort (via `AbortController`), while `Escape` only stops the stream and allows running tools to finish.
+
+In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the same way `Ctrl+C` does, and the status shows `cancelling` until the runtime has actually stopped it. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
 
