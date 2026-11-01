@@ -11,6 +11,7 @@
 //! [`App`]: crate::App
 
 pub mod view;
+pub mod work;
 
 use claurst_query::QueryEvent;
 

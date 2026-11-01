@@ -464,7 +464,8 @@ fn unavailable_views_explain_their_blocker_instead_of_faking_integrations() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Views);
     let text = text_of(&draw(&app, 80, 24).0);
-    for (view, issue) in [("Work", "#413"), ("Research", "#414"), ("Memory", "#415")] {
+    // Work now has a local-only page; see tests/next_work.rs.
+    for (view, issue) in [("Research", "#414"), ("Memory", "#415")] {
         let line = text
             .lines()
             .find(|line| line.contains(view))
