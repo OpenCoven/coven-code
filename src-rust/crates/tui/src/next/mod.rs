@@ -136,15 +136,18 @@ pub enum InspectorPage {
     Session,
     /// Engine-local background tasks, model tasks and the session goal.
     Work,
+    /// This session's web search and fetch activity.
+    Research,
     /// Destinations of the shared navigation model and their availability.
     Views,
 }
 
 impl InspectorPage {
-    pub const ALL: [InspectorPage; 4] = [
+    pub const ALL: [InspectorPage; 5] = [
         InspectorPage::Activity,
         InspectorPage::Session,
         InspectorPage::Work,
+        InspectorPage::Research,
         InspectorPage::Views,
     ];
 
@@ -153,6 +156,7 @@ impl InspectorPage {
             InspectorPage::Activity => "Activity",
             InspectorPage::Session => "Session",
             InspectorPage::Work => "Work",
+            InspectorPage::Research => "Research",
             InspectorPage::Views => "Views",
         }
     }
@@ -859,14 +863,17 @@ fn render_inspector(
         primitives::inspector_title(appearance, page.title()),
         Line::from(tabs),
     ];
-    if page == InspectorPage::Work {
-        // In the header, so scrolling the rows never hides what they are.
-        header.extend(work_scope_notes(appearance));
+    // In the header, so scrolling the rows never hides what they are.
+    match page {
+        InspectorPage::Work => header.extend(work_scope_notes(appearance)),
+        InspectorPage::Research => header.extend(research_scope_notes(appearance)),
+        _ => {}
     }
     let body = match page {
         InspectorPage::Activity => activity_page(appearance, app, view),
         InspectorPage::Session => session_page(appearance, app),
         InspectorPage::Work => work_page(appearance, app),
+        InspectorPage::Research => research_page(appearance, app),
         InspectorPage::Views => views_page(appearance, app),
     };
     let key = |action: &str| {
@@ -1021,6 +1028,112 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
     ]
 }
 
+/// What the Research page's rows are, and what it cannot show yet.
+fn research_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
+    vec![
+        primitives::status_message(
+            appearance,
+            Status::Evidence,
+            "tool calls",
+            "not a research job",
+        ),
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "unavailable",
+            "research jobs (#414)",
+        ),
+    ]
+}
+
+fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
+    use crate::application::research::{ResearchView, SourceOrigin, SourceOutcome};
+
+    let interrupted: Vec<String> = app
+        .interrupted_tools
+        .iter()
+        .map(|tool| tool.id.clone())
+        .collect();
+    let view = ResearchView::from_messages(&app.messages, &interrupted);
+    let mut lines = Vec::new();
+    if view.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No web search or fetch in this session.".to_string(),
+            appearance.style(Role::TextMuted),
+        )));
+        return lines;
+    }
+    for item in &view.items {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", item.origin.label()),
+                appearance.style(Role::TextMuted),
+            ),
+            Span::styled(item.request.clone(), appearance.style(Role::Text)),
+        ]));
+        let (status, word, detail) = match &item.outcome {
+            SourceOutcome::Pending => (Status::Pending, "pending", "no result yet".to_string()),
+            SourceOutcome::Returned => (
+                Status::Evidence,
+                "returned",
+                "the tool returned without an error".to_string(),
+            ),
+            SourceOutcome::Failed(error) => (Status::Blocked, "failed", error.clone()),
+            SourceOutcome::Interrupted => (
+                Status::Pending,
+                "interrupted",
+                "the turn stopped before a result".to_string(),
+            ),
+            SourceOutcome::NoResult => {
+                (Status::Pending, "unknown", "no result recorded".to_string())
+            }
+        };
+        let mut state = Line::from(Span::styled(
+            format!("{:<12}", "State"),
+            appearance.style(Role::TextMuted),
+        ));
+        state
+            .spans
+            .extend(primitives::status_message(appearance, status, word, &detail).spans);
+        lines.push(state);
+        lines.push(field(appearance, "Reference", item.reference.clone()));
+        if let Some(code) = item.http_status {
+            lines.push(field(appearance, "HTTP", code.to_string()));
+        }
+        lines.push(field(
+            appearance,
+            "Retrieved",
+            "unknown time, final URL and content hash (#433)".to_string(),
+        ));
+        if item.origin == SourceOrigin::Fetch && item.outcome == SourceOutcome::Returned {
+            lines.push(field(
+                appearance,
+                "Text",
+                "may be cached or model-extracted (#433)".to_string(),
+            ));
+        }
+        if item.origin == SourceOrigin::Search
+            && item.outcome == SourceOutcome::Returned
+            && item.hits.is_empty()
+        {
+            lines.push(field(
+                appearance,
+                "Hits",
+                "none parsed (output format not recognised)".to_string(),
+            ));
+        }
+        for hit in &item.hits {
+            lines.push(field(
+                appearance,
+                "Hit",
+                format!("{}  {} (parsed, unverified)", hit.title, hit.url),
+            ));
+        }
+        lines.push(Line::default());
+    }
+    lines
+}
+
 /// What the Work page's rows are, and what it cannot show yet.
 fn work_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
     vec![
@@ -1143,7 +1256,22 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             );
             line
         },
-        view("Research", "needs a qualified research lifecycle (#414)"),
+        {
+            let mut line = Line::from(Span::styled(
+                format!("  {:<10}", "Research"),
+                appearance.style(Role::Text),
+            ));
+            line.spans.extend(
+                primitives::status_message(
+                    appearance,
+                    Status::Pending,
+                    "local only",
+                    "Research page; research jobs wait on #414",
+                )
+                .spans,
+            );
+            line
+        },
         view("Memory", "needs a qualified memory reader (#415)"),
         Line::default(),
     ];

@@ -453,15 +453,14 @@ fn unavailable_views_explain_their_blocker_instead_of_faking_integrations() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Views);
     let text = text_of(&draw(&app, 80, 24).0);
-    // Work now has a local-only page; see tests/next_work.rs.
-    for (view, issue) in [("Research", "#414"), ("Memory", "#415")] {
-        let line = text
-            .lines()
-            .find(|line| line.contains(view))
-            .unwrap_or_else(|| panic!("{view} missing:\n{text}"));
-        assert!(line.contains("unavailable"), "{line}");
-        assert!(line.contains(issue), "{line}");
-    }
+    // Work and Research have local-only pages; see next_work.rs and
+    // next_research.rs.
+    let memory = text
+        .lines()
+        .find(|line| line.contains("Memory"))
+        .unwrap_or_else(|| panic!("Memory missing:\n{text}"));
+    assert!(memory.contains("unavailable"), "{memory}");
+    assert!(memory.contains("#415"), "{memory}");
     assert!(
         text.contains("Ctrl+K"),
         "commands stay discoverable:\n{text}"
