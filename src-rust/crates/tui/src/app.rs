@@ -3253,6 +3253,14 @@ impl App {
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
+    /// Ask the loop to cancel the running turn through its token. Next only:
+    /// Classic keeps its existing cancel behavior unchanged.
+    fn request_turn_cancellation(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.cancellation = crate::application::TurnCancellation::Requested;
+        }
+    }
+
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -5217,7 +5225,7 @@ impl App {
                 self.streaming_thinking.clear();
                 self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
-                self.cancellation = crate::application::TurnCancellation::Requested;
+                self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(true);
             }
 
@@ -5250,7 +5258,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
-                    self.cancellation = crate::application::TurnCancellation::Requested;
+                    self.request_turn_cancellation();
                     self.complete_current_turn_snapshot(true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
@@ -6041,7 +6049,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
-                    self.cancellation = crate::application::TurnCancellation::Requested;
+                    self.request_turn_cancellation();
                 } else {
                     // Handle exit confirmation: require two exit key presses within 2 seconds.
                     // Always clear the prompt input on Ctrl+C.
