@@ -669,6 +669,12 @@ pub struct App {
     pub keybindings: KeybindingResolver,
     /// Presentation preferences for the Next renderer; Classic ignores them.
     pub next_presentation: crate::next::NextPresentation,
+    /// Renderer drawing this session. Next-only keys are unbound in Classic.
+    pub renderer: crate::application::UiRenderer,
+    /// Next shell navigation state (inspector, reading anchor).
+    pub next_shell: crate::next::ShellState,
+    /// A user request to cancel the running turn, until the runtime settles it.
+    pub cancellation: crate::application::TurnCancellation,
     // CLI control-key routing and the normal UI handler resolve each event once.
     resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
@@ -1252,6 +1258,9 @@ impl App {
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
             next_presentation: crate::next::NextPresentation::default(),
+            renderer: crate::application::UiRenderer::default(),
+            next_shell: crate::next::ShellState::default(),
+            cancellation: crate::application::TurnCancellation::default(),
             resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,
@@ -3159,6 +3168,51 @@ impl App {
         }
     }
 
+    /// Hand a pending cancel request to the interactive loop exactly once.
+    /// The request then waits on the runtime until [`Self::settle_cancellation`].
+    pub fn take_cancellation_request(&mut self) -> bool {
+        if self.cancellation != crate::application::TurnCancellation::Requested {
+            return false;
+        }
+        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+        true
+    }
+
+    /// Record a cancellation the loop performed without a key request
+    /// (remote control), so it is shown pending until the worker stops.
+    pub fn note_cancellation_sent(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    }
+
+    /// The loop calls this once no turn worker is running any more. A
+    /// pending cancellation becomes the confirmed outcome.
+    pub fn settle_cancellation(&mut self) {
+        if self.cancellation != crate::application::TurnCancellation::Idle {
+            self.status_message = Some("Cancelled.".to_string());
+        }
+        self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Fold the row correction the Next renderer measured while the reader
+    /// was scrolled away into `scroll_offset`, so later scroll steps move
+    /// from where the reader actually is.
+    /// Ask the loop to cancel the running turn through its token. Next only:
+    /// Classic keeps its existing cancel behavior unchanged.
+    fn request_turn_cancellation(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.cancellation = crate::application::TurnCancellation::Requested;
+        }
+    }
+
+    pub fn settle_scroll_anchor(&mut self) {
+        let rows = self.next_shell.take_unsettled_rows();
+        if !self.auto_scroll {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add_signed(isize::try_from(rows).unwrap_or(0));
+        }
+    }
+
     pub fn invalidate_transcript(&self) {
         self.transcript_version
             .set(self.transcript_version.get().wrapping_add(1));
@@ -3857,8 +3911,18 @@ impl App {
         }
         let pending = self.keybindings.has_pending_chord();
         let context = self.current_key_context();
+        // The Next inspector layers its keys over the composer's.
+        let inspector_layer = self.renderer == crate::application::UiRenderer::Next
+            && self.next_shell.inspector.is_some()
+            && context == KeyContext::Chat
+            && self.prompt_input.suggestions.is_empty();
+        let contexts = if inspector_layer {
+            vec![KeyContext::Inspector, context]
+        } else {
+            vec![context]
+        };
         let result = match key_event_to_keystroke(&key) {
-            Some(stroke) => self.keybindings.process(stroke, &context),
+            Some(stroke) => self.keybindings.process_layered(stroke, &contexts),
             None => {
                 self.keybindings.cancel_chord();
                 KeybindingResult::NoMatch
@@ -4935,6 +4999,16 @@ impl App {
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
         match binding {
+            // Next-only actions are unbound in Classic; the key falls through
+            // exactly as it did before they existed.
+            KeybindingResult::Action(action)
+                if self.renderer != crate::application::UiRenderer::Next
+                    && crate::next::NEXT_ONLY_ACTIONS.contains(&action.as_str()) =>
+            {
+                if had_pending_chord {
+                    return false;
+                }
+            }
             KeybindingResult::Action(action) => return self.handle_keybinding_action(&action),
             KeybindingResult::Pending => return false,
             KeybindingResult::NoMatch if had_pending_chord => return false,
@@ -5094,6 +5168,7 @@ impl App {
                 self.streaming_thinking.clear();
                 self.tool_use_blocks.clear();
                 self.status_message = Some("Cancelled.".to_string());
+                self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(true);
             }
 
@@ -5126,6 +5201,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.tool_use_blocks.clear();
                     self.status_message = Some("Cancelled.".to_string());
+                    self.request_turn_cancellation();
                     self.complete_current_turn_snapshot(true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
@@ -5898,6 +5974,15 @@ impl App {
     }
 
     fn handle_keybinding_action(&mut self, action: &str) -> bool {
+        if crate::next::NEXT_ONLY_ACTIONS.contains(&action) {
+            if action == "jumpToLive" {
+                self.auto_scroll = true;
+                self.scroll_offset = 0;
+                self.new_messages_while_scrolled = 0;
+            }
+            self.next_shell.apply_action(action);
+            return false;
+        }
         match action {
             "interrupt" => {
                 if self.is_streaming {
@@ -5907,6 +5992,7 @@ impl App {
                     self.streaming_thinking.clear();
                     self.tool_use_blocks.clear();
                     self.status_message = Some("Cancelled.".to_string());
+                    self.request_turn_cancellation();
                 } else {
                     // Handle exit confirmation: require two exit key presses within 2 seconds.
                     // Always clear the prompt input on Ctrl+C.

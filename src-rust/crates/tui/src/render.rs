@@ -833,7 +833,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 /// Snapshot the rendered text of every row inside the selectable area into
 /// `app.last_row_text` so that subsequent double/triple-clicks can locate
 /// word and paragraph boundaries (issue #149 follow-up).
-fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
+pub(crate) fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
     let selectable_area = app.last_selectable_area.get();
     if selectable_area.width == 0 || selectable_area.height == 0 {
         app.last_row_text.borrow_mut().clear();
@@ -868,7 +868,7 @@ fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
 
 /// Post-render pass: invert colours on selected cells and extract the
 /// selection text into `app.selection_text`.
-fn apply_selection_highlight(frame: &mut Frame, app: &App) {
+pub(crate) fn apply_selection_highlight(frame: &mut Frame, app: &App) {
     let (anchor, focus) = match (app.selection_anchor, app.selection_focus) {
         (Some(a), Some(f)) => (a, f),
         _ => return,
