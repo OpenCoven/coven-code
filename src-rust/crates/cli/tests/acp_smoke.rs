@@ -45,6 +45,9 @@ fn run_with_input(
         .env("USERPROFILE", scratch.path())
         .env("COVEN_CODE_HOME", scratch.path())
         .env("COVEN_HOME", scratch.path().join("coven"))
+        // ACP never reads the interactive renderer selector; an unsupported
+        // value must leave every ACP smoke result unchanged.
+        .env("COVEN_CODE_UI", "not-a-renderer")
         // File-backed input reaches EOF without blocking the timeout supervisor.
         .stdin(std::fs::File::open(&stdin_path).expect("open ACP input"))
         // Drain into owned files so waiting for exit cannot fill an output pipe.
@@ -103,7 +106,11 @@ fn find_response(stdout: &str, id: i64) -> serde_json::Value {
 fn initialize_returns_spec_compliant_response() {
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":false},"clientInfo":{"name":"smoke","version":"0.0.0"}}}
 "#;
-    let (_status, stdout, _stderr) = run_with_input(request, Duration::from_secs(20), None);
+    let (_status, stdout, stderr) = run_with_input(request, Duration::from_secs(20), None);
+    assert!(
+        !stderr.contains("COVEN_CODE_UI"),
+        "ACP must not read the renderer selector:\n{stderr}"
+    );
     let resp = find_response(&stdout, 1);
     assert_eq!(resp["jsonrpc"], "2.0");
     let result = &resp["result"];

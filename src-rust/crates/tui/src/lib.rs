@@ -73,6 +73,8 @@ fn should_push_keyboard_enhancement_for_process() -> bool {
 pub mod agents_view;
 /// Application state and main event loop.
 pub mod app;
+/// Typed presentation seam shared by the Classic and Next renderers.
+pub mod application;
 /// Model-initiated question dialog (AskUserQuestion tool).
 pub mod ask_user_dialog;
 /// Bridge connection state and status badge.
@@ -143,6 +145,8 @@ pub mod message_copy;
 pub mod messages;
 /// Model picker overlay (/model command).
 pub mod model_picker;
+/// Opt-in Next renderer (`COVEN_CODE_UI=next`).
+pub mod next;
 /// Notification / banner system.
 pub mod notifications;
 /// First-launch onboarding / welcome dialog.
