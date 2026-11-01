@@ -113,6 +113,7 @@ fn bash_request() -> PermissionRequest {
         "rm -rf build".to_string(),
         None,
     )
+    .guarded()
 }
 
 fn deny_index(request: &PermissionRequest) -> usize {
@@ -463,6 +464,7 @@ fn multiline_request(lines: usize) -> PermissionRequest {
         command.join("\n"),
         None,
     )
+    .guarded()
 }
 
 #[test]

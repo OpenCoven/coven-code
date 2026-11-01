@@ -3228,6 +3228,11 @@ impl App {
     /// Clear the live tool rows of a turn being cancelled, keeping the ones
     /// still running as evidence of what the cancel interrupted.
     pub fn interrupt_tool_rows(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic clears its tool rows on cancel, as it always has.
+            self.tool_use_blocks.clear();
+            return;
+        }
         let running = self
             .tool_use_blocks
             .drain(..)
@@ -9235,18 +9240,13 @@ role = "Research"
             kind: ContextMenuKind::Selection,
         });
 
-        // Focus opens on deny, the last option (#411); Up moves off it.
-        let deny = app
-            .permission_request
-            .as_ref()
-            .map(|request| request.selected_option);
-        app.handle_key_event(press_key(KeyCode::Up, KeyModifiers::empty()));
+        app.handle_key_event(press_key(KeyCode::Down, KeyModifiers::empty()));
 
         assert_eq!(
             app.permission_request
                 .as_ref()
                 .map(|request| request.selected_option),
-            deny.map(|index| index - 1)
+            Some(1)
         );
         assert_eq!(
             app.context_menu_state

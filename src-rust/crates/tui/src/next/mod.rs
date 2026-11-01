@@ -735,7 +735,7 @@ fn approval_lines(
     });
     let mut details = Vec::new();
     let armed = app.permission_request.as_ref().is_none_or(|pending| {
-        pending.quiet_since.elapsed() >= crate::dialogs::PERMISSION_ARM_DELAY
+        !pending.arming || pending.quiet_since.elapsed() >= crate::dialogs::PERMISSION_ARM_DELAY
     });
     if !armed {
         details.push(primitives::status_message(
