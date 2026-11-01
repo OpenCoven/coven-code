@@ -132,6 +132,13 @@ tc_next_shell() {
 
     # ---- quit and terminal restoration -----------------------------------
     tui_keys C-c; sleep 0.3; tui_keys C-c
+    # Type the check only once the shell owns the pane again; keys sent
+    # while the app is still exiting are read by it and lost.
+    local waited=0
+    while [ "$waited" -lt 50 ] && \
+      [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "coven-code" ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
     tui_type 'stty -a | grep -q -- "-icanon" && echo "RAW_$((40 + 1))" || echo "COOKED_$((40 + 2))"'
     tui_keys Enter
     if wait_for "COOKED_42" 10; then _pass "quitting restores cooked terminal mode"
