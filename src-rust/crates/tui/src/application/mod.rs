@@ -114,6 +114,66 @@ pub enum TurnCancellation {
     AwaitingRuntime,
 }
 
+/// Who owns this session's execution, as far as a producer has shown.
+///
+/// Registration in the Coven daemon ledger is best effort and records the
+/// session; it is not daemon control or identity enforcement. Nothing here
+/// claims daemon-managed execution, which no producer offers yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SessionOwnership {
+    /// Run and enforced by this process; no ledger registration requested.
+    #[default]
+    EngineLocal,
+    /// Registration of `session_id` was sent; no answer yet.
+    LedgerPending { session_id: String },
+    /// The daemon accepted the registration of `session_id`.
+    LedgerRegistered { session_id: String },
+    /// The registration of `session_id` failed or no daemon was reachable.
+    LedgerFailed { session_id: String },
+}
+
+impl SessionOwnership {
+    /// A short label and a one-line explanation for the session `current`.
+    /// A registration for a different session says nothing about this one.
+    pub fn describe(&self, current: Option<&str>) -> (&'static str, &'static str) {
+        let applies = |id: &str| current == Some(id);
+        match self {
+            SessionOwnership::LedgerPending { session_id } if applies(session_id) => (
+                "engine-local, registering",
+                "runs in this process; ledger registration has not answered yet",
+            ),
+            SessionOwnership::LedgerRegistered { session_id } if applies(session_id) => (
+                "engine-local, ledger-registered",
+                "runs and is enforced in this process; the daemon records it but does not control it",
+            ),
+            SessionOwnership::LedgerFailed { session_id } if applies(session_id) => (
+                "engine-local, ledger unavailable",
+                "runs in this process; ledger registration failed, so the daemon does not know this session",
+            ),
+            SessionOwnership::EngineLocal => (
+                "engine-local",
+                "runs and is enforced in this process; not registered with a daemon",
+            ),
+            _ => (
+                "engine-local",
+                "runs in this process; the ledger registration was for a different session",
+            ),
+        }
+    }
+}
+
+/// The reader's place in one session, kept while another session is shown.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeView {
+    /// The unsent draft. Restored to the composer, never sent on restore.
+    pub draft: String,
+    /// Bodies of the draft's `[Pasted ...]` placeholders, by paste id.
+    pub pastes: std::collections::HashMap<u32, String>,
+    pub images: Vec<crate::image_paste::PastedImage>,
+    pub scroll_offset: usize,
+    pub auto_scroll: bool,
+}
+
 /// Interactive renderer selected by [`UI_SELECTOR_ENV`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UiRenderer {

@@ -2756,16 +2756,21 @@ async fn run_interactive(
     // The id is captured here so that a mid-run /resume (which rebinds session.id)
     // does not leave this registration uncompleted — the exit hook uses this local
     // rather than session.id, which may have changed to a different session by then.
+    let (ledger_tx, mut ledger_rx) = tokio::sync::oneshot::channel::<bool>();
     let ledger_session_id: Option<String> = if settings.daemon_ledger {
         let id = session.id.clone();
         let root = tool_ctx.working_dir.clone();
         let title = session.title.clone().unwrap_or_default();
         let id_for_task = id.clone();
         tokio::task::spawn_blocking(move || {
-            claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title);
+            let accepted =
+                claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title)
+                    .is_ok();
+            let _ = ledger_tx.send(accepted);
         });
         Some(id)
     } else {
+        drop(ledger_tx);
         None
     };
 
@@ -2788,6 +2793,14 @@ async fn run_interactive(
         app.attach_mcp_manager(manager);
     }
     app.replace_messages(initial_messages.clone());
+    app.enter_session_scope(&session.id);
+    app.session_title = session.title.clone();
+    app.ownership = match &ledger_session_id {
+        Some(id) => claurst_tui::application::SessionOwnership::LedgerPending {
+            session_id: id.clone(),
+        },
+        None => claurst_tui::application::SessionOwnership::EngineLocal,
+    };
     if let Some(log) = &diagnostic_log {
         app.push_system_message(
             format!("Diagnostics: {}", log.path().display()),
@@ -3063,6 +3076,8 @@ async fn run_interactive(
         }
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_companion_pose();
+        // The session browser's list loads in the background.
+        app.poll_session_list();
         app.notifications.tick();
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
@@ -3079,6 +3094,36 @@ async fn run_interactive(
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
         // synthesize an Enter event to dequeue and submit it.
+        if let claurst_tui::application::SessionOwnership::LedgerPending { session_id } =
+            &app.ownership
+        {
+            let outcome = match ledger_rx.try_recv() {
+                Ok(accepted) => Some(accepted),
+                // The registration task ended without answering.
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some(false),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            };
+            if let Some(accepted) = outcome {
+                let session_id = session_id.clone();
+                app.ownership = if accepted {
+                    claurst_tui::application::SessionOwnership::LedgerRegistered { session_id }
+                } else {
+                    claurst_tui::application::SessionOwnership::LedgerFailed { session_id }
+                };
+            }
+        }
+        // A session chosen in the browser resumes through `/session resume`, exactly
+        // as if typed, once no turn is running. If that did not switch
+        // sessions, the current one gets its draft back.
+        if !app.pending_auto_submit {
+            app.settle_pending_resume();
+        }
+        if current_query.is_none() && !app.is_streaming && !app.pending_auto_submit {
+            if let Some(id) = app.take_pending_resume() {
+                app.set_prompt_text(format!("/session resume {id}"));
+                app.pending_auto_submit = true;
+            }
+        }
         let synthetic_event: Option<Event> = if app.pending_auto_submit && !app.is_streaming {
             app.pending_auto_submit = false;
             Some(Event::Key(crossterm::event::KeyEvent::new(
@@ -3398,6 +3443,7 @@ async fn run_interactive(
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
                                     session_scope.advance();
                                     session = resumed_session;
+                                    app.enter_session_scope(&session.id);
                                     messages = session.messages.clone();
                                     app.replace_messages(messages.clone());
                                     cmd_ctx.config.model = Some(session.model.clone());
@@ -3412,6 +3458,7 @@ async fn run_interactive(
                                         Arc::new(std::sync::atomic::AtomicUsize::new(0));
                                     cmd_ctx.session_id = session.id.clone();
                                     cmd_ctx.session_title = session.title.clone();
+                                    app.session_title = session.title.clone();
                                     if let Some(saved_dir) = session.working_dir.as_ref() {
                                         let saved_path = std::path::PathBuf::from(saved_dir);
                                         if saved_path.exists() {
@@ -3436,6 +3483,7 @@ async fn run_interactive(
                                     session.title = Some(title.clone());
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
+                                    app.session_title = session.title.clone();
                                     let _ = claurst_core::history::save_session(&session).await;
                                     claurst_tui::update_terminal_title(Some(&title));
                                     app.status_message =
