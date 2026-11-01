@@ -92,7 +92,7 @@ These bindings are active when Coven Code is displaying a yes/no confirmation pr
 | `Enter` | defaultAction | Accept the highlighted default option |
 | `Escape` | cancel | Cancel the prompt and deny the action |
 
-A tool permission request opens with **No, deny** highlighted, so `Enter` on a new request denies. Keys other than `Escape` are ignored until 400 ms pass with no key pressed. Each ignored key restarts that wait, so typing meant for the prompt or a held key cannot approve a request. `Escape` always denies immediately.
+In the Next renderer (`COVEN_CODE_UI=next`), a tool permission request opens with **No, deny** highlighted, so `Enter` on a new request denies. Keys other than `Escape` are ignored until 400 ms pass with no key pressed. Each ignored key restarts that wait, so typing meant for the prompt or a held key cannot approve a request. `Escape` always denies immediately.
 
 ---
 
@@ -319,9 +319,11 @@ In vim insert mode, `Enter` also submits. Use `Shift+Enter` for newlines in vim 
 
 ### ESC During Streaming
 
-Pressing `Escape` while the model is streaming a response cancels the turn, the same way `Ctrl+C` does: the runtime stops the model request and any tool calls in progress. The input field regains focus and you can send a follow-up message.
+Pressing `Escape` while the model is streaming a response interrupts the stream. The partial response is preserved in the conversation history and the model stops generating. The input field regains focus and you can send a follow-up message.
 
-The Next renderer shows `cancelling` until the runtime has actually stopped the turn. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
+This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` also signals any tool calls in progress to abort (via `AbortController`), while `Escape` only stops the stream and allows running tools to finish.
+
+In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the same way `Ctrl+C` does, and the status shows `cancelling` until the runtime has actually stopped it. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
 
