@@ -162,13 +162,9 @@ fn drive(renderer: UiRenderer) -> Outgoing {
     draw(&app, renderer, 120, 40);
     let submitted = app.take_input();
 
-    let mut request = bash_request("toolu-parity-2");
-    // Old enough that decision keys count (#411 arming delay).
-    request.quiet_since -= claurst_tui::dialogs::PERMISSION_ARM_DELAY;
-    app.permission_request = Some(request);
+    app.permission_request = Some(bash_request("toolu-parity-2"));
     let mut confirmed = false;
-    // Focus starts on deny (last option): up, up, down lands on the prefix rule.
-    for code in [KeyCode::Up, KeyCode::Up, KeyCode::Down, KeyCode::Enter] {
+    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
         draw(&app, renderer, 120, 40);
         let request = app.permission_request.as_mut().expect("pending request");
         confirmed = handle_permission_key(request, key(code));
@@ -198,7 +194,7 @@ fn renderers_produce_identical_outgoing_operations_for_the_same_input() {
     assert_eq!(classic.submitted, "run the tests");
     assert_eq!(
         classic.permission,
-        Some(("toolu-parity-2".to_string(), 3, true))
+        Some(("toolu-parity-2".to_string(), 1, true))
     );
     assert_eq!(classic.view.draft, "next draft");
 }

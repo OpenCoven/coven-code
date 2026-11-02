@@ -10,11 +10,11 @@
     │  Runs a shell command in the project                                 │
     │                                                                      │
     │                                                                      │
-    │    [y] Yes, allow once                                               │
+    │  ► [y] Yes, allow once                                               │
     │    [Y] Yes, allow this session                                       │
     │    [p] Yes, always allow (persistent)                                │
     │    [P] Allow commands matching cargo test*                           │
-· Pe│  ► [n] No, deny                                                      │
+· Pe│    [n] No, deny                                                      │
   BU│                                                                      │uts
 ────│                                                                      │────
 ❯   └──────────────────────────────────────────────────────────────────────┘

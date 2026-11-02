@@ -64,10 +64,12 @@ pub struct PermissionRequest {
     pub kind: PermissionDialogKind,
     pub options: Vec<PermissionOption>,
     pub selected_option: usize,
-    /// When the request was opened, or the last key it ignored arrived.
-    /// Keys other than Escape count only after [`PERMISSION_ARM_DELAY`] of
-    /// quiet, so typing meant for the composer, or a held key, cannot
-    /// decide it.
+    /// Whether the request is [`guarded`](Self::guarded).
+    pub arming: bool,
+    /// When a guarded request was opened, or the last key it ignored
+    /// arrived. Keys other than Escape count only after
+    /// [`PERMISSION_ARM_DELAY`] of quiet, so typing meant for the composer,
+    /// or a held key, cannot decide it.
     pub quiet_since: Instant,
 }
 
@@ -75,13 +77,23 @@ pub struct PermissionRequest {
 pub const PERMISSION_ARM_DELAY: Duration = Duration::from_millis(400);
 
 impl PermissionRequest {
-    /// Focus the deny option so the default action is never destructive.
-    fn opened(mut self) -> Self {
+    /// A new request, with Classic's defaults: the first option focused
+    /// and keys accepted at once.
+    fn opened(self) -> Self {
+        self
+    }
+
+    /// Guard the request against stray keys (Next renderer, #411): focus
+    /// the deny option, so the default action is never destructive, and
+    /// ignore keys other than Escape until a quiet gap has passed.
+    pub fn guarded(mut self) -> Self {
         self.selected_option = self
             .options
             .iter()
             .position(|option| option.key == 'n')
             .unwrap_or_else(|| self.options.len().saturating_sub(1));
+        self.arming = true;
+        self.quiet_since = Instant::now();
         self
     }
 
@@ -99,6 +111,7 @@ impl PermissionRequest {
             input_preview: None,
             kind: PermissionDialogKind::Generic,
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options: Self::default_options(),
         })
@@ -126,6 +139,7 @@ impl PermissionRequest {
             input_preview,
             kind: PermissionDialogKind::Generic,
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options: Self::default_options(),
         })
@@ -154,6 +168,7 @@ impl PermissionRequest {
             input_preview: Some(command),
             kind,
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options,
         })
@@ -173,6 +188,7 @@ impl PermissionRequest {
             input_preview: Some(command.clone()),
             kind: PermissionDialogKind::PowerShell { command },
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options: Self::default_options(),
         })
@@ -197,6 +213,7 @@ impl PermissionRequest {
             input_preview: Some(preview),
             kind,
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options: Self::file_read_options(),
         })
@@ -226,6 +243,7 @@ impl PermissionRequest {
             input_preview: Some(preview),
             kind,
             selected_option: 0,
+            arming: false,
             quiet_since: Instant::now(),
             options: Self::file_write_options(),
         })
@@ -698,7 +716,7 @@ pub fn handle_permission_key(pr: &mut PermissionRequest, key: KeyEvent) -> bool 
 /// armed only Escape (deny) is accepted.
 pub fn handle_permission_key_at(pr: &mut PermissionRequest, key: KeyEvent, now: Instant) -> bool {
     let option_count = pr.options.len();
-    let armed = now.saturating_duration_since(pr.quiet_since) >= PERMISSION_ARM_DELAY;
+    let armed = !pr.arming || now.saturating_duration_since(pr.quiet_since) >= PERMISSION_ARM_DELAY;
     if !armed && key.code != KeyCode::Esc {
         pr.quiet_since = now;
         return false;

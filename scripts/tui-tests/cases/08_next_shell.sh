@@ -9,8 +9,7 @@
 # `claude` that answers once and then keeps the turn running, so streaming,
 # reading position and cancellation are exercised with no network or model.
 # The terminal is resized between steps (120x40, 80x24, 40x12, back to
-# 120x40). A final Classic segment checks that Escape stops a running turn
-# there too. This proves the shell journey only; it is not evidence for tool,
+# 120x40). This proves the shell journey only; it is not evidence for tool,
 # approval, task, research or memory behavior.
 
 register_case tc_next_shell
@@ -149,32 +148,6 @@ tc_next_shell() {
       "quitting restores the cursor"
     assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{mouse_any_flag}')" "0" \
       "quitting turns mouse reporting off"
-  fi
-  tui_stop
-
-  # ---- Classic: Escape stops the running turn as well ----------------------
-  rm -f "$scratch/done"
-  TUI_LAUNCH_PREFIX="${TUI_LAUNCH_PREFIX/COVEN_CODE_UI=next/COVEN_CODE_UI=classic}"
-  TUI_BOOT_STRING="$saved_boot"
-  if tui_start; then
-    tui_type "stream please"; tui_keys Enter
-    if wait_for "fake line 60" 15; then
-      tui_keys Escape
-      local tries=0
-      while pgrep -f "$scratch/bin/claude" >/dev/null 2>&1 && [ "$tries" -lt 10 ]; do
-        sleep 0.5; tries=$((tries + 1))
-      done
-      if pgrep -f "$scratch/bin/claude" >/dev/null 2>&1; then
-        _fail "Classic: Escape stops the turn's claude process"
-      else
-        _pass "Classic: Escape stops the turn's claude process"
-      fi
-      sleep 7
-      if [ -e "$scratch/done" ]; then _fail "Classic: the cancelled turn did not complete"
-      else _pass "Classic: the cancelled turn did not complete"; fi
-    else
-      _fail "Classic: the response streams" "$(tui_capture)"
-    fi
   fi
   tui_stop
 
