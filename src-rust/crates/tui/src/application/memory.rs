@@ -37,23 +37,43 @@ impl MemorySnapshot {
         list: Result<Vec<MemorySummary>, DaemonError>,
         overview: Result<MemoryOverview, DaemonError>,
     ) -> Self {
-        let reason = |error: DaemonError| one_line(&error.to_string());
         match list {
             Err(error) if error.is_offline() => MemorySnapshot::Offline,
-            // The list route exists on every daemon that serves memory, so a
-            // 404 means this daemon predates it.
-            Err(error) if error.status() == Some(404) => MemorySnapshot::UpdateRequired,
-            Err(error) => MemorySnapshot::Failed(reason(error)),
+            // A 404 on the list route, or an older row shape, means this
+            // daemon predates the v1 memory reads.
+            Err(error)
+                if error.status() == Some(404)
+                    || matches!(error, DaemonError::UnsupportedShape(_)) =>
+            {
+                MemorySnapshot::UpdateRequired
+            }
+            Err(error) => MemorySnapshot::Failed(reason(&error)),
             Ok(rows) => MemorySnapshot::Loaded {
                 rows,
-                overview: overview.map_err(reason),
+                overview: overview.map_err(|error| reason(&error)),
             },
         }
     }
 }
 
-/// Longest error text kept.
-const REASON_MAX_CHARS: usize = 160;
+/// Why a read failed, without any producer text: a daemon message, a parse
+/// error or a transport error can quote memory content or paths.
+fn reason(error: &DaemonError) -> String {
+    match error {
+        DaemonError::BadStatus { status, code, .. } => match code {
+            Some(code) => format!("HTTP {status} ({})", one_line(code)),
+            None => format!("HTTP {status}"),
+        },
+        DaemonError::Offline { .. } => "daemon offline".to_string(),
+        DaemonError::Transport(_) => "daemon transport error".to_string(),
+        DaemonError::MalformedResponse(_) => "unreadable daemon response".to_string(),
+        DaemonError::MissingField(field) => format!("daemon response missing {field}"),
+        DaemonError::UnsupportedShape(what) => format!("older daemon response ({what})"),
+    }
+}
+
+/// Longest error code kept.
+const REASON_MAX_CHARS: usize = 64;
 
 fn one_line(text: &str) -> String {
     let safe = terminal_safe(text).replace('\n', " ");
@@ -70,7 +90,13 @@ pub fn read_memory(client: Option<DaemonClient>) -> MemorySnapshot {
     let Some(client) = client else {
         return MemorySnapshot::Offline;
     };
-    MemorySnapshot::from_reads(client.memory_list(), client.memory_overview())
+    let list = client.memory_list();
+    // The overview is only worth a second round trip when the list read.
+    let overview = match &list {
+        Ok(_) => client.memory_overview(),
+        Err(_) => Err(DaemonError::MissingField("overview")),
+    };
+    MemorySnapshot::from_reads(list, overview)
 }
 
 #[cfg(test)]
@@ -124,6 +150,46 @@ mod tests {
         };
         assert_eq!(rows.len(), 1);
         assert!(overview.is_err());
+    }
+
+    #[test]
+    fn a_failed_read_shows_no_producer_text() {
+        const CANARY: &str = "CANARY-7f3a-private";
+        for error in [
+            DaemonError::BadStatus {
+                status: 500,
+                code: Some("internal".into()),
+                message: Some(format!("failed to read sage/{CANARY}.md")),
+            },
+            DaemonError::MalformedResponse(format!("invalid type: string \"{CANARY}\"")),
+            DaemonError::Transport(format!("read {CANARY}")),
+        ] {
+            let MemorySnapshot::Failed(reason) =
+                MemorySnapshot::from_reads(Err(error), Ok(MemoryOverview::default()))
+            else {
+                panic!()
+            };
+            assert!(!reason.contains(CANARY), "{reason}");
+        }
+        let loaded = MemorySnapshot::from_reads(
+            Ok(Vec::new()),
+            Err(DaemonError::MalformedResponse(CANARY.into())),
+        );
+        let MemorySnapshot::Loaded { overview, .. } = loaded else {
+            panic!()
+        };
+        assert!(!overview.unwrap_err().contains(CANARY));
+    }
+
+    #[test]
+    fn an_unsupported_response_shape_means_update_required() {
+        assert_eq!(
+            MemorySnapshot::from_reads(
+                Err(DaemonError::UnsupportedShape("memory row id")),
+                Err(DaemonError::UnsupportedShape("memory row id")),
+            ),
+            MemorySnapshot::UpdateRequired
+        );
     }
 
     #[test]

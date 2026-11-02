@@ -2581,12 +2581,17 @@ fn refresh_command_discovery(app: &mut claurst_tui::App, config: &Config, cwd: &
 /// How often an open Memory page re-reads the Coven daemon.
 const MEMORY_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The Memory page's daemon read in flight, if any, and when the last one
-/// finished.
+/// Shortest gap between two daemon memory reads, even across closing and
+/// reopening the page, so paging back and forth cannot pile up threads.
+const MEMORY_MIN_SPAWN_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The Memory page's daemon read in flight, if any, when the last one
+/// finished, and when the last one started (kept across closing the page).
 #[derive(Default)]
 struct MemoryPoll {
     in_flight: Option<std::sync::mpsc::Receiver<claurst_tui::application::memory::MemorySnapshot>>,
     last_read: Option<std::time::Instant>,
+    last_spawn: Option<std::time::Instant>,
 }
 
 /// Keep `app.memory_snapshot` for the Next Memory page (#415).
@@ -2608,7 +2613,10 @@ fn refresh_memory_snapshot(
 
     if !page_open {
         app.memory_snapshot = MemorySnapshot::NotRead;
-        *poll = MemoryPoll::default();
+        // Dropping the receiver discards a late answer; the spawn time is
+        // kept so a quick reopen does not start another read at once.
+        poll.in_flight = None;
+        poll.last_read = None;
         return;
     }
     if let Some(receiver) = &poll.in_flight {
@@ -2628,9 +2636,13 @@ fn refresh_memory_snapshot(
     }
     let due = poll
         .last_read
-        .is_none_or(|at| at.elapsed() >= MEMORY_REFRESH);
+        .is_none_or(|at| at.elapsed() >= MEMORY_REFRESH)
+        && poll
+            .last_spawn
+            .is_none_or(|at| at.elapsed() >= MEMORY_MIN_SPAWN_GAP);
     if due {
         poll.in_flight = Some(spawn_read());
+        poll.last_spawn = Some(std::time::Instant::now());
     }
 }
 
@@ -7225,6 +7237,7 @@ mod tests {
         // Fresh: no new read until the refresh interval passes.
         refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("too soon"));
         poll.last_read = Some(std::time::Instant::now() - MEMORY_REFRESH * 2);
+        poll.last_spawn = Some(std::time::Instant::now() - MEMORY_REFRESH * 2);
         let (_again, again_rx) = std::sync::mpsc::channel();
         let mut again_rx = Some(again_rx);
         refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
@@ -7246,6 +7259,7 @@ mod tests {
         refresh_memory_snapshot(&mut app, false, &mut poll, || panic!("closed"));
         assert_eq!(app.memory_snapshot, MemorySnapshot::NotRead);
         assert!(poll.in_flight.is_none() && poll.last_read.is_none());
+        assert!(poll.last_spawn.is_some(), "spawn time survives the close");
         assert!(
             sender.send(MemorySnapshot::Offline).is_err(),
             "late answer has nowhere to land"
@@ -7266,6 +7280,36 @@ mod tests {
         drop(sender);
         refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("retry storm"));
         assert!(matches!(app.memory_snapshot, MemorySnapshot::Failed(_)));
+        // The failure counts as a read: no immediate respawn.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("retry storm"));
+        assert!(poll.in_flight.is_none());
+    }
+
+    #[test]
+    fn reopening_the_memory_page_quickly_does_not_start_a_new_read_at_once() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        // Tab past the page and straight back.
+        refresh_memory_snapshot(&mut app, false, &mut poll, || panic!("closed"));
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("spawned on reopen"));
+        assert_eq!(
+            app.memory_snapshot,
+            MemorySnapshot::NotRead,
+            "no old snapshot"
+        );
+        // After the minimum gap a reopened page reads again.
+        poll.last_spawn = Some(std::time::Instant::now() - MEMORY_MIN_SPAWN_GAP * 2);
+        let (_again, again_rx) = std::sync::mpsc::channel();
+        let mut again_rx = Some(again_rx);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
+        assert!(poll.in_flight.is_some());
     }
 
     #[test]

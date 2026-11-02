@@ -219,6 +219,10 @@ pub enum DaemonError {
     MalformedResponse(String),
     /// Response was well-formed but a required field was missing.
     MissingField(&'static str),
+    /// The response has the shape of an older API than the one this client
+    /// reads; the field named is the first that did not match. Carries no
+    /// response content.
+    UnsupportedShape(&'static str),
 }
 
 impl DaemonError {
@@ -265,6 +269,9 @@ impl std::fmt::Display for DaemonError {
                 write!(f, "daemon returned invalid response: {msg}")
             }
             DaemonError::MissingField(name) => write!(f, "daemon response missing field `{name}`"),
+            DaemonError::UnsupportedShape(what) => {
+                write!(f, "daemon response predates this API ({what})")
+            }
         }
     }
 }
@@ -854,7 +861,7 @@ fn url_quote(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Familiar-memory reads (private parsing)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -871,23 +878,40 @@ struct RawMemorySummary {
     updated_at_iso: Option<String>,
     excerpt: Option<String>,
     source: Option<RawMemorySource>,
-    privacy_classification: Option<String>,
+    privacy_classification: Option<RawClassification>,
     reveal_required: Option<bool>,
     verification_state: Option<String>,
+}
+
+/// A classification label, or a shape this client does not know, which is
+/// treated as unclassified.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawClassification {
+    Label(String),
+    Unknown(serde::de::IgnoredAny),
 }
 
 fn parse_memory_list(body: &str) -> Result<Vec<MemorySummary>, DaemonError> {
     let raw: Vec<RawMemorySummary> =
         serde_json::from_str(body).map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+    // The v1 id is an opaque UUID. Older daemons derived it from the file
+    // name, so it would show what the preview withholds: refuse the shape.
+    if raw
+        .iter()
+        .any(|row| uuid::Uuid::parse_str(&row.id).is_err())
+    {
+        return Err(DaemonError::UnsupportedShape("memory row id"));
+    }
     Ok(raw
         .into_iter()
         .map(|row| {
             // Fail closed: only a producer classification together with an
             // explicit "no reveal required" lets text through.
-            let classified = row
-                .privacy_classification
-                .as_deref()
-                .is_some_and(|class| !class.trim().is_empty());
+            let classified = matches!(
+                &row.privacy_classification,
+                Some(RawClassification::Label(class)) if !class.trim().is_empty()
+            );
             let preview = if classified && row.reveal_required == Some(false) {
                 MemoryPreview::Allowed {
                     title: row.title.unwrap_or_default(),
@@ -957,6 +981,10 @@ fn parse_memory_overview(body: &str) -> Result<MemoryOverview, DaemonError> {
         verification_state: raw.verification.state,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1381,6 +1409,28 @@ mod tests {
     }
 
     #[test]
+    fn an_older_daemon_row_with_a_file_derived_id_is_unsupported_and_leaks_nothing() {
+        // Daemons before the v1 dashboard reads used `{familiar}-{file stem}`
+        // as the id and sent no privacy fields.
+        let body = format!(
+            r#"[{{"id":"sage-{MEMORY_CANARY}","familiar_id":"sage","title":"{MEMORY_CANARY}","path":"sage/{MEMORY_CANARY}.md","updated_at":"4m ago","excerpt":"{MEMORY_CANARY}"}}]"#
+        );
+        let error = parse_memory_list(&body).unwrap_err();
+        assert!(
+            matches!(error, DaemonError::UnsupportedShape(_)),
+            "{error:?}"
+        );
+        assert!(!format!("{error:?} {error}").contains(MEMORY_CANARY));
+    }
+
+    #[test]
+    fn a_structured_privacy_classification_is_withheld_not_a_failure() {
+        let body = format!("[{}]", memory_row(r#"{"level":"public"}"#, "false"));
+        let rows = parse_memory_list(&body).unwrap();
+        assert_eq!(rows[0].preview, MemoryPreview::Withheld);
+    }
+
+    #[test]
     fn a_memory_row_without_an_id_fails_the_read() {
         let body = r#"[{"familiar_id":"sage","verification_state":"unknown"}]"#;
         assert!(parse_memory_list(body).is_err());
@@ -1455,21 +1505,49 @@ mod tests {
     /// Opt-in evidence against a real daemon whose `COVEN_HOME` holds only
     /// synthetic memory containing `CANARY-7f3a-private`. Never point this at
     /// a home with real memory. Run with
-    /// `COVEN_HOME=<disposable home> cargo test -p claurst-core --lib live_daemon -- --ignored`.
+    /// `COVEN_MEMORY_LIVE_TEST=1 COVEN_HOME=<disposable home> cargo test -p claurst-core --lib live_daemon -- --ignored`.
     #[test]
     #[ignore = "needs a disposable Coven daemon with synthetic memory"]
     fn live_daemon_memory_reads_withhold_unclassified_text() {
+        // Refuse anything but an explicit, disposable home: the default
+        // `~/.coven` holds real memory.
+        assert_eq!(
+            std::env::var("COVEN_MEMORY_LIVE_TEST").as_deref(),
+            Ok("1"),
+            "set COVEN_MEMORY_LIVE_TEST=1 and a disposable COVEN_HOME"
+        );
+        let home = std::env::var("COVEN_HOME").expect("COVEN_HOME must be set");
+        let real = dirs::home_dir().map(|dir| dir.join(".coven"));
+        assert!(
+            real.as_deref() != Some(std::path::Path::new(&home)),
+            "refusing the real ~/.coven"
+        );
         let client = DaemonClient::new().expect("daemon socket in COVEN_HOME");
         let rows = client.memory_list().expect("memory list");
         assert!(!rows.is_empty(), "synthetic memory expected");
+        // Report only counts and booleans, never row content.
         let held = format!("{rows:?}");
-        assert!(!held.contains(MEMORY_CANARY), "{held}");
-        assert!(!held.contains(".md"), "path kept: {held}");
-        assert!(rows
+        assert!(!held.contains(MEMORY_CANARY), "canary kept");
+        assert!(!held.contains(".md"), "path kept");
+        let withheld = rows
             .iter()
-            .all(|row| row.preview == MemoryPreview::Withheld));
+            .filter(|row| row.preview == MemoryPreview::Withheld)
+            .count();
+        assert_eq!(
+            withheld,
+            rows.len(),
+            "{withheld} of {} withheld",
+            rows.len()
+        );
         let overview = client.memory_overview().expect("memory overview");
-        assert!(!overview.mutations, "{overview:?}");
-        eprintln!("live rows={} overview={overview:?}", rows.len());
+        assert!(!overview.mutations, "mutations offered");
+        eprintln!(
+            "live rows={} withheld={withheld} entries={:?} familiars={:?} detail={} mutations={}",
+            rows.len(),
+            overview.entries,
+            overview.familiars,
+            overview.detail,
+            overview.mutations
+        );
     }
 }

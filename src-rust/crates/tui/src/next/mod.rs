@@ -1139,7 +1139,12 @@ fn memory_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
                 "withheld: not cleared by the producer".to_string(),
             )),
             MemoryPreview::Allowed { title, excerpt } => {
-                lines.push(field(appearance, "Title", safe(title)));
+                let title = if title.trim().is_empty() {
+                    "untitled".to_string()
+                } else {
+                    safe(title)
+                };
+                lines.push(field(appearance, "Title", title));
                 if !excerpt.is_empty() {
                     lines.push(field(appearance, "Excerpt", safe(excerpt)));
                 }
@@ -1431,7 +1436,7 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             line.spans.extend(
                 primitives::status_message(
                     appearance,
-                    Status::Pending,
+                    Status::Evidence,
                     "read only",
                     "Memory page; reveal and selection wait on #415",
                 )

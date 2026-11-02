@@ -189,13 +189,30 @@ fn offline_update_required_and_failed_reads_say_so_with_no_fallback() {
 #[test]
 fn the_memory_page_offers_no_reveal_selection_or_mutation() {
     let mut app = loaded_app();
-    for code in [KeyCode::Enter, KeyCode::Delete, KeyCode::Backspace] {
+    // A draft typed before opening the page must not be sent by its keys.
+    app.next_shell.inspector = None;
+    for c in "draft".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.next_shell.inspector = Some(InspectorPage::Memory);
+    let snapshot = app.memory_snapshot.clone();
+    // Backspace is left out: keys the inspector does not bind reach the
+    // composer by the shell's design (#410), which edits, not submits.
+    for code in [KeyCode::Enter, KeyCode::Delete] {
         app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
     }
-    assert!(app.take_input().is_empty(), "nothing would be submitted");
+    assert_eq!(
+        app.memory_snapshot, snapshot,
+        "no reveal or selection state"
+    );
     assert!(
         app.messages.is_empty(),
         "nothing was added to the conversation"
+    );
+    assert_eq!(
+        app.take_input(),
+        "draft",
+        "the draft is kept and not submitted"
     );
     let text = draw(&app, 100, 50).to_lowercase();
     for verb in ["delete", "edit", "promote", "attach"] {
