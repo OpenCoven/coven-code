@@ -437,3 +437,42 @@ fn text_of(buffer: &Buffer) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[test]
+fn every_scheme_and_motion_setting_keeps_cells_inert_and_the_way_back() {
+    use claurst_tui::next::style::{Motion, Scheme};
+    let mut app = hostile_app(Variant::Plain);
+    app.notifications = Default::default();
+    for scheme in [Scheme::Dark, Scheme::Light] {
+        for motion in [Motion::Full, Motion::Reduced] {
+            for color in COLORS {
+                app.next_presentation = NextPresentation {
+                    appearance: Appearance {
+                        color,
+                        scheme,
+                        glyphs: Glyphs::Unicode,
+                        motion,
+                    },
+                    ..NextPresentation::default()
+                };
+                for page in pages() {
+                    app.next_shell.inspector = page;
+                    for (width, height) in SIZES {
+                        let buffer = draw(&app, width, height);
+                        let found = unsafe_cells(&buffer);
+                        assert!(
+                            found.is_empty(),
+                            "{scheme:?} {motion:?} {color:?} {page:?} {width}x{height}: {found:?}"
+                        );
+                        if page.is_some() && width >= 40 && height >= 12 {
+                            assert!(
+                                text_of(&buffer).contains("Esc"),
+                                "{scheme:?} {motion:?} {color:?} {page:?} {width}x{height}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
