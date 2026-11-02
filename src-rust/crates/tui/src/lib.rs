@@ -375,6 +375,27 @@ pub fn set_terminal_title(title: &str) {
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
 }
 
+/// The topic text for the terminal title. The title is written raw inside an
+/// OSC sequence, so in Next every control character and bidirectional
+/// override is dropped and newlines become spaces: a prompt or session title
+/// can never end the sequence early and emit its own. Classic is unchanged.
+pub fn terminal_title_topic(renderer: application::UiRenderer, topic: &str) -> String {
+    match renderer {
+        application::UiRenderer::Classic => topic.to_string(),
+        application::UiRenderer::Next => topic
+            .chars()
+            .filter_map(|ch| match ch {
+                '\n' | '\r' | '\t' => Some(' '),
+                '\u{0}'..='\u{1f}'
+                | '\u{7f}'..='\u{9f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}' => None,
+                _ => Some(ch),
+            })
+            .collect(),
+    }
+}
+
 /// Update the terminal title to reflect the current session context.
 /// Format: "✨ | <topic>" or just "✨ Coven" when no topic is set.
 pub fn update_terminal_title(topic: Option<&str>) {

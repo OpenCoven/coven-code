@@ -420,9 +420,57 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         }
     }
 
-    if !app.notifications.is_empty() {
-        crate::notifications::render_notification_banner(frame, &app.notifications, area);
+    render_toast(frame, app, area);
+}
+
+/// The current notification as one Next row at the top right, in the
+/// selected color mode. Its text can quote tool or model output, so it is
+/// made inert. Classic keeps its own banner.
+fn render_toast(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::notifications::NotificationKind;
+
+    let Some(notification) = app.notifications.current() else {
+        return;
+    };
+    let appearance = &app.next_presentation.appearance;
+    let width = 52u16.min(area.width.saturating_sub(4));
+    if width < 20 || area.height < 2 {
+        return;
     }
+    let (status, word) = match notification.kind {
+        NotificationKind::Info => (Status::Evidence, "note"),
+        NotificationKind::Success => (Status::Evidence, "done"),
+        NotificationKind::Warning => (Status::Pending, "warning"),
+        NotificationKind::Error => (Status::Blocked, "error"),
+    };
+    let hint = if notification.dismissible {
+        "  Esc"
+    } else {
+        ""
+    };
+    let text_width = usize::from(width).saturating_sub(hint.chars().count());
+    let message = primitives::status_message(
+        appearance,
+        status,
+        word,
+        &safe_one_line(&notification.message),
+    );
+    let mut line = wrap_line(message, text_width.max(1))
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    line.spans.push(Span::styled(
+        hint.to_string(),
+        appearance.style(Role::TextSubtle),
+    ));
+    let toast = Rect {
+        x: area.x + area.width.saturating_sub(width + 2),
+        y: area.y + 1,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, toast);
+    frame.render_widget(Paragraph::new(line), toast);
 }
 
 /// Cells the composer prompt glyph and its following space occupy; the
@@ -472,6 +520,11 @@ fn project_name(app: &App) -> String {
         .unwrap_or_else(|| "no project".to_string())
 }
 
+/// Untrusted text made terminal safe and folded onto one line.
+fn safe_one_line(text: &str) -> String {
+    crate::application::view::terminal_safe(text).replace('\n', " ")
+}
+
 fn model_label(app: &App) -> Option<String> {
     if !app.model_name.is_empty() {
         return Some(app.model_name.clone());
@@ -499,6 +552,9 @@ fn workspace_line(appearance: &Appearance, app: &App, width: u16) -> Line<'stati
         parts.push((format!("{familiar} (unverified)"), Role::Evidence));
     }
     for (text, role) in parts {
+        // Titles come from the model or the user, and paths and names from
+        // config: show them inert, on one line.
+        let text = safe_one_line(&text);
         let cells =
             separator.chars().count() + unicode_width::UnicodeWidthStr::width(text.as_str());
         if line.width() + cells > usize::from(width) {
@@ -1008,8 +1064,8 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             appearance,
             "Session",
             app.session_title
-                .clone()
-                .unwrap_or_else(|| "untitled session".to_string()),
+                .as_deref()
+                .map_or_else(|| "untitled session".to_string(), safe_one_line),
         ),
         field(
             appearance,
