@@ -10,15 +10,26 @@
 //! and cursor sequences can never reach the terminal from content. The
 //! PTY-level counterpart is tmux case 11.
 //!
-//! Not covered here: text that merely *looks* like UI chrome (for example a
-//! model writing "Allow? [y/n]") is shown as content; the real approval
-//! panel is drawn by the shell, not by content (see next_tools.rs).
+//! The matrix runs three variants: an approval pending (which hides the
+//! inspector), plain, and an error notice, which Next draws itself.
+//!
+//! Not covered here:
+//! - Frames Next hands to Classic (`delegates_to_classic`): slash and file
+//!   suggestions, the effort picker, the familiar switcher and other modals.
+//!   Classic draws them unchanged, including its transcript; tracked on #417.
+//! - Text that merely *looks* like UI chrome (a model writing "Allow?
+//!   [y/n]") is shown as content; the real approval panel is drawn by the
+//!   shell, not by content (see next_tools.rs).
+//! - Bidirectional overrides never reach a cell (ratatui drops zero-width
+//!   graphemes); they matter on the title path, where
+//!   `terminal_title_topic` drops them. Direction marks (U+200E/F, U+061C)
+//!   and line separators (U+2028/9) are not filtered.
 
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::coven_daemon::{MemoryOverview, MemoryPreview, MemorySummary};
 use claurst_core::tasks::BackgroundTask;
-use claurst_core::types::{ContentBlock, Message, ToolResultContent};
+use claurst_core::types::{ContentBlock, DocumentSource, ImageSource, Message, ToolResultContent};
 use claurst_tui::app::{App, ToolStatus, ToolUseBlock};
 use claurst_tui::application::memory::MemorySnapshot;
 use claurst_tui::application::UiRenderer;
@@ -44,20 +55,54 @@ const COLORS: [ColorMode; 4] = [
     ColorMode::TrueColor,
 ];
 
-fn hostile_app() -> App {
+/// Which overlay the frame carries: an approval takes the main pane and
+/// hides the inspector, so the matrix draws every variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Approval,
+    Plain,
+    ErrorNotice,
+}
+
+const VARIANTS: [Variant; 3] = [Variant::Approval, Variant::Plain, Variant::ErrorNotice];
+
+fn hostile_app(variant: Variant) -> App {
     let config = Config {
-        model: Some("claude-shell-model".to_string()),
+        model: Some(HOSTILE.to_string()),
         provider: Some("anthropic".to_string()),
-        project_dir: Some("/work/acme-api".into()),
+        project_dir: Some(format!("/work/acme-api{HOSTILE}").into()),
+        familiar: Some(HOSTILE.to_string()),
         ..Config::default()
     };
     let mut app = App::new(config, CostTracker::new());
     app.has_credentials = true;
     app.renderer = UiRenderer::Next;
     app.turn_start = None;
+    app.model_name = HOSTILE.to_string();
 
     app.messages = vec![
         Message::user(HOSTILE),
+        Message::user_blocks(vec![
+            ContentBlock::Image {
+                source: ImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: Some(HOSTILE.to_string()),
+                    data: None,
+                    url: None,
+                },
+            },
+            ContentBlock::Document {
+                source: DocumentSource {
+                    source_type: "base64".to_string(),
+                    media_type: Some(HOSTILE.to_string()),
+                    data: None,
+                    url: None,
+                },
+                title: Some(HOSTILE.to_string()),
+                context: None,
+                citations: None,
+            },
+        ]),
         Message::assistant(HOSTILE),
         Message::assistant_blocks(vec![
             ContentBlock::ToolUse {
@@ -97,18 +142,31 @@ fn hostile_app() -> App {
         output_preview: Some(HOSTILE.to_string()),
         input_json: json!({ "command": HOSTILE }).to_string(),
     }];
-    app.permission_request = Some(
-        PermissionRequest::bash(
-            "toolu_bash".to_string(),
-            "Bash".to_string(),
-            HOSTILE.to_string(),
-            HOSTILE.to_string(),
-            None,
-        )
-        .guarded(),
-    );
-    app.notifications
-        .push(NotificationKind::Warning, HOSTILE.to_string(), None);
+    if variant == Variant::Approval {
+        app.permission_request = Some(
+            PermissionRequest::bash(
+                "toolu_bash".to_string(),
+                "Bash".to_string(),
+                HOSTILE.to_string(),
+                HOSTILE.to_string(),
+                None,
+            )
+            .guarded(),
+        );
+    }
+    let kind = if variant == Variant::ErrorNotice {
+        NotificationKind::Error
+    } else {
+        NotificationKind::Warning
+    };
+    app.notifications.push(kind, HOSTILE.to_string(), None);
+    app.prompt_input
+        .pending_images
+        .push(claurst_tui::image_paste::PastedImage {
+            path: "/tmp/pasted.png".into(),
+            label: HOSTILE.to_string(),
+            dimensions: None,
+        });
     app.prompt_input.replace_text(HOSTILE.to_string());
     app.refresh_prompt_input();
 
@@ -181,30 +239,54 @@ fn pages() -> Vec<Option<InspectorPage>> {
 
 #[test]
 fn no_control_character_reaches_any_cell_on_any_page_size_color_or_glyph_set() {
-    let mut app = hostile_app();
     let mut renders = 0;
-    for glyphs in [Glyphs::Unicode, Glyphs::Ascii] {
-        for color in COLORS {
-            present(&mut app, color, glyphs);
-            for page in pages() {
-                app.next_shell.inspector = page;
-                for (width, height) in SIZES {
-                    let found = unsafe_cells(&draw(&app, width, height));
-                    assert!(
-                        found.is_empty(),
-                        "{page:?} {width}x{height} {color:?} {glyphs:?}: {found:?}"
-                    );
-                    renders += 1;
+    for variant in VARIANTS {
+        let mut app = hostile_app(variant);
+        for glyphs in [Glyphs::Unicode, Glyphs::Ascii] {
+            for color in COLORS {
+                present(&mut app, color, glyphs);
+                for page in pages() {
+                    app.next_shell.inspector = page;
+                    for (width, height) in SIZES {
+                        let found = unsafe_cells(&draw(&app, width, height));
+                        assert!(
+                            found.is_empty(),
+                            "{variant:?} {page:?} {width}x{height} {color:?} {glyphs:?}: {found:?}"
+                        );
+                        renders += 1;
+                    }
                 }
             }
         }
     }
-    assert_eq!(renders, 2 * 4 * 7 * 6, "every combination was drawn");
+    assert_eq!(renders, 3 * 2 * 4 * 7 * 6, "every combination was drawn");
+}
+
+#[test]
+fn without_an_approval_every_page_draws_its_own_content() {
+    // Guards the matrix: a pending approval hides the inspector, so the
+    // plain variant must really reach each page.
+    let mut app = hostile_app(Variant::Plain);
+    present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+    for (width, height) in SIZES.into_iter().filter(|(w, h)| *w >= 40 && *h >= 12) {
+        app.next_shell.inspector = None;
+        let base = draw(&app, width, height);
+        let mut seen = vec![base.clone()];
+        for page in InspectorPage::ALL {
+            app.next_shell.inspector = Some(page);
+            let buffer = draw(&app, width, height);
+            assert!(
+                !seen.contains(&buffer),
+                "{page:?} at {width}x{height} drew the same frame as another page"
+            );
+            seen.push(buffer);
+        }
+    }
 }
 
 #[test]
 fn hostile_sequences_are_shown_as_inert_text() {
-    let mut app = hostile_app();
+    let mut app = hostile_app(Variant::Plain);
     present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
     let buffer = draw(&app, 180, 50);
     let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
@@ -216,8 +298,9 @@ fn hostile_sequences_are_shown_as_inert_text() {
 
 #[test]
 fn the_way_back_stays_visible_on_every_page_from_40x12_up() {
-    let mut app = hostile_app();
-    app.permission_request = None;
+    let mut app = hostile_app(Variant::Plain);
+    // No toast, so its own "Esc" cannot satisfy the check.
+    app.notifications = Default::default();
     for color in COLORS {
         present(&mut app, color, Glyphs::Ascii);
         for page in InspectorPage::ALL {
@@ -237,37 +320,41 @@ fn the_way_back_stays_visible_on_every_page_from_40x12_up() {
 #[test]
 fn no_color_mode_draws_no_color_on_any_page() {
     use ratatui::style::Color;
-    let mut app = hostile_app();
-    present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
-    for page in pages() {
-        app.next_shell.inspector = page;
-        for (width, height) in SIZES {
-            let buffer = draw(&app, width, height);
-            let colored: Vec<_> = buffer
-                .content
-                .iter()
-                .enumerate()
-                .filter(|(_, cell)| cell.fg != Color::Reset || cell.bg != Color::Reset)
-                .map(|(index, cell)| {
-                    (
-                        index % usize::from(width),
-                        index / usize::from(width),
-                        cell.fg,
-                        cell.bg,
-                    )
-                })
-                .take(4)
-                .collect();
-            assert!(colored.is_empty(), "{page:?} {width}x{height}: {colored:?}");
+    for variant in VARIANTS {
+        let mut app = hostile_app(variant);
+        present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+        for page in pages() {
+            app.next_shell.inspector = page;
+            for (width, height) in SIZES {
+                let buffer = draw(&app, width, height);
+                let colored: Vec<_> = buffer
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, cell)| cell.fg != Color::Reset || cell.bg != Color::Reset)
+                    .map(|(index, cell)| {
+                        (
+                            index % usize::from(width),
+                            index / usize::from(width),
+                            cell.fg,
+                            cell.bg,
+                        )
+                    })
+                    .take(4)
+                    .collect();
+                assert!(
+                    colored.is_empty(),
+                    "{variant:?} {page:?} {width}x{height}: {colored:?}"
+                );
+            }
         }
     }
 }
 
 #[test]
 fn the_next_toast_shows_kind_text_and_the_way_to_dismiss_it() {
-    let mut app = hostile_app();
+    let mut app = hostile_app(Variant::Plain);
     app.notifications = Default::default();
-    app.permission_request = None;
     app.notifications.push(
         NotificationKind::Warning,
         "Disk almost full".to_string(),
@@ -293,4 +380,60 @@ fn the_terminal_title_topic_carries_no_control_characters_in_next() {
         claurst_tui::terminal_title_topic(UiRenderer::Classic, hostile),
         hostile
     );
+}
+
+#[test]
+fn a_toast_never_covers_the_approval_or_the_inspector_title() {
+    let mut app = hostile_app(Variant::Approval);
+    app.notifications = Default::default();
+    app.notifications.push(
+        NotificationKind::Info,
+        "Image attached: cat.png".to_string(),
+        None,
+    );
+    present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+    for (width, height) in [(40, 12), (60, 20), (120, 40)] {
+        let text = text_of(&draw(&app, width, height));
+        assert!(text.contains("Approve"), "{width}x{height}:\n{text}");
+    }
+    app.permission_request = None;
+    app.next_shell.inspector = Some(InspectorPage::Activity);
+    for (width, height) in [(40, 12), (120, 40)] {
+        let text = text_of(&draw(&app, width, height));
+        // The inspector title row ("- Activity" in ASCII) stays whole; in
+        // Split the toast may share the row, but only left of the inspector.
+        let row = text
+            .lines()
+            .find(|line| line.contains("- Activity"))
+            .unwrap_or_else(|| panic!("{width}x{height} title lost:\n{text}"));
+        if let Some(toast) = row.find("cat.png") {
+            assert!(toast < row.find("- Activity").unwrap(), "{row}");
+        }
+    }
+}
+
+#[test]
+fn an_error_notice_is_drawn_by_next_with_its_text_and_the_way_to_dismiss_it() {
+    let mut app = hostile_app(Variant::Plain);
+    app.notifications = Default::default();
+    app.notifications.push(
+        NotificationKind::Error,
+        "API error: overloaded, retry later".to_string(),
+        None,
+    );
+    assert!(!claurst_tui::next::delegates_to_classic(&app));
+    present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+    let text = text_of(&draw(&app, 80, 24));
+    assert!(text.contains("overloaded"), "{text}");
+    assert!(text.contains("Esc"), "{text}");
+}
+
+fn text_of(buffer: &Buffer) -> String {
+    let width = usize::from(buffer.area.width.max(1));
+    buffer
+        .content
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

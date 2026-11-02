@@ -20,7 +20,7 @@ _hostile_fake_claude() {
 # Fake `claude`: one answer full of terminal control sequences.
 cat >/dev/null &
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake","model":"fake-model"}'
-printf '%s\n' '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"hostile-begin \u001b]52;c;cHduZWQ=\u0007 \u001b]0;PWNED-TITLE\u0007 \u001b]8;;https://evil.example\u001b\\link\u001b]8;;\u001b\\ \u001b[2J\u001b[H \u009b31m \u009d52;c;eA\u009c hostile-end"}]}}'
+printf '%s\n' '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"hostile-begin \u001b]52;c;TU9ERUwtT1NDNTI=\u0007 \u001b]0;PWNED-TITLE\u0007 \u001b]8;;https://evil.example\u001b\\link\u001b]8;;\u001b\\ \u001b[2J\u001b[H \u009b31m \u009d52;c;eA\u009c hostile-end"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":1}}'
 FAKE
   chmod +x "$1"
@@ -67,7 +67,9 @@ tc_next_hostile_output() {
       s="$(tui_capture)"
       assert_contains "$s" "acme-hostile" "a screen clear in output does not wipe the shell"
       assert_contains "$s" "show me" "earlier transcript content survives"
-      assert_contains "$s" "^[]52;c;" "the clipboard write is shown as text"
+      assert_contains "$s" "^[]52;c;TU9ERUwtT1NDNTI=" "the model's clipboard write is shown as text"
+      assert_contains "$s" "^[]8;;https://evil.example" "the model's hyperlink is shown as text"
+      assert_absent "$s" "PWNED-TITLE"$'\a' "no raw BEL from the model's title sequence"
       assert_contains "$s" "^[[2J" "the screen clear is shown as text"
 
       local title_after buffers_after

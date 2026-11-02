@@ -123,7 +123,6 @@ pub fn delegates_to_classic(app: &App) -> bool {
     app.modal_open_besides_permission()
         || app.familiar_switcher_open
         || app.effort_picker.visible
-        || app.notifications.current_is_error()
         || !app.prompt_input.suggestions.is_empty()
 }
 
@@ -420,20 +419,65 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         }
     }
 
-    render_toast(frame, app, area);
+    // An error notice is modal (Esc dismisses it in either renderer); other
+    // notices never cover a pending approval.
+    if app.notifications.current_is_error() {
+        render_error_panel(frame, app, area, layout.composer);
+    } else if approval.is_none() {
+        render_toast(frame, app, layout.transcript);
+    }
 }
 
-/// The current notification as one Next row at the top right, in the
-/// selected color mode. Its text can quote tool or model output, so it is
-/// made inert. Classic keeps its own banner.
-fn render_toast(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::notifications::NotificationKind;
-
+/// The current error notice, drawn by Next over the composer. Its text can
+/// quote provider or tool output, so it is made inert and wrapped.
+fn render_error_panel(frame: &mut Frame, app: &App, area: Rect, composer: Rect) {
     let Some(notification) = app.notifications.current() else {
         return;
     };
     let appearance = &app.next_presentation.appearance;
-    let width = 52u16.min(area.width.saturating_sub(4));
+    let width = usize::from(area.width.max(1));
+    let mut lines = wrap_line(
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "error",
+            &safe_one_line(&notification.message),
+        ),
+        width,
+    );
+    let max_rows = usize::from((area.height / 2).max(2)) - 1;
+    lines.truncate(max_rows);
+    lines.push(Line::from(Span::styled(
+        "Esc dismiss".to_string(),
+        appearance.style(Role::TextSubtle),
+    )));
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let bottom = (composer.y + composer.height).min(area.y + area.height);
+    let panel = Rect {
+        x: area.x,
+        y: bottom.saturating_sub(height).max(area.y),
+        width: area.width,
+        height,
+    };
+    frame.render_widget(Clear, panel);
+    frame.render_widget(Paragraph::new(lines), panel);
+}
+
+/// The current notification as one Next row at the top right of the
+/// transcript, in the selected color mode, so it never covers the header,
+/// an approval or the inspector. Its text can quote tool or model output, so
+/// it is made inert. When the inspector replaces the transcript the notice
+/// waits. Classic keeps its own banner.
+fn render_toast(frame: &mut Frame, app: &App, transcript: Option<Rect>) {
+    use crate::notifications::NotificationKind;
+
+    let (Some(notification), Some(area)) = (app.notifications.current(), transcript) else {
+        return;
+    };
+    let appearance = &app.next_presentation.appearance;
+    let width = 52u16.min(area.width.saturating_sub(2));
     if width < 20 || area.height < 2 {
         return;
     }
@@ -455,17 +499,22 @@ fn render_toast(frame: &mut Frame, app: &App, area: Rect) {
         word,
         &safe_one_line(&notification.message),
     );
-    let mut line = wrap_line(message, text_width.max(1))
-        .into_iter()
-        .next()
-        .unwrap_or_default();
+    let mut rows = wrap_line(message, text_width.saturating_sub(1).max(1));
+    let cut = rows.len() > 1;
+    let mut line = rows.drain(..).next().unwrap_or_default();
+    if cut {
+        line.spans.push(Span::styled(
+            "…".to_string(),
+            appearance.style(Role::TextSubtle),
+        ));
+    }
     line.spans.push(Span::styled(
         hint.to_string(),
         appearance.style(Role::TextSubtle),
     ));
     let toast = Rect {
-        x: area.x + area.width.saturating_sub(width + 2),
-        y: area.y + 1,
+        x: area.x + area.width.saturating_sub(width + 1),
+        y: area.y,
         width,
         height: 1,
     };
@@ -989,10 +1038,12 @@ fn render_inspector(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// A labelled value. Values can come from config, stored sessions or tools,
+/// so every one is made inert here; already-safe text is unchanged.
 fn field(appearance: &Appearance, name: &str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{name:<12}"), appearance.style(Role::TextMuted)),
-        Span::styled(value, appearance.style(Role::Text)),
+        Span::styled(safe_one_line(&value), appearance.style(Role::Text)),
     ])
 }
 
