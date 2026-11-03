@@ -2,8 +2,10 @@
 //! only. A 100,000-line answer, a 10,000-line diff-shaped tool result and
 //! binary tool output must render at every size without panicking, keep
 //! cells inert, keep the composer and the way back visible, and scroll to
-//! both ends. Timing targets belong to the performance harness (#425); the
-//! elapsed time printed here is an observation, not a gate.
+//! both ends. Rows are kept between frames (#439), so the same tests check a
+//! kept row never outlives the content it was built from. Timing targets
+//! belong to the performance harness (#425); the elapsed time printed here
+//! is an observation, not a gate.
 
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
@@ -178,4 +180,92 @@ fn observation_frame_cost_against_transcript_length() {
         times.push((lines, started.elapsed() / 3));
     }
     eprintln!("observation: frame cost by answer length {times:?}");
+}
+
+#[test]
+fn jump_to_start_reaches_the_first_row_and_keeps_scrolling_working() {
+    let mut app = workload_app();
+    draw(&app, 80, 24);
+    let alt = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+    app.handle_key_event(alt('g'));
+    let top = text_of(&draw(&app, 80, 24));
+    app.settle_scroll_anchor();
+    assert!(top.contains("first question"), "start:\n{top}");
+    assert!(top.contains("answer line 000001"), "{top}");
+    assert!(!app.auto_scroll);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    let lower = text_of(&draw(&app, 80, 24));
+    app.settle_scroll_anchor();
+    assert!(
+        !lower.contains("first question"),
+        "PageDown moves at once:\n{lower}"
+    );
+
+    app.handle_key_event(alt('l'));
+    let live = text_of(&draw(&app, 80, 24));
+    assert!(live.contains("final words"), "live:\n{live}");
+}
+
+/// A frame drawn after any change must match one drawn from scratch.
+#[test]
+fn kept_rows_never_outlive_what_they_were_built_from() {
+    fn small() -> App {
+        let mut app = workload_app();
+        app.messages = vec![
+            Message::user("alpha question"),
+            Message::assistant("bravo answer"),
+            Message::assistant("charlie notes"),
+        ];
+        app
+    }
+    fn same_as_fresh(app: &App, messages: &[Message], width: u16, step: &str) {
+        let mut fresh = small();
+        fresh.messages = messages.to_vec();
+        fresh.next_presentation = app.next_presentation.clone();
+        assert_eq!(
+            text_of(&draw(app, width, 24)),
+            text_of(&draw(&fresh, width, 24)),
+            "{step}"
+        );
+    }
+
+    let mut app = small();
+    draw(&app, 80, 24);
+
+    // Same length and position, different text.
+    app.messages[1] = Message::assistant("bravo ANSWER");
+    let frame = text_of(&draw(&app, 80, 24));
+    assert!(frame.contains("bravo ANSWER"), "{frame}");
+    assert!(!frame.contains("bravo answer"), "{frame}");
+    same_as_fresh(&app, &app.messages.clone(), 80, "replaced");
+
+    app.messages.truncate(1);
+    let frame = text_of(&draw(&app, 80, 24));
+    assert!(!frame.contains("bravo"), "truncated:\n{frame}");
+    same_as_fresh(&app, &app.messages.clone(), 80, "truncated");
+
+    app.messages.clear();
+    app.messages.push(Message::user("delta question"));
+    let frame = text_of(&draw(&app, 80, 24));
+    assert!(!frame.contains("alpha"), "cleared:\n{frame}");
+    same_as_fresh(&app, &app.messages.clone(), 80, "cleared");
+
+    // A narrower pane rewraps kept rows.
+    app.messages.push(Message::assistant(
+        "echo ".repeat(30).trim_end().to_string(),
+    ));
+    draw(&app, 80, 24);
+    same_as_fresh(&app, &app.messages.clone(), 30, "rewrapped");
+
+    // A density change alters the rows themselves.
+    let before = text_of(&draw(&app, 80, 24));
+    app.next_presentation.density = match app.next_presentation.density {
+        claurst_core::appearance::Density::Comfortable => {
+            claurst_core::appearance::Density::Compact
+        }
+        _ => claurst_core::appearance::Density::Comfortable,
+    };
+    assert_ne!(before, text_of(&draw(&app, 80, 24)), "density");
+    same_as_fresh(&app, &app.messages.clone(), 80, "density");
 }

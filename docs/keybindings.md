@@ -77,6 +77,7 @@ These bindings are active when focus is in the chat input field.
 | `Ctrl+Shift+.` | jumpToPreviousError | Jump to previous error / issue |
 | `Alt+I` | toggleInspector | Next renderer only: open or close the inspector |
 | `Alt+L` | jumpToLive | Next renderer only: return a scrolled transcript to live output |
+| `Alt+G` | jumpToStart | Next renderer only: go to the start of the transcript |
 
 > `Ctrl+A` previously opened the model picker; it now moves the cursor to the line start (matching Emacs/readline). The model picker is now `Ctrl+Shift+A`. Old `keybindings.json` files are auto-migrated.
 
@@ -101,7 +102,7 @@ In the Next renderer (`COVEN_CODE_UI=next`), a tool permission request opens wit
 Active while the Next renderer's inspector is open (`COVEN_CODE_UI=next`). It
 is layered over the chat context: keys it does not bind keep their chat
 meaning, so the draft stays editable and `Enter` still submits. Classic leaves
-the `Alt+I` and `Alt+L` chords unbound.
+the `Alt+I`, `Alt+L` and `Alt+G` chords unbound.
 
 | Key | Action | Description |
 |-----|--------|-------------|

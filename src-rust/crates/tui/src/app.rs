@@ -6050,6 +6050,10 @@ impl App {
                 self.scroll_offset = 0;
                 self.new_messages_while_scrolled = 0;
             }
+            if action == "jumpToStart" {
+                self.auto_scroll = false;
+                self.scroll_offset = self.next_shell.measured_rows();
+            }
             self.next_shell.apply_action(action);
             return false;
         }

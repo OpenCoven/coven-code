@@ -19,16 +19,19 @@ pub mod primitives;
 pub mod style;
 
 use crate::app::App;
-use crate::application::view::{EntryRole, ToolActivity, ToolActivityState, TranscriptView};
+use crate::application::view::{
+    EntryRole, EntrySource, ToolActivity, ToolActivityState, TranscriptEntry, TranscriptView,
+};
 use crate::application::TurnCancellation;
 use claurst_core::appearance::Density;
 use claurst_core::keybindings::{KeyContext, KeybindingResolver, UserKeybindings};
+use claurst_core::types::Message;
 use primitives::Status;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use style::{Appearance, Role};
 
 /// Header text after the identity mark; the canonical mark is SVG-only, so
@@ -186,6 +189,7 @@ pub const NEXT_ONLY_ACTIONS: &[&str] = &[
     "scrollInspectorUp",
     "scrollInspectorDown",
     "jumpToLive",
+    "jumpToStart",
 ];
 
 const INSPECTOR_SCROLL_STEP: usize = 5;
@@ -212,6 +216,75 @@ pub struct ShellState {
     /// Largest useful `inspector_scroll` for the last drawn page.
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
+    transcript_rows: RefCell<TranscriptRows>,
+}
+
+/// Wrapped rows of the committed messages, kept between frames so a frame's
+/// cost follows the visible rows rather than the length of the conversation.
+///
+/// Each message is rebuilt when the content it is shown from changes. That is
+/// checked by comparing content, not through a change counter: `App::messages`
+/// is written from many places, and a missed signal would show stale text.
+#[derive(Debug, Default)]
+struct TranscriptRows {
+    layout: Option<(usize, Appearance, Density)>,
+    messages: Vec<(EntrySource, Vec<Line<'static>>)>,
+    total: usize,
+}
+
+impl TranscriptRows {
+    fn sync(&mut self, messages: &[Message], presentation: &NextPresentation, width: usize) {
+        let layout = (width, presentation.appearance, presentation.density);
+        if self.layout != Some(layout) {
+            self.layout = Some(layout);
+            self.messages.clear();
+        }
+        self.messages.truncate(messages.len());
+        for (index, message) in messages.iter().enumerate() {
+            let source = EntrySource::of(message);
+            match self.messages.get_mut(index) {
+                Some((cached, _)) if *cached == source => {}
+                slot => {
+                    let rows = source
+                        .project()
+                        .map(|entry| entry_lines(presentation, &entry))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .flat_map(|line| wrap_line(line, width))
+                        .collect();
+                    match slot {
+                        Some(cached) => *cached = (source, rows),
+                        None => self.messages.push((source, rows)),
+                    }
+                }
+            }
+        }
+        self.total = self.messages.iter().map(|(_, rows)| rows.len()).sum();
+    }
+
+    /// Up to `count` rows from row `start`, continuing into `tail`.
+    fn visible(&self, tail: &[Line<'static>], start: usize, count: usize) -> Vec<Line<'static>> {
+        let mut skip = start;
+        let mut lines = Vec::with_capacity(count);
+        let groups = self
+            .messages
+            .iter()
+            .map(|(_, rows)| rows.as_slice())
+            .chain(std::iter::once(tail));
+        for rows in groups {
+            if lines.len() == count {
+                break;
+            }
+            if skip >= rows.len() {
+                skip -= rows.len();
+                continue;
+            }
+            let wanted = count - lines.len();
+            lines.extend(rows[skip..].iter().take(wanted).cloned());
+            skip = 0;
+        }
+        lines
+    }
 }
 
 impl ShellState {
@@ -245,8 +318,19 @@ impl ShellState {
                     .min(self.inspector_scroll_max.get());
             }
             "jumpToLive" => self.anchor.set(ReadingAnchor::default()),
+            "jumpToStart" => {
+                let mut anchor = self.anchor.get();
+                anchor.unsettled = 0;
+                self.anchor.set(anchor);
+            }
             _ => {}
         }
+    }
+
+    /// Transcript rows in the last drawn frame. As a scroll offset, this is
+    /// past the first row, so the next frame clamps it to the start.
+    pub(crate) fn measured_rows(&self) -> usize {
+        self.anchor.get().total
     }
 
     /// Signed row correction the loop adds to `App::scroll_offset`.
@@ -321,7 +405,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
 
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
-    let view = TranscriptView::project(app);
+    let view = TranscriptView::project_without_history(app);
     let area = frame.area();
     let width = usize::from(area.width.max(1));
 
@@ -618,44 +702,58 @@ fn workspace_line(appearance: &Appearance, app: &App, width: u16) -> Line<'stati
     line
 }
 
-fn transcript_lines(presentation: &NextPresentation, view: &TranscriptView) -> Vec<Line<'static>> {
+/// Rows of one committed message, before wrapping.
+fn entry_lines(presentation: &NextPresentation, entry: &TranscriptEntry) -> Vec<Line<'static>> {
     let appearance = &presentation.appearance;
-    let text = |content: &str| {
-        Line::from(Span::styled(
-            content.to_string(),
-            appearance.style(Role::Text),
-        ))
-    };
-    let mut lines = Vec::new();
-    for entry in &view.entries {
-        lines.push(primitives::transcript_label(
-            appearance,
-            match entry.role {
-                EntryRole::User => "you",
-                EntryRole::Assistant => "coven",
-            },
-        ));
-        lines.extend(entry.text.lines().map(text));
-        lines.extend(entry.attachments.iter().map(|label| {
-            Line::from(Span::styled(
-                label.clone(),
-                appearance.style(Role::Evidence),
-            ))
-        }));
-        if presentation.density == Density::Comfortable {
-            lines.push(Line::default());
-        }
-    }
+    let mut lines = vec![primitives::transcript_label(
+        appearance,
+        match entry.role {
+            EntryRole::User => "you",
+            EntryRole::Assistant => "coven",
+        },
+    )];
     lines.extend(
-        view.tools
-            .iter()
-            .map(|tool| tool_line(appearance, tool, false)),
+        entry
+            .text
+            .lines()
+            .map(|content| text_line(appearance, content)),
     );
-    if !view.live_text.is_empty() {
-        lines.push(primitives::transcript_label(appearance, "coven"));
-        lines.extend(view.live_text.lines().map(text));
+    lines.extend(entry.attachments.iter().map(|label| {
+        Line::from(Span::styled(
+            label.clone(),
+            appearance.style(Role::Evidence),
+        ))
+    }));
+    if presentation.density == Density::Comfortable {
+        lines.push(Line::default());
     }
     lines
+}
+
+/// Rows below the committed messages, which change while a turn runs.
+fn live_lines(presentation: &NextPresentation, view: &TranscriptView) -> Vec<Line<'static>> {
+    let appearance = &presentation.appearance;
+    let mut lines: Vec<Line<'static>> = view
+        .tools
+        .iter()
+        .map(|tool| tool_line(appearance, tool, false))
+        .collect();
+    if !view.live_text.is_empty() {
+        lines.push(primitives::transcript_label(appearance, "coven"));
+        lines.extend(
+            view.live_text
+                .lines()
+                .map(|content| text_line(appearance, content)),
+        );
+    }
+    lines
+}
+
+fn text_line(appearance: &Appearance, content: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        content.to_string(),
+        appearance.style(Role::Text),
+    ))
 }
 
 /// Completion is not verification: a finished tool is neutral evidence.
@@ -904,22 +1002,23 @@ fn render_transcript(frame: &mut Frame, app: &App, view: &TranscriptView, area: 
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
     let width = usize::from(area.width.max(1));
-    let mut lines: Vec<Line<'static>> = transcript_lines(presentation, view)
+    let live: Vec<Line<'static>> = live_lines(presentation, view)
         .into_iter()
         .flat_map(|line| wrap_line(line, width))
         .collect();
+    let mut rows = app.next_shell.transcript_rows.borrow_mut();
+    rows.sync(&app.messages, presentation, width);
     // A scrolled reader gets a notice row at the bottom of the pane.
     let notice_rows = usize::from(!app.auto_scroll && area.height > 1);
     let height = usize::from(area.height).saturating_sub(notice_rows);
     let (start, unseen) = app.next_shell.window(
-        lines.len(),
+        rows.total + live.len(),
         height,
         area.width,
         app.auto_scroll,
         app.scroll_offset,
     );
-    lines.drain(..start);
-    lines.truncate(height);
+    let mut lines = rows.visible(&live, start, height);
     if notice_rows > 0 {
         lines.resize(height, Line::default());
         let jump = app
@@ -1714,5 +1813,67 @@ mod tests {
         );
         // A character wider than the whole width still gets its own row.
         assert_eq!(wrap_line(Line::from("漢字"), 1).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod transcript_rows_tests {
+    use super::*;
+
+    fn first_row_address(rows: &TranscriptRows, index: usize) -> *const Line<'static> {
+        rows.messages[index].1.as_ptr()
+    }
+
+    #[test]
+    fn only_a_changed_message_is_rebuilt() {
+        let presentation = NextPresentation::default();
+        let mut messages = vec![
+            Message::user("first"),
+            Message::assistant("second"),
+            Message::assistant("third"),
+        ];
+        let mut rows = TranscriptRows::default();
+        rows.sync(&messages, &presentation, 40);
+        let kept = [
+            first_row_address(&rows, 0),
+            first_row_address(&rows, 1),
+            first_row_address(&rows, 2),
+        ];
+
+        rows.sync(&messages, &presentation, 40);
+        assert_eq!(first_row_address(&rows, 0), kept[0]);
+        assert_eq!(first_row_address(&rows, 1), kept[1]);
+        assert_eq!(first_row_address(&rows, 2), kept[2]);
+
+        messages[1] = Message::assistant("SECOND");
+        rows.sync(&messages, &presentation, 40);
+        assert_eq!(first_row_address(&rows, 0), kept[0]);
+        assert_eq!(first_row_address(&rows, 2), kept[2]);
+        let text: String = rows.messages[1]
+            .1
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(text.contains("SECOND"), "{text}");
+
+        rows.sync(&messages, &presentation, 20);
+        let total = rows.total;
+        assert!(total > 0);
+        assert_eq!(rows.visible(&[], total, 5).len(), 0);
+    }
+
+    #[test]
+    fn visible_rows_cross_messages_and_reach_the_live_rows() {
+        let presentation = NextPresentation::default();
+        let messages = vec![Message::user("one"), Message::assistant("two")];
+        let mut rows = TranscriptRows::default();
+        rows.sync(&messages, &presentation, 40);
+        let live = vec![Line::from("live")];
+        let all = rows.visible(&live, 0, rows.total + 1);
+        assert_eq!(all.len(), rows.total + 1);
+        assert_eq!(all.last().map(ToString::to_string).as_deref(), Some("live"));
+        let last = rows.visible(&live, rows.total, 10);
+        assert_eq!(last.len(), 1);
+        assert_eq!(rows.visible(&live, 1, 2).len(), 2);
     }
 }
