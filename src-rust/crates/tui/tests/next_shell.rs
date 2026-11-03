@@ -639,3 +639,14 @@ fn inspector_scrolling_is_bounded_and_voice_recording_is_visible() {
     let text = text_of(&draw(&voice, 80, 24).0);
     assert!(text.contains("recording voice"), "{text}");
 }
+
+#[test]
+fn switching_sessions_drops_work_read_for_the_old_one() {
+    let mut app = next_app();
+    app.enter_session_scope("session-a");
+    app.work_sources.goal = Some(Err("read for session-a".into()));
+    app.enter_session_scope("session-a");
+    assert!(app.work_sources.goal.is_some(), "same session keeps it");
+    app.enter_session_scope("session-b");
+    assert!(app.work_sources.goal.is_none());
+}
