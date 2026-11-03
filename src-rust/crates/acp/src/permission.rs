@@ -47,6 +47,7 @@ pub async fn forward_pending(
 ) {
     let PendingPermissionRequest {
         tool_use_id,
+        call_id: _,
         request,
         reason,
         decision_tx,
@@ -345,6 +346,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         store.lock().queue.push_back(PendingPermissionRequest {
             tool_use_id: id.into(),
+            call_id: None,
             request: permission_request("Bash", "fixture", None, None, false),
             reason: "fixture".into(),
             decision_tx: Some(tx),

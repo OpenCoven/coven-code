@@ -92,6 +92,8 @@ These bindings are active when Coven Code is displaying a yes/no confirmation pr
 | `Enter` | defaultAction | Accept the highlighted default option |
 | `Escape` | cancel | Cancel the prompt and deny the action |
 
+In the Next renderer (`COVEN_CODE_UI=next`), a tool permission request opens with **No, deny** highlighted, so `Enter` on a new request denies. Keys other than `Escape` are ignored until 400 ms pass with no key pressed. Each ignored key restarts that wait, so typing meant for the prompt or a held key cannot approve a request. `Escape` always denies immediately.
+
 ---
 
 ### Inspector Context (Next renderer)

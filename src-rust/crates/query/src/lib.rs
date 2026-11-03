@@ -3961,9 +3961,10 @@ async fn execute_tool_blocks_with_hooks(
             } else {
                 let name = p.name.clone();
                 let input = p.input.clone();
-                futures::future::Either::Right(async move {
+                let call_id = p.id.clone();
+                futures::future::Either::Right(claurst_tools::with_tool_call(call_id, async move {
                     execute_tool(&name, &input, tools, tool_ctx).await
-                })
+                }))
             }
         })
         .collect();

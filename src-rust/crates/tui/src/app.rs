@@ -675,6 +675,11 @@ pub struct App {
     pub next_shell: crate::next::ShellState,
     /// A user request to cancel the running turn, until the runtime settles it.
     pub cancellation: crate::application::TurnCancellation,
+    /// Permission decisions by tool use id (true = allowed).
+    pub permission_decisions: std::collections::HashMap<String, bool>,
+    /// Tool rows of a cancelled turn, kept as evidence until the next user
+    /// turn; the live list is cleared on cancel.
+    pub interrupted_tools: Vec<ToolUseBlock>,
     // CLI control-key routing and the normal UI handler resolve each event once.
     resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
@@ -1261,6 +1266,8 @@ impl App {
             renderer: crate::application::UiRenderer::default(),
             next_shell: crate::next::ShellState::default(),
             cancellation: crate::application::TurnCancellation::default(),
+            permission_decisions: std::collections::HashMap::new(),
+            interrupted_tools: Vec::new(),
             resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,
@@ -1665,6 +1672,10 @@ impl App {
     }
 
     fn begin_user_turn_snapshot(&mut self) {
+        // A new turn replaces the previous turn's interruption evidence, and
+        // decisions are kept only while their tool row is still shown.
+        self.interrupted_tools.clear();
+        self.prune_permission_decisions();
         self.turn_metadata.push(TurnMetadata {
             submitted_at: Some(format_turn_time_label()),
             model_name: Some(self.model_name.clone()),
@@ -2304,6 +2315,8 @@ impl App {
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
                 self.tool_use_blocks.clear();
+                self.interrupted_tools.clear();
+                self.permission_decisions.clear();
                 self.turn_metadata.clear();
                 self.cost_usd = 0.0;
                 self.invalidate_transcript();
@@ -2577,8 +2590,20 @@ impl App {
     /// (overage / voice / memory), which render as overlays but let the user
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
+        self.permission_request.is_some() || self.blocking_surface_open_besides_permission()
+    }
+
+    /// Like [`Self::any_modal_open`] but ignoring a pending permission
+    /// request, for renderers that draw the request themselves.
+    pub fn modal_open_besides_permission(&self) -> bool {
+        self.blocking_surface_open_besides_permission()
+            || self.overage_upsell.visible
+            || self.voice_mode_notice.visible
+            || self.memory_update_notification.visible
+    }
+
+    fn blocking_surface_open_besides_permission(&self) -> bool {
         self.response_reader.visible
-            || self.permission_request.is_some()
             || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2869,6 +2894,10 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        // Resume, rewind and clear replace the conversation; interruption
+        // evidence from the old one no longer describes what is shown.
+        self.interrupted_tools.clear();
+        self.prune_permission_decisions();
 
         let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
             self.messages
@@ -3176,6 +3205,39 @@ impl App {
         }
         self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
         true
+    }
+
+    /// Remember the user's decision for a tool call so presentation can
+    /// show authorization separately from the execution result.
+    pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
+        self.permission_decisions
+            .insert(tool_use_id.to_string(), allowed);
+    }
+
+    fn prune_permission_decisions(&mut self) {
+        let shown: std::collections::HashSet<&str> = self
+            .tool_use_blocks
+            .iter()
+            .chain(&self.interrupted_tools)
+            .map(|block| block.id.as_str())
+            .collect();
+        self.permission_decisions
+            .retain(|id, _| shown.contains(id.as_str()));
+    }
+
+    /// Clear the live tool rows of a turn being cancelled, keeping the ones
+    /// still running as evidence of what the cancel interrupted.
+    pub fn interrupt_tool_rows(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic clears its tool rows on cancel, as it always has.
+            self.tool_use_blocks.clear();
+            return;
+        }
+        let running = self
+            .tool_use_blocks
+            .drain(..)
+            .filter(|block| block.status == ToolStatus::Running);
+        self.interrupted_tools.extend(running);
     }
 
     /// Record a cancellation the loop performed without a key request
@@ -5166,7 +5228,7 @@ impl App {
                 self.spinner_verb = None;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
-                self.tool_use_blocks.clear();
+                self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
                 self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(true);
@@ -5199,7 +5261,7 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
                     self.request_turn_cancellation();
                     self.complete_current_turn_snapshot(true);
@@ -5990,7 +6052,7 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
                     self.request_turn_cancellation();
                 } else {
@@ -7350,6 +7412,16 @@ impl App {
                     .collect::<Vec<_>>()
                     .join("\n"),
             };
+            // A cancelled call's closing result belongs to its interrupted
+            // row; it must not reappear as a second, failed card.
+            if let Some(row) = self
+                .interrupted_tools
+                .iter_mut()
+                .find(|row| row.id == tool_use_id)
+            {
+                row.output_preview = Some(Self::tool_result_preview(&result));
+                continue;
+            }
             let existing = self
                 .tool_use_blocks
                 .iter()

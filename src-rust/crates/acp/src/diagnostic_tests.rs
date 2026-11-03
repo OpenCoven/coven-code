@@ -204,6 +204,7 @@ async fn permission_reply(reply: Value) -> PermissionDecision {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let pending = PendingPermissionRequest {
         tool_use_id: "fixture-tool".into(),
+        call_id: None,
         reason: "fixture approval".into(),
         decision_tx: Some(tx),
         request: PermissionRequest {
@@ -309,6 +310,7 @@ fn permission_io_error_is_denied_without_logging_error_contents() {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let pending = PendingPermissionRequest {
             tool_use_id: "fixture-tool".into(),
+            call_id: None,
             reason: "fixture approval".into(),
             decision_tx: Some(tx),
             request: PermissionRequest {
