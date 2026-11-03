@@ -667,6 +667,8 @@ pub struct App {
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub keybindings: KeybindingResolver,
+    /// Presentation preferences for the Next renderer; Classic ignores them.
+    pub next_presentation: crate::next::NextPresentation,
     // CLI control-key routing and the normal UI handler resolve each event once.
     resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
@@ -1249,6 +1251,7 @@ impl App {
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
+            next_presentation: crate::next::NextPresentation::default(),
             resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,

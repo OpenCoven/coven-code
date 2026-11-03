@@ -125,7 +125,7 @@ fn both_renderers_show_the_projected_transcript_and_live_output() {
     }
     let next = draw(&app, UiRenderer::Next, 120, 40);
     assert!(next.contains(claurst_tui::next::PREVIEW_LABEL), "{next}");
-    assert!(next.contains("[tool done] Read"), "{next}");
+    assert!(next.contains("▸ Read ○ done"), "{next}");
 }
 
 fn bash_request(id: &str) -> PermissionRequest {
