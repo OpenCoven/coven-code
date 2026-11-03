@@ -675,6 +675,16 @@ pub struct App {
     pub next_shell: crate::next::ShellState,
     /// A user request to cancel the running turn, until the runtime settles it.
     pub cancellation: crate::application::TurnCancellation,
+    /// The engine session shown, when the loop has bound one.
+    pub session_id: Option<String>,
+    /// Who owns this session's execution, as far as a producer has shown.
+    pub ownership: crate::application::SessionOwnership,
+    /// Drafts and reading positions of sessions not currently shown.
+    pub scope_views: std::collections::HashMap<String, crate::application::ScopeView>,
+    /// A session the browser asked to resume; the loop performs it.
+    pub pending_resume: Option<String>,
+    /// The current view was saved by a resume request still in flight.
+    resume_saved_view: bool,
     /// Permission decisions by tool use id (true = allowed).
     pub permission_decisions: std::collections::HashMap<String, bool>,
     /// Tool rows of a cancelled turn, kept as evidence until the next user
@@ -1266,6 +1276,11 @@ impl App {
             renderer: crate::application::UiRenderer::default(),
             next_shell: crate::next::ShellState::default(),
             cancellation: crate::application::TurnCancellation::default(),
+            session_id: None,
+            ownership: crate::application::SessionOwnership::default(),
+            scope_views: std::collections::HashMap::new(),
+            pending_resume: None,
+            resume_saved_view: false,
             permission_decisions: std::collections::HashMap::new(),
             interrupted_tools: Vec::new(),
             resolved_keybinding: None,
@@ -3207,6 +3222,175 @@ impl App {
         true
     }
 
+    /// The loop submits a browser resume as `/session resume <id>`; that is
+    /// not something the user typed, so it does not stay in prompt history.
+    fn forget_synthetic_resume(&mut self) {
+        let synthetic = |entry: &String| entry.starts_with("/session resume ");
+        if self.prompt_input.history.last().is_some_and(synthetic) {
+            self.prompt_input.history.pop();
+            self.input_history = self.prompt_input.history.clone();
+        }
+    }
+
+    fn save_scope_view(&mut self) {
+        let Some(id) = self.session_id.clone() else {
+            return;
+        };
+        let view = crate::application::ScopeView {
+            draft: std::mem::take(&mut self.prompt_input.text),
+            pastes: std::mem::take(&mut self.prompt_input.paste_contents),
+            images: std::mem::take(&mut self.prompt_input.pending_images),
+            scroll_offset: self.scroll_offset,
+            auto_scroll: self.auto_scroll,
+        };
+        self.prompt_input.replace_text(String::new());
+        self.scope_views.insert(id, view);
+    }
+
+    fn restore_scope_view(&mut self, id: &str) {
+        let view = self
+            .scope_views
+            .remove(id)
+            .unwrap_or(crate::application::ScopeView {
+                auto_scroll: true,
+                ..Default::default()
+            });
+        self.set_prompt_text(view.draft);
+        // Paste ids only grow, so restored ids cannot collide with new ones.
+        self.prompt_input.paste_contents = view.pastes;
+        self.prompt_input.pending_images = view.images;
+        self.scroll_offset = view.scroll_offset;
+        self.auto_scroll = view.auto_scroll;
+        self.new_messages_while_scrolled = 0;
+    }
+
+    /// Resume `id` from the session browser. The current draft and reading
+    /// position are kept for this session; the loop performs the resume.
+    pub fn request_resume(&mut self, id: String) {
+        self.session_browser.close();
+        if self.session_id.as_deref() == Some(id.as_str()) {
+            self.status_message = Some("Already in this session.".to_string());
+            return;
+        }
+        // A cancelled turn is still running until the runtime settles it.
+        if self.is_streaming
+            || self.pending_resume.is_some()
+            || self.cancellation != crate::application::TurnCancellation::Idle
+        {
+            self.status_message =
+                Some("Finish or cancel the running turn before resuming.".to_string());
+            return;
+        }
+        self.save_scope_view();
+        self.resume_saved_view = true;
+        self.pending_resume = Some(id);
+    }
+
+    /// Load the session list the browser asked for, and deliver it when
+    /// ready. Every interactive loop calls this each tick.
+    pub fn poll_session_list(&mut self) {
+        // Drain background session-list results.
+        if let Some(ref mut rx) = self.session_list_rx {
+            match rx.try_recv() {
+                Ok(entries) => {
+                    self.session_browser.sessions = entries;
+                    self.session_browser.selected_idx = 0;
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Spawn async session-list load when requested.
+        if self.session_list_pending {
+            self.session_list_pending = false;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            self.session_list_rx = Some(rx);
+            tokio::spawn(async move {
+                let sessions = claurst_core::history::list_sessions().await;
+                let entries: Vec<crate::session_browser::SessionEntry> = sessions
+                    .into_iter()
+                    .map(|s| {
+                        let age = chrono::Utc::now().signed_duration_since(s.updated_at);
+                        let last_updated = if age.num_minutes() < 1 {
+                            "just now".to_string()
+                        } else if age.num_hours() < 1 {
+                            format!("{}m ago", age.num_minutes())
+                        } else if age.num_hours() < 24 {
+                            format!("{}h ago", age.num_hours())
+                        } else {
+                            format!("{}d ago", age.num_days())
+                        };
+                        crate::session_browser::SessionEntry {
+                            id: s.id,
+                            title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
+                            last_updated,
+                            message_count: s.messages.len(),
+                            cost_usd: s.total_cost,
+                        }
+                    })
+                    .collect();
+                let _ = tx.send(entries).await;
+            });
+        }
+    }
+
+    pub fn take_pending_resume(&mut self) -> Option<String> {
+        self.pending_resume.take()
+    }
+
+    /// The loop bound session `id`. Keep the outgoing session's draft and
+    /// position, drop views that belong to it, and restore `id`'s own draft
+    /// and position. A restored draft is shown, never sent.
+    pub fn enter_session_scope(&mut self, id: &str) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic keeps its existing resume behavior; only the bound id
+            // is recorded.
+            self.session_id = Some(id.to_string());
+            return;
+        }
+        if self.resume_saved_view {
+            self.forget_synthetic_resume();
+        }
+        if self.session_id.as_deref() != Some(id) {
+            if !self.resume_saved_view {
+                self.save_scope_view();
+            }
+            self.close_response_reader();
+            self.system_annotations.clear();
+            self.turn_metadata.clear();
+            self.selected_transcript_message = None;
+            self.tool_use_blocks.clear();
+            self.interrupted_tools.clear();
+            self.permission_decisions.clear();
+            self.streaming_text.clear();
+            self.streaming_thinking.clear();
+            self.selection_anchor = None;
+            self.selection_focus = None;
+            self.selection_text.borrow_mut().clear();
+            self.next_shell.inspector_scroll = 0;
+            self.session_id = Some(id.to_string());
+            self.restore_scope_view(id);
+        }
+        self.resume_saved_view = false;
+        self.pending_auto_submit = false;
+    }
+
+    /// The loop finished handling a command. If a browser resume did not
+    /// switch sessions, give the current session its draft back.
+    pub fn settle_pending_resume(&mut self) {
+        if self.resume_saved_view && self.pending_resume.is_none() {
+            self.forget_synthetic_resume();
+            self.resume_saved_view = false;
+            if let Some(id) = self.session_id.clone() {
+                self.restore_scope_view(&id);
+            }
+        }
+    }
+
     /// Remember the user's decision for a tool call so presentation can
     /// show authorization separately from the execution result.
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
@@ -4747,6 +4931,16 @@ impl App {
             match self.session_browser.mode {
                 SessionBrowserMode::Browse => match key.code {
                     KeyCode::Esc => self.session_browser.close(),
+                    // Next only (#412); Classic's browser is unchanged.
+                    KeyCode::Enter if self.renderer == crate::application::UiRenderer::Next => {
+                        if let Some(id) = self
+                            .session_browser
+                            .selected_session()
+                            .map(|entry| entry.id.clone())
+                        {
+                            self.request_resume(id);
+                        }
+                    }
                     KeyCode::Up => self.session_browser.select_prev(),
                     KeyCode::Down => self.session_browser.select_next(),
                     KeyCode::Char('r') => self.session_browser.start_rename(),
@@ -4755,8 +4949,13 @@ impl App {
                 SessionBrowserMode::Rename => match key.code {
                     KeyCode::Esc => self.session_browser.cancel(),
                     KeyCode::Enter => {
-                        if let Some((_id, name)) = self.session_browser.confirm_rename() {
-                            self.session_title = Some(name.clone());
+                        if let Some((id, name)) = self.session_browser.confirm_rename() {
+                            // Only the shown session's title is the header's.
+                            if self.renderer == crate::application::UiRenderer::Classic
+                                || self.session_id.as_deref() == Some(id.as_str())
+                            {
+                                self.session_title = Some(name.clone());
+                            }
                             self.status_message = Some(format!("Renamed to: {}", name));
                         }
                     }
@@ -7739,53 +7938,7 @@ impl App {
                 self.daemon_online = crate::coven_status::daemon_looks_online();
             }
 
-            // Drain background session-list results.
-            if let Some(ref mut rx) = self.session_list_rx {
-                match rx.try_recv() {
-                    Ok(entries) => {
-                        self.session_browser.sessions = entries;
-                        self.session_browser.selected_idx = 0;
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Spawn async session-list load when requested.
-            if self.session_list_pending {
-                self.session_list_pending = false;
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                self.session_list_rx = Some(rx);
-                tokio::spawn(async move {
-                    let sessions = claurst_core::history::list_sessions().await;
-                    let entries: Vec<crate::session_browser::SessionEntry> = sessions
-                        .into_iter()
-                        .map(|s| {
-                            let age = chrono::Utc::now().signed_duration_since(s.updated_at);
-                            let last_updated = if age.num_minutes() < 1 {
-                                "just now".to_string()
-                            } else if age.num_hours() < 1 {
-                                format!("{}m ago", age.num_minutes())
-                            } else if age.num_hours() < 24 {
-                                format!("{}h ago", age.num_hours())
-                            } else {
-                                format!("{}d ago", age.num_days())
-                            };
-                            crate::session_browser::SessionEntry {
-                                id: s.id,
-                                title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
-                                last_updated,
-                                message_count: s.messages.len(),
-                                cost_usd: s.total_cost,
-                            }
-                        })
-                        .collect();
-                    let _ = tx.send(entries).await;
-                });
-            }
+            self.poll_session_list();
 
             // Drain voice transcription events (non-blocking).
             // When the background recording/transcription task emits a

@@ -475,15 +475,19 @@ fn workspace_line(appearance: &Appearance, app: &App, width: u16) -> Line<'stati
     let mut parts = vec![(project_name(app), Role::Text)];
     parts.push((
         app.session_title
-            .clone()
+            .as_deref()
+            .map(crate::application::view::terminal_safe)
             .unwrap_or_else(|| "untitled session".to_string()),
         Role::TextMuted,
     ));
+    let (ownership, _) = app.ownership.describe(app.session_id.as_deref());
+    parts.push((ownership.to_string(), Role::Evidence));
     if let Some(model) = model_label(app) {
         parts.push((model, Role::TextMuted));
     }
     if let Some(familiar) = &app.config.familiar {
-        // A familiar id is a display name until #412 qualifies identity.
+        // No producer binds a familiar name to an identity yet; a name or
+        // avatar is never treated as one.
         parts.push((format!("{familiar} (unverified)"), Role::Evidence));
     }
     for (text, role) in parts {
@@ -977,16 +981,21 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
         "not configured; nothing connects until you choose a provider".to_string()
     };
     let familiar = match &app.config.familiar {
-        Some(id) => format!("{id} (display name; identity unverified until #412)"),
+        Some(id) => format!(
+            "{} (display name only; no identity contract binds it)",
+            crate::application::view::terminal_safe(id)
+        ),
         None => "none".to_string(),
     };
+    let (ownership, ownership_detail) = app.ownership.describe(app.session_id.as_deref());
     vec![
         field(appearance, "Project", project),
         field(
             appearance,
             "Session",
             app.session_title
-                .clone()
+                .as_deref()
+                .map(crate::application::view::terminal_safe)
                 .unwrap_or_else(|| "untitled session".to_string()),
         ),
         field(
@@ -1004,6 +1013,19 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
         ),
         field(appearance, "Credentials", credentials),
         field(appearance, "Familiar", familiar),
+        field(
+            appearance,
+            "Execution",
+            format!("{ownership}: {ownership_detail}"),
+        ),
+        field(
+            appearance,
+            "Session id",
+            app.session_id
+                .as_deref()
+                .map(crate::application::view::terminal_safe)
+                .unwrap_or_else(|| "not bound".to_string()),
+        ),
         field(
             appearance,
             "Renderer",
