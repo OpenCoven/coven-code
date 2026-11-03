@@ -269,3 +269,76 @@ fn kept_rows_never_outlive_what_they_were_built_from() {
     assert_ne!(before, text_of(&draw(&app, 80, 24)), "density");
     same_as_fresh(&app, &app.messages.clone(), 80, "density");
 }
+
+/// Going to the start holds through whatever moves the bottom-relative offset,
+/// until the reader scrolls down.
+#[test]
+fn the_start_stays_the_start_through_layout_changes_and_new_output() {
+    let alt = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+    let at_start = |app: &mut App, width, height, step: &str| {
+        let frame = text_of(&draw(app, width, height));
+        app.settle_scroll_anchor();
+        assert!(frame.contains("first question"), "{step}:\n{frame}");
+    };
+
+    let mut app = workload_app();
+    draw(&app, 160, 40);
+    app.handle_key_event(alt('g'));
+    at_start(&mut app, 160, 40, "jump");
+    at_start(&mut app, 160, 20, "shorter");
+    at_start(&mut app, 80, 40, "narrower");
+    at_start(&mut app, 80, 24, "resized again");
+
+    app.streaming_text.push_str("arriving\n");
+    at_start(&mut app, 80, 24, "new output");
+    let frame = text_of(&draw(&app, 80, 24));
+    assert!(frame.contains("new activity below"), "{frame}");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    let frame = text_of(&draw(&app, 80, 24));
+    app.settle_scroll_anchor();
+    assert!(!frame.contains("first question"), "released:\n{frame}");
+    // Far enough that a taller pane does not reach the first row by itself.
+    for _ in 0..5 {
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        draw(&app, 80, 24);
+        app.settle_scroll_anchor();
+    }
+    let frame = text_of(&draw(&app, 80, 40));
+    assert!(
+        !frame.contains("first question"),
+        "stays released:\n{frame}"
+    );
+
+    // With the transcript hidden after returning to live, nothing is measured.
+    let mut app = workload_app();
+    app.next_shell.inspector = Some(InspectorPage::Activity);
+    draw(&app, 80, 24);
+    app.handle_key_event(alt('l'));
+    app.handle_key_event(alt('g'));
+    draw(&app, 80, 24);
+    app.next_shell.inspector = None;
+    at_start(&mut app, 80, 24, "nothing measured");
+}
+
+/// A long streaming answer costs about the same as a long committed one.
+#[test]
+fn observation_frame_cost_while_streaming() {
+    let mut app = workload_app();
+    app.messages.truncate(1);
+    let mut times = Vec::new();
+    for lines in [1_000, 100_000] {
+        app.streaming_text = (1..=lines).map(|n| format!("live line {n:06}\n")).collect();
+        draw(&app, 80, 24);
+        let started = std::time::Instant::now();
+        for n in 0..3 {
+            app.streaming_text.push_str(&format!("more {n}\npartial"));
+            draw(&app, 80, 24);
+            app.streaming_text.push('\n');
+        }
+        times.push((lines, started.elapsed() / 3));
+    }
+    eprintln!("observation: streaming frame cost by answer length {times:?}");
+    let frame = text_of(&draw(&app, 80, 24));
+    assert!(frame.contains("more 2"), "{frame}");
+}

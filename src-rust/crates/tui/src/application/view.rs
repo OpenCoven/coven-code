@@ -215,17 +215,17 @@ impl TranscriptView {
             .iter()
             .filter_map(|message| EntrySource::of(message).project())
             .collect();
-        Self::with_entries(app, entries)
+        Self::with_entries(app, entries, terminal_safe(&app.streaming_text))
     }
 
-    /// Everything except the committed history, which stays empty. For a
-    /// renderer that keeps its own rows per [`EntrySource`], so a frame does
-    /// not re-project the whole conversation.
-    pub fn project_without_history(app: &App) -> Self {
-        Self::with_entries(app, Vec::new())
+    /// Everything except the conversation text: `entries` and `live_text`
+    /// stay empty. For a renderer that keeps its own rows for them, so a
+    /// frame does not re-project the whole conversation.
+    pub fn project_without_text(app: &App) -> Self {
+        Self::with_entries(app, Vec::new(), String::new())
     }
 
-    fn with_entries(app: &App, entries: Vec<TranscriptEntry>) -> Self {
+    fn with_entries(app: &App, entries: Vec<TranscriptEntry>, live_text: String) -> Self {
         let project_root = app.config.project_dir.as_deref();
         let cancelling = app.cancellation != crate::application::TurnCancellation::Idle;
         let interrupted = app.interrupted_tools.iter().map(|block| {
@@ -276,7 +276,7 @@ impl TranscriptView {
             });
         Self {
             entries,
-            live_text: terminal_safe(&app.streaming_text),
+            live_text,
             is_streaming: app.is_streaming,
             tools,
             permission,

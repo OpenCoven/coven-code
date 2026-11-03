@@ -256,11 +256,12 @@ fn classic_does_not_observe_next_only_keys() {
     app.set_prompt_text("abc".to_string());
     app.handle_key_event(alt('i'));
     app.handle_key_event(alt('l'));
+    app.handle_key_event(alt('g'));
     assert_eq!(app.next_shell.inspector, None);
     assert!(app.auto_scroll);
     // Same as before #410: the chords fall through to text input
     // (verified against the #409 head a65df294).
-    assert_eq!(app.prompt_input.text, "abcil");
+    assert_eq!(app.prompt_input.text, "abcilg");
 }
 
 #[test]

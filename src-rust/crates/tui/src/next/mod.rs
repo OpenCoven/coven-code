@@ -20,7 +20,8 @@ pub mod style;
 
 use crate::app::App;
 use crate::application::view::{
-    EntryRole, EntrySource, ToolActivity, ToolActivityState, TranscriptEntry, TranscriptView,
+    terminal_safe, EntryRole, EntrySource, ToolActivity, ToolActivityState, TranscriptEntry,
+    TranscriptView,
 };
 use crate::application::TurnCancellation;
 use claurst_core::appearance::Density;
@@ -205,6 +206,11 @@ struct ReadingAnchor {
     unsettled: i64,
     /// Rows that arrived since the reader scrolled away.
     unseen: usize,
+    /// Set while the reader stays at the first row after going to the start:
+    /// the offset from the bottom it was last drawn at. Layout changes and
+    /// new rows move that offset, so it is recomputed until the reader
+    /// scrolls down past it.
+    start_hold: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -219,25 +225,41 @@ pub struct ShellState {
     transcript_rows: RefCell<TranscriptRows>,
 }
 
-/// Wrapped rows of the committed messages, kept between frames so a frame's
-/// cost follows the visible rows rather than the length of the conversation.
+/// Wrapped rows of the conversation, kept between frames so a frame does not
+/// re-sanitize or re-wrap text that has not changed. Each frame still compares
+/// every message with the source of its rows, and tool rows are still built
+/// per frame, so a very long session keeps a small linear cost. This also holds
+/// a second copy of the conversation's text.
 ///
-/// Each message is rebuilt when the content it is shown from changes. That is
+/// A message is rebuilt when the content it is shown from changes. That is
 /// checked by comparing content, not through a change counter: `App::messages`
 /// is written from many places, and a missed signal would show stale text.
 #[derive(Debug, Default)]
 struct TranscriptRows {
     layout: Option<(usize, Appearance, Density)>,
     messages: Vec<(EntrySource, Vec<Line<'static>>)>,
-    total: usize,
+    messages_total: usize,
+    /// The complete lines of the streaming answer that `live_rows` shows.
+    live_source: String,
+    live_rows: Vec<Line<'static>>,
+    /// Rows of the streaming answer's unfinished last line.
+    live_partial: Vec<Line<'static>>,
 }
 
 impl TranscriptRows {
-    fn sync(&mut self, messages: &[Message], presentation: &NextPresentation, width: usize) {
+    fn sync(
+        &mut self,
+        messages: &[Message],
+        streaming: &str,
+        presentation: &NextPresentation,
+        width: usize,
+    ) {
         let layout = (width, presentation.appearance, presentation.density);
         if self.layout != Some(layout) {
             self.layout = Some(layout);
             self.messages.clear();
+            self.live_source.clear();
+            self.live_rows.clear();
         }
         self.messages.truncate(messages.len());
         for (index, message) in messages.iter().enumerate() {
@@ -259,18 +281,48 @@ impl TranscriptRows {
                 }
             }
         }
-        self.total = self.messages.iter().map(|(_, rows)| rows.len()).sum();
+        self.messages_total = self.messages.iter().map(|(_, rows)| rows.len()).sum();
+        self.sync_live(streaming, presentation, width);
     }
 
-    /// Up to `count` rows from row `start`, continuing into `tail`.
-    fn visible(&self, tail: &[Line<'static>], start: usize, count: usize) -> Vec<Line<'static>> {
+    /// `terminal_safe` and line splitting look at one character at a time, so
+    /// text split after a newline gives the same rows as the whole text.
+    fn sync_live(&mut self, streaming: &str, presentation: &NextPresentation, width: usize) {
+        let appearance = &presentation.appearance;
+        let wrapped = |text: &str| -> Vec<Line<'static>> {
+            terminal_safe(text)
+                .lines()
+                .flat_map(|content| wrap_line(text_line(appearance, content), width))
+                .collect()
+        };
+        let complete = streaming.rfind('\n').map_or(0, |newline| newline + 1);
+        let (complete, partial) = streaming.split_at(complete);
+        if !complete.starts_with(self.live_source.as_str()) {
+            self.live_source.clear();
+            self.live_rows.clear();
+        }
+        let new = &complete[self.live_source.len()..];
+        if !new.is_empty() {
+            self.live_rows.extend(wrapped(new));
+            self.live_source.push_str(new);
+        }
+        self.live_partial = wrapped(partial);
+    }
+
+    /// Up to `count` rows from row `start`, across the messages, then `tools`
+    /// (tool rows and the live label), then the streaming answer.
+    fn visible(&self, tools: &[Line<'static>], start: usize, count: usize) -> Vec<Line<'static>> {
         let mut skip = start;
         let mut lines = Vec::with_capacity(count);
         let groups = self
             .messages
             .iter()
             .map(|(_, rows)| rows.as_slice())
-            .chain(std::iter::once(tail));
+            .chain([
+                tools,
+                self.live_rows.as_slice(),
+                self.live_partial.as_slice(),
+            ]);
         for rows in groups {
             if lines.len() == count {
                 break;
@@ -284,6 +336,11 @@ impl TranscriptRows {
             skip = 0;
         }
         lines
+    }
+
+    /// Rows `visible` can return, given the size of `tools`.
+    fn total(&self, tools: usize) -> usize {
+        self.messages_total + tools + self.live_rows.len() + self.live_partial.len()
     }
 }
 
@@ -321,16 +378,11 @@ impl ShellState {
             "jumpToStart" => {
                 let mut anchor = self.anchor.get();
                 anchor.unsettled = 0;
+                anchor.start_hold = Some(i64::MIN);
                 self.anchor.set(anchor);
             }
             _ => {}
         }
-    }
-
-    /// Transcript rows in the last drawn frame. As a scroll offset, this is
-    /// past the first row, so the next frame clamps it to the start.
-    pub(crate) fn measured_rows(&self) -> usize {
-        self.anchor.get().total
     }
 
     /// Signed row correction the loop adds to `App::scroll_offset`.
@@ -370,16 +422,22 @@ impl ShellState {
         } else {
             let as_rows = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
             let current = as_rows(scroll_offset).saturating_add(anchor.unsettled);
-            let wanted = if anchor.total == 0 {
+            let held = anchor.start_hold.is_some_and(|hold| current >= hold);
+            if anchor.total != 0 && anchor.width == width {
+                anchor.unseen += total.saturating_sub(anchor.total);
+            }
+            let wanted = if held {
+                as_rows(max_scroll)
+            } else if anchor.total == 0 {
                 // Nothing measured yet: take the offset as given.
                 current
             } else if anchor.width == width {
-                anchor.unseen += total.saturating_sub(anchor.total);
                 current.saturating_add(as_rows(total) - as_rows(anchor.total))
             } else {
                 current.saturating_mul(as_rows(total)) / as_rows(anchor.total)
             };
             let clamped = wanted.clamp(0, as_rows(max_scroll));
+            anchor.start_hold = held.then_some(clamped);
             anchor.unsettled = clamped - as_rows(scroll_offset);
             anchor.width = width;
             anchor.total = total;
@@ -405,7 +463,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
 
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
-    let view = TranscriptView::project_without_history(app);
+    let view = TranscriptView::project_without_text(app);
     let area = frame.area();
     let width = usize::from(area.width.max(1));
 
@@ -730,21 +788,20 @@ fn entry_lines(presentation: &NextPresentation, entry: &TranscriptEntry) -> Vec<
     lines
 }
 
-/// Rows below the committed messages, which change while a turn runs.
-fn live_lines(presentation: &NextPresentation, view: &TranscriptView) -> Vec<Line<'static>> {
+/// Rows between the committed messages and the streaming answer.
+fn tool_and_label_lines(
+    presentation: &NextPresentation,
+    view: &TranscriptView,
+    streaming: bool,
+) -> Vec<Line<'static>> {
     let appearance = &presentation.appearance;
     let mut lines: Vec<Line<'static>> = view
         .tools
         .iter()
         .map(|tool| tool_line(appearance, tool, false))
         .collect();
-    if !view.live_text.is_empty() {
+    if streaming {
         lines.push(primitives::transcript_label(appearance, "coven"));
-        lines.extend(
-            view.live_text
-                .lines()
-                .map(|content| text_line(appearance, content)),
-        );
     }
     lines
 }
@@ -1002,23 +1059,24 @@ fn render_transcript(frame: &mut Frame, app: &App, view: &TranscriptView, area: 
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
     let width = usize::from(area.width.max(1));
-    let live: Vec<Line<'static>> = live_lines(presentation, view)
-        .into_iter()
-        .flat_map(|line| wrap_line(line, width))
-        .collect();
+    let tools: Vec<Line<'static>> =
+        tool_and_label_lines(presentation, view, !app.streaming_text.is_empty())
+            .into_iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
     let mut rows = app.next_shell.transcript_rows.borrow_mut();
-    rows.sync(&app.messages, presentation, width);
+    rows.sync(&app.messages, &app.streaming_text, presentation, width);
     // A scrolled reader gets a notice row at the bottom of the pane.
     let notice_rows = usize::from(!app.auto_scroll && area.height > 1);
     let height = usize::from(area.height).saturating_sub(notice_rows);
     let (start, unseen) = app.next_shell.window(
-        rows.total + live.len(),
+        rows.total(tools.len()),
         height,
         area.width,
         app.auto_scroll,
         app.scroll_offset,
     );
-    let mut lines = rows.visible(&live, start, height);
+    let mut lines = rows.visible(&tools, start, height);
     if notice_rows > 0 {
         lines.resize(height, Line::default());
         let jump = app
@@ -1833,20 +1891,20 @@ mod transcript_rows_tests {
             Message::assistant("third"),
         ];
         let mut rows = TranscriptRows::default();
-        rows.sync(&messages, &presentation, 40);
+        rows.sync(&messages, "", &presentation, 40);
         let kept = [
             first_row_address(&rows, 0),
             first_row_address(&rows, 1),
             first_row_address(&rows, 2),
         ];
 
-        rows.sync(&messages, &presentation, 40);
+        rows.sync(&messages, "", &presentation, 40);
         assert_eq!(first_row_address(&rows, 0), kept[0]);
         assert_eq!(first_row_address(&rows, 1), kept[1]);
         assert_eq!(first_row_address(&rows, 2), kept[2]);
 
         messages[1] = Message::assistant("SECOND");
-        rows.sync(&messages, &presentation, 40);
+        rows.sync(&messages, "", &presentation, 40);
         assert_eq!(first_row_address(&rows, 0), kept[0]);
         assert_eq!(first_row_address(&rows, 2), kept[2]);
         let text: String = rows.messages[1]
@@ -1856,8 +1914,8 @@ mod transcript_rows_tests {
             .collect();
         assert!(text.contains("SECOND"), "{text}");
 
-        rows.sync(&messages, &presentation, 20);
-        let total = rows.total;
+        rows.sync(&messages, "", &presentation, 20);
+        let total = rows.total(0);
         assert!(total > 0);
         assert_eq!(rows.visible(&[], total, 5).len(), 0);
     }
@@ -1867,13 +1925,73 @@ mod transcript_rows_tests {
         let presentation = NextPresentation::default();
         let messages = vec![Message::user("one"), Message::assistant("two")];
         let mut rows = TranscriptRows::default();
-        rows.sync(&messages, &presentation, 40);
-        let live = vec![Line::from("live")];
-        let all = rows.visible(&live, 0, rows.total + 1);
-        assert_eq!(all.len(), rows.total + 1);
-        assert_eq!(all.last().map(ToString::to_string).as_deref(), Some("live"));
-        let last = rows.visible(&live, rows.total, 10);
-        assert_eq!(last.len(), 1);
-        assert_eq!(rows.visible(&live, 1, 2).len(), 2);
+        rows.sync(&messages, "live\npart", &presentation, 40);
+        let tools = vec![Line::from("tool")];
+        let total = rows.total(tools.len());
+        let all: Vec<String> = rows
+            .visible(&tools, 0, total)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(all.len(), total);
+        assert_eq!(all[total - 3..], ["tool", "live", "part"]);
+        assert_eq!(rows.visible(&tools, total - 1, 10).len(), 1);
+        assert_eq!(rows.visible(&tools, 1, 2).len(), 2);
+    }
+
+    fn live_text(rows: &TranscriptRows) -> Vec<String> {
+        rows.visible(&[], rows.messages_total, usize::MAX >> 40)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Rows built in pieces must equal rows built from the whole text.
+    #[test]
+    fn a_stream_shows_the_same_rows_however_it_arrives() {
+        let presentation = NextPresentation::default();
+        let text = "alpha\u{1b}]52;c;eA\u{7}\r\n\n漢字 ".to_string()
+            + &"wide 漢字 text ".repeat(9)
+            + "\nlast line\n\ntail \u{9b}31m end";
+        let mut whole = TranscriptRows::default();
+        whole.sync(&[], &text, &presentation, 17);
+        for step in [1, 2, 3, 7, 40] {
+            let mut rows = TranscriptRows::default();
+            let cuts: Vec<usize> = text
+                .char_indices()
+                .map(|(index, _)| index)
+                .step_by(step)
+                .chain([text.len()])
+                .collect();
+            for cut in cuts {
+                rows.sync(&[], &text[..cut], &presentation, 17);
+            }
+            assert_eq!(live_text(&rows), live_text(&whole), "step {step}");
+        }
+    }
+
+    #[test]
+    fn stream_rows_are_kept_as_it_grows_and_dropped_when_it_is_replaced() {
+        let presentation = NextPresentation::default();
+        let mut rows = TranscriptRows::default();
+        rows.sync(&[], "one\ntwo\nthr", &presentation, 40);
+        let kept = rows.live_rows.as_ptr();
+        rows.sync(&[], "one\ntwo\nthree", &presentation, 40);
+        assert_eq!(
+            rows.live_rows.as_ptr(),
+            kept,
+            "no rebuild for a partial line"
+        );
+        assert_eq!(live_text(&rows), ["one", "two", "three"]);
+
+        // Same length, different text: a retry starting over.
+        rows.sync(&[], "uno\ndos\ntres", &presentation, 40);
+        assert_eq!(live_text(&rows), ["uno", "dos", "tres"]);
+        rows.sync(&[], "", &presentation, 40);
+        assert!(live_text(&rows).is_empty());
+        // A narrower pane rewraps kept rows.
+        rows.sync(&[], "abcdefgh\nx", &presentation, 40);
+        rows.sync(&[], "abcdefgh\nx", &presentation, 4);
+        assert_eq!(live_text(&rows), ["abcd", "efgh", "x"]);
     }
 }
