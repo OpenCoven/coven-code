@@ -13,10 +13,16 @@ fn registration_labels(source: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Register a session; `Ok` only when the daemon accepted it. Callers may
+/// ignore the result, but must not treat registration as daemon control.
 #[cfg(unix)]
-pub fn notify_session_start(id: &str, project_root: &std::path::Path, title: &str) {
+pub fn notify_session_start(
+    id: &str,
+    project_root: &std::path::Path,
+    title: &str,
+) -> Result<(), String> {
     let Some(client) = crate::coven_daemon::DaemonClient::new() else {
-        return;
+        return Err("no Coven daemon is configured".to_string());
     };
     let transcript_path = crate::session_storage::transcript_path(project_root, id)
         .ok()
@@ -29,9 +35,13 @@ pub fn notify_session_start(id: &str, project_root: &std::path::Path, title: &st
         transcript_path,
         labels: registration_labels(std::env::var(COVEN_SESSION_SOURCE).ok().as_deref()),
     };
-    if let Err(e) = client.register_external_session(&req) {
-        tracing::debug!("coven ledger register failed (ignored): {e}");
-    }
+    client
+        .register_external_session(&req)
+        .map(|_| ())
+        .map_err(|e| {
+            tracing::debug!("coven ledger register failed (ignored): {e}");
+            e.to_string()
+        })
 }
 
 #[cfg(unix)]
@@ -45,7 +55,13 @@ pub fn notify_session_complete(id: &str, exit_code: Option<i32>) {
 }
 
 #[cfg(not(unix))]
-pub fn notify_session_start(_id: &str, _project_root: &std::path::Path, _title: &str) {}
+pub fn notify_session_start(
+    _id: &str,
+    _project_root: &std::path::Path,
+    _title: &str,
+) -> Result<(), String> {
+    Err("the Coven daemon ledger is not supported on this platform".to_string())
+}
 
 #[cfg(not(unix))]
 pub fn notify_session_complete(_id: &str, _exit_code: Option<i32>) {}
