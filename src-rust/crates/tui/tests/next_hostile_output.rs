@@ -75,6 +75,7 @@ fn hostile_app(variant: Variant) -> App {
         ..Config::default()
     };
     let mut app = App::new(config, CostTracker::new());
+    app.session_id = Some(HOSTILE.to_string());
     app.has_credentials = true;
     app.renderer = UiRenderer::Next;
     app.turn_start = None;
