@@ -43,6 +43,14 @@ Chat	pageup	scrollUp
 Chat	pagedown	scrollDown
 Chat	ctrl+shift+a	openModelPicker
 Chat	ctrl+k	openCommandPalette
+Chat	alt+i	toggleInspector
+Chat	alt+l	jumpToLive
+Inspector	alt+i	closeInspector
+Inspector	escape	closeInspector
+Inspector	tab	nextInspectorPage
+Inspector	shift+tab	previousInspectorPage
+Inspector	pageup	scrollInspectorUp
+Inspector	pagedown	scrollInspectorDown
 Confirmation	y	yes
 Confirmation	enter	yes
 Confirmation	n	no

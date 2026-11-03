@@ -7,7 +7,7 @@
 //! never a source of authority for permissions, tools or persistence.
 
 use crate::app::{App, ToolStatus};
-use claurst_core::types::Role;
+use claurst_core::types::{ContentBlock, MessageContent, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryRole {
@@ -19,6 +19,9 @@ pub enum EntryRole {
 pub struct TranscriptEntry {
     pub role: EntryRole,
     pub text: String,
+    /// Text stand-ins for images and documents, since no renderer may
+    /// depend on a terminal image protocol.
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,28 @@ pub struct TranscriptView {
     pub permission: Option<PendingPermission>,
     pub status: Option<String>,
     pub draft: String,
+    /// Composer byte offset of the cursor in `draft`.
+    pub draft_cursor: usize,
+    /// Text stand-ins for attachments waiting to be sent with the draft.
+    pub draft_attachments: Vec<String>,
+}
+
+/// Text stand-in for one attachment block, or `None` for other blocks.
+fn attachment_label(block: &ContentBlock) -> Option<String> {
+    match block {
+        ContentBlock::Image { source } => Some(format!(
+            "[image {}]",
+            source.media_type.as_deref().unwrap_or("of unknown type")
+        )),
+        ContentBlock::Document { source, title, .. } => Some(format!(
+            "[document {}]",
+            title
+                .as_deref()
+                .or(source.media_type.as_deref())
+                .unwrap_or("of unknown type")
+        )),
+        _ => None,
+    }
 }
 
 impl TranscriptView {
@@ -64,14 +89,24 @@ impl TranscriptView {
             .iter()
             .filter_map(|message| {
                 let text = message.get_all_text();
-                if text.trim().is_empty() {
+                let attachments: Vec<String> = match &message.content {
+                    MessageContent::Blocks(blocks) => {
+                        blocks.iter().filter_map(attachment_label).collect()
+                    }
+                    MessageContent::Text(_) => Vec::new(),
+                };
+                if text.trim().is_empty() && attachments.is_empty() {
                     return None;
                 }
                 let role = match message.role {
                     Role::User => EntryRole::User,
                     Role::Assistant => EntryRole::Assistant,
                 };
-                Some(TranscriptEntry { role, text })
+                Some(TranscriptEntry {
+                    role,
+                    text,
+                    attachments,
+                })
             })
             .collect();
         let tools = app
@@ -110,6 +145,16 @@ impl TranscriptView {
             permission,
             status: app.status_message.clone(),
             draft: app.prompt_input.text.clone(),
+            draft_cursor: app.prompt_input.cursor,
+            draft_attachments: app
+                .prompt_input
+                .pending_images
+                .iter()
+                .map(|image| match image.dimensions {
+                    Some((width, height)) => format!("[image {} {width}x{height}]", image.label),
+                    None => format!("[image {}]", image.label),
+                })
+                .collect(),
         }
     }
 }

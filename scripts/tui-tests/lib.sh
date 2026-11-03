@@ -27,6 +27,7 @@ set -uo pipefail
 : "${TUI_SETTLE:=0.6}"                   # seconds to let a keypress redraw
 : "${TUI_LOG_DIR:=}"                      # if set, failing-case pane captures are written here
 : "${REQUIRE_TMUX:=0}"                    # if 1, a missing tmux is a hard error (CI), not a skip
+: "${TUI_LAUNCH_PREFIX:=}"               # shell text typed before the binary (cd, env); cases set and restore it
 
 # --- counters (persist across sourced case files) -----------------------
 TESTS_RUN=0
@@ -238,7 +239,7 @@ tui_start() {
 
   local args=""
   if [ "$#" -gt 0 ]; then printf -v args ' %q' "$@"; fi
-  tui_type "$COVEN_BIN$args"; tui_keys Enter
+  tui_type "$TUI_LAUNCH_PREFIX$COVEN_BIN$args"; tui_keys Enter
 
   if wait_for "$TUI_BOOT_STRING" "$TUI_WAIT_TIMEOUT"; then
     return 0

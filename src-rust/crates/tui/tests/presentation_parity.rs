@@ -251,19 +251,29 @@ fn next_hands_every_input_owning_surface_to_classic() {
 }
 
 #[test]
-fn next_clears_classic_mouse_geometry() {
+fn next_replaces_classic_mouse_geometry_with_its_own_transcript_target() {
     let (app, _) = replay(trace());
     draw(&app, UiRenderer::Classic, 120, 40);
     assert!(
         app.last_input_area.get().area() > 0,
         "classic records geometry"
     );
+    let classic_selectable = app.last_selectable_area.get();
     draw(&app, UiRenderer::Next, 120, 40);
+    // No per-message hit-test survives from Classic's layout.
     assert!(app.message_row_map.borrow().is_empty());
-    assert!(app.last_row_text.borrow().is_empty());
+    assert!(app.thinking_row_map.borrow().is_empty());
     assert_eq!(app.last_input_area.get().area(), 0);
-    assert_eq!(app.last_selectable_area.get().area(), 0);
-    assert_eq!(app.last_msg_area.get().area(), 0);
+    // Selection and copy target the Next transcript pane only (#410).
+    let selectable = app.last_selectable_area.get();
+    assert!(selectable.area() > 0);
+    assert_ne!(selectable, classic_selectable);
+    assert_eq!(app.last_msg_area.get(), selectable);
+    assert!(app
+        .last_row_text
+        .borrow()
+        .keys()
+        .all(|row| *row >= selectable.y && *row < selectable.y + selectable.height));
 }
 
 #[test]

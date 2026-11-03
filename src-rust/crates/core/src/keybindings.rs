@@ -27,6 +27,9 @@ pub enum KeyContext {
     ModelPicker,
     Select,
     Plugin,
+    /// The Next renderer's contextual inspector. Layered over Chat: keys it
+    /// does not bind keep their Chat meaning so the composer stays usable.
+    Inspector,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +298,16 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         // App shortcuts
         ("ctrl+shift+a", "openModelPicker", KeyContext::Chat),
         ("ctrl+k", "openCommandPalette", KeyContext::Chat),
+        // Next renderer only; Classic treats these chords as unbound.
+        ("alt+i", "toggleInspector", KeyContext::Chat),
+        ("alt+l", "jumpToLive", KeyContext::Chat),
+        // Hints show the newest default, so Escape is listed last.
+        ("alt+i", "closeInspector", KeyContext::Inspector),
+        ("escape", "closeInspector", KeyContext::Inspector),
+        ("tab", "nextInspectorPage", KeyContext::Inspector),
+        ("shift+tab", "previousInspectorPage", KeyContext::Inspector),
+        ("pageup", "scrollInspectorUp", KeyContext::Inspector),
+        ("pagedown", "scrollInspectorDown", KeyContext::Inspector),
         // ========== CONFIRMATION DIALOGS ==========
         ("y", "yes", KeyContext::Confirmation),
         ("enter", "yes", KeyContext::Confirmation),
@@ -795,6 +808,32 @@ impl KeybindingResolver {
             })
     }
 
+    /// The chord that reaches `action` in `context`, layered over Chat the
+    /// way the Next inspector resolves keys: the newest binding for the
+    /// action whose chord is not taken over by a later binding.
+    pub fn reachable_chord_in(&self, action: &str, context: &KeyContext) -> Option<String> {
+        let effect = |chord: &[ParsedKeystroke]| {
+            self.bindings
+                .iter()
+                .rev()
+                .find(|b| &b.context == context && b.chord.as_slice() == chord)
+                .or_else(|| self.resolve_in(self.bindings.len(), &KeyContext::Chat, chord))
+                .and_then(|b| b.action.as_deref())
+        };
+        self.bindings
+            .iter()
+            .rev()
+            .filter(|b| &b.context == context && b.action.as_deref() == Some(action))
+            .find(|b| effect(&b.chord) == Some(action))
+            .map(|b| {
+                b.chord
+                    .iter()
+                    .map(prettify_keystroke)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+    }
+
     /// Essential actions no key reaches in Chat.
     pub fn unreachable_essential_actions(&self) -> Vec<&'static str> {
         ESSENTIAL_ACTIONS
@@ -810,14 +849,32 @@ impl KeybindingResolver {
         keystroke: ParsedKeystroke,
         context: &KeyContext,
     ) -> KeybindingResult {
-        self.pending_chord.push(keystroke);
+        self.process_layered(keystroke, std::slice::from_ref(context))
+    }
 
-        // Find matching bindings in current context + Global
-        let matches: Vec<&ParsedBinding> = self
+    /// Like [`Self::process`], with `contexts` ordered from most to least
+    /// specific. An exact match in an earlier context wins over later ones;
+    /// Global ranks with the last context, and within one rank the last
+    /// binding wins (user overrides).
+    pub fn process_layered(
+        &mut self,
+        keystroke: ParsedKeystroke,
+        contexts: &[KeyContext],
+    ) -> KeybindingResult {
+        self.pending_chord.push(keystroke);
+        let broadest = contexts.len().saturating_sub(1);
+        let rank = |binding: &ParsedBinding| {
+            contexts
+                .iter()
+                .position(|context| context == &binding.context)
+                .or((binding.context == KeyContext::Global).then_some(broadest))
+        };
+
+        let matches: Vec<(usize, &ParsedBinding)> = self
             .bindings
             .iter()
-            .filter(|b| &b.context == context || b.context == KeyContext::Global)
             .filter(|b| b.chord.starts_with(self.pending_chord.as_slice()))
+            .filter_map(|b| rank(b).map(|r| (r, b)))
             .collect();
 
         if matches.is_empty() {
@@ -825,15 +882,18 @@ impl KeybindingResolver {
             return KeybindingResult::NoMatch;
         }
 
-        let exact: Vec<&ParsedBinding> = matches
+        let exact = matches
             .iter()
-            .copied()
-            .filter(|b| b.chord.len() == self.pending_chord.len())
-            .collect();
+            .filter(|(_, b)| b.chord.len() == self.pending_chord.len())
+            .fold(
+                None,
+                |best: Option<(usize, &ParsedBinding)>, &(r, b)| match best {
+                    Some((best_rank, _)) if best_rank < r => best,
+                    _ => Some((r, b)),
+                },
+            );
 
-        if !exact.is_empty() {
-            // Last match wins (user overrides)
-            let binding = exact.last().unwrap();
+        if let Some((_, binding)) = exact {
             self.pending_chord.clear();
             return match &binding.action {
                 Some(action) => KeybindingResult::Action(action.clone()),
@@ -1362,5 +1422,61 @@ mod tests {
             }
             other => panic!("Expected Action(\"moveRight\"), got {:?}", other),
         }
+    }
+
+    fn press(resolver: &mut KeybindingResolver, chord: &str, contexts: &[KeyContext]) -> String {
+        let mut result = KeybindingResult::NoMatch;
+        for stroke in parse_chord(chord).expect("chord") {
+            result = resolver.process_layered(stroke, contexts);
+        }
+        match result {
+            KeybindingResult::Action(action) => action,
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn layered_contexts_prefer_the_inspector_and_keep_chat_and_global_keys() {
+        let layered = [KeyContext::Inspector, KeyContext::Chat];
+        let mut resolver = KeybindingResolver::new(&UserKeybindings::default());
+        assert_eq!(press(&mut resolver, "escape", &layered), "closeInspector");
+        assert_eq!(press(&mut resolver, "tab", &layered), "nextInspectorPage");
+        // Composer keys the inspector does not bind keep their Chat meaning.
+        assert_eq!(
+            press(&mut resolver, "ctrl+k", &layered),
+            "openCommandPalette"
+        );
+        assert_eq!(press(&mut resolver, "ctrl+a", &layered), "goLineStart");
+        assert_eq!(press(&mut resolver, "ctrl+c", &layered), "interrupt");
+        // Without the inspector layer the same keys mean their Chat action.
+        assert_eq!(press(&mut resolver, "tab", &[KeyContext::Chat]), "indent");
+        assert_eq!(
+            press(&mut resolver, "alt+i", &[KeyContext::Chat]),
+            "toggleInspector"
+        );
+        assert_eq!(
+            press(&mut resolver, "escape", &[KeyContext::Chat]),
+            "NoMatch"
+        );
+
+        // A user rebinding inside the inspector wins over its default; a
+        // user Chat binding does not reach into the inspector layer.
+        let mut resolver = KeybindingResolver::new(&user(&[
+            ("ctrl+q", Some("closeInspector"), Some("Inspector")),
+            ("escape", None, Some("Inspector")),
+            ("tab", Some("redraw"), Some("Chat")),
+        ]));
+        assert_eq!(press(&mut resolver, "ctrl+q", &layered), "closeInspector");
+        assert_eq!(press(&mut resolver, "escape", &layered), "Unbound");
+        assert_eq!(press(&mut resolver, "tab", &layered), "nextInspectorPage");
+        assert_eq!(
+            resolver.reachable_chord_in("closeInspector", &KeyContext::Inspector),
+            Some("Ctrl+Q".to_string())
+        );
+        assert_eq!(
+            KeybindingResolver::new(&UserKeybindings::default())
+                .reachable_chord_in("closeInspector", &KeyContext::Inspector),
+            Some("Esc".to_string())
+        );
     }
 }
