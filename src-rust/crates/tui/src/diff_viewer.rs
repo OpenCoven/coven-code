@@ -569,7 +569,7 @@ fn parse_hunk_header(line: &str) -> (u32, u32, u32, u32) {
 // ---------------------------------------------------------------------------
 
 /// Render the diff dialog overlay.
-pub fn render_diff_dialog(state: &mut DiffViewerState, area: Rect, buf: &mut Buffer) {
+pub fn render_diff_dialog(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
     if !state.visible {
         return;
     }
@@ -838,16 +838,17 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
         inner.width
     };
     let palette = diff_palette_for(state);
-    let lines = build_diff_lines(file, text_width, &palette);
-    let total_lines = lines.len();
+    let total_lines = raw_line_count;
     let scroll =
         (state.detail_scroll as usize).min(total_lines.saturating_sub(inner.height as usize));
-    let visible = &lines[scroll..];
+    let visible = build_diff_rows(
+        file,
+        text_width,
+        &palette,
+        scroll..scroll + inner.height as usize,
+    );
 
     for (i, line) in visible.iter().enumerate() {
-        if i as u16 >= inner.height {
-            break;
-        }
         let y = inner.y + i as u16;
         let row_area = Rect {
             x: inner.x,
@@ -900,6 +901,9 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
 // Inline word-level diff helpers
 // ---------------------------------------------------------------------------
 
+/// Longest part of a line compared word by word.
+const WORD_DIFF_MAX_CHARS: usize = 2_000;
+
 /// Format a 10-char line-number gutter.
 fn format_gutter(old_no: Option<u32>, new_no: Option<u32>) -> String {
     match (old_no, new_no) {
@@ -933,6 +937,17 @@ fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_chars: usize) -> Vec<S
 
 /// Compute word-level inline diff spans for an adjacent (removed, added) line pair.
 /// Returns `(old_spans, new_spans)` where changed words have a highlighted background.
+/// The start of a line, which is all a row shows of it. A word-level diff grows
+/// with the square of a line's words, so without this limit one changed line in a
+/// minified file would hold up every frame for as long as it is on screen.
+fn word_diff_input(line: &str, shown_chars: usize) -> &str {
+    let limit = shown_chars.max(WORD_DIFF_MAX_CHARS);
+    match line.char_indices().nth(limit) {
+        Some((end, _)) => &line[..end],
+        None => line,
+    }
+}
+
 fn build_inline_diff_spans(
     old: &str,
     new: &str,
@@ -1035,7 +1050,20 @@ fn highlight_code_line(line: &str, path: &str, base_style: Style) -> Vec<Span<'s
     }
 }
 
+#[cfg(test)]
 fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> Vec<Line<'static>> {
+    build_diff_rows(file, width, palette, 0..usize::MAX)
+}
+
+/// Format the rows in `window`. A diff line is always one row, and whether a line
+/// pairs with its neighbour for the word-level diff depends only on those two
+/// lines, so a frame formats what is on screen however long the diff is.
+fn build_diff_rows(
+    file: &FileDiffStats,
+    width: u16,
+    palette: &DiffPalette,
+    window: std::ops::Range<usize>,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Gutter = 10 chars ("dddd dddd "), prefix marker = 3 chars ("+  " etc.)
     let gutter_width: usize = 10;
@@ -1043,10 +1071,28 @@ fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> 
     let total_width = width as usize;
     let avail = total_width.saturating_sub(gutter_width + prefix_width);
 
+    let mut next_hunk_row = 0;
     for hunk in &file.hunks {
         let hunk_lines = &hunk.lines;
-        let mut i = 0;
-        while i < hunk_lines.len() {
+        let hunk_row = next_hunk_row;
+        next_hunk_row += hunk_lines.len();
+        if next_hunk_row <= window.start {
+            continue;
+        }
+        if hunk_row >= window.end {
+            break;
+        }
+
+        let mut i = window.start.saturating_sub(hunk_row);
+        // A window can open on the second half of a pair, which is formatted with
+        // the first.
+        if i > 0
+            && hunk_lines[i].kind == DiffLineKind::Added
+            && hunk_lines[i - 1].kind == DiffLineKind::Removed
+        {
+            i -= 1;
+        }
+        while i < hunk_lines.len() && hunk_row + i < window.end {
             let diff_line = &hunk_lines[i];
 
             // Detect adjacent Removed → Added pair for inline word-level diff
@@ -1054,8 +1100,8 @@ fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> 
                 if let Some(next_line) = hunk_lines.get(i + 1) {
                     if next_line.kind == DiffLineKind::Added {
                         let (old_spans, new_spans) = build_inline_diff_spans(
-                            &diff_line.content,
-                            &next_line.content,
+                            word_diff_input(&diff_line.content, avail),
+                            word_diff_input(&next_line.content, avail),
                             palette,
                         );
 
@@ -1080,7 +1126,9 @@ fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> 
                         apply_row_bg(&mut old_clipped, palette.bg_removed);
                         removed_row.extend(old_clipped);
                         pad_to_width(&mut removed_row, total_width, palette.bg_removed);
-                        lines.push(Line::from(removed_row));
+                        if window.contains(&(hunk_row + i)) {
+                            lines.push(Line::from(removed_row));
+                        }
 
                         let mut added_row = vec![
                             Span::styled(
@@ -1101,7 +1149,9 @@ fn build_diff_lines(file: &FileDiffStats, width: u16, palette: &DiffPalette) -> 
                         apply_row_bg(&mut new_clipped, palette.bg_added);
                         added_row.extend(new_clipped);
                         pad_to_width(&mut added_row, total_width, palette.bg_added);
-                        lines.push(Line::from(added_row));
+                        if window.contains(&(hunk_row + i + 1)) {
+                            lines.push(Line::from(added_row));
+                        }
 
                         i += 2;
                         continue;
@@ -1344,6 +1394,115 @@ mod tests {
         );
     }
 
+    /// Every shape a window can cut through: a hunk header, pairs, a removal or
+    /// addition with no partner, context, and a second hunk.
+    fn mixed_file() -> FileDiffStats {
+        let line = |kind, content: &str| DiffLine {
+            kind,
+            content: content.to_string(),
+            old_line_no: Some(1),
+            new_line_no: Some(1),
+        };
+        use DiffLineKind::{Added, Context, Header, Removed};
+        FileDiffStats {
+            path: "mixed.rs".to_string(),
+            added: 0,
+            removed: 0,
+            binary: false,
+            is_new_file: false,
+            hunks: vec![
+                DiffHunk {
+                    old_range: (1, 7),
+                    new_range: (1, 7),
+                    lines: vec![
+                        line(Header, "@@ -1,9 +1,9 @@"),
+                        line(Context, "fn calm() {}"),
+                        line(Removed, "let a = 1;"),
+                        line(Added, "let a = 2;"),
+                        line(Removed, "let b = 1;"),
+                        line(Removed, "let c = 1;"),
+                        line(Added, "let c = 2;"),
+                        line(Added, "let d = 2;"),
+                        line(Context, "fn quiet() {}"),
+                    ],
+                },
+                DiffHunk {
+                    old_range: (40, 1),
+                    new_range: (40, 1),
+                    lines: vec![
+                        line(Header, "@@ -40,2 +40,2 @@"),
+                        line(Removed, "let e = 1;"),
+                        line(Added, "let e = 2;"),
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_word_diff_compares_a_whole_line_up_to_its_limit() {
+        let short = "é".repeat(WORD_DIFF_MAX_CHARS);
+        assert_eq!(word_diff_input(&short, 80), short);
+
+        let long = "é".repeat(WORD_DIFF_MAX_CHARS + 1);
+        assert_eq!(word_diff_input(&long, 80), short);
+
+        let wider_than_the_limit = WORD_DIFF_MAX_CHARS + 1;
+        assert_eq!(word_diff_input(&long, wider_than_the_limit), long);
+    }
+
+    #[test]
+    fn a_changed_line_past_the_limit_shows_the_same_text() {
+        let words = |prefix: &str| -> String {
+            (0..1_000).map(|word| format!("{prefix}{word} ")).collect()
+        };
+        let (old, new) = (words("old"), words("new"));
+        assert!(old.chars().count() > WORD_DIFF_MAX_CHARS);
+
+        let palette = DiffPalette::for_theme("coven");
+        let shown = 67;
+        let text = |spans: Vec<Span<'static>>| -> String {
+            truncate_spans_to_width(spans, shown)
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let (whole_old, whole_new) = build_inline_diff_spans(&old, &new, &palette);
+        let (clipped_old, clipped_new) = build_inline_diff_spans(
+            word_diff_input(&old, shown),
+            word_diff_input(&new, shown),
+            &palette,
+        );
+        assert_eq!(text(clipped_old), text(whole_old));
+        assert_eq!(text(clipped_new), text(whole_new));
+    }
+
+    #[test]
+    fn a_diff_line_is_always_one_row() {
+        let file = mixed_file();
+        let palette = DiffPalette::for_theme("coven");
+        let lines: usize = file.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+        assert_eq!(build_diff_lines(&file, 80, &palette).len(), lines);
+    }
+
+    #[test]
+    fn every_window_is_exactly_that_part_of_the_whole_diff() {
+        let file = mixed_file();
+        let palette = DiffPalette::for_theme("coven");
+        let whole = build_diff_lines(&file, 80, &palette);
+        for start in 0..=whole.len() {
+            for length in 0..=whole.len() {
+                let end = (start + length).min(whole.len());
+                assert_eq!(
+                    build_diff_rows(&file, 80, &palette, start..start + length),
+                    whole[start..end],
+                    "window {start}..{}",
+                    start + length
+                );
+            }
+        }
+    }
+
     #[test]
     fn build_diff_lines_inline_diff_for_adjacent_pair() {
         let file = FileDiffStats {
@@ -1549,7 +1708,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_diff_dialog(&mut state, area, frame.buffer_mut());
+                render_diff_dialog(&state, area, frame.buffer_mut());
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
