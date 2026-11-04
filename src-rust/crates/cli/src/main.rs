@@ -2768,7 +2768,7 @@ async fn run_interactive(
     let renderer = renderer_selection.renderer;
 
     // Set up terminal
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
     // The stderr warning is covered by the alternate screen; repeat it where
@@ -3739,7 +3739,7 @@ async fn run_interactive(
                                             eprintln!("\nLogin failed: {}", e);
                                         }
                                     }
-                                    terminal = claurst_tui::setup_terminal()?;
+                                    terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::StartLoginForProvider {
                                     provider,
@@ -3804,7 +3804,7 @@ async fn run_interactive(
                                             }
                                         }
                                     }
-                                    terminal = claurst_tui::setup_terminal()?;
+                                    terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::Error(e)) => {
                                     app.status_message = Some(format!("Error: {}", e));

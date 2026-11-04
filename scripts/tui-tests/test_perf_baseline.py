@@ -61,6 +61,17 @@ class SeededHistoryTests(unittest.TestCase):
         self.assertFalse(set(text) & set(perf.KEYS))
 
 
+class ReadDeadlineTests(unittest.TestCase):
+    def test_a_deadline_that_just_passed_is_not_an_error(self):
+        read_end, write_end = os.pipe()
+        self.addCleanup(os.close, read_end)
+        self.addCleanup(os.close, write_end)
+        session = perf.Session.__new__(perf.Session)
+        session.master = read_end
+        session.answered = {}
+        self.assertEqual(session.read(-0.001), (b"", None))
+
+
 class StreamingProfileTests(unittest.TestCase):
     def fake(self, chunks):
         root = tempfile.TemporaryDirectory()

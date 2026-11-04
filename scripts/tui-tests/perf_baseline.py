@@ -178,7 +178,8 @@ class Session:
 
     def read(self, timeout):
         """Return (bytes, timestamp) for the next chunk, or (b'', None)."""
-        ready, _, _ = select.select([self.master], [], [], timeout)
+        # A caller's deadline can pass between its check and this call.
+        ready, _, _ = select.select([self.master], [], [], max(0, timeout))
         if not ready:
             return b"", None
         try:
