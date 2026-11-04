@@ -7013,6 +7013,12 @@ impl App {
         use crate::image_paste::PastedImage;
         use crate::prompt_input::detect_pasted_path;
 
+        // Fast typing arrives as a paste burst, so it has to let go of a
+        // selection the way a typed key does.
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.clear_selection();
+        }
+
         if let Some(path) = detect_pasted_path(&data) {
             let ext = path
                 .extension()
