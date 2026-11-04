@@ -2766,6 +2766,15 @@ async fn run_interactive(
         eprintln!("warning: {warning}");
     }
     let renderer = renderer_selection.renderer;
+    // Next ties an approval to the file as it stood when asked. Classic keeps its
+    // existing approvals.
+    let mut tool_ctx = tool_ctx;
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        tool_ctx.permission_handler =
+            Arc::new(claurst_core::permissions::ContentBoundApprovals::new(
+                tool_ctx.permission_handler.clone(),
+            ));
+    }
 
     // Set up terminal
     let mut terminal = setup_terminal()?;

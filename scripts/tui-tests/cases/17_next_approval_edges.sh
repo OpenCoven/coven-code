@@ -2,7 +2,7 @@
 # shellcheck shell=bash
 #
 # Engine-local approval edges (#411), through the same local fake of the Messages
-# API as 14_next_approval_journey.sh: a file changing after its preview, a second
+# API as 14_next_approval_journey.sh: a file changing during its approval, a second
 # decision key, typing a session command at an open panel, a denied path, and a
 # command that prints and then fails. Engine-local evidence only.
 
@@ -84,6 +84,21 @@ JSON
 _next_approval_edges_journey() {
   local project="$1" scratch="$2" before told
 
+  # ---- a Write approved after its file changed does not overwrite the change
+  printf 'as reviewed\n' >"$project/report.txt"
+  before="$(_edge_requests)"
+  if _edge_ask "tool: Write {\"file_path\":\"$project/report.txt\",\"content\":\"from the model\\n\"}" "Write"; then
+    printf 'changed by someone\n' >"$project/report.txt"
+    sleep 0.5; tui_keys y
+    told="$(_edge_told_after $((before + 2)))"
+    assert_contains "$told" "changed while waiting for approval" "the model is told a Write's file changed"
+    assert_eq "$(cat "$project/report.txt")" "changed by someone" "a Write does not overwrite the other writer's change"
+  else
+    _fail "a Write approval opens" "$(tui_capture)"
+  fi
+  wait_absent "working" 15 >/dev/null
+  _edge_clear
+
   # ---- an Edit approved after its file changed does not overwrite the change
   printf 'old line\n' >"$project/notes.txt"
   before="$(_edge_requests)"
@@ -91,7 +106,7 @@ _next_approval_edges_journey() {
     printf 'changed by someone\n' >"$project/notes.txt"
     sleep 0.7; tui_keys y
     told="$(_edge_told_after $((before + 2)))"
-    assert_contains "$told" "old_string not found" "an Edit of a changed file fails after approval"
+    assert_contains "$told" "changed while waiting for approval" "an Edit of a changed file fails after approval"
     assert_contains "$told" '"is_error": true' "the model is told the Edit failed"
     assert_eq "$(cat "$project/notes.txt")" "changed by someone" "the other writer's change survives"
   else

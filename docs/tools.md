@@ -105,6 +105,12 @@ not prevent a concurrent process from changing the filesystem after approval.
 The Edit tool instructs the model to read first, but Write and Edit do not enforce
 a prior-read prerequisite. They record previous content for file history.
 
+### Files that change during an approval
+
+With `COVEN_CODE_UI=next`, an approval covers a file as it stood when the approval was asked for. If `Write`, `Edit`, `BatchEdit`, `ApplyPatch` or `NotebookEdit` finds that its file has changed, been created or been deleted by the time you answer, it writes nothing and tells the model to read the file again.
+
+The check compares file size and modification time, so it also refuses after a `touch`, and it can miss a same-size rewrite on a filesystem with coarse timestamps. A change that lands after the check, in the moment before the write, is not caught. Classic does not make this check: an approved `Write` replaces whatever the file holds by then.
+
 ---
 
 ## File Tools
