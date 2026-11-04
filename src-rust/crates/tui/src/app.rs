@@ -7696,6 +7696,16 @@ impl App {
         event: QueryEvent,
     ) -> Vec<crate::application::PresentationEffect> {
         let mut effects = Vec::new();
+        // A cancelled turn's backlog keeps arriving until the runtime settles.
+        // Its live output must not restart the turn on screen, or further
+        // interrupts would cancel again instead of reaching the exit sequence.
+        // The worker's durable messages and terminal events still apply.
+        if matches!(event, QueryEvent::Stream(_))
+            && self.renderer == crate::application::UiRenderer::Next
+            && self.cancellation != crate::application::TurnCancellation::Idle
+        {
+            return effects;
+        }
         // Auto-dismiss error modal when assistant responds
         match &event {
             QueryEvent::Stream(_) | QueryEvent::TurnComplete { .. } => {

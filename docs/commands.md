@@ -77,7 +77,7 @@ Clear the current conversation history and start a fresh session. The session fi
 ### /exit
 **Aliases:** `quit`, `q`
 
-Exit the Coven Code REPL. Equivalent to pressing `Ctrl+D`. Unsaved session state is flushed before exit.
+Exit the Coven Code REPL, like pressing `Ctrl+D` twice on an empty prompt. Finished turns are already saved. With `COVEN_CODE_UI=next`, a turn that is still running is stopped and what it delivered so far is saved. Classic does not save a running turn.
 
 ```
 /exit
