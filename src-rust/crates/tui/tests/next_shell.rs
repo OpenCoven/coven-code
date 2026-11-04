@@ -464,7 +464,8 @@ fn unavailable_views_explain_their_blocker_instead_of_faking_integrations() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Views);
     let text = text_of(&draw(&app, 80, 24).0);
-    for (view, issue) in [("Work", "#413"), ("Research", "#414"), ("Memory", "#415")] {
+    // Work now has a local-only page; see tests/next_work.rs.
+    for (view, issue) in [("Research", "#414"), ("Memory", "#415")] {
         let line = text
             .lines()
             .find(|line| line.contains(view))
@@ -637,4 +638,15 @@ fn inspector_scrolling_is_bounded_and_voice_recording_is_visible() {
     voice.voice_recording = true;
     let text = text_of(&draw(&voice, 80, 24).0);
     assert!(text.contains("recording voice"), "{text}");
+}
+
+#[test]
+fn switching_sessions_drops_work_read_for_the_old_one() {
+    let mut app = next_app();
+    app.enter_session_scope("session-a");
+    app.work_sources.goal = Some(Err("read for session-a".into()));
+    app.enter_session_scope("session-a");
+    assert!(app.work_sources.goal.is_some(), "same session keeps it");
+    app.enter_session_scope("session-b");
+    assert!(app.work_sources.goal.is_none());
 }

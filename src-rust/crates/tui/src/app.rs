@@ -963,6 +963,9 @@ pub struct App {
     /// Goal badge string shown in the footer, e.g. "active · 5m · 3 turns".
     /// None when no goal is active. Updated by the REPL after each turn.
     pub active_goal_badge: Option<String>,
+    /// Snapshot of the engine-local work stores for the Next Work page,
+    /// refreshed by the interactive loop. Display only; it grants nothing.
+    pub work_sources: crate::application::work::WorkSources,
 
     // ---- Thinking block expansion state ----------------------------------
     /// Set of thinking block content hashes that are expanded.
@@ -1418,6 +1421,7 @@ impl App {
             worktree_branch: None,
             agent_type_badge: None,
             active_goal_badge: None,
+            work_sources: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
             last_selectable_area: Cell::new(ratatui::layout::Rect::default()),
@@ -3372,6 +3376,8 @@ impl App {
             self.selection_focus = None;
             self.selection_text.borrow_mut().clear();
             self.next_shell.inspector_scroll = 0;
+            // Work read for the old session does not describe this one.
+            self.work_sources = Default::default();
             self.session_id = Some(id.to_string());
             self.restore_scope_view(id);
         }
