@@ -146,3 +146,18 @@ idle RSS and idle PTY writes per second, and exits nonzero if any sample
 timed out. Times are observed at the PTY boundary and include scheduling;
 compare builds only with the same binary profile, host and load. It is a
 baseline instrument, not #417's in-process render instrumentation.
+
+```bash
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --ui next --history-lines 100000 --stream --size 80x24 --size 120x40
+```
+
+`--ui next` selects the Next renderer. `--history-lines N` resumes a synthetic
+session of N transcript lines. A resume must prove it loaded, so a failed one
+cannot pass as a fast empty session: Next must show seeded text, and Classic
+must print the CLI's load confirmation. `--stream` adds a turn against a fake
+`claude` written to the disposable home, then reports input-to-paint during
+the turn and the gap between paints. That gap is a boundary proxy for active
+render cost; its floor is the event loop's 16 ms poll, and a slower fake
+producer would widen it. Classic cannot show the live end of a transcript past
+65,535 rows (#441), so `--stream` with 100,000 lines exits nonzero on Classic.
