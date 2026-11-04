@@ -3952,7 +3952,12 @@ async fn execute_tool_blocks_with_hooks(
         });
     }
 
-    // Phase 2: execute non-blocked tools concurrently.
+    // Phase 2: execute non-blocked tools concurrently, except that tools which
+    // write take turns in the order requested. Each reads its target and writes
+    // it back, so two at once would start from the same content and one change
+    // would vanish while both report success.
+    let writer_turn = tokio::sync::Mutex::new(());
+    let writer_turn = &writer_turn;
     let exec_futures: Vec<_> = prepared
         .iter()
         .map(|p| {
@@ -3962,7 +3967,16 @@ async fn execute_tool_blocks_with_hooks(
                 let name = p.name.clone();
                 let input = p.input.clone();
                 let call_id = p.id.clone();
+                let writes = tools.iter().any(|tool| {
+                    tool.name() == name
+                        && tool.permission_level() == claurst_tools::PermissionLevel::Write
+                });
                 futures::future::Either::Right(claurst_tools::with_tool_call(call_id, async move {
+                    let _turn = if writes {
+                        Some(writer_turn.lock().await)
+                    } else {
+                        None
+                    };
                     execute_tool(&name, &input, tools, tool_ctx).await
                 }))
             }
@@ -8290,6 +8304,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn scheduling_ctx(working_dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            working_dir: working_dir.to_path_buf(),
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(AutoPermissionHandler {
+                mode: PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: CostTracker::new(),
+            session_id: "tool-scheduling".into(),
+            goal_turn: Default::default(),
+            file_history: Default::default(),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Config::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+        }
+    }
+
+    fn assert_all_succeeded(results: &[ContentBlock]) {
+        let text = serde_json::to_string(results).unwrap();
+        assert!(!text.contains(r#""is_error":true"#), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_edit_to_one_file_in_a_response_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        let lines: Vec<String> = (0..8).map(|i| format!("line {i}")).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(claurst_tools::FileEditTool)];
+        let calls = lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                (
+                    format!("edit-{i}"),
+                    "Edit".to_string(),
+                    serde_json::json!({
+                        "file_path": path,
+                        "old_string": line,
+                        "new_string": format!("edited {i}"),
+                    }),
+                )
+            })
+            .collect();
+
+        let results =
+            execute_tool_blocks_with_hooks(calls, &tools, &scheduling_ctx(dir.path()), None).await;
+
+        assert_all_succeeded(&results);
+        let expected: Vec<String> = (0..8).map(|i| format!("edited {i}")).collect();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected.join("\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writing_tools_in_a_response_run_in_the_order_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(claurst_tools::FileWriteTool),
+            Box::new(claurst_tools::FileEditTool),
+        ];
+        let calls = vec![
+            (
+                "write".to_string(),
+                "Write".to_string(),
+                serde_json::json!({"file_path": path, "content": "draft\n"}),
+            ),
+            (
+                "edit".to_string(),
+                "Edit".to_string(),
+                serde_json::json!({"file_path": path, "old_string": "draft", "new_string": "final"}),
+            ),
+        ];
+
+        let results =
+            execute_tool_blocks_with_hooks(calls, &tools, &scheduling_ctx(dir.path()), None).await;
+
+        assert_all_succeeded(&results);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "final\n");
+    }
+
+    /// Finishes only once every tool sharing the barrier is running at once.
+    struct RendezvousTool {
+        name: &'static str,
+        level: PermissionLevel,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl Tool for RendezvousTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Waits for the other tools in its response"
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            self.level
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            self.barrier.wait().await;
+            ToolResult::success("met")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writing_tool_does_not_hold_up_the_others_in_its_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let tool = |name, level| -> Box<dyn Tool> {
+            Box::new(RendezvousTool {
+                name,
+                level,
+                barrier: barrier.clone(),
+            })
+        };
+        let tools = vec![
+            tool("Writes", PermissionLevel::Write),
+            tool("RunsOne", PermissionLevel::Execute),
+            tool("RunsTwo", PermissionLevel::Execute),
+            tool("Reads", PermissionLevel::ReadOnly),
+        ];
+        let calls = ["Writes", "RunsOne", "RunsTwo", "Reads"]
+            .map(|name| (name.to_string(), name.to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            execute_tool_blocks_with_hooks(calls, &tools, &ctx, None),
+        )
+        .await
+        .expect("tools in a response must still run at the same time");
+
+        assert_all_succeeded(&results);
     }
 
     #[test]
