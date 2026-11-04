@@ -417,6 +417,36 @@ pub struct ToolUseBlock {
     pub output_preview: Option<String>,
     /// JSON-serialised input for the tool call (populated from the API stream).
     pub input_json: String,
+    pub run: ToolRun,
+}
+
+/// What the query loop has reported about a tool's own work, ahead of the
+/// `ToolEnd` that waits for every tool in its response. Only Next shows this.
+#[derive(Debug, Clone, Default)]
+pub struct ToolRun {
+    /// When its work began: the start, the end of its wait for a turn, or the
+    /// moment it was approved.
+    pub started_at: Option<std::time::Instant>,
+    /// Waiting for another tool in its response to finish first.
+    pub queued: bool,
+    /// How long its work took and whether it failed, once it ended.
+    pub finished: Option<(std::time::Duration, bool)>,
+}
+
+impl ToolRun {
+    fn started() -> Self {
+        Self {
+            started_at: Some(std::time::Instant::now()),
+            ..Self::default()
+        }
+    }
+
+    fn finish(&mut self, is_error: bool) {
+        if self.finished.is_none() {
+            let took = self.started_at.map(|at| at.elapsed()).unwrap_or_default();
+            self.finished = Some((took, is_error));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3452,6 +3482,17 @@ impl App {
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
         self.permission_decisions
             .insert(tool_use_id.to_string(), allowed);
+        // Time spent waiting on the user is not time the tool spent working.
+        if let Some(run) = self.tool_run_mut(tool_use_id) {
+            run.started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
+        self.tool_use_blocks
+            .iter_mut()
+            .find(|block| block.id == tool_id)
+            .map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -7806,6 +7847,7 @@ impl App {
                         input_json,
                         status: ToolStatus::Running,
                         output_preview: None,
+                        run: Default::default(),
                     });
                     self.tool_use_blocks.len() - 1
                 }
@@ -7923,6 +7965,7 @@ impl App {
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
+                    existing.run = ToolRun::started();
                 } else {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
@@ -7931,6 +7974,7 @@ impl App {
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
+                        run: ToolRun::started(),
                     });
                 }
                 self.invalidate_transcript();
@@ -7951,6 +7995,7 @@ impl App {
                         ToolStatus::Done
                     };
                     block.output_preview = Some(preview);
+                    block.run.finish(is_error);
                 }
                 self.invalidate_transcript();
                 if is_error {
@@ -7959,6 +8004,25 @@ impl App {
                     self.status_message = None;
                 }
                 self.refresh_turn_diff_from_history();
+            }
+
+            QueryEvent::ToolQueued { tool_id } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.queued = true;
+                    run.started_at = None;
+                }
+            }
+
+            QueryEvent::ToolDequeued { tool_id } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    *run = ToolRun::started();
+                }
+            }
+
+            QueryEvent::ToolFinished { tool_id, is_error } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.finish(is_error);
+                }
             }
 
             QueryEvent::TurnComplete {

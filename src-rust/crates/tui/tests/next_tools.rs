@@ -89,6 +89,12 @@ fn tool_start(app: &mut App, id: &str, name: &str, input: &str) {
     );
 }
 
+fn row_of<'a>(text: &'a str, name: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.contains(name))
+        .unwrap_or_else(|| panic!("no {name} row in:\n{text}"))
+}
+
 fn tool_end(app: &mut App, id: &str, name: &str, result: &str, is_error: bool) {
     apply(
         app,
@@ -537,4 +543,189 @@ fn the_approval_shows_the_whole_command_or_says_what_is_hidden() {
             }
         }
     }
+}
+
+#[test]
+fn a_finished_tool_shows_its_result_while_its_neighbour_still_runs() {
+    let mut app = next_app();
+    app.push_message(Message::user("look around".to_string()));
+    tool_start(&mut app, "quick", "Read", r#"{"file_path":"/a.rs"}"#);
+    tool_start(&mut app, "bad", "Grep", r#"{"pattern":"x"}"#);
+    tool_start(&mut app, "slow", "Bash", r#"{"command":"sleep 300"}"#);
+
+    let finished = |tool_id: &str, is_error| QueryEvent::ToolFinished {
+        tool_id: tool_id.to_string(),
+        is_error,
+    };
+    apply(&mut app, finished("quick", false));
+    apply(&mut app, finished("bad", true));
+
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Read").contains("done"), "{text}");
+    assert!(row_of(&text, "Grep").contains("error"), "{text}");
+    assert!(row_of(&text, "Bash").contains("running"), "{text}");
+}
+
+#[test]
+fn a_tool_waiting_for_its_turn_says_so_until_its_turn_comes() {
+    let mut app = next_app();
+    app.push_message(Message::user("edit twice".to_string()));
+    tool_start(&mut app, "second", "Edit", r#"{"file_path":"/a.rs"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolQueued {
+            tool_id: "second".to_string(),
+        },
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "Edit").contains("waiting for its turn"),
+        "{text}"
+    );
+    assert!(!row_of(&text, "Edit").contains("running"), "{text}");
+
+    apply(
+        &mut app,
+        QueryEvent::ToolDequeued {
+            tool_id: "second".to_string(),
+        },
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Edit").contains("running"), "{text}");
+}
+
+#[test]
+fn a_tool_asking_for_approval_is_not_shown_as_running() {
+    let mut app = next_app();
+    app.push_message(Message::user("run it".to_string()));
+    tool_start(&mut app, "call-1", "Bash", r#"{"command":"make"}"#);
+    let bash = claurst_tui::dialogs::PermissionRequest::bash(
+        "call-1".to_string(),
+        "Bash".to_string(),
+        "make".to_string(),
+        "make".to_string(),
+        None,
+    );
+    app.permission_request = Some(bash);
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    assert_eq!(
+        view.tools[0].state,
+        claurst_tui::application::view::ToolActivityState::AwaitingApproval
+    );
+
+    app.permission_request = None;
+    app.tool_use_blocks[0].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+    app.record_permission_decision("call-1", true);
+    let text = text_of(&draw(&app, 100, 30));
+    let row = row_of(&text, "Bash");
+    assert!(row.contains("allowed, running"), "{row}");
+    assert!(
+        !row.contains("10m"),
+        "time spent waiting on the user is not the tool's: {row}"
+    );
+}
+
+#[test]
+fn tool_rows_show_how_long_the_work_took_from_one_second() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(&mut app, "long", "Bash", r#"{"command":"make"}"#);
+    tool_start(&mut app, "short", "Read", r#"{"file_path":"/a.rs"}"#);
+
+    let text = text_of(&draw(&app, 100, 30));
+    let row = row_of(&text, "Bash");
+    assert!(row.trim_end().ends_with("running"), "no time yet: {row}");
+
+    app.tool_use_blocks[0].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(65));
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Bash").contains("running 1m 5s"), "{text}");
+
+    tool_end(&mut app, "long", "Bash", "built", false);
+    tool_end(&mut app, "short", "Read", "contents", false);
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Bash").contains("done 1m 5s"), "{text}");
+    let read = row_of(&text, "Read");
+    assert!(read.trim_end().ends_with("done"), "under a second: {read}");
+}
+
+#[test]
+fn a_cancelled_tool_shows_no_time_because_when_it_stopped_is_not_known() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(&mut app, "long", "Bash", r#"{"command":"make"}"#);
+    app.tool_use_blocks[0].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(65));
+    app.interrupt_tool_rows();
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    assert_eq!(view.tools.len(), 1);
+    assert_eq!(view.tools[0].elapsed, None);
+}
+
+#[test]
+fn classic_draws_nothing_new_for_a_tools_progress() {
+    let mut app = next_app();
+    app.renderer = claurst_tui::application::UiRenderer::Classic;
+    app.push_message(Message::user("edit twice".to_string()));
+    tool_start(&mut app, "first", "Edit", r#"{"file_path":"/a.rs"}"#);
+    tool_start(&mut app, "second", "Edit", r#"{"file_path":"/b.rs"}"#);
+
+    let frame = |app: &App| {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| claurst_tui::render::render_app(frame, app))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let before = frame(&app);
+    apply(
+        &mut app,
+        QueryEvent::ToolQueued {
+            tool_id: "second".to_string(),
+        },
+    );
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "first".to_string(),
+            is_error: true,
+        },
+    );
+    assert_eq!(before, frame(&app));
+}
+
+#[test]
+fn a_long_path_keeps_its_file_name_and_a_long_command_keeps_its_start() {
+    let mut app = next_app();
+    app.push_message(Message::user("look".to_string()));
+    let long_path = format!("/outside/{}/notes.txt", "deep/".repeat(30));
+    tool_start(
+        &mut app,
+        "read",
+        "Read",
+        &format!(r#"{{"file_path":"{long_path}"}}"#),
+    );
+    let long_command = format!("make release {}", "--flag ".repeat(30));
+    tool_start(
+        &mut app,
+        "run",
+        "Bash",
+        &format!(r#"{{"command":"{long_command}"}}"#),
+    );
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    let target = |id: &str| {
+        let tool = view.tools.iter().find(|tool| tool.id == id).unwrap();
+        tool.target.clone().unwrap()
+    };
+    assert!(target("read").ends_with("/notes.txt"), "{}", target("read"));
+    assert!(target("read").starts_with('…'), "{}", target("read"));
+    assert!(target("read").chars().count() <= 60, "{}", target("read"));
+    assert!(
+        target("run").starts_with("make release"),
+        "{}",
+        target("run")
+    );
+    assert!(target("run").ends_with('…'), "{}", target("run"));
+    assert!(target("run").chars().count() <= 60, "{}", target("run"));
 }

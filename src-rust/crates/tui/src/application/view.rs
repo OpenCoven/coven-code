@@ -71,6 +71,10 @@ pub struct TranscriptEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolActivityState {
+    /// Asked the user and has no answer yet.
+    AwaitingApproval,
+    /// Waiting for another tool in its response to finish first.
+    Queued,
     Running,
     Done,
     Error,
@@ -94,6 +98,25 @@ pub struct ToolActivity {
     pub output: Option<String>,
     /// The user's permission decision for this call, when one was asked.
     pub allowed: Option<bool>,
+    /// How long its work has taken, once that is worth showing.
+    pub elapsed: Option<std::time::Duration>,
+}
+
+/// Shorter than this, a time on a tool row is only noise.
+const SHORTEST_ELAPSED: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a tool's work has taken. A cancelled tool shows none: whether its
+/// work stopped, and when, is not known here (see #373).
+fn tool_elapsed(
+    block: &crate::app::ToolUseBlock,
+    state: ToolActivityState,
+) -> Option<std::time::Duration> {
+    let elapsed = match state {
+        ToolActivityState::Running => block.run.started_at?.elapsed(),
+        ToolActivityState::Done | ToolActivityState::Error => block.run.finished?.0,
+        _ => return None,
+    };
+    (elapsed >= SHORTEST_ELAPSED).then_some(elapsed)
 }
 
 /// [`terminal_safe`] text folded onto one line.
@@ -132,7 +155,7 @@ pub fn terminal_safe(text: &str) -> String {
 fn tool_target(input_json: &str, project_root: Option<&std::path::Path>) -> Option<String> {
     let input: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(input_json).ok()?;
-    let raw = [
+    let (key, raw) = [
         "command",
         "file_path",
         "path",
@@ -142,18 +165,28 @@ fn tool_target(input_json: &str, project_root: Option<&std::path::Path>) -> Opti
         "description",
     ]
     .iter()
-    .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))?;
+    .find_map(|key| {
+        input
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(|raw| (*key, raw))
+    })?;
     let first_line = raw.lines().next().unwrap_or_default();
     let relative = project_root
         .and_then(|root| std::path::Path::new(first_line).strip_prefix(root).ok())
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| first_line.to_string());
     let safe = terminal_safe(&relative);
-    if safe.chars().count() > TARGET_MAX_CHARS {
+    let length = safe.chars().count();
+    if length <= TARGET_MAX_CHARS {
+        Some(safe)
+    } else if matches!(key, "file_path" | "path") {
+        // The end of a path is what names the file.
+        let tail: String = safe.chars().skip(length - (TARGET_MAX_CHARS - 1)).collect();
+        Some(format!("…{tail}"))
+    } else {
         let short: String = safe.chars().take(TARGET_MAX_CHARS - 1).collect();
         Some(format!("{short}…"))
-    } else {
-        Some(safe)
     }
 }
 
@@ -244,10 +277,22 @@ impl TranscriptView {
         app.tool_use_blocks
             .iter()
             .map(|block| {
-                let state = match block.status {
-                    ToolStatus::Running => ToolActivityState::Running,
-                    ToolStatus::Done => ToolActivityState::Done,
-                    ToolStatus::Error => ToolActivityState::Error,
+                let awaiting_approval = app
+                    .permission_request
+                    .as_ref()
+                    .is_some_and(|request| request.tool_use_id == block.id);
+                let state = match (&block.status, block.run.finished) {
+                    (ToolStatus::Done, _) | (ToolStatus::Running, Some((_, false))) => {
+                        ToolActivityState::Done
+                    }
+                    (ToolStatus::Error, _) | (ToolStatus::Running, Some((_, true))) => {
+                        ToolActivityState::Error
+                    }
+                    (ToolStatus::Running, None) if awaiting_approval => {
+                        ToolActivityState::AwaitingApproval
+                    }
+                    (ToolStatus::Running, None) if block.run.queued => ToolActivityState::Queued,
+                    (ToolStatus::Running, None) => ToolActivityState::Running,
                 };
                 (block, state)
             })
@@ -260,6 +305,7 @@ impl TranscriptView {
                 input: terminal_safe(&block.input_json),
                 output: block.output_preview.as_deref().map(terminal_safe),
                 allowed: app.permission_decisions.get(&block.id).copied(),
+                elapsed: tool_elapsed(block, state),
             })
             .collect()
     }

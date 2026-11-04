@@ -49,6 +49,8 @@ Writers outside the response are not covered. Two subagents or `TeamCreate` team
 
 ---
 
+The Next renderer reports each tool as it goes: `waiting for its turn` while another writing tool runs, `awaiting approval` while it asks you, and `running`, `done` or `error` with how long its work took, once that passes a second. Time spent waiting for your answer is not counted. A result can still arrive later than its `done`, because results are returned to the model together. Classic and headless output are unchanged.
+
 ## Permission System
 
 ### Permission Levels

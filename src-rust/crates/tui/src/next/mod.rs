@@ -1069,6 +1069,8 @@ fn text_line(appearance: &Appearance, content: &str) -> Line<'static> {
 /// Completion is not verification: a finished tool is neutral evidence.
 fn tool_status(state: ToolActivityState) -> (Status, &'static str) {
     match state {
+        ToolActivityState::AwaitingApproval => (Status::Pending, "awaiting approval"),
+        ToolActivityState::Queued => (Status::Pending, "waiting for its turn"),
         ToolActivityState::Running => (Status::Pending, "running"),
         ToolActivityState::Done => (Status::Evidence, "done"),
         ToolActivityState::Error => (Status::Blocked, "error"),
@@ -1077,7 +1079,7 @@ fn tool_status(state: ToolActivityState) -> (Status, &'static str) {
     }
 }
 
-/// One tool row: operation, safe target and state. A permission decision
+/// One tool row: operation, safe target, state and elapsed time. A permission decision
 /// is shown next to the execution state, never in place of it: an allowed
 /// call is still running until the tool reports its result.
 fn tool_line(appearance: &Appearance, tool: &ToolActivity, expanded: bool) -> Line<'static> {
@@ -1090,6 +1092,15 @@ fn tool_line(appearance: &Appearance, tool: &ToolActivity, expanded: bool) -> Li
         (Some(false), _) => (Status::Blocked, "denied".to_string()),
         (Some(true), ToolActivityState::Running) => (status, format!("allowed, {word}")),
         _ => (status, word.to_string()),
+    };
+    let word = match (tool.elapsed, tool.allowed) {
+        (Some(elapsed), allowed) if allowed != Some(false) => {
+            format!(
+                "{word} {}",
+                crate::app::format_elapsed_ms(elapsed.as_millis())
+            )
+        }
+        _ => word,
     };
     primitives::tool_row(appearance, &label, status, &word, expanded)
 }

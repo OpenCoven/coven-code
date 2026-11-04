@@ -884,6 +884,14 @@ pub enum QueryEvent {
         result: String,
         is_error: bool,
     },
+    /// A tool is waiting for another in its response to finish first.
+    ToolQueued { tool_id: String },
+    /// A queued tool's turn has come.
+    ToolDequeued { tool_id: String },
+    /// A tool's own work has ended. Its [`QueryEvent::ToolEnd`], which carries
+    /// the result, follows once its hooks have run and every tool in the
+    /// response has ended.
+    ToolFinished { tool_id: String, is_error: bool },
     /// The model finished a turn.
     TurnComplete {
         turn: u32,
@@ -4098,14 +4106,32 @@ async fn execute_tool_blocks_with_hooks(
                 let name = p.name.clone();
                 let input = p.input.clone();
                 let call_id = p.id.clone();
+                let tool_id = p.id.clone();
                 let writes = tools.iter().any(|tool| {
                     tool.name() == name
                         && tool.permission_level() == claurst_tools::PermissionLevel::Write
                 });
                 futures::future::Either::Right(claurst_tools::with_tool_call(call_id, async move {
+                    let report = |event| {
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(event);
+                        }
+                    };
                     let execute = async {
                         let _turn = if writes {
-                            Some(writer_turn.lock().await)
+                            Some(match writer_turn.try_lock() {
+                                Ok(turn) => turn,
+                                Err(_) => {
+                                    report(QueryEvent::ToolQueued {
+                                        tool_id: tool_id.clone(),
+                                    });
+                                    let turn = writer_turn.lock().await;
+                                    report(QueryEvent::ToolDequeued {
+                                        tool_id: tool_id.clone(),
+                                    });
+                                    turn
+                                }
+                            })
                         } else {
                             None
                         };
@@ -4114,11 +4140,18 @@ async fn execute_tool_blocks_with_hooks(
                     // Cancel each unfinished call rather than dropping the
                     // complete batch: join_all retains results already received,
                     // and queued writers must not start after cancellation.
-                    tokio::select! {
+                    // A call cancelled while it waits its turn still finishes,
+                    // so its row does not stay queued.
+                    let result = tokio::select! {
                         biased;
                         _ = cancel_token.cancelled() => ToolResult::error(CANCELLED),
                         result = execute => result,
-                    }
+                    };
+                    report(QueryEvent::ToolFinished {
+                        tool_id,
+                        is_error: result.is_error,
+                    });
+                    result
                 }))
             }
         })
@@ -8822,6 +8855,119 @@ mod tests {
         .expect("tools in a response must still run at the same time");
 
         assert_all_succeeded(&results);
+    }
+
+    /// Ends when the test says so, so a test can look at what was reported while
+    /// it is still running.
+    struct HeldTool {
+        name: &'static str,
+        level: PermissionLevel,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for HeldTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Ends when the test says so"
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            self.level
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            self.release.notified().await;
+            ToolResult::error("held tool failed")
+        }
+    }
+
+    /// The next event about a tool's progress, skipping starts.
+    async fn next_progress(rx: &mut mpsc::UnboundedReceiver<QueryEvent>) -> String {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .expect("the expected event never came")
+                .expect("the channel closed");
+            match event {
+                QueryEvent::ToolQueued { tool_id } => return format!("queued {tool_id}"),
+                QueryEvent::ToolDequeued { tool_id } => return format!("dequeued {tool_id}"),
+                QueryEvent::ToolFinished { tool_id, is_error } => {
+                    return format!("finished {tool_id} error={is_error}")
+                }
+                QueryEvent::ToolEnd { tool_id, .. } => return format!("end {tool_id}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_reports_finishing_while_others_in_its_response_still_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let slow_gate = Arc::new(tokio::sync::Barrier::new(2));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(HeldTool {
+                name: "Quick",
+                level: PermissionLevel::ReadOnly,
+                release: release.clone(),
+            }),
+            Box::new(RendezvousTool {
+                name: "Slow",
+                level: PermissionLevel::Execute,
+                barrier: slow_gate.clone(),
+            }),
+        ];
+        let calls = [("quick", "Quick"), ("slow", "Slow")]
+            .map(|(id, name)| (id.to_string(), name.to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let watch = async {
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished quick error=true");
+            slow_gate.wait().await;
+            assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
+            assert_eq!(next_progress(&mut rx).await, "end quick");
+            assert_eq!(next_progress(&mut rx).await, "end slow");
+        };
+        tokio::join!(run, watch);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writing_tool_reports_waiting_for_its_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release: release.clone(),
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "queued second");
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished first error=true");
+            assert_eq!(next_progress(&mut rx).await, "dequeued second");
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished second error=true");
+        };
+        tokio::join!(run, watch);
     }
 
     #[test]
