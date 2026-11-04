@@ -264,6 +264,87 @@ fn classic_does_not_observe_next_only_keys() {
 }
 
 #[test]
+fn classic_does_not_observe_ctrl_z() {
+    let mut app = next_app();
+    app.renderer = UiRenderer::Classic;
+    app.set_prompt_text("abc".to_string());
+    app.handle_key_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(!app.next_shell.take_suspend_request());
+    // Same as before suspend existed: the chord falls through to text input.
+    assert_eq!(app.prompt_input.text, "abcz");
+}
+
+#[test]
+fn classic_keeps_user_chords_that_start_on_next_only_keys() {
+    for first in ["ctrl+z", "alt+i", "alt+l"] {
+        let mut bindings = claurst_core::keybindings::UserKeybindings::default();
+        bindings
+            .bindings
+            .push(claurst_core::keybindings::UserBinding {
+                chord: format!("{first} ctrl+x"),
+                action: Some("openCommandPalette".to_string()),
+                context: Some("Chat".to_string()),
+            });
+        let mut app = next_app();
+        app.keybindings = claurst_core::keybindings::KeybindingResolver::new(&bindings);
+        app.select_renderer(UiRenderer::Classic);
+        let first_key = match first {
+            "ctrl+z" => key(KeyCode::Char('z'), KeyModifiers::CONTROL),
+            "alt+i" => alt('i'),
+            _ => alt('l'),
+        };
+        app.handle_key_event(first_key);
+        assert!(!app.command_palette.visible, "{first}");
+        assert_eq!(
+            app.prompt_input.text, "",
+            "{first} is held as a chord prefix"
+        );
+        app.handle_key_event(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(
+            app.command_palette.visible,
+            "{first} ctrl+x reaches the user's action"
+        );
+    }
+}
+
+#[test]
+fn next_keeps_its_own_keys_when_selected() {
+    let mut app = next_app();
+    app.select_renderer(UiRenderer::Next);
+    app.handle_key_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(app.next_shell.take_suspend_request());
+    app.handle_key_event(alt('i'));
+    assert!(app.next_shell.inspector.is_some());
+}
+
+#[test]
+fn ctrl_z_asks_to_suspend_once_and_leaves_the_session_alone() {
+    let mut app = next_app();
+    app.set_prompt_text("keep me".to_string());
+    app.push_message(Message::user("run it".to_string()));
+    apply(&mut app, delta("working on it"));
+    assert!(app.is_streaming);
+    app.handle_key_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(app.next_shell.take_suspend_request());
+    assert!(!app.next_shell.take_suspend_request(), "asked once");
+    assert_eq!(app.prompt_input.text, "keep me", "the draft is untouched");
+    assert!(app.is_streaming, "suspending is not cancelling");
+}
+
+#[test]
+fn ctrl_z_asks_to_suspend_with_the_inspector_open() {
+    let mut app = next_app();
+    app.handle_key_event(alt('i'));
+    assert!(app.next_shell.inspector.is_some());
+    app.handle_key_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(app.next_shell.take_suspend_request());
+    assert!(
+        app.next_shell.inspector.is_some(),
+        "the inspector stays open"
+    );
+}
+
+#[test]
 fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending() {
     for (renderer, cancel_key) in [
         (UiRenderer::Next, esc()),

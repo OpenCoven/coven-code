@@ -179,6 +179,7 @@ pub const NEXT_ONLY_ACTIONS: &[&str] = &[
     "scrollInspectorUp",
     "scrollInspectorDown",
     "jumpToLive",
+    "suspend",
 ];
 
 const INSPECTOR_SCROLL_STEP: usize = 5;
@@ -205,9 +206,16 @@ pub struct ShellState {
     /// Largest useful `inspector_scroll` for the last drawn page.
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
+    suspend_requested: bool,
 }
 
 impl ShellState {
+    /// Whether the user asked to suspend since the last call. The event loop
+    /// owns the terminal, so it carries the suspend out.
+    pub fn take_suspend_request(&mut self) -> bool {
+        std::mem::take(&mut self.suspend_requested)
+    }
+
     /// Apply one of [`NEXT_ONLY_ACTIONS`].
     pub fn apply_action(&mut self, action: &str) {
         match action {
@@ -238,6 +246,7 @@ impl ShellState {
                     .min(self.inspector_scroll_max.get());
             }
             "jumpToLive" => self.anchor.set(ReadingAnchor::default()),
+            "suspend" => self.suspend_requested = true,
             _ => {}
         }
     }

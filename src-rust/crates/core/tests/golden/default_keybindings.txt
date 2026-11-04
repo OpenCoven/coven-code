@@ -45,6 +45,7 @@ Chat	ctrl+shift+a	openModelPicker
 Chat	ctrl+k	openCommandPalette
 Chat	alt+i	toggleInspector
 Chat	alt+l	jumpToLive
+Chat	ctrl+z	suspend
 Inspector	alt+i	closeInspector
 Inspector	escape	closeInspector
 Inspector	tab	nextInspectorPage

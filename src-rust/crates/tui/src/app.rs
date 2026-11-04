@@ -6237,6 +6237,16 @@ impl App {
         self.exit_key_sequence_start = Some(key_char);
     }
 
+    /// Choose the renderer for this session. Next-only keys stay unbound in
+    /// any other renderer, including as the start of a user's chord.
+    pub fn select_renderer(&mut self, renderer: crate::application::UiRenderer) {
+        self.renderer = renderer;
+        if renderer != crate::application::UiRenderer::Next {
+            self.keybindings
+                .remove_default_actions(crate::next::NEXT_ONLY_ACTIONS);
+        }
+    }
+
     fn handle_keybinding_action(&mut self, action: &str) -> bool {
         if crate::next::NEXT_ONLY_ACTIONS.contains(&action) {
             if action == "jumpToLive" {

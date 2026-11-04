@@ -301,6 +301,7 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         // Next renderer only; Classic treats these chords as unbound.
         ("alt+i", "toggleInspector", KeyContext::Chat),
         ("alt+l", "jumpToLive", KeyContext::Chat),
+        ("ctrl+z", "suspend", KeyContext::Chat),
         // Hints show the newest default, so Escape is listed last.
         ("alt+i", "closeInspector", KeyContext::Inspector),
         ("escape", "closeInspector", KeyContext::Inspector),
@@ -683,6 +684,27 @@ pub struct BindingConflict {
 }
 
 impl KeybindingResolver {
+    /// Drop the defaults bound to `actions`, so their chords are free again.
+    /// For a renderer that does not handle them: a default that only falls
+    /// through would still shadow a user's longer chord. User bindings stay.
+    pub fn remove_default_actions(&mut self, actions: &[&str]) {
+        let default_count = self.default_count;
+        let mut index = 0;
+        let mut kept = 0;
+        self.bindings.retain(|binding| {
+            let is_default = index < default_count;
+            index += 1;
+            let remove = is_default
+                && binding
+                    .action
+                    .as_deref()
+                    .is_some_and(|action| actions.contains(&action));
+            kept += usize::from(is_default && !remove);
+            !remove
+        });
+        self.default_count = kept;
+    }
+
     pub fn new(user: &UserKeybindings) -> Self {
         let mut bindings = default_bindings();
         let default_count = bindings.len();
@@ -1218,11 +1240,43 @@ mod tests {
     }
 
     #[test]
+    fn removing_default_actions_frees_their_chords_and_keeps_user_bindings() {
+        let user = user(&[
+            ("ctrl+z ctrl+x", Some("openHelp"), Some("Chat")),
+            ("alt+u", Some("suspend"), Some("Chat")),
+        ]);
+        let mut resolver = KeybindingResolver::new(&user);
+        // The exact default shadows the user's longer chord.
+        assert_eq!(
+            press(&mut resolver, "ctrl+z", &[KeyContext::Chat]),
+            "suspend"
+        );
+
+        resolver.remove_default_actions(&["suspend"]);
+        let pending =
+            resolver.process_layered(parse_keystroke("ctrl+z").unwrap(), &[KeyContext::Chat]);
+        assert!(matches!(pending, KeybindingResult::Pending));
+        assert_eq!(
+            press(&mut resolver, "ctrl+x", &[KeyContext::Chat]),
+            "openHelp"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+u", &[KeyContext::Chat]),
+            "suspend",
+            "a user's own binding stays"
+        );
+        assert_eq!(
+            press(&mut resolver, "ctrl+k", &[KeyContext::Chat]),
+            "openCommandPalette"
+        );
+    }
+
+    #[test]
     fn test_resolver_no_match() {
         let user = UserKeybindings::default();
         let mut resolver = KeybindingResolver::new(&user);
-        // ctrl+z has no default binding
-        let ks = parse_keystroke("ctrl+z").unwrap();
+        // ctrl+alt+z has no default binding
+        let ks = parse_keystroke("ctrl+alt+z").unwrap();
         let result = resolver.process(ks, &KeyContext::Chat);
         assert!(matches!(result, KeybindingResult::NoMatch));
     }

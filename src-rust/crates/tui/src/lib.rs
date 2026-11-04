@@ -379,9 +379,46 @@ pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
 /// The interactive terminal handed to the event loops.
 pub type AppTerminal = Terminal<QuietBackend<CrosstermBackend<Stdout>>>;
 
+/// The title most recently set, so it can be restored after a suspend.
+static LAST_TERMINAL_TITLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(unix)]
+fn last_terminal_title() -> Option<String> {
+    LAST_TERMINAL_TITLE.lock().ok()?.clone()
+}
+
 /// Set the terminal window title via OSC escape sequence.
 pub fn set_terminal_title(title: &str) {
+    if let Ok(mut last) = LAST_TERMINAL_TITLE.lock() {
+        *last = Some(title.to_string());
+    }
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
+}
+
+/// Give the terminal back to the shell, run `stop`, then take it back.
+///
+/// The new terminal has no previous frame, so the next draw repaints it all.
+#[cfg(unix)]
+pub fn suspend_terminal(
+    terminal: &mut AppTerminal,
+    renderer: application::UiRenderer,
+    stop: impl FnOnce(),
+) -> io::Result<()> {
+    let title = last_terminal_title();
+    // Keyboard flags have one stack per screen and setup pushed on the
+    // alternate one, but restore pops after leaving it. Pop here too, or that
+    // stack grows on every suspend and programs run from the shell inherit it.
+    if should_push_keyboard_enhancement_for_process() {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ = restore_terminal(terminal);
+    stop();
+    *terminal = setup_terminal(renderer)?;
+    terminal.clear()?;
+    if let Some(title) = title {
+        set_terminal_title(&title);
+    }
+    Ok(())
 }
 
 /// Update the terminal title to reflect the current session context.
@@ -1802,5 +1839,19 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("COVEN_CODE_VOICE", v);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_title_tests {
+    use super::*;
+
+    #[test]
+    fn the_last_title_is_remembered_for_a_resume() {
+        set_terminal_title("title before suspending");
+        assert_eq!(
+            last_terminal_title().as_deref(),
+            Some("title before suspending")
+        );
     }
 }
