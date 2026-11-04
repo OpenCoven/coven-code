@@ -421,7 +421,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
 
     // An error notice is modal (Esc dismisses it in either renderer); other
     // notices never cover a pending approval.
-    if app.notifications.current_is_error() {
+    if app.notifications.current_is_error() && approval.is_none() {
         render_error_panel(frame, app, area, layout.composer);
     } else if approval.is_none() {
         render_toast(frame, app, layout.transcript);
