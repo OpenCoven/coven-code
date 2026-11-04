@@ -87,14 +87,14 @@ _next_approval_edges_journey() {
   # ---- a Write approved after its file changed does not overwrite the change
   printf 'as reviewed\n' >"$project/report.txt"
   before="$(_edge_requests)"
-  if _edge_ask "tool: Write {\"file_path\":\"$project/report.txt\",\"content\":\"from the model\\n\"}" "Write"; then
+  if _edge_ask "tool: Write {\"file_path\":\"$project/report.txt\",\"content\":\"from the model\\n\"}" "Approve Write"; then
     printf 'changed by someone\n' >"$project/report.txt"
     sleep 0.5; tui_keys y
     told="$(_edge_told_after $((before + 2)))"
     assert_contains "$told" "changed while waiting for approval" "the model is told a Write's file changed"
     assert_eq "$(cat "$project/report.txt")" "changed by someone" "a Write does not overwrite the other writer's change"
   else
-    _fail "a Write approval opens" "$(tui_capture)"
+    _fail "Write asks for approval" "$(tui_capture)"
   fi
   wait_absent "working" 15 >/dev/null
   _edge_clear
