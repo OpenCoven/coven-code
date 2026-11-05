@@ -658,6 +658,45 @@ impl ShellState {
     }
 }
 
+/// What to tell the user after they quit during a turn. Tools run inside this
+/// process, so the turn ends with it: nothing is left working on their behalf,
+/// and a tool with no reported result has no known outcome.
+pub fn turn_exit_report(app: &App) -> Vec<String> {
+    let view = TranscriptView::project_without_text(app);
+    let open: Vec<String> = view
+        .tools
+        .iter()
+        .filter(|tool| {
+            tool.allowed != Some(false)
+                && matches!(
+                    tool.state,
+                    ToolActivityState::AwaitingApproval
+                        | ToolActivityState::Queued
+                        | ToolActivityState::Running
+                        | ToolActivityState::CancelRequested
+                )
+        })
+        .map(|tool| match &tool.target {
+            Some(target) => format!("No result from {} {target}", tool.name),
+            None => format!("No result from {}", tool.name),
+        })
+        .collect();
+    let mut report = vec![
+        "Quit during a turn. It stopped here: this session runs inside coven-code, so nothing \
+         carries it on."
+            .to_string(),
+    ];
+    if !open.is_empty() {
+        report.extend(open);
+        report.push(
+            "What these finished is unknown, and anything they started in the background may \
+             still be running."
+                .to_string(),
+        );
+    }
+    report
+}
+
 pub fn render_next(frame: &mut Frame, app: &App) {
     if delegates_to_classic(app) {
         crate::render::render_app(frame, app);

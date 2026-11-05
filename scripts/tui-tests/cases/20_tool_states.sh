@@ -3,8 +3,9 @@
 #
 # Several tools in one response (#411, #451). Next's rows say what each tool is
 # doing rather than waiting for the whole response to end, and two edits to one
-# file both land in either renderer. A local fake of the Messages API drives the
-# real client, query loop and tools.
+# file both land in either renderer. Quitting during a turn says what is not
+# known (#412). A local fake of the Messages API drives the real client, query
+# loop and tools.
 
 register_case tc_tool_states
 
@@ -69,6 +70,31 @@ _states_edits() { # ui, scratch
     "$1: neither edit is refused as a stale review"
 }
 
+# Next: quitting during a turn says what is not known, and an idle quit says nothing.
+_states_quit() { # scratch
+  if _states_launch next preview "$1"; then
+    tui_type "run: sleep 30"; tui_keys Enter
+    if wait_for "Approve Bash" 15; then sleep 0.8; tui_keys y; fi
+    _states_wait_row "Bash sleep 30" 'running' "next: a command is running before the quit"
+    tui_keys C-d; sleep 0.25; tui_keys C-d
+    if wait_for "No result from Bash sleep 30" 10; then
+      _pass "next: quitting names the tool with no result"
+    else
+      _fail "next: quitting names the tool with no result" "$(tui_capture)"
+    fi
+    local said; said="$(tui_capture)"
+    assert_contains "$said" "nothing carries it on" "next: quitting says nothing carries the turn on"
+    assert_contains "$said" "is unknown" "next: quitting says the outcome is unknown"
+    assert_contains "$said" "coven-code --resume" "next: quitting gives the way back"
+  fi
+  tui_stop
+  if _states_launch next preview "$1"; then
+    tui_keys C-d; sleep 0.25; tui_keys C-d; sleep 1.5
+    assert_absent "$(tui_capture)" "Quit during a turn" "next: an idle quit says nothing about a turn"
+  fi
+  tui_stop
+}
+
 tc_tool_states() {
   describe "Several tools in one response"
   if ! have_tmux; then _skip "tmux not installed"; return 0; fi
@@ -100,6 +126,8 @@ tc_tool_states() {
     tui_keys C-c; sleep 0.3; tui_keys C-c
   fi
   tui_stop
+
+  _states_quit "$scratch"
 
   TUI_LAUNCH_PREFIX="$saved_prefix"
   TUI_BOOT_STRING="$saved_boot"

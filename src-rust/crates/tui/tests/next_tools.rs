@@ -729,3 +729,52 @@ fn a_long_path_keeps_its_file_name_and_a_long_command_keeps_its_start() {
     assert!(target("run").ends_with('…'), "{}", target("run"));
     assert!(target("run").chars().count() <= 60, "{}", target("run"));
 }
+
+#[test]
+fn quitting_mid_turn_says_what_is_not_known() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(&mut app, "ended", "Read", r#"{"file_path":"/a.rs"}"#);
+    tool_start(
+        &mut app,
+        "open",
+        "Bash",
+        "{\"command\":\"make \\u001b]0;x\\u0007all\"}",
+    );
+    tool_start(&mut app, "waits", "Edit", r#"{"file_path":"/b.rs"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "ended".to_string(),
+            is_error: false,
+        },
+    );
+    apply(
+        &mut app,
+        QueryEvent::ToolQueued {
+            tool_id: "waits".to_string(),
+        },
+    );
+
+    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    assert!(report.contains("Quit during a turn"), "{report}");
+    assert!(report.contains("nothing carries it on"), "{report}");
+    assert!(report.contains("No result from Bash make"), "{report}");
+    assert!(report.contains("No result from Edit /b.rs"), "{report}");
+    assert!(!report.contains("Read"), "that one reported: {report}");
+    assert!(report.contains("unknown"), "{report}");
+    assert!(
+        !report.chars().any(|ch| ch.is_control() && ch != '\n'),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn quitting_mid_turn_with_no_tool_open_says_only_that_it_stopped() {
+    let mut app = next_app();
+    app.push_message(Message::user("write a poem".to_string()));
+    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    assert!(report.contains("nothing carries it on"), "{report}");
+    assert!(!report.contains("No result"), "{report}");
+    assert!(!report.contains("unknown"), "{report}");
+}

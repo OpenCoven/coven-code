@@ -5863,6 +5863,7 @@ async fn run_interactive(
     // Classic keeps its existing exit.
     if app.renderer == claurst_tui::application::UiRenderer::Next {
         if let Some((handle, msgs_arc)) = current_query.take() {
+            let exit_report = claurst_tui::next::turn_exit_report(&app);
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
             messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
             session.messages = messages.clone();
@@ -5879,6 +5880,16 @@ async fn run_interactive(
                 &mut cmd_ctx.messages,
             );
             persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+            for line in exit_report {
+                println!("{line}");
+            }
+            let saved = !session.messages.is_empty()
+                && claurst_core::history::load_session(&session.id)
+                    .await
+                    .is_ok();
+            if saved {
+                println!("Pick it up with: coven-code --resume {}", session.id);
+            }
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
