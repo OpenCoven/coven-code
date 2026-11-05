@@ -283,6 +283,8 @@ Common keys:
 
 Subcommands: `/config keybindings`, `/config theme [name]`, `/config output-style [style]`, `/config import`, `/config advisor [model|off]`, `/config color`, `/config vim`, `/config voice`, `/config statusline`, `/config terminal-setup` — each documented below or under [Display & Terminal](#display--terminal). Use `/splash` for the empty-session welcome panel.
 
+Under the Next renderer, `/config appearance` lists, previews, saves, reverts and resets how Next draws. See [Next Appearance](configuration.md#next-appearance).
+
 `/config import` imports user-level Claude Code configuration (`CLAUDE.md`, `settings.json`) from `~/.claude` via an interactive dialog with preview and confirmation. It replaces the former `/import-config` command.
 
 ---

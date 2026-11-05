@@ -1826,6 +1826,62 @@ pub mod config {
 
     // Existing settings are staged beside the resolved target. Missing targets
     // retain direct creation, including through dangling symlinks.
+    fn write_appearance_edits(
+        path: &std::path::Path,
+        edits: &crate::appearance::AppearanceEdits,
+    ) -> anyhow::Result<()> {
+        let mut root: serde_json::Value = match std::fs::read_to_string(path) {
+            Ok(content) => serde_json::from_str(&content)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::Value::Object(Default::default())
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        let object = root
+            .as_object_mut()
+            .with_context(|| format!("{} does not hold a settings object", path.display()))?;
+        let mut layer: crate::appearance::NextAppearanceSettings =
+            match object.get("nextAppearance") {
+                Some(value) => serde_json::from_value(value.clone())?,
+                None => Default::default(),
+            };
+        anyhow::ensure!(
+            !layer.is_unreadable(),
+            "nextAppearance in {} is not an object",
+            path.display()
+        );
+        edits.apply_to(&mut layer);
+        let written = serde_json::to_value(&layer)?;
+        if written.as_object().is_some_and(|keys| keys.is_empty()) {
+            object.remove("nextAppearance");
+        } else {
+            object.insert("nextAppearance".to_string(), written);
+        }
+        match edits.reduce_motion() {
+            Some(true) => {
+                object.insert(
+                    crate::appearance::REDUCE_MOTION_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            Some(false) => {
+                object.remove(crate::appearance::REDUCE_MOTION_KEY);
+            }
+            None => {}
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(&root)?;
+        if let Some((staged, target)) = prepare_settings_save(path, content.as_bytes())? {
+            staged.persist(target).map_err(|error| error.error)?;
+        }
+        Ok(())
+    }
+
     fn prepare_settings_save(
         path: &std::path::Path,
         content: &[u8],
@@ -1929,6 +1985,16 @@ pub mod config {
                 staged.persist(target).map_err(|error| error.error)?;
             }
             Ok(())
+        }
+
+        /// Write appearance edits to the user's settings file and change
+        /// nothing else in it: keys this version does not know stay, and values
+        /// from project settings never move into the user's file. A file that
+        /// cannot be read as settings is refused and left as it was.
+        pub fn save_appearance_edits(
+            edits: &crate::appearance::AppearanceEdits,
+        ) -> anyhow::Result<()> {
+            write_appearance_edits(&Self::global_settings_path(), edits)
         }
 
         /// Return the effective `Config`, merging top-level provider settings
@@ -2442,6 +2508,93 @@ pub mod config {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn appearance_edits_change_only_what_they_name() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(
+                &path,
+                r#"{"someFutureKey":{"a":[1,2]},"config":{"model":"m"},"reduceMotion":true,
+                    "nextAppearance":{"laterKey":42,"theme":"plaid","density":"compact"}}"#,
+            )
+            .unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("layout", "work").unwrap();
+            write_appearance_edits(&path, &edits).unwrap();
+
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                written,
+                serde_json::json!({
+                    "someFutureKey": {"a": [1, 2]},
+                    "config": {"model": "m"},
+                    "reduceMotion": true,
+                    "nextAppearance": {
+                        "laterKey": 42, "theme": "plaid", "density": "compact", "layout": "work"
+                    }
+                })
+            );
+        }
+
+        #[test]
+        fn appearance_reset_leaves_the_rest_of_the_file_and_creates_nothing_empty() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(
+                &path,
+                r#"{"someFutureKey":1,"reduceMotion":true,"nextAppearance":{"density":"compact"}}"#,
+            )
+            .unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.reset_all();
+            write_appearance_edits(&path, &edits).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(written, serde_json::json!({"someFutureKey": 1}));
+        }
+
+        #[test]
+        fn appearance_edits_start_a_missing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("nested/settings.json");
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("reduceMotion", "true").unwrap();
+            edits.set("density", "compact").unwrap();
+            write_appearance_edits(&path, &edits).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                written,
+                serde_json::json!({"reduceMotion": true, "nextAppearance": {"density": "compact"}})
+            );
+            let loaded: Settings = serde_json::from_value(written).unwrap();
+            assert!(loaded.reduce_motion);
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_they_cannot_read_and_leave_it_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+            for content in [
+                "{ not json",
+                "[1,2,3]",
+                r#"{"nextAppearance":"dark","kept":1}"#,
+                "",
+            ] {
+                std::fs::write(&path, content).unwrap();
+                let error = write_appearance_edits(&path, &edits).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("settings.json")
+                        || format!("{error:#}").contains("nextAppearance"),
+                    "{error:#}"
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+            }
+        }
 
         #[test]
         fn project_settings_do_not_merge_mcp_servers() {

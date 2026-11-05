@@ -14,6 +14,7 @@
 //! or partially drawn. The command palette and `/` suggestions are therefore
 //! the existing ones.
 
+pub mod appearance;
 pub mod layout;
 pub mod primitives;
 pub mod style;
@@ -217,6 +218,8 @@ struct ReadingAnchor {
 
 #[derive(Debug, Default)]
 pub struct ShellState {
+    /// Appearance changes being previewed, not yet saved.
+    pub appearance_edits: claurst_core::appearance::AppearanceEdits,
     /// The one open inspector page, if any. It owns Escape and Tab; the
     /// composer keeps every other key, so the draft is never stranded.
     pub inspector: Option<InspectorPage>,
@@ -2098,6 +2101,11 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
         .map(|keys| format!("{keys} command palette, / suggestions"))
         .unwrap_or_else(|| "/ suggestions (no key opens the palette)".to_string());
     lines.push(field(appearance, "Commands", palette));
+    lines.push(field(
+        appearance,
+        "Appearance",
+        "/config appearance previews, saves and resets".to_string(),
+    ));
     lines
 }
 

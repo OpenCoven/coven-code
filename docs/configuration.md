@@ -62,6 +62,37 @@ When Coven Code saves the engine-global file, it preserves the JSON values of un
 
 ---
 
+## Next Appearance
+
+`nextAppearance` changes how the Next renderer (`COVEN_CODE_UI=next`) draws, and nothing else: no value here reaches permissions, providers, identity or stored state. Classic ignores it. An invalid value falls back to its default and stays in the file, and so does any key this version does not know.
+
+| Key | Values | Default | What it does |
+|-----|--------|---------|--------------|
+| `theme` | `auto`, `dark`, `light` | `auto` | Light or dark colors. `auto` reads `COLORFGBG`; with no answer, Next uses the terminal's own palette. |
+| `colorMode` | `auto`, `truecolor`, `256`, `16`, `none` | `auto` | Color capability. `auto` follows `NO_COLOR`, `TERM` and `COLORTERM`; an explicit value overrides `NO_COLOR`. |
+| `glyphs` | `auto`, `unicode`, `ascii` | `auto` | `auto` uses Unicode under a UTF-8 locale, except CJK locales. |
+| `density` | `comfortable`, `compact` | `comfortable` | Blank rows between transcript entries. |
+| `layout` | `focus`, `work`, `inspect` | `focus` | Where the inspector starts: closed, on Work, or on Activity. It opens at launch only at 120x32 or larger, so a session never starts with its transcript hidden. |
+| `hints` | `true`, `false` | `false` | The key-hint row. |
+
+The top-level `reduceMotion` setting makes Next's activity indicator static.
+
+Under Next, `/config appearance` previews these before anything is saved:
+
+```text
+/config appearance                  List the settings and their values
+/config appearance density compact  Preview one; it shows at once and is not saved
+/config appearance save             Keep the preview in your settings file
+/config appearance revert           Drop the preview
+/config appearance reset            Preview the defaults; save keeps them
+```
+
+A save changes only the keys you previewed and leaves the rest of the file as it was. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+
+Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
+
+---
+
 ## The `config` Object
 
 The `config` object holds runtime behaviour options.
