@@ -185,12 +185,13 @@ fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
     }
 }
 
-/// Error text with each `scheme://…` token replaced by its [`display_url`]
-/// form, so a failed request never shows credentials or a query string.
+/// Error text with each scheme-prefixed token replaced by its [`display_url`]
+/// form, so a failed request never shows credentials or a query string. This
+/// includes HTTP URLs the client accepts without exactly `//`.
 fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(found) = rest.find("://") {
+    while let Some(found) = rest.find(':') {
         let start = rest[..found]
             .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
             .map_or(0, |at| at + 1);
@@ -199,9 +200,9 @@ fn redact_urls(text: &str) -> String {
             .map_or(rest.len(), |at| found + at);
         out.push_str(&rest[..start]);
         if start == found {
-            // No scheme before `://`; keep the separator and move on.
-            out.push_str("://");
-            rest = &rest[found + 3..];
+            // No scheme before the colon; keep it and move on.
+            out.push(':');
+            rest = &rest[found + 1..];
             continue;
         }
         let url = &rest[start..end];
@@ -254,9 +255,14 @@ fn numbered_title(line: &str) -> Option<&str> {
 /// A URL shown without credentials, query or fragment, which can carry
 /// secrets. Text without a `scheme://` is shown as is, made safe. A backslash
 /// ends the host, as it does for the HTTP client, so `a.com\@b.com` shows
-/// `a.com`, the host actually contacted.
+/// `a.com`, the host actually contacted. An HTTP URL the client reads with
+/// other slashes, such as `https:user:pw@host`, is shown in the client's form.
 pub fn display_url(raw: &str) -> String {
     let raw = raw.trim();
+    let normalized = reqwest::Url::parse(raw)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https") && !plain_authority(raw));
+    let raw = normalized.as_ref().map_or(raw, reqwest::Url::as_str);
     let Some((scheme, rest)) = raw.split_once("://") else {
         return one_line(raw);
     };
@@ -275,6 +281,17 @@ pub fn display_url(raw: &str) -> String {
         "#…"
     };
     one_line(&format!("{scheme}://{host}{path}{marker}"))
+}
+
+/// Whether the split in [`display_url`] finds the host the HTTP client
+/// contacts: exactly `//` after the scheme, and no tab or newline, which the
+/// client deletes before it parses.
+fn plain_authority(raw: &str) -> bool {
+    !raw.contains(['\t', '\n', '\r'])
+        && raw.split_once(':').is_some_and(|(_, rest)| {
+            rest.strip_prefix("//")
+                .is_some_and(|authority| !authority.starts_with(['/', '\\']))
+        })
 }
 
 /// Terminal-safe text on one row.
@@ -443,6 +460,15 @@ mod tests {
             let row = format!("{:?}", view.items[0]);
             assert!(!row.contains("secret"), "{row}");
             assert!(!row.contains("token=abc"), "{row}");
+        }
+        // Error text is read token by token, so these two only reach
+        // `display_url` through the call's input.
+        for raw in [
+            "https://\n/user:secret@api.example.com/v1?token=abc",
+            "https:/\t/user:secret@api.example.com/v1?token=abc",
+        ] {
+            assert_eq!(reqwest::Url::parse(raw).unwrap().username(), "user");
+            assert_eq!(display_url(raw), "https://api.example.com/v1?…", "{raw:?}");
         }
     }
 
