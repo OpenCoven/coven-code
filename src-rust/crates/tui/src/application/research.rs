@@ -185,43 +185,63 @@ fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
     }
 }
 
-/// Error text with each scheme-prefixed token replaced by its [`display_url`]
-/// form, so a failed request never shows credentials or a query string. This
-/// includes HTTP URLs the client accepts without exactly `//`. A token runs to
-/// the next whitespace, since the client accepts brackets and quotes inside a
-/// URL; punctuation that closes the sentence or an outer bracket is shown after
-/// it.
+/// Error text with each URL replaced by its [`display_url`] form, so a failed
+/// request never shows credentials or a query string. A URL starts at an
+/// `http:` or `https:` scheme, which the client also accepts without exactly
+/// `//`, or at any scheme, even an empty one, followed by `://`. It runs to the
+/// next ASCII whitespace, since the client accepts brackets, quotes and other
+/// spaces inside a URL; punctuation that closes the sentence or an outer
+/// bracket is shown after it.
 fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(found) = rest.find(':') {
-        let start = rest[..found]
-            .char_indices()
-            .rev()
-            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map_or(0, |(at, c)| at + c.len_utf8());
-        let end = rest[found..]
-            .find(char::is_whitespace)
-            .map_or(rest.len(), |at| found + at);
-        let (url, after) = split_trailing_punctuation(&rest[start..end]);
-        let shown = (start < found).then(|| display_url(url));
-        match shown {
-            Some(shown) if shown != url => {
-                out.push_str(&rest[..start]);
-                out.push_str(&shown);
-                out.push_str(after);
-                rest = &rest[end..];
-            }
-            // Not a URL, or nothing in it to hide: keep the text up to the
-            // colon and look for a URL after it, as in `URL:https:…`.
-            _ => {
-                out.push_str(&rest[..=found]);
-                rest = &rest[found + 1..];
-            }
+    for piece in text.split_inclusive(|c: char| c.is_ascii_whitespace()) {
+        let word = piece.trim_end_matches(|c: char| c.is_ascii_whitespace());
+        redact_word(word, &mut out);
+        out.push_str(&piece[word.len()..]);
+    }
+    out
+}
+
+/// Most URLs read in one word. Each is read to the end of the word, so past
+/// this many the rest of the word is hidden instead of being read again.
+const URLS_PER_WORD: usize = 8;
+
+/// One word of [`redact_urls`], from the first URL in it that has something
+/// to hide. A URL with nothing to hide can still hold one that does, as in
+/// `https://a/https://user:pw@b/`, so the next is tried.
+fn redact_word(word: &str, out: &mut String) {
+    let mut scheme_start = 0;
+    let mut read = 0;
+    for (at, c) in word.char_indices() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') {
+            continue;
+        }
+        let start = scheme_start;
+        scheme_start = at + c.len_utf8();
+        let scheme = &word[start..at];
+        let starts_url = c == ':'
+            && (word[at + 1..].starts_with("//")
+                || scheme.eq_ignore_ascii_case("http")
+                || scheme.eq_ignore_ascii_case("https"));
+        if !starts_url {
+            continue;
+        }
+        if read == URLS_PER_WORD {
+            out.push_str(&word[..start]);
+            out.push('…');
+            return;
+        }
+        read += 1;
+        let (url, after) = split_trailing_punctuation(&word[start..]);
+        let shown = display_url(url);
+        if shown != url {
+            out.push_str(&word[..start]);
+            out.push_str(&shown);
+            out.push_str(after);
+            return;
         }
     }
-    out.push_str(rest);
-    out
+    out.push_str(word);
 }
 
 /// A token split before the punctuation that ends it: `:`, `,`, `.`, `;`, `>`,
@@ -229,12 +249,21 @@ fn redact_urls(text: &str) -> String {
 /// punctuation never holds a credential, and keeping `[::1]` whole lets the
 /// client's parser read it.
 fn split_trailing_punctuation(token: &str) -> (&str, &str) {
+    let (opening_parens, opening_brackets) =
+        (token.matches('(').count(), token.matches('[').count());
+    let (mut closing_parens, mut closing_brackets) =
+        (token.matches(')').count(), token.matches(']').count());
     let mut end = token.len();
     while let Some(last) = token[..end].chars().next_back() {
-        let body = &token[..end];
         let closes = match last {
-            ')' => body.matches(')').count() > body.matches('(').count(),
-            ']' => body.matches(']').count() > body.matches('[').count(),
+            ')' if closing_parens > opening_parens => {
+                closing_parens -= 1;
+                true
+            }
+            ']' if closing_brackets > opening_brackets => {
+                closing_brackets -= 1;
+                true
+            }
             ':' | ',' | '.' | ';' | '>' | '"' | '\'' => true,
             _ => false,
         };
@@ -606,6 +635,50 @@ mod tests {
         assert_eq!(
             redact_urls("at https://u:pw@[::1]/v1, then"),
             "at https://[::1]/v1, then"
+        );
+    }
+
+    #[test]
+    fn colons_that_start_no_url_are_not_read_as_one() {
+        for text in [
+            "a:".repeat(50_000),
+            "at 12:34:56 on fe80::1:2 from std::io::Error".to_string(),
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        ] {
+            assert_eq!(redact_urls(&text), text);
+        }
+    }
+
+    #[test]
+    fn a_word_with_many_urls_is_hidden_past_the_ones_read() {
+        let read = "https://a/".repeat(URLS_PER_WORD - 1);
+        assert_eq!(
+            redact_urls(&format!("{read}https://user:secret@b/ x")),
+            format!("{read}https://b/ x")
+        );
+        let shown = redact_urls(&format!("{read}https://a/https://user:secret@b/ x"));
+        assert_eq!(shown, format!("{read}https://a/… x"));
+    }
+
+    #[test]
+    fn a_url_with_an_empty_scheme_or_a_space_inside_is_redacted() {
+        for error in [
+            "x(://user:secret@h.example/?token=abc)",
+            "a:://user:secret@h.example/?token=abc",
+            "Failed to fetch https://h.example/?a=1\u{a0}token=abc: timed out",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(!shown.contains("token=abc"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_closing_bracket_is_kept_in_the_url_while_it_has_a_partner() {
+        assert_eq!(redact_urls("(https:u:pw@[::1])"), "(https://[::1]/)");
+        assert_eq!(
+            redact_urls("((https://u:pw@h.example/?q=(a)))"),
+            "((https://h.example/?…))"
         );
     }
 
