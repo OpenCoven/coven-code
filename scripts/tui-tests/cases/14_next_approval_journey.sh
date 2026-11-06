@@ -30,6 +30,17 @@ _ask_for_tool() {
   wait_for "Approve Bash" 15
 }
 
+# What the model was told about the last tool call: "ok", "error", or "none"
+# when the last request carried no tool result (say, a wait that timed out).
+_last_tool_result() {
+  python3 -B -c 'import json, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+content = json.loads(lines[-1])["last"].get("content") if lines else None
+blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"] \
+    if isinstance(content, list) else []
+print("none" if not blocks else "error" if blocks[-1].get("is_error") else "ok")' "$APPROVAL_LOG"
+}
+
 # Let the panel arm: keys are ignored until 400 ms pass with none pressed.
 _let_panel_arm() { sleep 0.7; }
 
@@ -90,8 +101,7 @@ tc_next_approval_journey() {
       fi
       if [ -e "$scratch/markers/enter-marker" ]; then _fail "a denied command does not run"
       else _pass "a denied command does not run"; fi
-      assert_contains "$(tail -n 1 "$APPROVAL_LOG")" '"is_error": true' \
-        "the tool result is an error"
+      assert_eq "$(_last_tool_result)" "error" "the tool result is an error"
       assert_contains "$(tui_capture)" "denied" "the tool row says denied"
     else
       _fail "a tool call opens an approval panel" "$(tui_capture)"
@@ -102,10 +112,13 @@ tc_next_approval_journey() {
     requests="$(_approval_requests)"
     tui_type "please rushed-marker"; sleep 0.2
     tui_keys Enter; tui_keys Enter; tui_keys Enter
-    local burst=0
+    local burst=0 open_keys=0
     while [ "$burst" -lt 8 ]; do
+      if tui_capture | grep -q "Approve Bash"; then open_keys=$((open_keys + 1)); fi
       tui_keys y; sleep 0.1; burst=$((burst + 1))
     done
+    if [ "$open_keys" -gt 0 ]; then _pass "part of the burst reached an open panel"
+    else _fail "part of the burst reached an open panel" "$(tui_capture)"; fi
     if [ -e "$scratch/markers/rushed-marker" ]; then
       _fail "keys typed as the panel arrives do not approve"
     else
@@ -135,8 +148,7 @@ tc_next_approval_journey() {
       fi
       if [ -e "$scratch/markers/once-marker" ]; then _pass "the allowed command ran"
       else _fail "the allowed command ran"; fi
-      assert_absent "$(tail -n 1 "$APPROVAL_LOG")" '"is_error": true' \
-        "the tool result is not an error"
+      assert_eq "$(_last_tool_result)" "ok" "the tool result is not an error"
     else
       _fail "allow once runs the call and the model hears success" "$(tui_capture)"
     fi
@@ -154,8 +166,7 @@ tc_next_approval_journey() {
       else _fail "Escape refuses the call" "$(tui_capture)"; fi
       if [ -e "$scratch/markers/second-marker" ]; then _fail "an escaped command does not run"
       else _pass "an escaped command does not run"; fi
-      assert_contains "$(tail -n 1 "$APPROVAL_LOG")" '"is_error": true' \
-        "Escape tells the model the call failed"
+      assert_eq "$(_last_tool_result)" "error" "Escape tells the model the call failed"
     else
       _fail "allow once does not cover the next call" "$(tui_capture)"
     fi
@@ -171,6 +182,7 @@ tc_next_approval_journey() {
       _wait_for_requests $((requests + 2)) || true
       if [ -e "$scratch/markers/session-marker" ]; then _pass "allow for the session runs the call"
       else _fail "allow for the session runs the call" "$(tui_capture)"; fi
+      assert_eq "$(_last_tool_result)" "ok" "allow for the session tells the model it succeeded"
       wait_for "ready" 10 || true
 
       rm -f "$scratch/markers/session-marker"
@@ -180,6 +192,7 @@ tc_next_approval_journey() {
       else _fail "the same command needs no new decision" "$(tui_capture)"; fi
       if [ -e "$scratch/markers/session-marker" ]; then _pass "the same command ran again"
       else _fail "the same command ran again" "$(tui_capture)"; fi
+      assert_eq "$(_last_tool_result)" "ok" "the model hears the repeated call succeeded"
       wait_for "ready" 10 || true
 
       requests="$(_approval_requests)"
