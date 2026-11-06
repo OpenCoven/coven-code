@@ -595,15 +595,14 @@ pub fn render_next(frame: &mut Frame, app: &App) {
     }
 }
 
-/// The current error notice, drawn by Next over the composer. Its text can
-/// quote provider or tool output, so it is made inert and wrapped.
 /// Mark the selection, unless the screen has moved under it.
 ///
 /// A selection is stored as screen cells, and its text is read back from them
 /// every frame. A resize, a scroll or streamed rows can put other text in those
 /// cells, and copying would then return text nobody selected. So once the cells
 /// stop changing the text is fixed: if they show anything else, the mark goes
-/// and the text stays available to copy until the next key or selection.
+/// and the text stays available to copy until typing, a paste or a new
+/// selection lets it go.
 fn draw_selection(frame: &mut Frame, app: &App) {
     let shell = &app.next_shell;
     let cells = app.selection_anchor.zip(app.selection_focus);
@@ -639,6 +638,8 @@ fn draw_selection(frame: &mut Frame, app: &App) {
     }
 }
 
+/// The current error notice, drawn by Next over the composer. Its text can
+/// quote provider or tool output, so it is made inert and wrapped.
 fn render_error_panel(frame: &mut Frame, app: &App, area: Rect, composer: Rect) {
     let Some(notification) = app.notifications.current() else {
         return;
@@ -1883,7 +1884,7 @@ fn status_line(appearance: &Appearance, app: &App, view: &TranscriptView) -> Lin
     };
     if app.next_shell.selection_kept.get() {
         spans.push(Span::styled(
-            format!(" {separator} selection kept, Ctrl+C copies"),
+            format!(" {separator} selection kept"),
             appearance.style(Role::TextMuted),
         ));
     }

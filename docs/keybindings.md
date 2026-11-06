@@ -333,9 +333,12 @@ In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the
 
 In the Next renderer (`COVEN_CODE_UI=next`), a mouse selection keeps the text you
 selected. If a resize, a scroll or new output moves other text under it, the mark
-goes away and the status line shows `selection kept, Ctrl+C copies`. `Ctrl+C` then
-copies the original text. During a running turn it copies instead of cancelling,
-and `Escape` still cancels. Typing, pasting or making a new selection lets it go.
+goes away and the status line shows `selection kept`. Copying then gives the
+original text, not what moved under it. `Ctrl+Shift+C` copies it in a terminal
+that passes `Ctrl+Shift+C` on as its own key; other terminals send it as `Ctrl+C`
+or keep it for their own copy. `Ctrl+C` does not copy: it still cancels a running
+turn, or clears the draft and asks you to press it again to exit. Typing, pasting
+or making a new selection lets the selection go.
 
 ### @file Injection with Typeahead
 
