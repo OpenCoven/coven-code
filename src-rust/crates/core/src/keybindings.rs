@@ -1272,6 +1272,36 @@ mod tests {
     }
 
     #[test]
+    fn removing_default_actions_also_frees_chords_an_upgraded_file_copied() {
+        // The block format loads as schema 0, and the schema upgrade copies
+        // every default into the user's own bindings, these ones included.
+        let mut user = UserKeybindings::from_json_str(
+            r#"{"bindings":[{"context":"Chat","bindings":{
+                "ctrl+z ctrl+x":"openCommandPalette",
+                "alt+i alt+x":"openHelp",
+                "alt+u":"suspend"}}]}"#,
+        );
+        assert_eq!(user.schema_version, 0);
+        user.smart_merge_with_defaults();
+        let mut resolver = KeybindingResolver::new(&user);
+
+        resolver.remove_default_actions(&["toggleInspector", "jumpToLive", "suspend"]);
+        assert_eq!(
+            press(&mut resolver, "ctrl+z ctrl+x", &[KeyContext::Chat]),
+            "openCommandPalette"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+i alt+x", &[KeyContext::Chat]),
+            "openHelp"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+u", &[KeyContext::Chat]),
+            "suspend",
+            "a user's own binding on another chord stays"
+        );
+    }
+
+    #[test]
     fn test_resolver_no_match() {
         let user = UserKeybindings::default();
         let mut resolver = KeybindingResolver::new(&user);
