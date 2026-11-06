@@ -689,6 +689,41 @@ fn escape_still_cancels_a_turn_while_a_selection_is_kept() {
     assert_ne!(app.cancellation, TurnCancellation::Idle);
 }
 
+#[test]
+fn a_kept_selection_does_not_offer_ctrl_c_which_still_interrupts() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    app.is_streaming = true;
+    let (buffer, _) = draw(&app, 60, 16);
+    let text = text_of(&buffer);
+    assert!(text.contains("selection kept"), "{text}");
+    assert!(
+        !text.contains("Ctrl+C"),
+        "the hint must not offer a key that cancels the turn:\n{text}"
+    );
+
+    // Ctrl+Shift+C, where the terminal reports it, is not the interrupt key.
+    assert_eq!(
+        app.handle_control_key(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )),
+        None
+    );
+    assert_eq!(app.cancellation, TurnCancellation::Idle);
+
+    // The CLI routes Ctrl+C here before any other key handling.
+    assert_eq!(
+        app.handle_control_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Some(true),
+        "Ctrl+C interrupts"
+    );
+    assert_ne!(app.cancellation, TurnCancellation::Idle);
+}
+
 fn row_of(text: &str, needle: &str) -> Option<usize> {
     text.lines().position(|line| line.contains(needle))
 }
