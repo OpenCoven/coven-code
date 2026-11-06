@@ -16,20 +16,26 @@ _flood_saved_count() { # home
     | wc -l | tr -d ' '
 }
 
+# Wall-clock time in tenths of a second.
+_flood_now_tenths() { python3 -c 'import time; print(int(time.time() * 10))'; }
+
 # Press the quit keys, wait for the TUI to exit, then check it gave the terminal back.
-# Sets FLOOD_QUIT_TENTHS to how long the exit took, in tenths of a second.
+# Sets FLOOD_QUIT_TENTHS to how long the exit took after the last key, in tenths
+# of a second by the wall clock. Each pass of the wait also runs tmux, so the
+# pass count gives up later than 30 s; it only stops a hung exit.
 _flood_quit() { # how, keys...
-  local how="$1" key waited=0 running
+  local how="$1" key passes=0 running start
   shift
   # The running process's name, whatever the binary under test is called.
   running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
   for key in "$@"; do tui_keys "$key"; sleep 0.25; done
-  while [ "$waited" -lt 300 ] && \
+  start="$(_flood_now_tenths)"
+  while [ "$passes" -lt 300 ] && \
     [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
-    sleep 0.1; waited=$((waited + 1))
+    sleep 0.1; passes=$((passes + 1))
   done
-  FLOOD_QUIT_TENTHS="$waited"
-  if [ "$waited" -lt 300 ]; then _pass "$how exits (after about $((waited / 10))s)"
+  FLOOD_QUIT_TENTHS=$(($(_flood_now_tenths) - start))
+  if [ "$passes" -lt 300 ]; then _pass "$how exits (after about $((FLOOD_QUIT_TENTHS / 10))s)"
   else _fail "$how exits" "$(tui_capture)"; fi
   assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{alternate_on}')" "0" \
     "$how leaves the alternate screen"
@@ -141,8 +147,10 @@ _next_event_flood_journey() {
   _flood_quit "Ctrl+C twice more during a burst" C-c C-c
 
   # ---- quitting while a tool ignores the stop still exits within the bound.
-  # Quitting waits 2 s for the turn; 8 s leaves room for a loaded host and still
-  # fails if that wait grows or goes away. Only the prompt can be saved.
+  # Quitting waits up to 2 s for the turn; 8 s leaves room for a loaded host and
+  # still fails if that wait grows. This bounds it from above only: the partial
+  # answer check after a burst is what fails if the wait goes away. Only the
+  # prompt can be saved here.
   tui_stop
   tui_start || return 0
   tui_type "run: sleep 20"; sleep 0.3; tui_keys Enter
@@ -150,9 +158,9 @@ _next_event_flood_journey() {
     sleep 0.7; tui_keys y; sleep 1.5
     _flood_quit "Ctrl+D twice while a tool ignores the stop" C-d C-d
     if [ "$FLOOD_QUIT_TENTHS" -lt 80 ]; then
-      _pass "quitting waits about 2 s for a turn that does not stop"
+      _pass "quitting exits within 8 s while a turn does not stop"
     else
-      _fail "quitting waits about 2 s for a turn that does not stop" "took about $((FLOOD_QUIT_TENTHS / 10))s"
+      _fail "quitting exits within 8 s while a turn does not stop" "took about $((FLOOD_QUIT_TENTHS / 10))s"
     fi
     saved="$(find "$home" -type f -path '*/sessions/*.json' -exec grep -l 'run: sleep 20' {} + 2>/dev/null)"
     if [ -n "$saved" ]; then _pass "a turn that did not stop in time keeps its prompt"
