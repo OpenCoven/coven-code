@@ -189,9 +189,11 @@ fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
 /// request never shows credentials or a query string. A URL starts at an
 /// `http:` or `https:` scheme, which the client also accepts without exactly
 /// `//`, or at any scheme, even an empty one, followed by `://`. It runs to the
-/// next ASCII whitespace, since the client accepts brackets, quotes and other
-/// spaces inside a URL; punctuation that closes the sentence or an outer
-/// bracket is shown after it.
+/// next ASCII whitespace, so brackets, quotes and other spaces, which the
+/// client accepts inside a URL, stay in it. The client also accepts a space and
+/// drops tabs and line breaks, so a URL written with those inside is cut there;
+/// that is a stated limit. Punctuation that closes the sentence or an outer
+/// bracket is shown after the URL.
 fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for piece in text.split_inclusive(|c: char| c.is_ascii_whitespace()) {
@@ -206,42 +208,49 @@ fn redact_urls(text: &str) -> String {
 /// this many the rest of the word is hidden instead of being read again.
 const URLS_PER_WORD: usize = 8;
 
-/// One word of [`redact_urls`], from the first URL in it that has something
-/// to hide. A URL with nothing to hide can still hold one that does, as in
-/// `https://a/https://user:pw@b/`, so the next is tried.
+/// One word of [`redact_urls`]. A URL with nothing to hide can still hold one
+/// that does, as in `https://a/https://user:pw@b/`, so the next is tried. What
+/// is shown for a redacted URL is read again past its scheme, so a URL in its
+/// path is redacted too, as in `https://a/x/https://user:pw@b/?q`.
 fn redact_word(word: &str, out: &mut String) {
-    let mut scheme_start = 0;
+    let mut word = Cow::Borrowed(word);
     let mut read = 0;
-    for (at, c) in word.char_indices() {
-        if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') {
-            continue;
+    'word: loop {
+        let mut scheme_start = 0;
+        for (at, c) in word.char_indices() {
+            if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') {
+                continue;
+            }
+            let start = scheme_start;
+            scheme_start = at + c.len_utf8();
+            let scheme = &word[start..at];
+            let starts_url = c == ':'
+                && (word[at + 1..].starts_with("//")
+                    || scheme.eq_ignore_ascii_case("http")
+                    || scheme.eq_ignore_ascii_case("https"));
+            if !starts_url {
+                continue;
+            }
+            if read == URLS_PER_WORD {
+                out.push_str(&word[..start]);
+                out.push('…');
+                return;
+            }
+            read += 1;
+            let (url, after) = split_trailing_punctuation(&word[start..]);
+            let shown = display_url(url);
+            if shown != url {
+                out.push_str(&word[..start]);
+                let past_scheme = shown.find(':').map_or(shown.len(), |colon| colon + 1);
+                out.push_str(&shown[..past_scheme]);
+                let rest = format!("{}{after}", &shown[past_scheme..]);
+                word = Cow::Owned(rest);
+                continue 'word;
+            }
         }
-        let start = scheme_start;
-        scheme_start = at + c.len_utf8();
-        let scheme = &word[start..at];
-        let starts_url = c == ':'
-            && (word[at + 1..].starts_with("//")
-                || scheme.eq_ignore_ascii_case("http")
-                || scheme.eq_ignore_ascii_case("https"));
-        if !starts_url {
-            continue;
-        }
-        if read == URLS_PER_WORD {
-            out.push_str(&word[..start]);
-            out.push('…');
-            return;
-        }
-        read += 1;
-        let (url, after) = split_trailing_punctuation(&word[start..]);
-        let shown = display_url(url);
-        if shown != url {
-            out.push_str(&word[..start]);
-            out.push_str(&shown);
-            out.push_str(after);
-            return;
-        }
+        out.push_str(&word);
+        return;
     }
-    out.push_str(word);
 }
 
 /// A token split before the punctuation that ends it: `:`, `,`, `.`, `;`, `>`,
@@ -658,6 +667,11 @@ mod tests {
         );
         let shown = redact_urls(&format!("{read}https://a/https://user:secret@b/ x"));
         assert_eq!(shown, format!("{read}https://a/… x"));
+        let many = "https://a/".repeat(10_000);
+        assert_eq!(
+            redact_urls(&many),
+            format!("{}…", "https://a/".repeat(URLS_PER_WORD))
+        );
     }
 
     #[test]
@@ -671,6 +685,22 @@ mod tests {
             assert!(!shown.contains("secret"), "{shown}");
             assert!(!shown.contains("token=abc"), "{shown}");
         }
+    }
+
+    #[test]
+    fn a_url_in_the_path_of_a_redacted_one_is_redacted_too() {
+        for error in [
+            "a:https:/h/x://user:secret@b.example/",
+            "https://a.example/x\u{a0}https://user:secret@b.example/?q",
+            "https://a.example/x/https://user:secret@b.example/?q",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+        }
+        assert_eq!(
+            redact_urls("(https://a.example/x/https://user:secret@b.example/?q)."),
+            "(https://a.example/x/https://b.example/?…)."
+        );
     }
 
     #[test]
