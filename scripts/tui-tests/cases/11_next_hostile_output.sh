@@ -63,12 +63,15 @@ tc_next_hostile_output() {
     if wait_for "hostile-end" 15; then
       _pass "the hostile answer is rendered"
       tui_settle
-      local s
+      local s joined
       s="$(tui_capture)"
+      # The answer wraps at narrow widths, so long sequences are read across
+      # its rows, in the order they are drawn.
+      joined="$(tr -d '\n' <<<"$s")"
       assert_contains "$s" "acme-hostile" "a screen clear in output does not wipe the shell"
       assert_contains "$s" "show me" "earlier transcript content survives"
-      assert_contains "$s" "^[]52;c;TU9ERUwtT1NDNTI=" "the model's clipboard write is shown as text"
-      assert_contains "$s" "^[]8;;https://evil.example" "the model's hyperlink is shown as text"
+      assert_contains "$joined" "^[]52;c;TU9ERUwtT1NDNTI=" "the model's clipboard write is shown as text"
+      assert_contains "$joined" "^[]8;;https://evil.example" "the model's hyperlink is shown as text"
       assert_absent "$s" "PWNED-TITLE"$'\a' "no raw BEL from the model's title sequence"
       assert_contains "$s" "^[[2J" "the screen clear is shown as text"
 
