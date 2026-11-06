@@ -106,7 +106,7 @@ the `Alt+I` and `Alt+L` chords unbound.
 | Key | Action | Description |
 |-----|--------|-------------|
 | `Escape` / `Alt+I` | closeInspector | Close the inspector and return to the transcript |
-| `Tab` | nextInspectorPage | Next page (Activity, Session, Views) |
+| `Tab` | nextInspectorPage | Next page (Activity, Session, Work, Research, Memory, Views) |
 | `Shift+Tab` | previousInspectorPage | Previous page |
 | `Page Up` | scrollInspectorUp | Scroll the inspector up |
 | `Page Down` | scrollInspectorDown | Scroll the inspector down |
