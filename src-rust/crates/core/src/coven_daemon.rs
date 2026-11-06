@@ -1375,18 +1375,33 @@ mod tests {
     }
 
     #[test]
-    fn unclassified_or_reveal_required_memory_keeps_no_title_or_excerpt() {
+    fn memory_not_public_or_needing_reveal_keeps_no_title_or_excerpt() {
+        // Coven Memory requires a reveal unless the classification is exactly
+        // "public" and reveal_required is false. Every other label, including
+        // private, unknown, future, padded or differently cased ones, fails closed.
         for (classification, reveal) in [
             ("null", "null"),
             ("null", "false"),
             ("\"private\"", "true"),
             ("\"private\"", "null"),
+            ("\"private\"", "false"),
+            ("\"unknown\"", "false"),
+            ("\"unclassified\"", "false"),
+            ("\"future-label\"", "false"),
+            ("\" public \"", "false"),
+            ("\"Public\"", "false"),
+            ("\"public\"", "true"),
+            ("\"public\"", "null"),
             ("\"\"", "false"),
         ] {
             let body = format!("[{}]", memory_row(classification, reveal));
             let rows = parse_memory_list(&body).unwrap();
             assert_eq!(rows.len(), 1, "{classification} {reveal}");
-            assert_eq!(rows[0].preview, MemoryPreview::Withheld);
+            assert_eq!(
+                rows[0].preview,
+                MemoryPreview::Withheld,
+                "{classification} {reveal}"
+            );
             let held = format!("{:?}", rows[0]);
             assert!(!held.contains(MEMORY_CANARY), "{held}");
         }
