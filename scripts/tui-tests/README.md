@@ -157,9 +157,10 @@ session of N transcript lines. A resume must prove it loaded, so a failed one
 cannot pass as a fast empty session: Next must show seeded text, and Classic
 must print the CLI's load confirmation. `--stream` adds a turn against a fake
 `claude` written to the disposable home, then reports input-to-paint during
-the turn and the gap between paints. The fake is set from launch, so the whole
-run is a session with a provider: compare its cold start, RSS and idle writes
-only with other `--stream` runs. That gap is a boundary proxy for active
+the turn and the gap between paints. That gap is a boundary proxy for active
 render cost; its floor is the event loop's 16 ms poll, and a slower fake
-producer would widen it. Classic cannot show the live end of a transcript past
-65,535 rows (#441), so `--stream` with 100,000 lines exits nonzero on Classic.
+producer would widen it. The fake is set from launch, so every figure from a
+`--stream` run, cold start and idle ones included, comes from a session with a
+provider: compare it only with other `--stream` runs. Classic cannot show the
+live end of a transcript past 65,535 rows (#441), so `--stream` with 100,000
+lines exits nonzero on Classic.
