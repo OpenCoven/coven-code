@@ -1301,7 +1301,7 @@ mod tests {
         };
         let mut buf = Buffer::empty(area);
 
-        diff_viewer::render_diff_dialog(&mut state, area, &mut buf);
+        diff_viewer::render_diff_dialog(&state, area, &mut buf);
 
         let rendered = buf
             .content

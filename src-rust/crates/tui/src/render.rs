@@ -583,8 +583,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     }
 
     if app.diff_viewer.visible {
-        let mut state = app.diff_viewer.clone();
-        render_diff_dialog(&mut state, size, frame.buffer_mut());
+        render_diff_dialog(&app.diff_viewer, size, frame.buffer_mut());
     }
 
     if app.global_search.visible {
