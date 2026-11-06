@@ -906,13 +906,15 @@ fn parse_memory_list(body: &str) -> Result<Vec<MemorySummary>, DaemonError> {
     Ok(raw
         .into_iter()
         .map(|row| {
-            // Fail closed: only a producer classification together with an
-            // explicit "no reveal required" lets text through.
-            let classified = matches!(
+            // Fail closed, as Coven Memory does in src/features/memory/privacy.ts
+            // at eb542a5: only exactly "public" together with an explicit "no
+            // reveal required" lets text through. Private, unknown and future
+            // labels are withheld.
+            let public = matches!(
                 &row.privacy_classification,
-                Some(RawClassification::Label(class)) if !class.trim().is_empty()
+                Some(RawClassification::Label(class)) if class == "public"
             );
-            let preview = if classified && row.reveal_required == Some(false) {
+            let preview = if public && row.reveal_required == Some(false) {
                 MemoryPreview::Allowed {
                     title: row.title.unwrap_or_default(),
                     excerpt: row.excerpt.unwrap_or_default(),
