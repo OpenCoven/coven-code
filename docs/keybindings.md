@@ -77,6 +77,7 @@ These bindings are active when focus is in the chat input field.
 | `Ctrl+Shift+.` | jumpToPreviousError | Jump to previous error / issue |
 | `Alt+I` | toggleInspector | Next renderer only: open or close the inspector |
 | `Alt+L` | jumpToLive | Next renderer only: return a scrolled transcript to live output |
+| `Ctrl+Z` | suspend | Next renderer only, Unix: stop the job and return to the shell; `fg` brings back the same screen and draft. A running turn is not cancelled, but its connection may drop while stopped. Tools in the same process group stop too. The default Bash tool runs in its own session and keeps running, and time spent stopped counts toward tool timeouts. Without a job-control shell, a notice appears and the session keeps running. |
 
 > `Ctrl+A` previously opened the model picker; it now moves the cursor to the line start (matching Emacs/readline). The model picker is now `Ctrl+Shift+A`. Old `keybindings.json` files are auto-migrated.
 

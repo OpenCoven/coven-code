@@ -1235,7 +1235,13 @@ impl App {
             }
         }
         let model_name = config.effective_model().to_string();
-        let user_keybindings = UserKeybindings::load(&Settings::config_dir());
+        // This load upgrades an older file and saves it. Classic drops the
+        // Next-only defaults, so the upgrade must keep a binding in every
+        // context when only they use its chord.
+        let user_keybindings = UserKeybindings::load_with_renderer_only(
+            &Settings::config_dir(),
+            crate::next::NEXT_ONLY_ACTIONS,
+        );
         let mut app = Self {
             config,
             cost_tracker,
@@ -6235,6 +6241,16 @@ impl App {
         );
         self.last_exit_key_warning = Some(std::time::Instant::now());
         self.exit_key_sequence_start = Some(key_char);
+    }
+
+    /// Choose the renderer for this session. Next-only keys stay unbound in
+    /// any other renderer, including as the start of a user's chord.
+    pub fn select_renderer(&mut self, renderer: crate::application::UiRenderer) {
+        self.renderer = renderer;
+        if renderer != crate::application::UiRenderer::Next {
+            self.keybindings
+                .remove_default_actions(crate::next::NEXT_ONLY_ACTIONS);
+        }
     }
 
     fn handle_keybinding_action(&mut self, action: &str) -> bool {

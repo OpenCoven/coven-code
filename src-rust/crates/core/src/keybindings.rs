@@ -301,6 +301,7 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         // Next renderer only; Classic treats these chords as unbound.
         ("alt+i", "toggleInspector", KeyContext::Chat),
         ("alt+l", "jumpToLive", KeyContext::Chat),
+        ("ctrl+z", "suspend", KeyContext::Chat),
         // Hints show the newest default, so Escape is listed last.
         ("alt+i", "closeInspector", KeyContext::Inspector),
         ("escape", "closeInspector", KeyContext::Inspector),
@@ -477,11 +478,18 @@ impl UserKeybindings {
     }
 
     pub fn load(config_dir: &Path) -> Self {
+        Self::load_with_renderer_only(config_dir, &[])
+    }
+
+    /// [`Self::load`], where `renderer_only` names default actions that one
+    /// renderer drops (see [`KeybindingResolver::remove_default_actions`]).
+    /// See [`Self::smart_merge_with_defaults_except`].
+    pub fn load_with_renderer_only(config_dir: &Path, renderer_only: &[&str]) -> Self {
         let path = config_dir.join("keybindings.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
             let mut kb = Self::from_json_str(&content);
             let old_version = kb.schema_version;
-            kb.smart_merge_with_defaults();
+            kb.smart_merge_with_defaults_except(renderer_only);
 
             // Save back if schema was updated
             if kb.schema_version > old_version {
@@ -528,6 +536,16 @@ impl UserKeybindings {
 
     /// Smart merge: preserve user customizations while adding new defaults
     pub fn smart_merge_with_defaults(&mut self) {
+        self.smart_merge_with_defaults_except(&[]);
+    }
+
+    /// [`Self::smart_merge_with_defaults`], except that a chord whose every
+    /// default is bound to one of `renderer_only` is not taken over. A renderer
+    /// that drops those defaults would otherwise leave the user's binding
+    /// confined to a default's context; it stays in every context instead, as
+    /// it did before those defaults existed. A chord with any other default is
+    /// merged as before.
+    pub fn smart_merge_with_defaults_except(&mut self, renderer_only: &[&str]) {
         if self.schema_version >= KEYBINDINGS_SCHEMA_VERSION {
             return; // Already up to date
         }
@@ -560,12 +578,26 @@ impl UserKeybindings {
         }
 
         // Get current defaults and integrate customizations
+        let defaults = default_bindings();
+        let claimable: std::collections::HashSet<String> = defaults
+            .iter()
+            .filter(|default| {
+                !default
+                    .action
+                    .as_deref()
+                    .is_some_and(|action| renderer_only.contains(&action))
+            })
+            .map(|default| format_chord_string(&default.chord))
+            .collect();
         let mut merged_bindings = Vec::new();
-        for default in default_bindings() {
+        for default in defaults {
             let chord_str = format_chord_string(&default.chord);
             let context_str = format!("{:?}", default.context);
+            let claims_chord = claimable.contains(&chord_str);
 
-            if let Some(custom_action) = user_customizations.get(&chord_str) {
+            if let Some(custom_action) =
+                user_customizations.get(&chord_str).filter(|_| claims_chord)
+            {
                 // User has customized this binding, use their version
                 merged_bindings.push(UserBinding {
                     chord: chord_str.clone(),
@@ -683,6 +715,43 @@ pub struct BindingConflict {
 }
 
 impl KeybindingResolver {
+    /// Drop the defaults bound to `actions`, so their chords are free again.
+    /// For a renderer that does not handle them: a default that only falls
+    /// through would still shadow a user's longer chord. User bindings stay,
+    /// except exact copies of a dropped default: upgrading an older
+    /// keybindings file copies every default into the user's own bindings.
+    pub fn remove_default_actions(&mut self, actions: &[&str]) {
+        let dropped = |binding: &ParsedBinding| {
+            binding
+                .action
+                .as_deref()
+                .is_some_and(|action| actions.contains(&action))
+        };
+        let (defaults, users) = self.bindings.split_at(self.default_count);
+        let copied = |binding: &ParsedBinding| {
+            dropped(binding)
+                && defaults.iter().any(|default| {
+                    default.chord == binding.chord
+                        && default.context == binding.context
+                        && default.action == binding.action
+                })
+        };
+        let (users, user_chords): (Vec<ParsedBinding>, Vec<String>) = users
+            .iter()
+            .zip(&self.user_chords)
+            .filter(|(binding, _)| !copied(binding))
+            .map(|(binding, chord)| (binding.clone(), chord.clone()))
+            .unzip();
+        let defaults: Vec<ParsedBinding> = defaults
+            .iter()
+            .filter(|binding| !dropped(binding))
+            .cloned()
+            .collect();
+        self.default_count = defaults.len();
+        self.bindings = defaults.into_iter().chain(users).collect();
+        self.user_chords = user_chords;
+    }
+
     pub fn new(user: &UserKeybindings) -> Self {
         let mut bindings = default_bindings();
         let default_count = bindings.len();
@@ -1218,11 +1287,162 @@ mod tests {
     }
 
     #[test]
+    fn removing_default_actions_frees_their_chords_and_keeps_user_bindings() {
+        let user = user(&[
+            ("ctrl+z ctrl+x", Some("openHelp"), Some("Chat")),
+            ("alt+u", Some("suspend"), Some("Chat")),
+        ]);
+        let mut resolver = KeybindingResolver::new(&user);
+        // The exact default shadows the user's longer chord.
+        assert_eq!(
+            press(&mut resolver, "ctrl+z", &[KeyContext::Chat]),
+            "suspend"
+        );
+
+        resolver.remove_default_actions(&["suspend"]);
+        let pending =
+            resolver.process_layered(parse_keystroke("ctrl+z").unwrap(), &[KeyContext::Chat]);
+        assert!(matches!(pending, KeybindingResult::Pending));
+        assert_eq!(
+            press(&mut resolver, "ctrl+x", &[KeyContext::Chat]),
+            "openHelp"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+u", &[KeyContext::Chat]),
+            "suspend",
+            "a user's own binding stays"
+        );
+        assert_eq!(
+            press(&mut resolver, "ctrl+k", &[KeyContext::Chat]),
+            "openCommandPalette"
+        );
+    }
+
+    #[test]
+    fn removing_default_actions_also_frees_chords_an_upgraded_file_copied() {
+        // The block format loads as schema 0, and the schema upgrade copies
+        // every default into the user's own bindings, these ones included.
+        let mut user = UserKeybindings::from_json_str(
+            r#"{"bindings":[{"context":"Chat","bindings":{
+                "ctrl+z ctrl+x":"openCommandPalette",
+                "alt+i alt+x":"openHelp",
+                "alt+u":"suspend"}}]}"#,
+        );
+        assert_eq!(user.schema_version, 0);
+        user.smart_merge_with_defaults();
+        let mut resolver = KeybindingResolver::new(&user);
+
+        resolver.remove_default_actions(&["toggleInspector", "jumpToLive", "suspend"]);
+        assert_eq!(
+            press(&mut resolver, "ctrl+z ctrl+x", &[KeyContext::Chat]),
+            "openCommandPalette"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+i alt+x", &[KeyContext::Chat]),
+            "openHelp"
+        );
+        assert_eq!(
+            press(&mut resolver, "alt+u", &[KeyContext::Chat]),
+            "suspend",
+            "a user's own binding on another chord stays"
+        );
+    }
+
+    #[test]
+    fn upgrading_keeps_an_old_files_binding_on_a_renderer_only_chord_in_every_context() {
+        // Before ctrl+z had a default, the upgrade left this binding in every
+        // context. A renderer that drops that default must still see it there.
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        let resolve = |except: &[&str]| {
+            let mut user = UserKeybindings::from_json_str(
+                r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}}]}"#,
+            );
+            user.smart_merge_with_defaults_except(except);
+            let mut resolver = KeybindingResolver::new(&user);
+            resolver.remove_default_actions(&renderer_only);
+            [KeyContext::Chat, KeyContext::Transcript]
+                .map(|context| press(&mut resolver, "ctrl+z", &[context]))
+        };
+        assert_eq!(resolve(&renderer_only), ["openHelp", "openHelp"]);
+        // The plain upgrade confines it to the default's Chat context.
+        assert_eq!(resolve(&[]), ["openHelp", "NoMatch"]);
+    }
+
+    #[test]
+    fn upgrading_merges_a_chord_with_any_other_default_as_before() {
+        // escape's first default is renderer-only, but escape has others, so
+        // the file's binding takes that default's place, as it did before.
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        let upgrade = |except: &[&str]| {
+            let mut user = UserKeybindings::from_json_str(
+                r#"{"bindings":[{"context":"Chat","bindings":{"escape":"interrupt"}}]}"#,
+            );
+            user.smart_merge_with_defaults_except(except);
+            user
+        };
+        let fields = |user: &UserKeybindings| -> Vec<(String, Option<String>, Option<String>)> {
+            user.bindings
+                .iter()
+                .filter(|b| b.chord == "escape")
+                .map(|b| (b.chord.clone(), b.action.clone(), b.context.clone()))
+                .collect()
+        };
+        assert_eq!(fields(&upgrade(&renderer_only)), fields(&upgrade(&[])));
+        let mut resolver = KeybindingResolver::new(&upgrade(&renderer_only));
+        resolver.remove_default_actions(&renderer_only);
+        assert_eq!(
+            press(&mut resolver, "escape", &[KeyContext::Confirmation]),
+            "no"
+        );
+    }
+
+    #[test]
+    fn loading_an_old_file_saves_its_bindings_as_the_upgrade_merges_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keybindings.json");
+        std::fs::write(
+            &path,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}},{"context":"Chat","bindings":{"escape":"interrupt"}}]}"#,
+        )
+        .unwrap();
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        UserKeybindings::load_with_renderer_only(dir.path(), &renderer_only);
+        let saved = UserKeybindings::from_json_str(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(saved.schema_version, KEYBINDINGS_SCHEMA_VERSION);
+        let ctrl_z: Vec<_> = saved
+            .bindings
+            .iter()
+            .filter(|b| b.chord == "ctrl+z")
+            .map(|b| (b.action.as_deref(), b.context.as_deref()))
+            .collect();
+        assert_eq!(
+            ctrl_z,
+            [(Some("suspend"), Some("Chat")), (Some("openHelp"), None)]
+        );
+        // escape has a default outside Next, so its binding takes the first
+        // default's place, as on main, and Classic's prompt still says no.
+        let escape: Vec<_> = saved
+            .bindings
+            .iter()
+            .filter(|b| b.chord == "escape")
+            .map(|b| (b.action.as_deref(), b.context.as_deref()))
+            .take(2)
+            .collect();
+        assert_eq!(
+            escape,
+            [
+                (Some("interrupt"), Some("Inspector")),
+                (Some("no"), Some("Confirmation"))
+            ]
+        );
+    }
+
+    #[test]
     fn test_resolver_no_match() {
         let user = UserKeybindings::default();
         let mut resolver = KeybindingResolver::new(&user);
-        // ctrl+z has no default binding
-        let ks = parse_keystroke("ctrl+z").unwrap();
+        // ctrl+alt+z has no default binding
+        let ks = parse_keystroke("ctrl+alt+z").unwrap();
         let result = resolver.process(ks, &KeyContext::Chat);
         assert!(matches!(result, KeybindingResult::NoMatch));
     }

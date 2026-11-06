@@ -2647,6 +2647,64 @@ fn read_session_goal(session_id: &str) -> Option<Result<claurst_core::goal::Goal
     }
 }
 
+/// Hand the terminal back to the shell and stop until the shell resumes us.
+///
+/// SIGTSTP rather than SIGSTOP: the OS discards it when no job-control shell
+/// could resume this job, so it can never leave a session stopped for good.
+/// It goes to the process group, so tools in this group stop too. The default
+/// Bash tool leads its own session and keeps running, and time spent stopped
+/// counts toward tool timeouts.
+#[cfg(unix)]
+fn suspend_job(
+    terminal: &mut claurst_tui::AppTerminal,
+    app: &mut claurst_tui::App,
+    renderer: claurst_tui::application::UiRenderer,
+) -> anyhow::Result<()> {
+    // A real stop lasts at least as long as someone typing `fg`.
+    const SHORTEST_STOP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let mut stopped_for = std::time::Duration::ZERO;
+    let handed_back = claurst_tui::suspend_terminal(terminal, renderer, || {
+        let started = std::time::Instant::now();
+        if let Err(error) = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(0),
+            nix::sys::signal::Signal::SIGTSTP,
+        ) {
+            tracing::warn!(%error, "could not stop the job");
+        }
+        stopped_for = started.elapsed();
+    })?;
+    if !handed_back {
+        app.push_notification(
+            claurst_tui::notifications::NotificationKind::Warning,
+            "Could not give the terminal back to the shell, so Coven Code did not stop."
+                .to_string(),
+            Some(5),
+        );
+    } else if stopped_for < SHORTEST_STOP {
+        app.push_notification(
+            claurst_tui::notifications::NotificationKind::Info,
+            "Nothing to return to: no job-control shell started this session.".to_string(),
+            Some(5),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn suspend_job(
+    _terminal: &mut claurst_tui::AppTerminal,
+    app: &mut claurst_tui::App,
+    _renderer: claurst_tui::application::UiRenderer,
+) -> anyhow::Result<()> {
+    app.push_notification(
+        claurst_tui::notifications::NotificationKind::Info,
+        "Suspend is not available on this platform.".to_string(),
+        Some(3),
+    );
+    Ok(())
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -2806,9 +2864,13 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    let user_keybindings =
-        claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
-    app.renderer = renderer;
+    // Classic drops the Next-only defaults, so upgrading an older file must
+    // keep a binding in every context when only they use its chord.
+    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
+        &Settings::config_dir(),
+        claurst_tui::next::NEXT_ONLY_ACTIONS,
+    );
+    app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
@@ -3168,6 +3230,10 @@ async fn run_interactive(
                 &mut work_goal_read,
                 read_session_goal,
             );
+        }
+
+        if app.next_shell.take_suspend_request() {
+            suspend_job(&mut terminal, &mut app, renderer)?;
         }
 
         // Draw the UI
