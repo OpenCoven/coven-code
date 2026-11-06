@@ -2670,7 +2670,7 @@ fn suspend_job(
     const SHORTEST_STOP: std::time::Duration = std::time::Duration::from_millis(50);
 
     let mut stopped_for = std::time::Duration::ZERO;
-    claurst_tui::suspend_terminal(terminal, renderer, || {
+    let handed_back = claurst_tui::suspend_terminal(terminal, renderer, || {
         let started = std::time::Instant::now();
         if let Err(error) = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(0),
@@ -2680,7 +2680,14 @@ fn suspend_job(
         }
         stopped_for = started.elapsed();
     })?;
-    if stopped_for < SHORTEST_STOP {
+    if !handed_back {
+        app.push_notification(
+            claurst_tui::notifications::NotificationKind::Warning,
+            "Could not give the terminal back to the shell, so Coven Code did not stop."
+                .to_string(),
+            Some(5),
+        );
+    } else if stopped_for < SHORTEST_STOP {
         app.push_notification(
             claurst_tui::notifications::NotificationKind::Info,
             "Nothing to return to: no job-control shell started this session.".to_string(),

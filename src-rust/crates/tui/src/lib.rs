@@ -396,6 +396,8 @@ pub fn set_terminal_title(title: &str) {
 }
 
 /// Give the terminal back to the shell, run `stop`, then take it back.
+/// Returns whether `stop` ran: it does not if the terminal could not be
+/// handed back, and the terminal is set up again either way.
 ///
 /// The new terminal has no previous frame, so the next draw repaints it all.
 #[cfg(unix)]
@@ -403,7 +405,7 @@ pub fn suspend_terminal(
     terminal: &mut AppTerminal,
     renderer: application::UiRenderer,
     stop: impl FnOnce(),
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let title = last_terminal_title();
     // Keyboard flags have one stack per screen and setup pushed on the
     // alternate one, but restore pops after leaving it. Pop here too, or that
@@ -411,21 +413,31 @@ pub fn suspend_terminal(
     if should_push_keyboard_enhancement_for_process() {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    stop_if_restored(restore_terminal(terminal), stop);
+    let stopped = stop_if_restored(restore_terminal(terminal), stop);
     *terminal = setup_terminal(renderer)?;
     terminal.clear()?;
     if let Some(title) = title {
         set_terminal_title(&title);
     }
-    Ok(())
+    Ok(stopped)
 }
 
-/// Run `stop` after handing the terminal back to the shell. Returns whether
+/// Run `stop` only if the terminal was handed back to the shell. Restoring
+/// stops at its first error, and stopping then would leave the shell in raw
+/// mode, on the alternate screen or with mouse capture on. Returns whether
 /// it ran.
 #[cfg(unix)]
-fn stop_if_restored(_restored: io::Result<()>, stop: impl FnOnce()) -> bool {
-    stop();
-    true
+fn stop_if_restored(restored: io::Result<()>, stop: impl FnOnce()) -> bool {
+    match restored {
+        Ok(()) => {
+            stop();
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not hand the terminal back; not suspending");
+            false
+        }
+    }
 }
 
 /// Update the terminal title to reflect the current session context.
