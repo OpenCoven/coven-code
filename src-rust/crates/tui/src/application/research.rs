@@ -187,36 +187,63 @@ fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
 
 /// Error text with each scheme-prefixed token replaced by its [`display_url`]
 /// form, so a failed request never shows credentials or a query string. This
-/// includes HTTP URLs the client accepts without exactly `//`.
+/// includes HTTP URLs the client accepts without exactly `//`. A token runs to
+/// the next whitespace, since the client accepts brackets and quotes inside a
+/// URL; punctuation that closes the sentence or an outer bracket is shown after
+/// it.
 fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(found) = rest.find(':') {
         let start = rest[..found]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map_or(0, |at| at + 1);
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |(at, c)| at + c.len_utf8());
         let end = rest[found..]
-            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\''))
+            .find(char::is_whitespace)
             .map_or(rest.len(), |at| found + at);
-        out.push_str(&rest[..start]);
-        if start == found {
-            // No scheme before the colon; keep it and move on.
-            out.push(':');
-            rest = &rest[found + 1..];
-            continue;
+        let (url, after) = split_trailing_punctuation(&rest[start..end]);
+        let shown = (start < found).then(|| display_url(url));
+        match shown {
+            Some(shown) if shown != url => {
+                out.push_str(&rest[..start]);
+                out.push_str(&shown);
+                out.push_str(after);
+                rest = &rest[end..];
+            }
+            // Not a URL, or nothing in it to hide: keep the text up to the
+            // colon and look for a URL after it, as in `URL:https:…`.
+            _ => {
+                out.push_str(&rest[..=found]);
+                rest = &rest[found + 1..];
+            }
         }
-        let url = &rest[start..end];
-        // A trailing `:` belongs to the sentence ("Failed to fetch URL: …").
-        let (url, colon) = match url.strip_suffix(':') {
-            Some(url) => (url, ":"),
-            None => (url, ""),
-        };
-        out.push_str(&display_url(url));
-        out.push_str(colon);
-        rest = &rest[end..];
     }
     out.push_str(rest);
     out
+}
+
+/// A token split before the punctuation that ends it: `:`, `,`, `.`, `;`, `>`,
+/// quotes, and a `)` or `]` with no opening partner in the token. That
+/// punctuation never holds a credential, and keeping `[::1]` whole lets the
+/// client's parser read it.
+fn split_trailing_punctuation(token: &str) -> (&str, &str) {
+    let mut end = token.len();
+    while let Some(last) = token[..end].chars().next_back() {
+        let body = &token[..end];
+        let closes = match last {
+            ')' => body.matches(')').count() > body.matches('(').count(),
+            ']' => body.matches(']').count() > body.matches('[').count(),
+            ':' | ',' | '.' | ';' | '>' | '"' | '\'' => true,
+            _ => false,
+        };
+        if !closes {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    token.split_at(end)
 }
 
 /// Hits in the search tool's numbered form: a `N. **title**` line directly
@@ -256,12 +283,18 @@ fn numbered_title(line: &str) -> Option<&str> {
 /// secrets. Text without a `scheme://` is shown as is, made safe. A backslash
 /// ends the host, as it does for the HTTP client, so `a.com\@b.com` shows
 /// `a.com`, the host actually contacted. An HTTP URL the client reads with
-/// other slashes, such as `https:user:pw@host`, is shown in the client's form.
+/// other slashes, such as `https:user:pw@host`, is shown in the client's form,
+/// and one it cannot parse at all shows only its scheme.
 pub fn display_url(raw: &str) -> String {
     let raw = raw.trim();
     let normalized = reqwest::Url::parse(raw)
         .ok()
         .filter(|url| matches!(url.scheme(), "http" | "https") && !plain_authority(raw));
+    if normalized.is_none() && !plain_authority(raw) {
+        if let Some(scheme) = http_scheme(raw) {
+            return format!("{scheme}:…");
+        }
+    }
     let raw = normalized.as_ref().map_or(raw, reqwest::Url::as_str);
     let Some((scheme, rest)) = raw.split_once("://") else {
         return one_line(raw);
@@ -292,6 +325,19 @@ fn plain_authority(raw: &str) -> bool {
             rest.strip_prefix("//")
                 .is_some_and(|authority| !authority.starts_with(['/', '\\']))
         })
+}
+
+/// `http` or `https` when that is the text's scheme, ignoring case and the
+/// control characters and spaces the client's parser would drop.
+fn http_scheme(raw: &str) -> Option<&'static str> {
+    let (scheme, _) = raw.split_once(':')?;
+    let scheme: String = scheme
+        .chars()
+        .filter(|c| !(c.is_ascii_control() || *c == ' '))
+        .collect();
+    ["http", "https"]
+        .into_iter()
+        .find(|known| scheme.eq_ignore_ascii_case(known))
 }
 
 /// Terminal-safe text on one row.
@@ -517,6 +563,59 @@ mod tests {
             panic!()
         };
         assert!(!text.contains("hunter"), "{text}");
+    }
+
+    #[test]
+    fn error_text_with_letters_outside_ascii_before_a_colon_is_kept() {
+        for text in [
+            "Failed to fetch bücher.de: builder error",
+            "Größe: 3",
+            "エラー: x",
+        ] {
+            assert_eq!(redact_urls(text), text);
+        }
+    }
+
+    #[test]
+    fn urls_inside_brackets_or_quotes_or_after_a_label_are_redacted() {
+        for error in [
+            "Failed to fetch https:user:secret@[::1]/v1?token=abc: builder error",
+            "Failed to fetch https://h.example/v1?f=(a)&token=abc: builder error",
+            "error sending request for url (https://user:secret@h.example/?token=abc)",
+            "URL:https:user:secret@h.example/?token=abc",
+            "url=\"https://user:secret@h.example/?token=abc\"",
+            "<https://user:secret@h.example/?token=abc>",
+            "Größe:https://user:secret@h.example/?token=abc",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(!shown.contains("token=abc"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn punctuation_after_a_url_stays_after_its_redacted_form() {
+        assert_eq!(
+            redact_urls("Failed to fetch https://u:pw@h.example/x: timed out"),
+            "Failed to fetch https://h.example/x: timed out"
+        );
+        assert_eq!(
+            redact_urls("(see https://u:pw@h.example/a)."),
+            "(see https://h.example/a)."
+        );
+        assert_eq!(
+            redact_urls("at https://u:pw@[::1]/v1, then"),
+            "at https://[::1]/v1, then"
+        );
+    }
+
+    #[test]
+    fn an_http_url_the_client_cannot_parse_shows_only_its_scheme() {
+        assert!(reqwest::Url::parse("https:user:secret@h%zz/x?token=abc").is_err());
+        assert_eq!(display_url("https:user:secret@h%zz/x?token=abc"), "https:…");
+        assert_eq!(display_url("HTTP:user:secret@h%zz/"), "http:…");
+        // With exactly `//` the plain split already finds the host.
+        assert_eq!(display_url("https://user:secret@h%zz/x"), "https://h%zz/x");
     }
 
     #[test]
