@@ -224,6 +224,29 @@ fn the_memory_page_offers_no_reveal_selection_or_mutation() {
 }
 
 #[test]
+fn a_daemon_offering_changes_still_gets_a_read_only_page() {
+    let mut app = loaded_app();
+    if let MemorySnapshot::Loaded {
+        overview: Ok(overview),
+        ..
+    } = &mut app.memory_snapshot
+    {
+        overview.mutations = true;
+    } else {
+        panic!("the fixture has an overview");
+    }
+    let text = draw(&app, 120, 50);
+    // The inspector column wraps "changes offered by the daemon, not here".
+    assert!(text.contains("changes offered"), "{text}");
+    assert!(text.contains("not here"), "{text}");
+    assert!(text.contains("read only"), "{text}");
+    let lower = text.to_lowercase();
+    for verb in ["delete", "edit", "promote", "attach"] {
+        assert!(!lower.contains(verb), "offers {verb:?}:\n{text}");
+    }
+}
+
+#[test]
 fn the_scope_notes_and_a_row_stay_visible_at_40x12() {
     let text = draw(&loaded_app(), 40, 12);
     assert!(text.contains("read only"), "{text}");
