@@ -686,23 +686,39 @@ pub struct BindingConflict {
 impl KeybindingResolver {
     /// Drop the defaults bound to `actions`, so their chords are free again.
     /// For a renderer that does not handle them: a default that only falls
-    /// through would still shadow a user's longer chord. User bindings stay.
+    /// through would still shadow a user's longer chord. User bindings stay,
+    /// except exact copies of a dropped default: upgrading an older
+    /// keybindings file copies every default into the user's own bindings.
     pub fn remove_default_actions(&mut self, actions: &[&str]) {
-        let default_count = self.default_count;
-        let mut index = 0;
-        let mut kept = 0;
-        self.bindings.retain(|binding| {
-            let is_default = index < default_count;
-            index += 1;
-            let remove = is_default
-                && binding
-                    .action
-                    .as_deref()
-                    .is_some_and(|action| actions.contains(&action));
-            kept += usize::from(is_default && !remove);
-            !remove
-        });
-        self.default_count = kept;
+        let dropped = |binding: &ParsedBinding| {
+            binding
+                .action
+                .as_deref()
+                .is_some_and(|action| actions.contains(&action))
+        };
+        let (defaults, users) = self.bindings.split_at(self.default_count);
+        let copied = |binding: &ParsedBinding| {
+            dropped(binding)
+                && defaults.iter().any(|default| {
+                    default.chord == binding.chord
+                        && default.context == binding.context
+                        && default.action == binding.action
+                })
+        };
+        let (users, user_chords): (Vec<ParsedBinding>, Vec<String>) = users
+            .iter()
+            .zip(&self.user_chords)
+            .filter(|(binding, _)| !copied(binding))
+            .map(|(binding, chord)| (binding.clone(), chord.clone()))
+            .unzip();
+        let defaults: Vec<ParsedBinding> = defaults
+            .iter()
+            .filter(|binding| !dropped(binding))
+            .cloned()
+            .collect();
+        self.default_count = defaults.len();
+        self.bindings = defaults.into_iter().chain(users).collect();
+        self.user_chords = user_chords;
     }
 
     pub fn new(user: &UserKeybindings) -> Self {
