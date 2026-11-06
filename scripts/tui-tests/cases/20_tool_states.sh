@@ -82,7 +82,9 @@ _states_quit() { # scratch
     else
       _fail "next: quitting names the tool with no result" "$(tui_capture)"
     fi
-    local said; said="$(tui_capture)"
+    # The report is printed to the shell, which wraps it at the terminal width;
+    # -J joins the wrapped rows back into the lines that were printed.
+    local said; said="$(_tmux capture-pane -t "$TUI_SESSION" -p -J 2>/dev/null)"
     assert_contains "$said" "nothing carries it on" "next: quitting says nothing carries the turn on"
     assert_contains "$said" "is unknown" "next: quitting says the outcome is unknown"
     assert_contains "$said" "coven-code --resume" "next: quitting gives the way back"
