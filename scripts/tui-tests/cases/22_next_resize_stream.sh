@@ -62,6 +62,19 @@ tc_next_resize_stream() {
 
     assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" "$running" \
       "the process survives every size"
+    # tmux itself sometimes leaves the window at an earlier size when the host
+    # is loaded. Reapply the last size so the checks below judge the app, and
+    # say so if tmux never takes it.
+    local applied tries=0
+    applied="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
+    while [ "$applied" != "120x40" ] && [ "$tries" -lt 5 ]; do
+      _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40; sleep 0.25; tries=$((tries + 1))
+      applied="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
+    done
+    if [ "$tries" -gt 0 ]; then
+      info "tmux needed $tries more resize(s) to reach 120x40 (now $applied)"
+    fi
+    assert_eq "$applied" "120x40" "tmux applied the final size"
     if wait_absent "working" 240; then _pass "the turn finishes"
     else _fail "the turn finishes" "$(tui_capture)"; fi
     local screen; screen="$(tui_capture)"
