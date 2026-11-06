@@ -1,8 +1,9 @@
 //! T10 (#417), large-content fixtures for the Next renderer: correctness
-//! only. A 100,000-line answer, a 10,000-line diff-shaped tool result and
-//! binary tool output must render at every size without panicking, keep
-//! cells inert, keep the composer and the way back visible, and scroll to
-//! both ends. Timing targets belong to the performance harness (#425); the
+//! only. A 100,000-line answer, a 10,000-line diff and binary output must
+//! render at every size without panicking, keep cells inert, keep the
+//! composer and the way back visible, and scroll to both ends. Next does not
+//! draw tool results yet, so the diff and the binary output also arrive as
+//! assistant text, which it does draw. Timing targets belong to the performance harness (#425); the
 //! elapsed time printed here is an observation, not a gate.
 
 use claurst_core::config::Config;
@@ -72,15 +73,17 @@ fn workload_app() -> App {
         Message::user_blocks(vec![
             ContentBlock::ToolResult {
                 tool_use_id: "toolu_diff".to_string(),
-                content: ToolResultContent::Text(diff),
+                content: ToolResultContent::Text(diff.clone()),
                 is_error: Some(false),
             },
             ContentBlock::ToolResult {
                 tool_use_id: "toolu_bin".to_string(),
-                content: ToolResultContent::Text(binary),
+                content: ToolResultContent::Text(binary.clone()),
                 is_error: Some(false),
             },
         ]),
+        Message::assistant(diff),
+        Message::assistant(binary),
         Message::assistant("final words"),
     ];
     app
@@ -149,10 +152,14 @@ fn a_100k_line_answer_scrolls_away_from_live_and_returns() {
     }
     let away = text_of(&draw(&app, 80, 24));
     assert!(!away.contains("final words"), "scrolled away:\n{away}");
-    assert!(
-        away.contains("answer line 0"),
-        "reading the answer:\n{away}"
-    );
+    // The far end: an offset past the first row settles on the first rows.
+    app.scroll_offset = 1_000_000;
+    app.auto_scroll = false;
+    draw(&app, 80, 24);
+    app.settle_scroll_anchor();
+    let start = text_of(&draw(&app, 80, 24));
+    assert!(start.contains("first question"), "the start:\n{start}");
+    assert!(start.contains("answer line 000001"), "the start:\n{start}");
     app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
     app.settle_scroll_anchor();
     let live = text_of(&draw(&app, 80, 24));
