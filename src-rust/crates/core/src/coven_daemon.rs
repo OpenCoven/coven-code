@@ -906,13 +906,15 @@ fn parse_memory_list(body: &str) -> Result<Vec<MemorySummary>, DaemonError> {
     Ok(raw
         .into_iter()
         .map(|row| {
-            // Fail closed: only a producer classification together with an
-            // explicit "no reveal required" lets text through.
-            let classified = matches!(
+            // Fail closed, as Coven Memory does in src/features/memory/privacy.ts
+            // at eb542a5: only exactly "public" together with an explicit "no
+            // reveal required" lets text through. Private, unknown and future
+            // labels are withheld.
+            let public = matches!(
                 &row.privacy_classification,
-                Some(RawClassification::Label(class)) if !class.trim().is_empty()
+                Some(RawClassification::Label(class)) if class == "public"
             );
-            let preview = if classified && row.reveal_required == Some(false) {
+            let preview = if public && row.reveal_required == Some(false) {
                 MemoryPreview::Allowed {
                     title: row.title.unwrap_or_default(),
                     excerpt: row.excerpt.unwrap_or_default(),
@@ -1375,18 +1377,33 @@ mod tests {
     }
 
     #[test]
-    fn unclassified_or_reveal_required_memory_keeps_no_title_or_excerpt() {
+    fn memory_not_public_or_needing_reveal_keeps_no_title_or_excerpt() {
+        // Coven Memory requires a reveal unless the classification is exactly
+        // "public" and reveal_required is false. Every other label, including
+        // private, unknown, future, padded or differently cased ones, fails closed.
         for (classification, reveal) in [
             ("null", "null"),
             ("null", "false"),
             ("\"private\"", "true"),
             ("\"private\"", "null"),
+            ("\"private\"", "false"),
+            ("\"unknown\"", "false"),
+            ("\"unclassified\"", "false"),
+            ("\"future-label\"", "false"),
+            ("\" public \"", "false"),
+            ("\"Public\"", "false"),
+            ("\"public\"", "true"),
+            ("\"public\"", "null"),
             ("\"\"", "false"),
         ] {
             let body = format!("[{}]", memory_row(classification, reveal));
             let rows = parse_memory_list(&body).unwrap();
             assert_eq!(rows.len(), 1, "{classification} {reveal}");
-            assert_eq!(rows[0].preview, MemoryPreview::Withheld);
+            assert_eq!(
+                rows[0].preview,
+                MemoryPreview::Withheld,
+                "{classification} {reveal}"
+            );
             let held = format!("{:?}", rows[0]);
             assert!(!held.contains(MEMORY_CANARY), "{held}");
         }
