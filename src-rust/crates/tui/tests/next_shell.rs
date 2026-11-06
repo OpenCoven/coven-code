@@ -492,6 +492,242 @@ fn transcript_text_is_selectable_in_next() {
     assert!(rows.values().any(|row| row.contains("answer 001")));
 }
 
+const SELECTED: ratatui::style::Color = ratatui::style::Color::Rgb(200, 200, 200);
+
+fn highlighted(buffer: &Buffer) -> String {
+    buffer
+        .content
+        .iter()
+        .filter(|cell| cell.bg == SELECTED)
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+/// Select `needle` the way a drag does, from the cells of the last frame.
+fn select(app: &mut App, needle: &str) {
+    let area = app.last_selectable_area.get();
+    let (row, column) = {
+        let rows = app.last_row_text.borrow();
+        let (row, text) = rows
+            .iter()
+            .find(|(_, text)| text.contains(needle))
+            .expect("the text is on screen");
+        (*row, text.find(needle).unwrap())
+    };
+    let start = area.x + u16::try_from(column).unwrap();
+    let end = start + u16::try_from(needle.len()).unwrap() - 1;
+    app.selection_anchor = Some((start, row));
+    app.selection_focus = Some((end, row));
+}
+
+fn selected_text(app: &App) -> String {
+    app.selection_text.borrow().clone()
+}
+
+#[test]
+fn a_selection_stays_on_its_text_while_nothing_moves() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    for _ in 0..3 {
+        let (buffer, _) = draw(&app, 80, 24);
+        assert_eq!(selected_text(&app), "answer 039");
+        assert_eq!(highlighted(&buffer), "answer 039");
+        assert!(!text_of(&buffer).contains("selection kept"));
+    }
+}
+
+#[test]
+fn a_resize_keeps_the_selected_text_and_marks_nothing_else() {
+    for (width, height) in [(100, 30), (180, 50), (60, 16), (40, 12), (20, 6)] {
+        let mut app = next_app();
+        with_history(&mut app, 40);
+        let _ = draw(&app, 80, 24);
+        select(&mut app, "answer 039");
+        let _ = draw(&app, 80, 24);
+
+        let (buffer, _) = draw(&app, width, height);
+        assert_eq!(
+            selected_text(&app),
+            "answer 039",
+            "{width}x{height}: copy still gives what was selected"
+        );
+        assert_eq!(highlighted(&buffer), "", "{width}x{height}: no wrong mark");
+
+        // Going back does not guess that the cells mean the same thing again.
+        let (buffer, _) = draw(&app, 80, 24);
+        assert_eq!(selected_text(&app), "answer 039");
+        assert_eq!(highlighted(&buffer), "");
+        assert!(
+            text_of(&buffer).contains("selection kept"),
+            "the kept selection is visible:\n{}",
+            text_of(&buffer)
+        );
+    }
+}
+
+#[test]
+fn text_moving_under_a_selection_does_not_change_what_it_copies() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+
+    apply(&mut app, delta(&"streamed line\n".repeat(30)));
+    let (buffer, _) = draw(&app, 80, 24);
+    assert_eq!(selected_text(&app), "answer 039");
+    assert_eq!(highlighted(&buffer), "");
+    assert!(text_of(&buffer).contains("selection kept"));
+}
+
+#[test]
+fn rows_arriving_elsewhere_leave_a_selection_alone() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    app.handle_key_event(key(KeyCode::PageUp, KeyModifiers::NONE));
+    let first = text_of(&draw(&app, 80, 24).0);
+    app.settle_scroll_anchor();
+    let line = first
+        .lines()
+        .find(|line| line.starts_with("answer "))
+        .expect("history visible")
+        .trim()
+        .to_string();
+    select(&mut app, &line);
+    let _ = draw(&app, 80, 24);
+
+    apply(&mut app, delta(&"streamed line\n".repeat(30)));
+    let (buffer, _) = draw(&app, 80, 24);
+    assert_eq!(selected_text(&app), line);
+    assert_eq!(highlighted(&buffer), line);
+}
+
+#[test]
+fn a_new_selection_replaces_a_kept_one() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    let _ = draw(&app, 60, 16);
+    assert_eq!(selected_text(&app), "answer 039");
+
+    select(&mut app, "answer 039");
+    let (buffer, _) = draw(&app, 60, 16);
+    assert_eq!(selected_text(&app), "answer 039");
+    assert_eq!(highlighted(&buffer), "answer 039");
+    assert!(!text_of(&buffer).contains("selection kept"));
+}
+
+#[test]
+fn any_other_key_lets_go_of_a_kept_selection() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    let _ = draw(&app, 60, 16);
+
+    app.handle_key_event(key(KeyCode::Char('x'), KeyModifiers::NONE));
+    let (buffer, _) = draw(&app, 60, 16);
+    assert_eq!(selected_text(&app), "");
+    assert_eq!(highlighted(&buffer), "");
+    assert!(!text_of(&buffer).contains("selection kept"));
+}
+
+#[test]
+fn pasting_or_fast_typing_lets_go_of_a_selection_only_in_next() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    let _ = draw(&app, 60, 16);
+
+    // Fast typing reaches the app as a paste, not as keys.
+    app.handle_paste_data("q7z".to_string());
+    let (buffer, _) = draw(&app, 60, 16);
+    assert_eq!(selected_text(&app), "");
+    assert!(!text_of(&buffer).contains("selection kept"));
+
+    let mut classic = next_app();
+    classic.renderer = UiRenderer::Classic;
+    classic.selection_anchor = Some((1, 1));
+    classic.selection_focus = Some((4, 1));
+    classic.handle_paste_data("q7z".to_string());
+    assert_eq!(classic.selection_anchor, Some((1, 1)));
+}
+
+#[test]
+fn a_bound_key_keeps_a_selection_so_scrolling_can_come_before_copying() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+
+    app.handle_key_event(key(KeyCode::PageUp, KeyModifiers::NONE));
+    let (buffer, _) = draw(&app, 80, 24);
+    assert_eq!(selected_text(&app), "answer 039");
+    assert_eq!(highlighted(&buffer), "");
+    assert!(text_of(&buffer).contains("selection kept"));
+}
+
+#[test]
+fn escape_still_cancels_a_turn_while_a_selection_is_kept() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    app.is_streaming = true;
+    let _ = draw(&app, 60, 16);
+
+    app.handle_key_event(esc());
+    assert_ne!(app.cancellation, TurnCancellation::Idle);
+}
+
+#[test]
+fn a_kept_selection_does_not_offer_ctrl_c_which_still_interrupts() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    let _ = draw(&app, 80, 24);
+    select(&mut app, "answer 039");
+    let _ = draw(&app, 80, 24);
+    app.is_streaming = true;
+    let (buffer, _) = draw(&app, 60, 16);
+    let text = text_of(&buffer);
+    assert!(text.contains("selection kept"), "{text}");
+    assert!(
+        !text.contains("Ctrl+C"),
+        "the hint must not offer a key that cancels the turn:\n{text}"
+    );
+
+    // Ctrl+Shift+C, where the terminal reports it in either form, is not the
+    // interrupt key.
+    for c in ['c', 'C'] {
+        assert_eq!(
+            app.handle_control_key(key(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            None,
+            "{c}"
+        );
+        assert_eq!(app.cancellation, TurnCancellation::Idle);
+    }
+
+    // The CLI routes Ctrl+C here before any other key handling.
+    assert_eq!(
+        app.handle_control_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Some(true),
+        "Ctrl+C interrupts"
+    );
+    assert_ne!(app.cancellation, TurnCancellation::Idle);
+}
+
 fn row_of(text: &str, needle: &str) -> Option<usize> {
     text.lines().position(|line| line.contains(needle))
 }
