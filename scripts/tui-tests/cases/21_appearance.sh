@@ -116,8 +116,9 @@ tc_appearance() {
   fi
   _look_quit
 
-  # A file that cannot be read is refused and left alone.
-  if _look_launch next preview "$scratch"; then
+  # A file that cannot be read is refused and left alone. The inspect layout
+  # opens only at 120x32 or larger, so this launch has that size at any suite size.
+  if TUI_WIDTH=120 TUI_HEIGHT=40 _look_launch next preview "$scratch"; then
     _look_run "/config appearance layout inspect" "Previewing layout = inspect" \
       "next: a layout previews"
     assert_contains "$(tui_capture)" "Activity" "next: the inspector opens at once"
@@ -168,7 +169,7 @@ tc_appearance() {
 
   # The layout setting takes effect at launch, when the inspector fits.
   printf '{"hasCompletedOnboarding":true,%s,"nextAppearance":{"layout":"work"}}\n' "$seen" >"$file"
-  if _look_launch next preview "$scratch"; then
+  if TUI_WIDTH=120 TUI_HEIGHT=40 _look_launch next preview "$scratch"; then
     if wait_for "canonical tasks" 5; then _pass "next: the work layout opens the Work page"
     else _fail "next: the work layout opens the Work page" "$(tui_capture)"; fi
     # Below 120x32 the page would cover the transcript, which nobody asked to hide.
