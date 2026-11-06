@@ -17,7 +17,7 @@ set -uo pipefail
 # --- configuration (override via env) -----------------------------------
 : "${COVEN_BIN:=}"                       # path to the binary; auto-detected if empty
 : "${TUI_SESSION:=coven-tui-test}"       # tmux session name
-: "${TUI_SOCKET:=coven-tui-test}"        # dedicated tmux server socket (-L)
+: "${TUI_SOCKET:=coven-tui-test-$$}"     # tmux server socket (-L), one per run so runs cannot collide
 : "${TUI_WIDTH:=120}"                    # terminal columns
 : "${TUI_HEIGHT:=40}"                    # terminal rows
 : "${TUI_BOOT_STRING:=Coven v}"          # string proving the TUI has drawn
@@ -257,8 +257,12 @@ tui_stop() {
   fi
 }
 
-# tui_shutdown_server — tear down the dedicated tmux server entirely.
-tui_shutdown_server() { _tmux kill-server 2>/dev/null || true; }
+# tui_shutdown_server — tear down the dedicated tmux server entirely. tmux leaves
+# its socket file behind, and each run's has its own name, so remove it too.
+tui_shutdown_server() {
+  _tmux kill-server 2>/dev/null || true
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$TUI_SOCKET"
+}
 
 # --- case framework -----------------------------------------------------
 # register_case <function-name>   (called at top of each cases/*.sh file)

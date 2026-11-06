@@ -5158,8 +5158,15 @@ impl App {
             return self.handle_global_search_key(key);
         }
 
-        // Notification dismiss
-        if key.code == KeyCode::Esc && !self.notifications.is_empty() {
+        // Notification dismiss. Next keeps a notice waiting while the
+        // inspector replaces the transcript; Esc then belongs to the inspector,
+        // so a notice the reader has not seen is not thrown away.
+        if key.code == KeyCode::Esc
+            && !self.notifications.is_empty()
+            && (self.renderer != crate::application::UiRenderer::Next
+                || crate::next::delegates_to_classic(self)
+                || self.next_shell.notice_shown())
+        {
             self.notifications.dismiss_current();
             return false;
         }

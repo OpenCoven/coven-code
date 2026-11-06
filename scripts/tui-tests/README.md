@@ -83,7 +83,7 @@ Override via environment variables:
 | `TUI_WIDTH` / `TUI_HEIGHT` | `120` / `40` | tmux pane size (the TUI is layout-sensitive) |
 | `TUI_WAIT_TIMEOUT` | `20` | Seconds to wait for an expected string |
 | `TUI_SESSION` | `coven-tui-test` | tmux session name |
-| `TUI_SOCKET` | `coven-tui-test` | Dedicated tmux server socket (`-L`) so the harness never touches your own tmux sessions |
+| `TUI_SOCKET` | `coven-tui-test-<pid>` | tmux server socket (`-L`), one per run, so the harness never touches your own tmux sessions and runs in parallel never touch each other |
 | `TUI_LOG_DIR` | _(unset)_ | If set, the full pane capture for each failing case is written here (CI uploads these as artifacts) |
 | `REQUIRE_TMUX` | `0` | If `1`, a missing `tmux` is a hard error instead of skipping the interactive cases (set in CI) |
 
@@ -130,3 +130,19 @@ headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 - After spawning a session, the inner shell needs a moment before it accepts
   input. `tui_start` proves readiness with a marker echo before launching the
   binary; replicate that pattern if you script sessions by hand.
+
+## Performance baseline
+
+```bash
+(cd src-rust && cargo build --release --locked)
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --runs 20 --keys 20 --size 40x12 --size 80x24 --size 120x40 --json perf.json
+```
+
+Spawns the binary directly on a pseudo-terminal (no tmux polling) with a
+disposable home, a synthetic `USER`, no credentials and no model call. It
+reports cold usable frame, input-to-paint and resize-to-paint percentiles,
+idle RSS and idle PTY writes per second, and exits nonzero if any sample
+timed out. Times are observed at the PTY boundary and include scheduling;
+compare builds only with the same binary profile, host and load. It is a
+baseline instrument, not #417's in-process render instrumentation.
