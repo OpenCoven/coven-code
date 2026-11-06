@@ -3956,6 +3956,10 @@ async fn execute_tool_blocks_with_hooks(
     // write take turns in the order requested. Each reads its target and writes
     // it back, so two at once would start from the same content and one change
     // would vanish while both report success.
+    //
+    // Request order rests on two things: tokio's Mutex grants the lock in the
+    // order tasks first wait for it, and `join_all` first polls its futures in
+    // the order given, so each writer starts waiting in request order.
     let writer_turn = tokio::sync::Mutex::new(());
     let writer_turn = &writer_turn;
     let exec_futures: Vec<_> = prepared
@@ -8391,6 +8395,156 @@ mod tests {
 
         assert_all_succeeded(&results);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "final\n");
+    }
+
+    fn result_for<'a>(results: &'a [ContentBlock], id: &str) -> (&'a ContentBlock, bool) {
+        let block = results
+            .iter()
+            .find(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id))
+            .unwrap_or_else(|| panic!("no result for {id}"));
+        let is_error = matches!(
+            block,
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
+        );
+        (block, is_error)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edit_batch_edit_and_apply_patch_on_one_file_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "line 0\nline 1\nline 2\n").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(claurst_tools::FileEditTool),
+            Box::new(claurst_tools::BatchEditTool),
+            Box::new(claurst_tools::ApplyPatchTool),
+        ];
+        let name = |i: usize| tools[i].name().to_string();
+        let calls = vec![
+            (
+                "edit".to_string(),
+                name(0),
+                serde_json::json!({"file_path": path, "old_string": "line 0", "new_string": "edited 0"}),
+            ),
+            (
+                "batch".to_string(),
+                name(1),
+                serde_json::json!({"edits": [{"file_path": path, "old_string": "line 1", "new_string": "batched 1"}]}),
+            ),
+            (
+                "patch".to_string(),
+                name(2),
+                serde_json::json!({"patch": "--- a/notes.txt\n+++ b/notes.txt\n@@ -3,1 +3,1 @@\n-line 2\n+patched 2\n"}),
+            ),
+        ];
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            execute_tool_blocks_with_hooks(calls, &tools, &scheduling_ctx(dir.path()), None),
+        )
+        .await
+        .expect("the writers finish");
+
+        assert_all_succeeded(&results);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "edited 0\nbatched 1\npatched 2\n"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_first_edit_frees_the_turn_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(claurst_tools::FileEditTool)];
+        let calls = vec![
+            (
+                "missing".to_string(),
+                "Edit".to_string(),
+                serde_json::json!({"file_path": path, "old_string": "not in the file", "new_string": "x"}),
+            ),
+            (
+                "valid".to_string(),
+                "Edit".to_string(),
+                serde_json::json!({"file_path": path, "old_string": "beta", "new_string": "gamma"}),
+            ),
+        ];
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            execute_tool_blocks_with_hooks(calls, &tools, &scheduling_ctx(dir.path()), None),
+        )
+        .await
+        .expect("the second edit is not held up");
+
+        assert!(result_for(&results, "missing").1, "{results:?}");
+        assert!(!result_for(&results, "valid").1, "{results:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    }
+
+    /// Denies the first permission request and allows the rest.
+    struct DenyFirst(std::sync::atomic::AtomicUsize);
+
+    impl claurst_core::permissions::PermissionHandler for DenyFirst {
+        fn check_permission(
+            &self,
+            request: &claurst_core::permissions::PermissionRequest,
+        ) -> claurst_core::permissions::PermissionDecision {
+            self.request_permission(request)
+        }
+
+        fn request_permission(
+            &self,
+            _request: &claurst_core::permissions::PermissionRequest,
+        ) -> claurst_core::permissions::PermissionDecision {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                claurst_core::permissions::PermissionDecision::Deny
+            } else {
+                claurst_core::permissions::PermissionDecision::Allow
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_denied_first_edit_frees_the_turn_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(claurst_tools::FileEditTool)];
+        let calls = vec![
+            (
+                "denied".to_string(),
+                "Edit".to_string(),
+                serde_json::json!({"file_path": path, "old_string": "alpha", "new_string": "omega"}),
+            ),
+            (
+                "allowed".to_string(),
+                "Edit".to_string(),
+                serde_json::json!({"file_path": path, "old_string": "beta", "new_string": "gamma"}),
+            ),
+        ];
+        let mut ctx = scheduling_ctx(dir.path());
+        ctx.permission_handler = Arc::new(DenyFirst(Default::default()));
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            execute_tool_blocks_with_hooks(calls, &tools, &ctx, None),
+        )
+        .await
+        .expect("the second edit is not held up");
+
+        let (denied, denied_is_error) = result_for(&results, "denied");
+        assert!(denied_is_error, "{results:?}");
+        assert!(
+            format!("{denied:?}").to_lowercase().contains("denied"),
+            "{denied:?}"
+        );
+        assert!(!result_for(&results, "allowed").1, "{results:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
     }
 
     /// Finishes only once every tool sharing the barrier is running at once.
