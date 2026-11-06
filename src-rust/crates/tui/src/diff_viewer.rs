@@ -935,11 +935,11 @@ fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_chars: usize) -> Vec<S
     result
 }
 
-/// Compute word-level inline diff spans for an adjacent (removed, added) line pair.
-/// Returns `(old_spans, new_spans)` where changed words have a highlighted background.
-/// The start of a line, which is all a row shows of it. A word-level diff grows
-/// with the square of a line's words, so without this limit one changed line in a
-/// minified file would hold up every frame for as long as it is on screen.
+/// The start of a line that the word-level diff compares: at least as much as a
+/// row shows, and up to [`WORD_DIFF_MAX_CHARS`] characters. A word-level diff
+/// grows with the square of a line's words, so without this limit one changed
+/// line in a minified file would hold up every frame for as long as it is on
+/// screen.
 fn word_diff_input(line: &str, shown_chars: usize) -> &str {
     let limit = shown_chars.max(WORD_DIFF_MAX_CHARS);
     match line.char_indices().nth(limit) {
@@ -948,6 +948,8 @@ fn word_diff_input(line: &str, shown_chars: usize) -> &str {
     }
 }
 
+/// Compute word-level inline diff spans for an adjacent (removed, added) line pair.
+/// Returns `(old_spans, new_spans)` where changed words have a highlighted background.
 fn build_inline_diff_spans(
     old: &str,
     new: &str,
@@ -1501,6 +1503,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_dialog_draws_the_window_at_its_scroll_and_clamps_past_the_end() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let lines = (0..100)
+            .map(|n| DiffLine {
+                kind: DiffLineKind::Context,
+                content: format!("row {n:03}"),
+                old_line_no: Some(n + 1),
+                new_line_no: Some(n + 1),
+            })
+            .collect();
+        let file = FileDiffStats {
+            hunks: vec![DiffHunk {
+                old_range: (1, 100),
+                new_range: (1, 100),
+                lines,
+            }],
+            ..make_file("long.rs", 0, 0, false)
+        };
+        let palette = DiffPalette::for_theme("coven");
+        // The "row NNN" text each row of the whole diff shows, if any.
+        let tokens: Vec<Option<String>> = build_diff_lines(&file, 80, &palette)
+            .iter()
+            .map(|line| {
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                text.find("row ").map(|at| text[at..at + 7].to_string())
+            })
+            .collect();
+        let draw = |scroll: u16| -> String {
+            let mut state = DiffViewerState::new();
+            state.visible = true;
+            state.files = vec![file.clone()];
+            state.collapsed = vec![false];
+            state.detail_scroll = scroll;
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|frame| render_diff_dialog(&state, frame.area(), frame.buffer_mut()))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            buffer
+                .content()
+                .chunks(120)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let shown = draw(30);
+        let first = tokens[30]
+            .clone()
+            .expect("row 30 of the whole diff is a line");
+        let next = tokens[31]
+            .clone()
+            .expect("row 31 of the whole diff is a line");
+        let before = tokens[29]
+            .clone()
+            .expect("row 29 of the whole diff is a line");
+        assert!(shown.contains(&first), "{first} at the top:\n{shown}");
+        assert!(shown.contains(&next), "{next} below it:\n{shown}");
+        assert!(
+            !shown.contains(&before),
+            "{before} is above the window:\n{shown}"
+        );
+
+        let end = draw(u16::MAX);
+        assert!(end.contains("row 099"), "the last row:\n{end}");
+        assert!(!end.contains("row 000"), "clamped to the end:\n{end}");
     }
 
     #[test]
