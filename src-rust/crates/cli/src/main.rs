@@ -2647,12 +2647,6 @@ fn read_session_goal(session_id: &str) -> Option<Result<claurst_core::goal::Goal
     }
 }
 
-// Allowed: this is the main interactive-mode bootstrap. Its inputs are all
-// distinct, separately-constructed services (config, settings, HTTP client,
-// tool registry, tool execution context, query loop knobs, etc.) and
-// bundling them behind a struct would force every test and CLI mode to
-// construct that struct just to call this function. The count is a feature
-// of how the TUI is wired together, not a code-smell.
 /// Hand the terminal back to the shell and stop until the shell resumes us.
 ///
 /// SIGTSTP rather than SIGSTOP: the OS discards it when no job-control shell
@@ -2711,6 +2705,12 @@ fn suspend_job(
     Ok(())
 }
 
+// Allowed: this is the main interactive-mode bootstrap. Its inputs are all
+// distinct, separately-constructed services (config, settings, HTTP client,
+// tool registry, tool execution context, query loop knobs, etc.) and
+// bundling them behind a struct would force every test and CLI mode to
+// construct that struct just to call this function. The count is a feature
+// of how the TUI is wired together, not a code-smell.
 #[allow(clippy::too_many_arguments)]
 async fn run_interactive(
     config: Config,
