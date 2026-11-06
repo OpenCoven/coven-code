@@ -28,8 +28,7 @@ _flood_quit() { # how, keys...
   shift
   # The running process's name, whatever the binary under test is called.
   running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
-  for key in "$@"; do tui_keys "$key"; sleep 0.25; done
-  start="$(_flood_now_tenths)"
+  for key in "$@"; do tui_keys "$key"; start="$(_flood_now_tenths)"; sleep 0.25; done
   while [ "$passes" -lt 300 ] && \
     [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
     sleep 0.1; passes=$((passes + 1))
