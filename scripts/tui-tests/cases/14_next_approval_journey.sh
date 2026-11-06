@@ -114,7 +114,7 @@ tc_next_approval_journey() {
     tui_keys Enter; tui_keys Enter; tui_keys Enter
     local burst=0 open_keys=0
     while [ "$burst" -lt 8 ]; do
-      if tui_capture | grep -q "Approve Bash"; then open_keys=$((open_keys + 1)); fi
+      if grep -q "Approve Bash" <<<"$(tui_capture)"; then open_keys=$((open_keys + 1)); fi
       tui_keys y; sleep 0.1; burst=$((burst + 1))
     done
     if [ "$open_keys" -gt 0 ]; then _pass "part of the burst reached an open panel"
@@ -126,7 +126,7 @@ tc_next_approval_journey() {
     fi
     # Settle whatever state that left: a still-open panel, or an earlier deny.
     _let_panel_arm
-    if tui_capture | grep -q "Approve Bash"; then tui_keys Escape; fi
+    if grep -q "Approve Bash" <<<"$(tui_capture)"; then tui_keys Escape; fi
     _wait_for_requests $((requests + 2)) || true
     wait_for "ready" 10 || true
     tui_keys C-u
