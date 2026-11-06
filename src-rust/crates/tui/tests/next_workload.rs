@@ -1,11 +1,12 @@
 //! T10 (#417), large-content fixtures for the Next renderer: correctness
-//! only. A 100,000-line answer, a 10,000-line diff-shaped tool result and
-//! binary tool output must render at every size without panicking, keep
-//! cells inert, keep the composer and the way back visible, and scroll to
-//! both ends. Rows are kept between frames (#439), so the same tests check a
-//! kept row never outlives the content it was built from. Timing targets
-//! belong to the performance harness (#425); the elapsed time printed here
-//! is an observation, not a gate.
+//! only. A 100,000-line answer, a 10,000-line diff and binary output must
+//! render at every size without panicking, keep cells inert, keep the
+//! composer and the way back visible, and scroll to both ends. Next does not
+//! draw tool results yet, so the diff and the binary output also arrive as
+//! assistant text, which it does draw. Rows are kept between frames (#439),
+//! so the same tests check a kept row never outlives the content it was built
+//! from. Timing targets belong to the performance harness (#425); the elapsed
+//! time printed here is an observation, not a gate.
 
 use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
@@ -74,15 +75,17 @@ fn workload_app() -> App {
         Message::user_blocks(vec![
             ContentBlock::ToolResult {
                 tool_use_id: "toolu_diff".to_string(),
-                content: ToolResultContent::Text(diff),
+                content: ToolResultContent::Text(diff.clone()),
                 is_error: Some(false),
             },
             ContentBlock::ToolResult {
                 tool_use_id: "toolu_bin".to_string(),
-                content: ToolResultContent::Text(binary),
+                content: ToolResultContent::Text(binary.clone()),
                 is_error: Some(false),
             },
         ]),
+        Message::assistant(diff),
+        Message::assistant(binary),
         Message::assistant("final words"),
     ];
     app
@@ -151,10 +154,14 @@ fn a_100k_line_answer_scrolls_away_from_live_and_returns() {
     }
     let away = text_of(&draw(&app, 80, 24));
     assert!(!away.contains("final words"), "scrolled away:\n{away}");
-    assert!(
-        away.contains("answer line 0"),
-        "reading the answer:\n{away}"
-    );
+    // The far end: an offset past the first row settles on the first rows.
+    app.scroll_offset = 1_000_000;
+    app.auto_scroll = false;
+    draw(&app, 80, 24);
+    app.settle_scroll_anchor();
+    let start = text_of(&draw(&app, 80, 24));
+    assert!(start.contains("first question"), "the start:\n{start}");
+    assert!(start.contains("answer line 000001"), "the start:\n{start}");
     app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
     app.settle_scroll_anchor();
     let live = text_of(&draw(&app, 80, 24));
@@ -341,4 +348,46 @@ fn observation_frame_cost_while_streaming() {
     eprintln!("observation: streaming frame cost by answer length {times:?}");
     let frame = text_of(&draw(&app, 80, 24));
     assert!(frame.contains("more 2"), "{frame}");
+}
+
+#[test]
+fn resuming_a_scrolled_session_does_not_reuse_another_sessions_start_anchor() {
+    let mut app = workload_app();
+    app.enter_session_scope("long-session");
+    let long_messages = vec![
+        Message::user("long-session question"),
+        Message::assistant(
+            (0..200)
+                .map(|n| format!("saved line {n:03}\n"))
+                .collect::<String>(),
+        ),
+    ];
+    app.replace_messages(long_messages.clone());
+    app.scroll_offset = 24;
+    app.auto_scroll = false;
+    let saved = text_of(&draw(&app, 80, 24));
+    app.settle_scroll_anchor();
+    assert_eq!(app.scroll_offset, 24);
+
+    // Another session holds its reading position at the start.
+    app.enter_session_scope("short-session");
+    app.replace_messages(vec![
+        Message::user("short question"),
+        Message::assistant("short answer"),
+    ]);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    draw(&app, 80, 24);
+    app.settle_scroll_anchor();
+
+    app.enter_session_scope("long-session");
+    app.replace_messages(long_messages);
+    assert_eq!(
+        app.scroll_offset, 24,
+        "the session restores its saved offset"
+    );
+    let resumed = text_of(&draw(&app, 80, 24));
+    assert_eq!(
+        resumed, saved,
+        "the renderer must keep the restored reading position"
+    );
 }

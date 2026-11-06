@@ -223,6 +223,9 @@ pub struct ShellState {
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
     transcript_rows: RefCell<TranscriptRows>,
+    /// Whether the last frame showed the current notice. A notice waits while
+    /// the inspector replaces the transcript, and Esc must not dismiss it unseen.
+    notice_shown: Cell<bool>,
     /// The selection's cells at the last frame. A change means the user moved
     /// the selection; no change means anything different under it moved there.
     selection_cells: Cell<Option<SelectionCells>>,
@@ -353,6 +356,18 @@ impl TranscriptRows {
 }
 
 impl ShellState {
+    /// A switched or resumed session brings its own reading offset; the
+    /// outgoing session's anchor and kept rows cannot describe it.
+    pub(crate) fn reset_transcript_for_session(&mut self) {
+        self.anchor.set(ReadingAnchor::default());
+        *self.transcript_rows.get_mut() = TranscriptRows::default();
+    }
+
+    /// Whether the last Next frame showed the current notice.
+    pub fn notice_shown(&self) -> bool {
+        self.notice_shown.get()
+    }
+
     /// Apply one of [`NEXT_ONLY_ACTIONS`].
     pub fn apply_action(&mut self, action: &str) {
         match action {
@@ -569,9 +584,11 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         }
     }
 
-    // An error notice is modal (Esc dismisses it in either renderer); other
-    // notices never cover a pending approval.
-    if app.notifications.current_is_error() {
+    // A pending approval owns input, so every notice waits until it is
+    // decided. An error notice is then modal (Esc dismisses it in either
+    // renderer).
+    app.next_shell.notice_shown.set(false);
+    if app.notifications.current_is_error() && approval.is_none() {
         render_error_panel(frame, app, area, layout.composer);
     } else if approval.is_none() {
         render_toast(frame, app, layout.transcript);
@@ -712,6 +729,7 @@ fn render_toast(frame: &mut Frame, app: &App, transcript: Option<Rect>) {
     };
     frame.render_widget(Clear, toast);
     frame.render_widget(Paragraph::new(line), toast);
+    app.next_shell.notice_shown.set(true);
 }
 
 /// Cells the composer prompt glyph and its following space occupy; the

@@ -196,11 +196,14 @@ fn the_memory_page_offers_no_reveal_selection_or_mutation() {
     }
     app.next_shell.inspector = Some(InspectorPage::Memory);
     let snapshot = app.memory_snapshot.clone();
-    // Backspace is left out: keys the inspector does not bind reach the
-    // composer by the shell's design (#410), which edits, not submits.
-    for code in [KeyCode::Enter, KeyCode::Delete] {
-        app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
-    }
+    // Keys the inspector does not bind reach the composer by the shell's
+    // design (#410). Delete edits the draft and must not submit it. Enter is
+    // left out: it submits the draft, as it does with the inspector closed,
+    // and nothing from this page goes with it.
+    assert!(
+        !app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+        "Delete does not submit the draft"
+    );
     assert_eq!(
         app.memory_snapshot, snapshot,
         "no reveal or selection state"
@@ -217,6 +220,29 @@ fn the_memory_page_offers_no_reveal_selection_or_mutation() {
     let text = draw(&app, 100, 50).to_lowercase();
     for verb in ["delete", "edit", "promote", "attach"] {
         assert!(!text.contains(verb), "offers {verb:?}:\n{text}");
+    }
+}
+
+#[test]
+fn a_daemon_offering_changes_still_gets_a_read_only_page() {
+    let mut app = loaded_app();
+    if let MemorySnapshot::Loaded {
+        overview: Ok(overview),
+        ..
+    } = &mut app.memory_snapshot
+    {
+        overview.mutations = true;
+    } else {
+        panic!("the fixture has an overview");
+    }
+    let text = draw(&app, 120, 50);
+    // The inspector column wraps "changes offered by the daemon, not here".
+    assert!(text.contains("changes offered"), "{text}");
+    assert!(text.contains("not here"), "{text}");
+    assert!(text.contains("read only"), "{text}");
+    let lower = text.to_lowercase();
+    for verb in ["delete", "edit", "promote", "attach"] {
+        assert!(!lower.contains(verb), "offers {verb:?}:\n{text}");
     }
 }
 

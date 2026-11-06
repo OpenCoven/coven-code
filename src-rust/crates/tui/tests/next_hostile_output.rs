@@ -429,6 +429,66 @@ fn an_error_notice_is_drawn_by_next_with_its_text_and_the_way_to_dismiss_it() {
     assert!(text.contains("Esc"), "{text}");
 }
 
+#[test]
+fn a_pending_approval_defers_error_notices_without_losing_them() {
+    for (width, height) in SIZES {
+        let mut app = hostile_app(Variant::Approval);
+        app.notifications = Default::default();
+        present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+        let approval = draw(&app, width, height);
+        app.notifications.push(
+            NotificationKind::Error,
+            "API overloaded; retry later. ".repeat(100),
+            None,
+        );
+        assert_eq!(
+            draw(&app, width, height),
+            approval,
+            "the input-owning approval must stay intact at {width}x{height}"
+        );
+        assert!(app.notifications.current_is_error());
+        app.permission_request = None;
+        let text = text_of(&draw(&app, width, height));
+        assert!(text.contains("error"), "{width}x{height}:\n{text}");
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!app.notifications.current_is_error());
+    }
+}
+
+#[test]
+fn esc_closes_the_inspector_while_its_notice_waits_unseen() {
+    let mut app = hostile_app(Variant::Plain);
+    app.notifications = Default::default();
+    app.notifications
+        .push(NotificationKind::Info, "Familiar: sage".to_string(), None);
+    present(&mut app, ColorMode::NoColor, Glyphs::Ascii);
+    app.next_shell.inspector = Some(InspectorPage::Activity);
+    // Below 120x32 the inspector replaces the transcript, so the notice waits.
+    let text = text_of(&draw(&app, 80, 24));
+    assert!(!text.contains("Familiar: sage"), "{text}");
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.next_shell.inspector, None, "Esc closes the inspector");
+    let text = text_of(&draw(&app, 80, 24));
+    assert!(
+        text.contains("Familiar: sage"),
+        "the notice is kept:\n{text}"
+    );
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(
+        app.notifications.is_empty(),
+        "a shown notice still dismisses"
+    );
+}
+
 fn text_of(buffer: &Buffer) -> String {
     let width = usize::from(buffer.area.width.max(1));
     buffer
