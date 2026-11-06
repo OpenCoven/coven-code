@@ -3380,6 +3380,7 @@ impl App {
             self.selection_focus = None;
             self.selection_text.borrow_mut().clear();
             self.next_shell.inspector_scroll = 0;
+            self.next_shell.reset_transcript_for_session();
             // Work read for the old session does not describe this one.
             self.work_sources = Default::default();
             self.session_id = Some(id.to_string());

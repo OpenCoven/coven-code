@@ -348,6 +348,13 @@ impl TranscriptRows {
 }
 
 impl ShellState {
+    /// A switched or resumed session brings its own reading offset; the
+    /// outgoing session's anchor and kept rows cannot describe it.
+    pub(crate) fn reset_transcript_for_session(&mut self) {
+        self.anchor.set(ReadingAnchor::default());
+        *self.transcript_rows.get_mut() = TranscriptRows::default();
+    }
+
     /// Whether the last Next frame showed the current notice.
     pub fn notice_shown(&self) -> bool {
         self.notice_shown.get()
