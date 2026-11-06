@@ -484,12 +484,20 @@ fn wide_terminals_show_navigation_only_on_request_and_beside_the_conversation() 
     with_history(&mut app, 40);
     app.set_prompt_text("unsent draft".to_string());
 
-    let closed = text_of(&draw(&app, 180, 50).0);
-    assert!(closed.contains("answer 039"), "{closed}");
-    assert!(
-        !closed.contains("local only"),
-        "nothing opens by itself:\n{closed}"
-    );
+    // Every inspector page draws a footer naming its page key, so a frame
+    // without it shows no page, whichever one could have opened.
+    let footer = "next page";
+    for _ in 0..2 {
+        let closed = text_of(&draw(&app, 180, 50).0);
+        assert!(closed.contains("answer 039"), "{closed}");
+        assert!(
+            !closed.contains(footer) && !closed.contains("local only"),
+            "nothing opens by itself:\n{closed}"
+        );
+        assert_eq!(app.next_shell.inspector, None);
+    }
+    let area = Rect::new(0, 0, 180, 50);
+    assert!(plan(area, false, 0, 2).inspector.is_none());
 
     app.handle_key_event(alt('i'));
     let _ = draw(&app, 180, 50);
@@ -497,6 +505,10 @@ fn wide_terminals_show_navigation_only_on_request_and_beside_the_conversation() 
     assert_eq!(app.next_shell.inspector, Some(InspectorPage::Views));
 
     let open = text_of(&draw(&app, 180, 50).0);
+    assert!(
+        open.contains(footer),
+        "the footer marks an open page:\n{open}"
+    );
     for destination in ["Chat", "Work", "Research", "Memory", "Ctrl+K"] {
         assert!(open.contains(destination), "{destination}:\n{open}");
     }
@@ -507,7 +519,6 @@ fn wide_terminals_show_navigation_only_on_request_and_beside_the_conversation() 
     assert!(row.chars().count() > 72, "{row}");
     assert!(open.contains("unsent draft"), "{open}");
 
-    let area = Rect::new(0, 0, 180, 50);
     let layout = plan(area, true, 0, 2);
     let (transcript, inspector) = (layout.transcript.unwrap(), layout.inspector.unwrap());
     assert_eq!(transcript.width + 1 + inspector.width, 180);

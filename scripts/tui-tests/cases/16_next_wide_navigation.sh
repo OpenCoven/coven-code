@@ -36,6 +36,8 @@ tc_next_wide_navigation() {
     wait_for "wide draft" 5 >/dev/null || true
     s="$(tui_capture)"
     assert_absent "$s" "local only" "navigation does not open by itself at 180x50"
+    # Every inspector page has a "next page" footer, so no page opened at all.
+    assert_absent "$s" "next page" "no inspector page opens by itself at 180x50"
 
     tui_keys M-i
     wait_for "Activity" 5 >/dev/null || true
@@ -44,6 +46,7 @@ tc_next_wide_navigation() {
     else _fail "navigation opens on request at 180x50" "$(tui_capture)"; fi
     s="$(tui_capture)"
     assert_contains "$s" "Ctrl+K" "navigation points to the existing palette"
+    assert_contains "$s" "next page" "an open page shows the footer the closed check looks for"
     assert_contains "$s" "wide draft" "the draft stays beside navigation"
     assert_contains "$s" "acme-next" "the workspace line stays on screen"
 
