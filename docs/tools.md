@@ -43,7 +43,9 @@ Built-in tools are constructed once per session by `all_tools()`. Cheap lookup p
 
 The query loop starts the tool calls in one response together. Tools that write, such as `Write`, `Edit`, `BatchEdit`, `ApplyPatch` and `NotebookEdit`, take turns in the order the model requested them, so each sees what the one before it wrote. Every other tool, including `Bash` and MCP tools, runs alongside them and may overlap, so a `Bash` call in the same response as an `Edit` can see the file before or after that edit. All of them still pass through permission checks.
 
-Subagents running at the same time are not covered, so two of them can still overwrite each other's change to the same file.
+A writer keeps its turn while its approval prompt is open, so when writers and other tools are mixed the prompts can come out of request order: for `Edit A`, `Edit B`, `Bash C` they can appear as A, C, B. Results still return to the model in request order.
+
+Writers outside the response are not covered. Two subagents or `TeamCreate` teammates running at the same time, a subagent and an `Edit` in its parent's response, or a scheduled query loop can still overwrite each other's change to the same file. A configured formatter that runs past its 30-second limit is not stopped, so its late write can replace a change made after it.
 
 ---
 
