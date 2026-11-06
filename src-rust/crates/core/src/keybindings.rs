@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_an_old_file_saves_its_renderer_only_chord_for_every_context() {
+    fn loading_an_old_file_saves_its_bindings_as_the_upgrade_merges_them() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keybindings.json");
         std::fs::write(
