@@ -705,15 +705,19 @@ fn a_kept_selection_does_not_offer_ctrl_c_which_still_interrupts() {
         "the hint must not offer a key that cancels the turn:\n{text}"
     );
 
-    // Ctrl+Shift+C, where the terminal reports it, is not the interrupt key.
-    assert_eq!(
-        app.handle_control_key(key(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT
-        )),
-        None
-    );
-    assert_eq!(app.cancellation, TurnCancellation::Idle);
+    // Ctrl+Shift+C, where the terminal reports it in either form, is not the
+    // interrupt key.
+    for c in ['c', 'C'] {
+        assert_eq!(
+            app.handle_control_key(key(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            None,
+            "{c}"
+        );
+        assert_eq!(app.cancellation, TurnCancellation::Idle);
+    }
 
     // The CLI routes Ctrl+C here before any other key handling.
     assert_eq!(
