@@ -901,7 +901,7 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
 // Inline word-level diff helpers
 // ---------------------------------------------------------------------------
 
-/// Longest part of a line compared word by word.
+/// How much of a line is compared word by word, unless a row shows more.
 const WORD_DIFF_MAX_CHARS: usize = 2_000;
 
 /// Format a 10-char line-number gutter.
@@ -935,11 +935,11 @@ fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_chars: usize) -> Vec<S
     result
 }
 
-/// The start of a line that the word-level diff compares: at least as much as a
-/// row shows, and up to [`WORD_DIFF_MAX_CHARS`] characters. A word-level diff
-/// grows with the square of a line's words, so without this limit one changed
-/// line in a minified file would hold up every frame for as long as it is on
-/// screen.
+/// The start of a line that the word-level diff compares: its first
+/// [`WORD_DIFF_MAX_CHARS`] characters, or as many as a row shows if that is
+/// more. A word-level diff grows with the square of a line's words, so without
+/// this limit one changed line in a minified file would hold up every frame for
+/// as long as it is on screen.
 fn word_diff_input(line: &str, shown_chars: usize) -> &str {
     let limit = shown_chars.max(WORD_DIFF_MAX_CHARS);
     match line.char_indices().nth(limit) {
@@ -1574,8 +1574,24 @@ mod tests {
             "{before} is above the window:\n{shown}"
         );
 
+        // Past the end, the dialog shows the last full page.
+        let page = tokens
+            .iter()
+            .flatten()
+            .filter(|token| shown.contains(token.as_str()))
+            .count();
+        let rows: Vec<&String> = tokens.iter().flatten().collect();
+        let (top, above) = (rows[rows.len() - page], rows[rows.len() - page - 1]);
         let end = draw(u16::MAX);
         assert!(end.contains("row 099"), "the last row:\n{end}");
+        assert!(
+            end.contains(top.as_str()),
+            "{top} tops the last page:\n{end}"
+        );
+        assert!(
+            !end.contains(above.as_str()),
+            "{above} is above the last page:\n{end}"
+        );
         assert!(!end.contains("row 000"), "clamped to the end:\n{end}");
     }
 
