@@ -2865,7 +2865,7 @@ async fn run_interactive(
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
     // Classic drops the Next-only defaults, so upgrading an older file must
-    // not move a binding into their chords' contexts.
+    // leave a binding on a chord that only they use in every context.
     let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
         &Settings::config_dir(),
         claurst_tui::next::NEXT_ONLY_ACTIONS,

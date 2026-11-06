@@ -1236,8 +1236,8 @@ impl App {
         }
         let model_name = config.effective_model().to_string();
         // This load upgrades an older file and saves it. Classic drops the
-        // Next-only defaults, so the upgrade must not move a binding into
-        // their chords' contexts.
+        // Next-only defaults, so the upgrade must leave a binding on a chord
+        // that only they use in every context.
         let user_keybindings = UserKeybindings::load_with_renderer_only(
             &Settings::config_dir(),
             crate::next::NEXT_ONLY_ACTIONS,

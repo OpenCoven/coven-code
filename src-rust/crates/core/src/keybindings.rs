@@ -1402,7 +1402,7 @@ mod tests {
         let path = dir.path().join("keybindings.json");
         std::fs::write(
             &path,
-            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}}]}"#,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}},{"context":"Chat","bindings":{"escape":"interrupt"}}]}"#,
         )
         .unwrap();
         let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
@@ -1418,6 +1418,22 @@ mod tests {
         assert_eq!(
             ctrl_z,
             [(Some("suspend"), Some("Chat")), (Some("openHelp"), None)]
+        );
+        // escape has a default outside Next, so its binding takes the first
+        // default's place, as on main, and Classic's prompt still says no.
+        let escape: Vec<_> = saved
+            .bindings
+            .iter()
+            .filter(|b| b.chord == "escape")
+            .map(|b| (b.action.as_deref(), b.context.as_deref()))
+            .take(2)
+            .collect();
+        assert_eq!(
+            escape,
+            [
+                (Some("interrupt"), Some("Inspector")),
+                (Some("no"), Some("Confirmation"))
+            ]
         );
     }
 
