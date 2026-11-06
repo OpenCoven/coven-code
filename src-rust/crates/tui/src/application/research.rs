@@ -318,8 +318,10 @@ fn is_special(scheme: &str) -> bool {
 /// `a.com\@b.com` shows `a.com`, the host actually contacted. A URL the
 /// client's parser reads differently from exactly `scheme://`, such as
 /// `https:user:pw@host` or one with a tab inside its `//`, is shown in the
-/// parser's form. A special-scheme URL it cannot parse at all shows only its
-/// scheme. Other text without a `scheme://` is shown as is, made safe.
+/// parser's form. One it reads without a host, such as `x:?q`, shows its path
+/// without its query or fragment, or only its scheme if the path holds an `@`.
+/// A special-scheme URL it cannot parse at all shows only its scheme. Text it
+/// cannot parse, without a `scheme://`, is shown as is, made safe.
 pub fn display_url(raw: &str) -> String {
     let written = raw.trim();
     let parsed = reqwest::Url::parse(written).ok();
@@ -329,6 +331,22 @@ pub fn display_url(raw: &str) -> String {
         if let Some(scheme) = special_scheme(written) {
             return format!("{scheme}:…");
         }
+    }
+    // With no host, the parser's form has no `scheme://` of its own to split
+    // at, so it is shown up to its path, and not at all if `@` is written there.
+    if let Some(url) = normalized.as_ref().filter(|url| url.host().is_none()) {
+        let before_query = &written[..written.find(['?', '#']).unwrap_or(written.len())];
+        if before_query.contains('@') {
+            return format!("{}:…", url.scheme());
+        }
+        let marker = match (url.query(), url.fragment()) {
+            (Some(_), _) => "?…",
+            (None, Some(_)) => "#…",
+            _ => "",
+        };
+        let form = url.as_str();
+        let path_end = form.find(['?', '#']).unwrap_or(form.len());
+        return one_line(&format!("{}{marker}", &form[..path_end]));
     }
     let raw = normalized.as_ref().map_or(written, reqwest::Url::as_str);
     let Some((scheme, rest)) = raw.split_once("://") else {
@@ -804,19 +822,35 @@ mod tests {
     #[test]
     fn other_schemes_never_show_credentials_or_query() {
         assert_eq!(display_url("ftp://u:p@h/?tok"), "ftp://h/?…");
-        // A backslash is part of the credentials in a scheme that is not
-        // special, as the client's parser reads it.
         // The parser deletes a tab or newline, here inside the `//`.
         assert_eq!(
             display_url("foo:/\t/user:secret@h.example/?token=abc"),
             "foo://h.example/?…"
         );
+        // A backslash is part of the credentials in a scheme that is not
+        // special, as the client's parser reads it.
         let parsed = reqwest::Url::parse("foo://user:secret\\x@b.example/").unwrap();
         assert_eq!(parsed.password(), Some("secret%5Cx"));
         assert_eq!(
             display_url("foo://user:secret\\x@b.example/"),
             "foo://b.example/"
         );
+    }
+
+    #[test]
+    fn a_url_without_a_host_never_shows_a_url_inside_it() {
+        for (raw, shown) in [
+            ("x:?https://a/x/https://user:secret@b/", "x:?…"),
+            ("x:#https:///user:secret@b/", "x:#…"),
+            ("foo:/p?https://a/x/https://user:secret@b/", "foo:/p?…"),
+            ("foo:/x/https:user:secret@b/", "foo:…"),
+            ("foo:/x/https://../user:secret@b/", "foo:…"),
+            ("mailto:a@b.c?subject=x", "mailto:…"),
+            ("x:?q", "x:?…"),
+            ("urn:isbn:0451450523", "urn:isbn:0451450523"),
+        ] {
+            assert_eq!(display_url(raw), shown, "{raw}");
+        }
     }
 
     #[test]
