@@ -56,6 +56,11 @@ pub struct ToolActivity {
     pub allowed: Option<bool>,
 }
 
+/// [`terminal_safe`] text folded onto one line.
+fn one_line_safe(text: &str) -> String {
+    terminal_safe(text).replace('\n', " ")
+}
+
 /// Longest target shown on a tool row.
 const TARGET_MAX_CHARS: usize = 60;
 
@@ -140,8 +145,13 @@ pub struct TranscriptView {
     pub draft_attachments: Vec<String>,
 }
 
-/// Text stand-in for one attachment block, or `None` for other blocks.
+/// Text stand-in for one attachment block, or `None` for other blocks. The
+/// media type and title come from the stored message, so they are made inert.
 fn attachment_label(block: &ContentBlock) -> Option<String> {
+    attachment_label_raw(block).map(|label| one_line_safe(&label))
+}
+
+fn attachment_label_raw(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Image { source } => Some(format!(
             "[image {}]",
@@ -251,9 +261,13 @@ impl TranscriptView {
                 .prompt_input
                 .pending_images
                 .iter()
-                .map(|image| match image.dimensions {
-                    Some((width, height)) => format!("[image {} {width}x{height}]", image.label),
-                    None => format!("[image {}]", image.label),
+                .map(|image| {
+                    // The label is a pasted file's name.
+                    let label = one_line_safe(&image.label);
+                    match image.dimensions {
+                        Some((width, height)) => format!("[image {label} {width}x{height}]"),
+                        None => format!("[image {label}]"),
+                    }
                 })
                 .collect(),
         }

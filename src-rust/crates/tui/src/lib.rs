@@ -27,6 +27,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use quiet_backend::QuietBackend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
@@ -161,6 +162,7 @@ pub mod overlays;
 pub mod plugin_views;
 /// Complete prompt input with vim mode, history, typeahead, and paste handling.
 pub mod prompt_input;
+pub mod quiet_backend;
 pub mod rate_limit_recovery;
 /// All ratatui rendering logic.
 pub mod render;
@@ -291,7 +293,7 @@ fn restore_terminal_cleanup() -> io::Result<()> {
 /// panic message.  Without this, any panic in rendering code leaves the
 /// terminal in raw mode with mouse capture enabled — the user sees garbage
 /// input until they run `reset`.
-pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTerminal> {
     // Chain on top of any existing hook (e.g. from a previous call or test harness).
     // Only restore the terminal when the panic originates on the main thread.
     // Tokio worker threads also trigger this process-wide hook (Tokio catches
@@ -355,24 +357,52 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 
     set_terminal_title("\u{2728} Coven");
-    let backend = CrosstermBackend::new(stdout);
+    // Only Next keeps unchanged frames off the wire; Classic's bytes are unchanged.
+    let quiet = renderer == application::UiRenderer::Next;
+    let backend = QuietBackend::new(CrosstermBackend::new(stdout), quiet);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
 }
 
 /// Restore the terminal to its original state.
-pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
     disable_raw_mode()?;
     // Restore the original title by clearing it (terminals fall back to default).
     let _ = execute!(terminal.backend_mut(), crossterm::terminal::SetTitle(""),);
     restore_terminal_cleanup()?;
+    // Never skip this as "already shown": the user keeps this cursor.
+    terminal.backend_mut().forget_terminal_state();
     terminal.show_cursor()?;
     Ok(())
 }
 
+/// The interactive terminal handed to the event loops.
+pub type AppTerminal = Terminal<QuietBackend<CrosstermBackend<Stdout>>>;
+
 /// Set the terminal window title via OSC escape sequence.
 pub fn set_terminal_title(title: &str) {
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
+}
+
+/// The topic text for the terminal title. The title is written raw inside an
+/// OSC sequence, so in Next every control character and bidirectional
+/// override is dropped and newlines become spaces: a prompt or session title
+/// can never end the sequence early and emit its own. Classic is unchanged.
+pub fn terminal_title_topic(renderer: application::UiRenderer, topic: &str) -> String {
+    match renderer {
+        application::UiRenderer::Classic => topic.to_string(),
+        application::UiRenderer::Next => topic
+            .chars()
+            .filter_map(|ch| match ch {
+                '\n' | '\r' | '\t' => Some(' '),
+                '\u{0}'..='\u{1f}'
+                | '\u{7f}'..='\u{9f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}' => None,
+                _ => Some(ch),
+            })
+            .collect(),
+    }
 }
 
 /// Update the terminal title to reflect the current session context.
@@ -1280,7 +1310,7 @@ mod tests {
         };
         let mut buf = Buffer::empty(area);
 
-        diff_viewer::render_diff_dialog(&mut state, area, &mut buf);
+        diff_viewer::render_diff_dialog(&state, area, &mut buf);
 
         let rendered = buf
             .content
