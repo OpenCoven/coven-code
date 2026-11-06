@@ -8413,7 +8413,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn edit_batch_edit_and_apply_patch_on_one_file_all_land() {
+    async fn edit_batch_edit_and_apply_patch_on_one_file_land_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, "line 0\nline 1\nline 2\n").unwrap();
@@ -8423,6 +8423,8 @@ mod tests {
             Box::new(claurst_tools::ApplyPatchTool),
         ];
         let name = |i: usize| tools[i].name().to_string();
+        // Each call changes what the one before it wrote, so all three succeed
+        // only when they run in the order they were asked for.
         let calls = vec![
             (
                 "edit".to_string(),
@@ -8432,12 +8434,12 @@ mod tests {
             (
                 "batch".to_string(),
                 name(1),
-                serde_json::json!({"edits": [{"file_path": path, "old_string": "line 1", "new_string": "batched 1"}]}),
+                serde_json::json!({"edits": [{"file_path": path, "old_string": "edited 0", "new_string": "batched 0"}]}),
             ),
             (
                 "patch".to_string(),
                 name(2),
-                serde_json::json!({"patch": "--- a/notes.txt\n+++ b/notes.txt\n@@ -3,1 +3,1 @@\n-line 2\n+patched 2\n"}),
+                serde_json::json!({"patch": "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,1 +1,1 @@\n-batched 0\n+patched 0\n"}),
             ),
         ];
 
@@ -8451,7 +8453,7 @@ mod tests {
         assert_all_succeeded(&results);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "edited 0\nbatched 1\npatched 2\n"
+            "patched 0\nline 1\nline 2\n"
         );
     }
 
@@ -8539,10 +8541,16 @@ mod tests {
 
         let (denied, denied_is_error) = result_for(&results, "denied");
         assert!(denied_is_error, "{results:?}");
-        assert!(
-            format!("{denied:?}").to_lowercase().contains("denied"),
-            "{denied:?}"
-        );
+        // What the model is told, not the block's Debug text, which also holds
+        // the call's id.
+        let ContentBlock::ToolResult {
+            content: ToolResultContent::Text(told),
+            ..
+        } = denied
+        else {
+            panic!("{denied:?}");
+        };
+        assert!(told.contains("Permission denied for tool 'Edit'"), "{told}");
         assert!(!result_for(&results, "allowed").1, "{results:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
     }
