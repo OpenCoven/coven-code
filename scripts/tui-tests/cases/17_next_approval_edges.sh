@@ -99,7 +99,10 @@ _next_approval_edges_journey() {
   fi
   wait_for "ready" 10 >/dev/null || true
 
-  # ---- a second decision key does not decide or run anything twice
+  # ---- a second allow key after the decision does not run the call again or
+  # start another request. The fake sends one call per response, so this cannot
+  # show a second key reaching the next queued panel: that needs two calls in
+  # one response.
   before="$(_edge_requests)"
   if _edge_ask "run: echo once >> $project/count.txt" "Approve Bash"; then
     sleep 0.7; tui_keys y; tui_keys y
