@@ -54,8 +54,8 @@ fi
 info "Term:    ${TUI_WIDTH}x${TUI_HEIGHT}"
 [ -n "$TUI_LOG_DIR" ] && info "Logs:    $TUI_LOG_DIR (pane captures on failure)"
 
-# Clean up any stray server from a previous aborted run, and guarantee the
-# dedicated tmux server is torn down on exit.
+# With an explicit TUI_SOCKET, clean up any stray server from a previous aborted
+# run. Either way, guarantee this run's tmux server is torn down on exit.
 if have_tmux; then
   tui_shutdown_server
   trap 'tui_shutdown_server' EXIT
