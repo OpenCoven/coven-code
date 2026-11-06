@@ -349,3 +349,45 @@ fn observation_frame_cost_while_streaming() {
     let frame = text_of(&draw(&app, 80, 24));
     assert!(frame.contains("more 2"), "{frame}");
 }
+
+#[test]
+fn resuming_a_scrolled_session_does_not_reuse_another_sessions_start_anchor() {
+    let mut app = workload_app();
+    app.enter_session_scope("long-session");
+    let long_messages = vec![
+        Message::user("long-session question"),
+        Message::assistant(
+            (0..200)
+                .map(|n| format!("saved line {n:03}\n"))
+                .collect::<String>(),
+        ),
+    ];
+    app.replace_messages(long_messages.clone());
+    app.scroll_offset = 24;
+    app.auto_scroll = false;
+    let saved = text_of(&draw(&app, 80, 24));
+    app.settle_scroll_anchor();
+    assert_eq!(app.scroll_offset, 24);
+
+    // Another session holds its reading position at the start.
+    app.enter_session_scope("short-session");
+    app.replace_messages(vec![
+        Message::user("short question"),
+        Message::assistant("short answer"),
+    ]);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    draw(&app, 80, 24);
+    app.settle_scroll_anchor();
+
+    app.enter_session_scope("long-session");
+    app.replace_messages(long_messages);
+    assert_eq!(
+        app.scroll_offset, 24,
+        "the session restores its saved offset"
+    );
+    let resumed = text_of(&draw(&app, 80, 24));
+    assert_eq!(
+        resumed, saved,
+        "the renderer must keep the restored reading position"
+    );
+}
