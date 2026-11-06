@@ -421,6 +421,32 @@ mod tests {
     }
 
     #[test]
+    fn http_urls_the_client_reads_differently_are_still_redacted() {
+        // The HTTP client accepts any run of `/` and `\` after `https:`,
+        // including none, and still sends the credentials it finds.
+        for raw in [
+            "https:user:secret@api.example.com/v1?token=abc#frag",
+            "https:/user:secret@api.example.com/v1?token=abc#frag",
+            "https:\\user:secret@api.example.com/v1?token=abc#frag",
+            "https:///user:secret@api.example.com/v1?token=abc#frag",
+            "https://\\user:secret@api.example.com/v1?token=abc#frag",
+        ] {
+            let parsed = reqwest::Url::parse(raw).unwrap();
+            assert_eq!(parsed.username(), "user", "{raw}");
+            assert_eq!(parsed.host_str(), Some("api.example.com"), "{raw}");
+            assert_eq!(display_url(raw), "https://api.example.com/v1?…", "{raw}");
+            let messages = vec![
+                call("f", "WebFetch", json!({ "url": raw })),
+                result("f", &format!("Failed to fetch {raw}: builder error"), true),
+            ];
+            let view = ResearchView::from_messages(&messages, &[]);
+            let row = format!("{:?}", view.items[0]);
+            assert!(!row.contains("secret"), "{row}");
+            assert!(!row.contains("token=abc"), "{row}");
+        }
+    }
+
+    #[test]
     fn failed_fetch_errors_never_show_credentials_or_query() {
         let messages = vec![
             call("f401", "WebFetch", json!({"url": "https://user:secret@api.x/v1?token=abc"})),
