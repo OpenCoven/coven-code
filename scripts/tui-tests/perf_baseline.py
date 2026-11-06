@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic Classic performance baseline over a raw pseudo-terminal.
+"""Synthetic Classic/Next performance baseline over a raw pseudo-terminal.
 
 Measures, per terminal size and run, against a disposable home with no
 credentials and no model call:
@@ -10,6 +10,8 @@ credentials and no model call:
 - resize-to-paint: TIOCSWINSZ + SIGWINCH -> first output with visible text
 - idle RSS: resident set size after the first frame settles
 - idle writes: PTY writes per second with no input or visible change
+- with --stream, during a running turn: input-to-paint, and the gap between
+  paints as a boundary proxy for active render cost
 
 The harness answers the terminal queries a real emulator would (primary
 device attributes, cursor position, keyboard-enhancement probe) so startup
@@ -22,6 +24,13 @@ attribute time to individual render phases.
 Usage:
   python3 scripts/tui-tests/perf_baseline.py --bin PATH [--runs N]
       [--keys N] [--size 80x24 --size 120x40] [--json OUT]
+      [--ui classic|next] [--history-lines N] [--stream]
+
+--ui next selects the Next renderer through COVEN_CODE_UI. --history-lines N
+resumes a seeded session holding N transcript lines, so input and resize are
+measured with a long conversation on screen. The seed is synthetic and lives
+in the disposable home. --stream runs a turn against a fake `claude` written
+there, with no network or model.
 """
 import argparse
 import fcntl
@@ -37,9 +46,17 @@ import subprocess
 import tempfile
 import termios
 import time
+import uuid
 
 BOOT = b"Coven v"  # matched after escape sequences are removed
 PROMPT = "❯".encode()  # composer prompt glyph
+NEXT_READY = [b"preview", b"ready"]  # Next header and idle status
+SEEDED_MARK = b"seeded"  # one word: a diffed frame may skip the blank after it
+RESUMED_MARK = b"Resumed session"  # the CLI prints this only after a good load
+STREAM_MARK = b"streamed"
+STREAM_KEYS = b"qz"  # letters the working status and spinner rows do not use
+FRAME_MERGE_MS = 1.0  # PTY reads closer than this belong to one paint
+LINES_PER_ANSWER = 100
 KEYS = b"qzxjvkwy"
 QUERIES = {
     b"\x1b[c": b"\x1b[?62;22c",   # DA1
@@ -54,22 +71,107 @@ def set_size(fd, cols, rows):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def session_env(home, ui, claude_bin=None):
+    """Environment for one engine: built from nothing, so no credential leaks in."""
+    env = {
+        "PATH": os.defpath,
+        "HOME": home,
+        "USER": "baseline",
+        "LOGNAME": "baseline",
+        "TERM": "xterm-256color",
+        "LANG": "en_US.UTF-8",
+    }
+    if ui == "next":
+        env["COVEN_CODE_UI"] = "next"
+    if claude_bin:
+        env["COVEN_CODE_CLAUDE_BIN"] = claude_bin
+    return env
+
+
+def ready_needles(ui, resumed):
+    """Text that proves a usable frame.
+
+    A resume must prove it loaded: the engine falls back to an empty session
+    when a resume fails, which would otherwise measure as a very fast long
+    conversation. Next must show seeded text. Classic's welcome header can
+    leave no transcript rows at 80x24 even after a good resume, so it relies
+    on the CLI's load confirmation.
+    """
+    if ui == "next":
+        return NEXT_READY + ([SEEDED_MARK] if resumed else [])
+    return [PROMPT, RESUMED_MARK] if resumed else [BOOT, PROMPT]
+
+
+def seed_session(home, project, lines):
+    """Write a synthetic session of `lines` answer lines; return its id.
+
+    The text avoids every probe key, so repainting it cannot be mistaken for
+    a keystroke reaching the screen.
+    """
+    sessions = os.path.join(home, ".coven-code", "sessions")
+    os.makedirs(sessions, exist_ok=True)
+    messages = []
+    for start in range(0, lines, LINES_PER_ANSWER):
+        end = min(start + LINES_PER_ANSWER, lines)
+        messages.append({"role": "user", "content": "more"})
+        messages.append({
+            "role": "assistant",
+            "content": "".join(f"seeded line {n:06d}\n" for n in range(start, end)),
+        })
+    session_id = str(uuid.uuid4())
+    now = "2026-01-01T00:00:00Z"
+    with open(os.path.join(sessions, f"{session_id}.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "id": session_id, "created_at": now, "updated_at": now,
+            "messages": messages, "model": "seed", "title": None,
+            "working_dir": project,
+        }, f)
+    return session_id
+
+
+def write_fake_claude(directory, chunks=3000, delay="0.01"):
+    """Write a fake `claude` that streams one line per chunk; return its path.
+
+    It stops by itself after `chunks`, or on SIGPIPE once the engine is gone.
+    """
+    path = os.path.join(directory, "fake-claude")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"""#!/bin/sh
+cat >/dev/null &
+printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"fake","model":"fake-model"}}'
+i=1
+while [ "$i" -le {chunks} ]; do
+  printf '%s\\n' "{{\\"type\\":\\"assistant\\",\\"message\\":{{\\"model\\":\\"fake-model\\",\\"content\\":[{{\\"type\\":\\"text\\",\\"text\\":\\"{STREAM_MARK.decode()} line $i\\\\n\\"}}]}}}}"
+  sleep {delay}
+  i=$((i + 1))
+done
+printf '%s\\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"input_tokens":3,"output_tokens":1}}}}'
+""")
+    os.chmod(path, 0o755)
+    return path
+
+
+def paint_gaps_ms(times, merge_ms=FRAME_MERGE_MS):
+    """Gaps between paint starts; reads closer than merge_ms are one paint."""
+    starts = []
+    last = None
+    for at in times:
+        if last is None or (at - last) * 1000 > merge_ms:
+            starts.append(at)
+        last = at
+    return [round((b - a) * 1000, 1) for a, b in zip(starts, starts[1:])]
+
+
 class Session:
-    def __init__(self, binary, cols, rows, home, project):
+    def __init__(self, binary, cols, rows, home, project, ui="classic", resume=None,
+                 claude_bin=None):
         self.master, slave = pty.openpty()
         set_size(slave, cols, rows)
-        env = {
-            "PATH": os.defpath,
-            "HOME": home,
-            "USER": "baseline",
-            "LOGNAME": "baseline",
-            "TERM": "xterm-256color",
-            "LANG": "en_US.UTF-8",
-        }
+        argv = [binary] + (["--resume", resume] if resume else [])
         self.started = time.perf_counter()
         self.proc = subprocess.Popen(
-            [binary], stdin=slave, stdout=slave, stderr=slave, cwd=project,
-            env=env, start_new_session=True, close_fds=True,
+            argv, stdin=slave, stdout=slave, stderr=slave, cwd=project,
+            env=session_env(home, ui, claude_bin), start_new_session=True, close_fds=True,
         )
         os.close(slave)
         self.answered = {}
@@ -128,6 +230,15 @@ class Session:
             if at is not None and ESCAPES.sub(b"", data).strip():
                 last = at
 
+    def visible_times(self, seconds):
+        """Timestamps of the chunks carrying visible text for `seconds`."""
+        times, end = [], time.perf_counter() + seconds
+        while time.perf_counter() < end:
+            data, at = self.read(end - time.perf_counter())
+            if at is not None and ESCAPES.sub(b"", data).strip():
+                times.append(at)
+        return times
+
     def idle_writes_per_second(self, seconds=2.0):
         writes, end = 0, time.perf_counter() + seconds
         while time.perf_counter() < end:
@@ -170,8 +281,34 @@ def summarize(values):
     }
 
 
-def run_size(binary, cols, rows, runs, keys):
+def measure_stream(s, keys):
+    """Start a turn; return (paint gaps, input-to-paint samples, failures)."""
+    os.write(s.master, b"\x15")  # clear the keys typed by the idle probe
+    s.drain(0.1)
+    os.write(s.master, b"go")
+    s.drain(0.1)
+    os.write(s.master, b"\r")
+    if s.wait_for([STREAM_MARK], 15) is None:
+        return [], [], ["turn never streamed within 15s"]
+    s.visible_times(0.3)
+    gaps = paint_gaps_ms(s.visible_times(2.0))
+    inputs, failures = [], []
+    for k in range(keys):
+        key = STREAM_KEYS[k % len(STREAM_KEYS):k % len(STREAM_KEYS) + 1]
+        sent = time.perf_counter()
+        os.write(s.master, key)
+        at = s.wait_for([key], 2)
+        if at is None:
+            failures.append(f"key {key!r} not painted in 2s during a turn")
+        else:
+            inputs.append((at - sent) * 1000)
+        s.visible_times(0.05)
+    return gaps, inputs, failures
+
+
+def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stream=False):
     cold, inputs, resizes, rss, idle, failures, answered = [], [], [], [], [], [], {}
+    stream_gaps, stream_inputs = [], []
     for i in range(runs):
         with tempfile.TemporaryDirectory(prefix="coven-perf-") as root:
             home = os.path.join(root, "home")
@@ -181,9 +318,11 @@ def run_size(binary, cols, rows, runs, keys):
             with open(os.path.join(home, ".coven-code", "settings.json"), "w",
                       encoding="utf-8") as f:
                 f.write('{"hasCompletedOnboarding": true}')
-            s = Session(binary, cols, rows, home, project)
+            resume = seed_session(home, project, history_lines) if history_lines else None
+            fake = write_fake_claude(root) if stream else None
+            s = Session(binary, cols, rows, home, project, ui, resume, fake)
             try:
-                at = s.wait_for([BOOT, PROMPT], 20)
+                at = s.wait_for(ready_needles(ui, bool(resume)), 20)
                 if at is None:
                     failures.append(f"run {i}: no usable frame within 20s")
                     continue
@@ -211,13 +350,24 @@ def run_size(binary, cols, rows, runs, keys):
                     else:
                         resizes.append((at - sent) * 1000)
                     s.drain(0.3)
+                if stream:
+                    gaps, keyed, problems = measure_stream(s, keys)
+                    stream_gaps += gaps
+                    stream_inputs += keyed
+                    failures += [f"run {i}: {p}" for p in problems]
                 for q, n in s.answered.items():
                     answered[q] = answered.get(q, 0) + n
             finally:
                 s.close()
     rss = [r for r in rss if r is not None]
+    during_turn = {
+        "stream_input_to_paint": summarize(stream_inputs),
+        "stream_paint_gap": summarize(stream_gaps),
+    } if stream else {}
     return {
         "cells": f"{cols}x{rows}",
+        "ui": ui,
+        "history_lines": history_lines,
         "runs": runs,
         "cold_usable_frame": summarize(cold),
         "input_to_paint": summarize(inputs),
@@ -229,6 +379,7 @@ def run_size(binary, cols, rows, runs, keys):
         },
         "idle_writes_per_second_p50": (
             round(statistics.median(idle), 1) if idle else None),
+        **during_turn,
         "queries_answered": {repr(k): v for k, v in answered.items()},
         "failures": failures,
     }
@@ -241,13 +392,17 @@ def main():
     ap.add_argument("--keys", type=int, default=20)
     ap.add_argument("--size", action="append", default=[])
     ap.add_argument("--json")
+    ap.add_argument("--ui", choices=["classic", "next"], default="classic")
+    ap.add_argument("--history-lines", type=int, default=0)
+    ap.add_argument("--stream", action="store_true")
     args = ap.parse_args()
     sizes = args.size or ["80x24", "120x40"]
     binary = os.path.abspath(args.bin)
     results = []
     for size in sizes:
         cols, rows = (int(v) for v in size.split("x"))
-        results.append(run_size(binary, cols, rows, args.runs, args.keys))
+        results.append(run_size(binary, cols, rows, args.runs, args.keys,
+                                args.ui, args.history_lines, args.stream))
     report = {"binary": binary, "results": results}
     text = json.dumps(report, indent=2)
     print(text)
