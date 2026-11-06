@@ -539,11 +539,12 @@ impl UserKeybindings {
         self.smart_merge_with_defaults_except(&[]);
     }
 
-    /// [`Self::smart_merge_with_defaults`], except that a default bound to one
-    /// of `renderer_only` does not take over a chord the file binds. A renderer
-    /// that drops that default would otherwise leave the user's binding
-    /// confined to the default's context; it stays in every context instead,
-    /// as it did before the default existed.
+    /// [`Self::smart_merge_with_defaults`], except that a chord whose every
+    /// default is bound to one of `renderer_only` is not taken over. A renderer
+    /// that drops those defaults would otherwise leave the user's binding
+    /// confined to a default's context; it stays in every context instead, as
+    /// it did before those defaults existed. A chord with any other default is
+    /// merged as before.
     pub fn smart_merge_with_defaults_except(&mut self, renderer_only: &[&str]) {
         if self.schema_version >= KEYBINDINGS_SCHEMA_VERSION {
             return; // Already up to date
@@ -577,14 +578,22 @@ impl UserKeybindings {
         }
 
         // Get current defaults and integrate customizations
+        let defaults = default_bindings();
+        let claimable: std::collections::HashSet<String> = defaults
+            .iter()
+            .filter(|default| {
+                !default
+                    .action
+                    .as_deref()
+                    .is_some_and(|action| renderer_only.contains(&action))
+            })
+            .map(|default| format_chord_string(&default.chord))
+            .collect();
         let mut merged_bindings = Vec::new();
-        for default in default_bindings() {
+        for default in defaults {
             let chord_str = format_chord_string(&default.chord);
             let context_str = format!("{:?}", default.context);
-            let claims_chord = !default
-                .action
-                .as_deref()
-                .is_some_and(|action| renderer_only.contains(&action));
+            let claims_chord = claimable.contains(&chord_str);
 
             if let Some(custom_action) =
                 user_customizations.get(&chord_str).filter(|_| claims_chord)
@@ -1357,6 +1366,59 @@ mod tests {
         assert_eq!(resolve(&renderer_only), ["openHelp", "openHelp"]);
         // The plain upgrade confines it to the default's Chat context.
         assert_eq!(resolve(&[]), ["openHelp", "NoMatch"]);
+    }
+
+    #[test]
+    fn upgrading_merges_a_chord_with_any_other_default_as_before() {
+        // escape's first default is renderer-only, but escape has others, so
+        // the file's binding takes that default's place, as it did before.
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        let upgrade = |except: &[&str]| {
+            let mut user = UserKeybindings::from_json_str(
+                r#"{"bindings":[{"context":"Chat","bindings":{"escape":"interrupt"}}]}"#,
+            );
+            user.smart_merge_with_defaults_except(except);
+            user
+        };
+        let fields = |user: &UserKeybindings| -> Vec<(String, Option<String>, Option<String>)> {
+            user.bindings
+                .iter()
+                .filter(|b| b.chord == "escape")
+                .map(|b| (b.chord.clone(), b.action.clone(), b.context.clone()))
+                .collect()
+        };
+        assert_eq!(fields(&upgrade(&renderer_only)), fields(&upgrade(&[])));
+        let mut resolver = KeybindingResolver::new(&upgrade(&renderer_only));
+        resolver.remove_default_actions(&renderer_only);
+        assert_eq!(
+            press(&mut resolver, "escape", &[KeyContext::Confirmation]),
+            "no"
+        );
+    }
+
+    #[test]
+    fn loading_an_old_file_saves_its_renderer_only_chord_for_every_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keybindings.json");
+        std::fs::write(
+            &path,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}}]}"#,
+        )
+        .unwrap();
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        UserKeybindings::load_with_renderer_only(dir.path(), &renderer_only);
+        let saved = UserKeybindings::from_json_str(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(saved.schema_version, KEYBINDINGS_SCHEMA_VERSION);
+        let ctrl_z: Vec<_> = saved
+            .bindings
+            .iter()
+            .filter(|b| b.chord == "ctrl+z")
+            .map(|b| (b.action.as_deref(), b.context.as_deref()))
+            .collect();
+        assert_eq!(
+            ctrl_z,
+            [(Some("suspend"), Some("Chat")), (Some("openHelp"), None)]
+        );
     }
 
     #[test]
