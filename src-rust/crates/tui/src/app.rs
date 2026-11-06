@@ -1235,7 +1235,13 @@ impl App {
             }
         }
         let model_name = config.effective_model().to_string();
-        let user_keybindings = UserKeybindings::load(&Settings::config_dir());
+        // This load upgrades an older file and saves it. Classic drops the
+        // Next-only defaults, so the upgrade must not move a binding into
+        // their chords' contexts.
+        let user_keybindings = UserKeybindings::load_with_renderer_only(
+            &Settings::config_dir(),
+            crate::next::NEXT_ONLY_ACTIONS,
+        );
         let mut app = Self {
             config,
             cost_tracker,

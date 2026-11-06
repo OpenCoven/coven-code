@@ -478,11 +478,18 @@ impl UserKeybindings {
     }
 
     pub fn load(config_dir: &Path) -> Self {
+        Self::load_with_renderer_only(config_dir, &[])
+    }
+
+    /// [`Self::load`], where `renderer_only` names default actions that one
+    /// renderer drops (see [`KeybindingResolver::remove_default_actions`]).
+    /// See [`Self::smart_merge_with_defaults_except`].
+    pub fn load_with_renderer_only(config_dir: &Path, renderer_only: &[&str]) -> Self {
         let path = config_dir.join("keybindings.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
             let mut kb = Self::from_json_str(&content);
             let old_version = kb.schema_version;
-            kb.smart_merge_with_defaults();
+            kb.smart_merge_with_defaults_except(renderer_only);
 
             // Save back if schema was updated
             if kb.schema_version > old_version {
@@ -529,6 +536,15 @@ impl UserKeybindings {
 
     /// Smart merge: preserve user customizations while adding new defaults
     pub fn smart_merge_with_defaults(&mut self) {
+        self.smart_merge_with_defaults_except(&[]);
+    }
+
+    /// [`Self::smart_merge_with_defaults`], except that a default bound to one
+    /// of `renderer_only` does not take over a chord the file binds. A renderer
+    /// that drops that default would otherwise leave the user's binding
+    /// confined to the default's context; it stays in every context instead,
+    /// as it did before the default existed.
+    pub fn smart_merge_with_defaults_except(&mut self, renderer_only: &[&str]) {
         if self.schema_version >= KEYBINDINGS_SCHEMA_VERSION {
             return; // Already up to date
         }
@@ -565,8 +581,14 @@ impl UserKeybindings {
         for default in default_bindings() {
             let chord_str = format_chord_string(&default.chord);
             let context_str = format!("{:?}", default.context);
+            let claims_chord = !default
+                .action
+                .as_deref()
+                .is_some_and(|action| renderer_only.contains(&action));
 
-            if let Some(custom_action) = user_customizations.get(&chord_str) {
+            if let Some(custom_action) =
+                user_customizations.get(&chord_str).filter(|_| claims_chord)
+            {
                 // User has customized this binding, use their version
                 merged_bindings.push(UserBinding {
                     chord: chord_str.clone(),
@@ -1315,6 +1337,26 @@ mod tests {
             "suspend",
             "a user's own binding on another chord stays"
         );
+    }
+
+    #[test]
+    fn upgrading_keeps_an_old_files_binding_on_a_renderer_only_chord_in_every_context() {
+        // Before ctrl+z had a default, the upgrade left this binding in every
+        // context. A renderer that drops that default must still see it there.
+        let renderer_only = ["toggleInspector", "closeInspector", "jumpToLive", "suspend"];
+        let resolve = |except: &[&str]| {
+            let mut user = UserKeybindings::from_json_str(
+                r#"{"bindings":[{"context":"Global","bindings":{"ctrl+z":"openHelp"}}]}"#,
+            );
+            user.smart_merge_with_defaults_except(except);
+            let mut resolver = KeybindingResolver::new(&user);
+            resolver.remove_default_actions(&renderer_only);
+            [KeyContext::Chat, KeyContext::Transcript]
+                .map(|context| press(&mut resolver, "ctrl+z", &[context]))
+        };
+        assert_eq!(resolve(&renderer_only), ["openHelp", "openHelp"]);
+        // The plain upgrade confines it to the default's Chat context.
+        assert_eq!(resolve(&[]), ["openHelp", "NoMatch"]);
     }
 
     #[test]

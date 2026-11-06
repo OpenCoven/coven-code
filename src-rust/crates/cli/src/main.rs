@@ -2864,8 +2864,12 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    let user_keybindings =
-        claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
+    // Classic drops the Next-only defaults, so upgrading an older file must
+    // not move a binding into their chords' contexts.
+    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
+        &Settings::config_dir(),
+        claurst_tui::next::NEXT_ONLY_ACTIONS,
+    );
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
