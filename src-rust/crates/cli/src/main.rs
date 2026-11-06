@@ -3656,7 +3656,11 @@ async fn run_interactive(
                                         tool_ctx.file_history.clone(),
                                         tool_ctx.current_turn.clone(),
                                     );
-                                    claurst_tui::update_terminal_title(session.title.as_deref());
+                                    let title = session
+                                        .title
+                                        .as_deref()
+                                        .map(|title| claurst_tui::terminal_title_topic(renderer, title));
+                                    claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
                                         Some(format!("Resumed session {}.", &session.id[..8]));
                                 }
@@ -3668,7 +3672,8 @@ async fn run_interactive(
             app.session_title = session.title.clone();
         }
                                     let _ = claurst_core::history::save_session(&session).await;
-                                    claurst_tui::update_terminal_title(Some(&title));
+                                    let shown = claurst_tui::terminal_title_topic(renderer, &title);
+                                    claurst_tui::update_terminal_title(Some(&shown));
                                     app.status_message =
                                         Some(format!("Session renamed to \"{}\".", title));
                                 }
@@ -4173,11 +4178,13 @@ async fn run_interactive(
 
                         }
                         // Update terminal title from session title or first message
-                        if session.title.is_some() {
-                            claurst_tui::update_terminal_title(session.title.as_deref());
+                        if let Some(title) = session.title.as_deref() {
+                            let title = claurst_tui::terminal_title_topic(renderer, title);
+                            claurst_tui::update_terminal_title(Some(&title));
                         } else {
                             // Use a truncated version of the first user message
                             let topic: String = input.chars().take(60).collect();
+                            let topic = claurst_tui::terminal_title_topic(renderer, &topic);
                             claurst_tui::update_terminal_title(Some(&topic));
                         }
 

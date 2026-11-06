@@ -234,13 +234,6 @@ fn next_hands_every_input_owning_surface_to_classic() {
         ("familiar switcher", |app| app.familiar_switcher_open = true),
         ("effort picker", |app| app.effort_picker.visible = true),
         ("response reader", |app| app.response_reader.visible = true),
-        ("error modal", |app| {
-            app.push_notification(
-                NotificationKind::Error,
-                "synthetic failure".to_string(),
-                None,
-            )
-        }),
     ];
     for (name, open) in cases {
         let (mut app, _) = replay(trace());
@@ -302,4 +295,25 @@ fn next_keeps_newest_output_visible_at_small_sizes_without_panicking() {
             assert!(frame.contains("newest line"), "{width}x{height}:\n{frame}");
         }
     }
+}
+
+/// An error notice is not handed to Classic: Classic's modal draws its text
+/// raw (#417), so Next draws its own inert panel. Esc still dismisses it
+/// through the shared key handling.
+#[test]
+fn next_draws_error_notices_itself_and_esc_still_dismisses_them() {
+    let (mut app, _) = replay(trace());
+    app.push_notification(
+        NotificationKind::Error,
+        "synthetic failure".to_string(),
+        None,
+    );
+    assert!(!claurst_tui::next::delegates_to_classic(&app));
+    let next = draw(&app, UiRenderer::Next, 120, 40);
+    assert_ne!(next, draw(&app, UiRenderer::Classic, 120, 40));
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(!app.notifications.current_is_error(), "Esc dismissed it");
 }
