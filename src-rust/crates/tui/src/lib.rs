@@ -411,14 +411,21 @@ pub fn suspend_terminal(
     if should_push_keyboard_enhancement_for_process() {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = restore_terminal(terminal);
-    stop();
+    stop_if_restored(restore_terminal(terminal), stop);
     *terminal = setup_terminal(renderer)?;
     terminal.clear()?;
     if let Some(title) = title {
         set_terminal_title(&title);
     }
     Ok(())
+}
+
+/// Run `stop` after handing the terminal back to the shell. Returns whether
+/// it ran.
+#[cfg(unix)]
+fn stop_if_restored(_restored: io::Result<()>, stop: impl FnOnce()) -> bool {
+    stop();
+    true
 }
 
 /// Update the terminal title to reflect the current session context.
@@ -1853,5 +1860,16 @@ mod terminal_title_tests {
             last_terminal_title().as_deref(),
             Some("title before suspending")
         );
+    }
+
+    #[test]
+    fn a_terminal_that_was_not_handed_back_is_not_stopped() {
+        let mut stopped = false;
+        let failed = Err(io::Error::other("raw mode stayed on"));
+        assert!(!stop_if_restored(failed, || stopped = true));
+        assert!(!stopped, "the shell would get a half-restored terminal");
+
+        assert!(stop_if_restored(Ok(()), || stopped = true));
+        assert!(stopped);
     }
 }
