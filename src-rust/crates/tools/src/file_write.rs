@@ -68,6 +68,7 @@ impl Tool for FileWriteTool {
                 return ToolResult::error(format!("Failed to resolve {}: {}", path.display(), e))
             }
         };
+        let reviewed = ctx.files_under_review([path.clone()]).await;
         if let Err(e) = ctx.check_permission_for_path(
             self.name(),
             &format!("Write {}", path.display()),
@@ -75,6 +76,9 @@ impl Tool for FileWriteTool {
             false,
         ) {
             return ToolResult::error(e.to_string());
+        }
+        if let Err(refusal) = reviewed.ensure_unchanged().await {
+            return ToolResult::error(refusal);
         }
 
         // Ensure parent directories exist

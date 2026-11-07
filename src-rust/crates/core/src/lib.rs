@@ -4090,6 +4090,37 @@ pub mod permissions {
     pub trait PermissionHandler: Send + Sync {
         fn check_permission(&self, request: &PermissionRequest) -> PermissionDecision;
         fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision;
+
+        /// Whether an approval covers a file only as it stood when the approval
+        /// was asked for, so a file that changes during the wait is left alone.
+        fn binds_approvals_to_content(&self) -> bool {
+            false
+        }
+    }
+
+    /// Decides exactly as `inner` does, and binds its approvals to file content.
+    pub struct ContentBoundApprovals {
+        inner: Arc<dyn PermissionHandler>,
+    }
+
+    impl ContentBoundApprovals {
+        pub fn new(inner: Arc<dyn PermissionHandler>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl PermissionHandler for ContentBoundApprovals {
+        fn check_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.inner.check_permission(request)
+        }
+
+        fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.inner.request_permission(request)
+        }
+
+        fn binds_approvals_to_content(&self) -> bool {
+            true
+        }
     }
 
     /// Handler for non-interactive / headless modes.
