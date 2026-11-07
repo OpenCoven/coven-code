@@ -25,7 +25,7 @@ _states_wait_row() { # row ERE, state ERE, message
   _fail "$3" "row: $row"$'\n'"$(tui_capture)"
 }
 
-_states_launch() { # ui, boot, scratch
+_states_launch() { # ui, boot, scratch[, COVEN_HOME]
   TUI_LAUNCH_PREFIX="cd $(printf '%q' "$3/project") && env"
   local var
   for var in OPENAI_API_KEY COVEN_CODE_PROVIDER COVEN_CODE_API_BASE COVEN_CODE_HOME \
@@ -33,7 +33,7 @@ _states_launch() { # ui, boot, scratch
     TUI_LAUNCH_PREFIX+=" -u $var"
   done
   TUI_LAUNCH_PREFIX+=" $(printf '%q ' \
-    "HOME=$3/home" "COVEN_HOME=$3/home/.coven" "COVEN_CODE_UI=$1" \
+    "HOME=$3/home" "COVEN_HOME=${4:-$3/home/.coven}" "COVEN_CODE_UI=$1" \
     ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$(cat "$3/port")")"
   TUI_BOOT_STRING="$2"
   tui_start
@@ -84,7 +84,11 @@ _states_resume_plain() { # scratch, captured report
 
 # Next: quitting during a turn says what is not known, and an idle quit says nothing.
 _states_quit() { # scratch
-  if _states_launch next preview "$1"; then
+  # COVEN_HOME names a home outside HOME, so a shell without it cannot reach
+  # these sessions through ~/.coven-code: the way back has to say where it is.
+  mkdir -p "$1/elsewhere/code"
+  printf '%s\n' '{"hasCompletedOnboarding": true}' >"$1/elsewhere/code/settings.json"
+  if _states_launch next preview "$1" "$1/elsewhere"; then
     tui_type "run: sleep 30"; tui_keys Enter
     if wait_for "Approve Bash" 15; then sleep 0.8; tui_keys y; fi
     _states_wait_row "Bash sleep 30" 'running' "next: a command is running before the quit"
@@ -105,7 +109,7 @@ _states_quit() { # scratch
     _states_resume_plain "$1" "$said"
   fi
   tui_stop
-  if _states_launch next preview "$1"; then
+  if _states_launch next preview "$1" "$1/elsewhere"; then
     tui_keys C-d; sleep 0.25; tui_keys C-d; sleep 1.5
     assert_absent "$(tui_capture)" "Quit during a turn" "next: an idle quit says nothing about a turn"
   fi
