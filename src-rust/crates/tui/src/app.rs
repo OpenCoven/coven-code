@@ -3377,6 +3377,7 @@ impl App {
             self.selection_focus = None;
             self.selection_text.borrow_mut().clear();
             self.next_shell.inspector_scroll = 0;
+            self.next_shell.reset_transcript_for_session();
             // Work read for the old session does not describe this one.
             self.work_sources = Default::default();
             self.session_id = Some(id.to_string());
@@ -6254,6 +6255,9 @@ impl App {
                 self.auto_scroll = true;
                 self.scroll_offset = 0;
                 self.new_messages_while_scrolled = 0;
+            }
+            if action == "jumpToStart" {
+                self.auto_scroll = false;
             }
             self.next_shell.apply_action(action);
             return false;
