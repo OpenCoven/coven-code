@@ -58,6 +58,11 @@ and verify the effective behavior before relying on a global preference.
 Most day-to-day options live inside the `config` object. Provider credentials
 live in the `providers` map.
 
+When Coven Code saves this file, it writes back any top-level key it does not
+know unchanged, such as one a newer version added. Inside `config` and the
+other objects, it writes only the keys it knows. Unknown keys in project
+settings are ignored and never copied into this file.
+
 ---
 
 ## The `config` Object
