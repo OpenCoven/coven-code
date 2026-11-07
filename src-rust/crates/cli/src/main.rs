@@ -4738,12 +4738,12 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(width, height) => {
-                    // The next draw lays out for the new size; Next's layout
-                    // setting decides first whether the inspector fits.
-                    if app.renderer == claurst_tui::application::UiRenderer::Next {
-                        app.next_shell.follow_layout((width, height));
-                    }
+                // The next draw lays out for the new size; Next's layout
+                // setting decides first whether the inspector fits.
+                Event::Resize(width, height)
+                    if app.renderer == claurst_tui::application::UiRenderer::Next =>
+                {
+                    app.next_shell.follow_layout((width, height));
                 }
                 _ => {}
             }
