@@ -2,9 +2,10 @@
 """Local stand-in for the Anthropic Messages API, for engine-local tool journeys.
 
 Binds to 127.0.0.1 only. The first reply to a prompt asks the engine to run a
-real Bash tool call: the text after "run: " verbatim, or otherwise a `touch` of
-a marker named by the prompt's last word. The reply to its tool result reports
-what the engine sent back, so a journey can see the outcome on screen.
+real tool call: "tool: NAME JSON" for that tool and input, "run: COMMAND" for
+Bash with that command, or otherwise a Bash `touch` of a marker named by the
+prompt's last word. The reply to its tool result reports what the engine sent
+back, so a journey can see the outcome on screen.
 Every request's messages are appended to the log for later checks.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
@@ -17,6 +18,7 @@ import sys
 DENIED_TEXT = "TOOL_RESULT_ERROR"
 ALLOWED_TEXT = "TOOL_RESULT_OK"
 COMMAND_PREFIX = "run: "  # the rest of the prompt is the command, verbatim
+TOOL_PREFIX = "tool: "  # then a tool name and its JSON input
 
 
 def sse(event, data):
@@ -61,17 +63,16 @@ def text_turn(text):
     )
 
 
-def tool_turn(tool_id, command):
+def tool_turn(tool_id, name, tool_input):
     return (
         message_start()
         + sse("content_block_start", {
             "type": "content_block_start", "index": 0,
-            "content_block": {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {}},
+            "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}},
         })
         + sse("content_block_delta", {
             "type": "content_block_delta", "index": 0,
-            "delta": {"type": "input_json_delta",
-                      "partial_json": json.dumps({"command": command})},
+            "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input)},
         })
         + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
         + message_end("tool_use")
@@ -104,11 +105,15 @@ def reply_for(messages, marker_dir, turn):
     if result is not None:
         return text_turn(DENIED_TEXT if result.get("is_error") else ALLOWED_TEXT)
     text = message_text(last)
+    tool_id = f"toolu_fake_{turn}"
+    if text.startswith(TOOL_PREFIX):
+        name, _, tool_input = text[len(TOOL_PREFIX):].partition(" ")
+        return tool_turn(tool_id, name, json.loads(tool_input))
     if text.startswith(COMMAND_PREFIX):
-        return tool_turn(f"toolu_fake_{turn}", text[len(COMMAND_PREFIX):])
+        return tool_turn(tool_id, "Bash", {"command": text[len(COMMAND_PREFIX):]})
     words = text.split()
     marker = os.path.join(marker_dir, words[-1] if words else "unnamed")
-    return tool_turn(f"toolu_fake_{turn}", f"touch '{marker}'")
+    return tool_turn(tool_id, "Bash", {"command": f"touch '{marker}'"})
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

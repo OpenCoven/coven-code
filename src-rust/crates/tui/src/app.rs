@@ -42,11 +42,8 @@ use claurst_core::types::{ContentBlock, Message, Role};
 use claurst_core::{sample_completion_verb, sample_spinner_verb, CommandContextSignal};
 use claurst_query::QueryEvent;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::backend::CrosstermBackend;
 use ratatui::style::Color;
-use ratatui::Terminal;
 use std::cell::{Cell, RefCell};
-use std::io::Stdout;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
@@ -7962,10 +7959,7 @@ impl App {
 
     /// Run the TUI event loop. Returns `Some(input)` when the user submits
     /// a message, or `None` when the user quits.
-    pub fn run(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<Option<String>> {
+    pub fn run(&mut self, terminal: &mut crate::AppTerminal) -> anyhow::Result<Option<String>> {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
