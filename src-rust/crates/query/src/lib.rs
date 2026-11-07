@@ -3622,24 +3622,34 @@ pub async fn run_query_loop(
                                     .require_work(&ctx_for_dream.session_id)
                                     .is_err()
                                 {
-                                    let _ = tokio::fs::remove_file(&task.lock_file).await;
                                     return;
                                 }
-                                let agent = crate::agent_tool::AgentTool;
-                                let _result = claurst_tools::Tool::execute(
+                                let cancel = tokio_util::sync::CancellationToken::new();
+                                let (agent, completed) = crate::agent_tool::ObservedAgentTool::new(
+                                    Arc::clone(&task.lock),
+                                    cancel.clone(),
+                                );
+                                let result = claurst_tools::Tool::execute(
                                     &agent,
                                     agent_input,
                                     &ctx_for_dream,
                                 )
                                 .await;
-                                if ctx_for_dream
-                                    .goal_turn
-                                    .require_work(&ctx_for_dream.session_id)
-                                    .is_ok()
+                                if result.is_error {
+                                    tracing::warn!(error = %result.content, "AutoDream agent launch failed");
+                                    return;
+                                }
+                                if let Err(error) =
+                                    crate::auto_dream::AutoDream::finish_after_execution(
+                                        task,
+                                        completed,
+                                        cancel,
+                                        ctx_for_dream.goal_turn,
+                                        ctx_for_dream.session_id,
+                                    )
+                                    .await
                                 {
-                                    crate::auto_dream::AutoDream::finish_consolidation(&task).await;
-                                } else {
-                                    let _ = tokio::fs::remove_file(&task.lock_file).await;
+                                    tracing::warn!(%error, "AutoDream completion could not be confirmed");
                                 }
                             });
                         }
