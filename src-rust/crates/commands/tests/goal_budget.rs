@@ -1,66 +1,30 @@
+#[path = "common/goal.rs"]
+mod goal_fixture;
+
 use claurst_commands::{CommandContext, CommandResult, GoalCommand, SlashCommand};
 use claurst_core::{config::Config, cost::CostTracker, GoalStore};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use goal_fixture::run_cases;
 
 #[test]
 fn invalid_explicit_goal_budgets_preserve_existing_goal() {
-    run_cases(&[
-        "overflow_k",
-        "overflow_m",
-        "overflow_integer",
-        "invalid",
-        "negative",
-        "over_storage",
-    ]);
+    run_cases(
+        "goal_budget_worker",
+        &[
+            "overflow_k",
+            "overflow_m",
+            "overflow_integer",
+            "invalid",
+            "negative",
+            "over_storage",
+        ],
+    );
 }
 #[test]
 fn valid_goal_budgets_preserve_existing_semantics() {
-    run_cases(&["zero", "plain", "k", "m", "none", "max_storage"]);
-}
-
-fn run_cases(cases: &[&str]) {
-    let mut failures = Vec::new();
-    for case in cases {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let project = temp.path().join("project");
-        std::fs::create_dir(&home).unwrap();
-        std::fs::create_dir(&project).unwrap();
-        let log = temp.path().join("stderr");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "goal_budget_worker", "--ignored", "--nocapture"])
-            .env_clear()
-            .env("COVEN_CODE_HOME", &home)
-            .env("GOAL_FIXTURE_PROJECT", &project)
-            .env("GOAL_FIXTURE_CASE", case)
-            .env("GOAL_FIXTURE_DONE", temp.path().join("done"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let outcome = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                result => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("{case}: child wait failed: {result:?}");
-                }
-            }
-        };
-        if outcome.success() {
-            assert_eq!(std::fs::read(temp.path().join("done")).unwrap(), b"checked");
-        } else {
-            failures.push(format!("{case}: {}", std::fs::read_to_string(log).unwrap()));
-        }
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    run_cases(
+        "goal_budget_worker",
+        &["zero", "plain", "k", "m", "none", "max_storage"],
+    );
 }
 
 #[test]
