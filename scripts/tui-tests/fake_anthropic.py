@@ -5,7 +5,8 @@ Binds to 127.0.0.1 only. The first reply to a prompt asks the engine to run a
 real tool call: "tool: NAME JSON" for that tool and input, "run: COMMAND" for
 Bash with that command, or otherwise a Bash `touch` of a marker named by the
 prompt's last word. The reply to its tool result reports what the engine sent
-back, so a journey can see the outcome on screen.
+back, so a journey can see the outcome on screen. "flood: N" instead sends N
+text deltas in one burst, to put the interactive event path under pressure.
 Every request's messages are appended to the log for later checks.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
@@ -19,6 +20,8 @@ DENIED_TEXT = "TOOL_RESULT_ERROR"
 ALLOWED_TEXT = "TOOL_RESULT_OK"
 COMMAND_PREFIX = "run: "  # the rest of the prompt is the command, verbatim
 TOOL_PREFIX = "tool: "  # then a tool name and its JSON input
+FLOOD_PREFIX = "flood: "  # then how many text deltas to send in one burst
+FLOOD_TEXT = "flood line\n"
 
 
 def sse(event, data):
@@ -58,6 +61,22 @@ def text_turn(text):
             "type": "content_block_delta", "index": 0,
             "delta": {"type": "text_delta", "text": text},
         })
+        + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + message_end("end_turn")
+    )
+
+
+def flood_turn(count):
+    return (
+        message_start()
+        + sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        + sse("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": FLOOD_TEXT},
+        }) * count
         + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
         + message_end("end_turn")
     )
@@ -106,6 +125,8 @@ def reply_for(messages, marker_dir, turn):
         return text_turn(DENIED_TEXT if result.get("is_error") else ALLOWED_TEXT)
     text = message_text(last)
     tool_id = f"toolu_fake_{turn}"
+    if text.startswith(FLOOD_PREFIX):
+        return flood_turn(int(text[len(FLOOD_PREFIX):]))
     if text.startswith(TOOL_PREFIX):
         name, _, tool_input = text[len(TOOL_PREFIX):].partition(" ")
         return tool_turn(tool_id, name, json.loads(tool_input))
