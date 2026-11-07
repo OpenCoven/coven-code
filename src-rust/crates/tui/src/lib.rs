@@ -395,6 +395,27 @@ pub fn set_terminal_title(title: &str) {
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
 }
 
+/// The topic text for the terminal title. The title is written raw inside an
+/// OSC sequence, so in Next every control character and bidirectional
+/// override is dropped and newlines become spaces: a prompt or session title
+/// can never end the sequence early and emit its own. Classic is unchanged.
+pub fn terminal_title_topic(renderer: application::UiRenderer, topic: &str) -> String {
+    match renderer {
+        application::UiRenderer::Classic => topic.to_string(),
+        application::UiRenderer::Next => topic
+            .chars()
+            .filter_map(|ch| match ch {
+                '\n' | '\r' | '\t' => Some(' '),
+                '\u{0}'..='\u{1f}'
+                | '\u{7f}'..='\u{9f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}' => None,
+                _ => Some(ch),
+            })
+            .collect(),
+    }
+}
+
 /// Give the terminal back to the shell, run `stop`, then take it back.
 /// Returns whether `stop` ran: it does not if the terminal could not be
 /// handed back, and the terminal is set up again either way.
@@ -1345,7 +1366,7 @@ mod tests {
         };
         let mut buf = Buffer::empty(area);
 
-        diff_viewer::render_diff_dialog(&mut state, area, &mut buf);
+        diff_viewer::render_diff_dialog(&state, area, &mut buf);
 
         let rendered = buf
             .content

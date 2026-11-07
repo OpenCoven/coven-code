@@ -541,22 +541,78 @@ fn images_fall_back_to_filename_and_type_text() {
 }
 
 #[test]
-fn unavailable_views_explain_their_blocker_instead_of_faking_integrations() {
+fn views_name_their_limits_instead_of_faking_integrations() {
     let mut app = next_app();
     app.next_shell.inspector = Some(InspectorPage::Views);
     let text = text_of(&draw(&app, 80, 24).0);
-    // Work and Research have local-only pages; see next_work.rs and
-    // next_research.rs.
-    let memory = text
-        .lines()
-        .find(|line| line.contains("Memory"))
-        .unwrap_or_else(|| panic!("Memory missing:\n{text}"));
-    assert!(memory.contains("unavailable"), "{memory}");
-    assert!(memory.contains("#415"), "{memory}");
+    // Work, Research and Memory have limited pages; see next_work.rs,
+    // next_research.rs and next_memory.rs. None claims to be complete.
+    for (name, issue) in [("Work", "#413"), ("Research", "#414"), ("Memory", "#415")] {
+        let line = text
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("{name} missing:\n{text}"));
+        assert!(line.contains(issue), "{line}");
+        assert!(!line.contains("current"), "{line}");
+    }
     assert!(
         text.contains("Ctrl+K"),
         "commands stay discoverable:\n{text}"
     );
+}
+
+#[test]
+fn wide_terminals_show_navigation_only_on_request_and_beside_the_conversation() {
+    let mut app = next_app();
+    with_history(&mut app, 40);
+    app.set_prompt_text("unsent draft".to_string());
+
+    // Every inspector page draws a footer naming its page key, so a frame
+    // without it shows no page, whichever one could have opened.
+    let footer = "next page";
+    for _ in 0..2 {
+        let closed = text_of(&draw(&app, 180, 50).0);
+        assert!(closed.contains("answer 039"), "{closed}");
+        assert!(
+            !closed.contains(footer) && !closed.contains("local only"),
+            "nothing opens by itself:\n{closed}"
+        );
+        assert_eq!(app.next_shell.inspector, None);
+    }
+    let area = Rect::new(0, 0, 180, 50);
+    assert!(plan(area, false, 0, 2).inspector.is_none());
+
+    app.handle_key_event(alt('i'));
+    let _ = draw(&app, 180, 50);
+    app.handle_key_event(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.next_shell.inspector, Some(InspectorPage::Views));
+
+    let open = text_of(&draw(&app, 180, 50).0);
+    assert!(
+        open.contains(footer),
+        "the footer marks an open page:\n{open}"
+    );
+    for destination in ["Chat", "Work", "Research", "Memory", "Ctrl+K"] {
+        assert!(open.contains(destination), "{destination}:\n{open}");
+    }
+    let row = open
+        .lines()
+        .find(|line| line.contains("answer 039"))
+        .unwrap_or_else(|| panic!("the conversation stays beside it:\n{open}"));
+    assert!(row.chars().count() > 72, "{row}");
+    assert!(open.contains("unsent draft"), "{open}");
+
+    let layout = plan(area, true, 0, 2);
+    let (transcript, inspector) = (layout.transcript.unwrap(), layout.inspector.unwrap());
+    assert_eq!(transcript.width + 1 + inspector.width, 180);
+    assert!(transcript.width >= 72 && inspector.width >= 40);
+
+    // Closing returns to the same conversation and the same draft.
+    app.handle_key_event(esc());
+    assert_eq!(app.next_shell.inspector, None);
+    let back = text_of(&draw(&app, 180, 50).0);
+    assert!(back.contains("answer 039"), "{back}");
+    assert!(back.contains("unsent draft"), "{back}");
 }
 
 #[test]

@@ -963,6 +963,9 @@ pub struct App {
     /// Snapshot of the engine-local work stores for the Next Work page,
     /// refreshed by the interactive loop. Display only; it grants nothing.
     pub work_sources: crate::application::work::WorkSources,
+    /// Familiar memory read for the Next Memory page; cleared when the page
+    /// closes so private reads are not kept.
+    pub memory_snapshot: crate::application::memory::MemorySnapshot,
 
     // ---- Thinking block expansion state ----------------------------------
     /// Set of thinking block content hashes that are expanded.
@@ -1425,6 +1428,7 @@ impl App {
             agent_type_badge: None,
             active_goal_badge: None,
             work_sources: Default::default(),
+            memory_snapshot: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
             last_selectable_area: Cell::new(ratatui::layout::Rect::default()),
@@ -5157,8 +5161,15 @@ impl App {
             return self.handle_global_search_key(key);
         }
 
-        // Notification dismiss
-        if key.code == KeyCode::Esc && !self.notifications.is_empty() {
+        // Notification dismiss. Next keeps a notice waiting while the
+        // inspector replaces the transcript; Esc then belongs to the inspector,
+        // so a notice the reader has not seen is not thrown away.
+        if key.code == KeyCode::Esc
+            && !self.notifications.is_empty()
+            && (self.renderer != crate::application::UiRenderer::Next
+                || crate::next::delegates_to_classic(self)
+                || self.next_shell.notice_shown())
+        {
             self.notifications.dismiss_current();
             return false;
         }

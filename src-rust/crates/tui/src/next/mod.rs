@@ -123,7 +123,6 @@ pub fn delegates_to_classic(app: &App) -> bool {
     app.modal_open_besides_permission()
         || app.familiar_switcher_open
         || app.effort_picker.visible
-        || app.notifications.current_is_error()
         || !app.prompt_input.suggestions.is_empty()
 }
 
@@ -138,16 +137,19 @@ pub enum InspectorPage {
     Work,
     /// This session's web search and fetch activity.
     Research,
+    /// Familiar memory read from the Coven daemon, read only.
+    Memory,
     /// Destinations of the shared navigation model and their availability.
     Views,
 }
 
 impl InspectorPage {
-    pub const ALL: [InspectorPage; 5] = [
+    pub const ALL: [InspectorPage; 6] = [
         InspectorPage::Activity,
         InspectorPage::Session,
         InspectorPage::Work,
         InspectorPage::Research,
+        InspectorPage::Memory,
         InspectorPage::Views,
     ];
 
@@ -157,6 +159,7 @@ impl InspectorPage {
             InspectorPage::Session => "Session",
             InspectorPage::Work => "Work",
             InspectorPage::Research => "Research",
+            InspectorPage::Memory => "Memory",
             InspectorPage::Views => "Views",
         }
     }
@@ -211,9 +214,17 @@ pub struct ShellState {
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
     suspend_requested: bool,
+    /// Whether the last frame showed the current notice. A notice waits while
+    /// the inspector replaces the transcript, and Esc must not dismiss it unseen.
+    notice_shown: Cell<bool>,
 }
 
 impl ShellState {
+    /// Whether the last Next frame showed the current notice.
+    pub fn notice_shown(&self) -> bool {
+        self.notice_shown.get()
+    }
+
     /// Whether the user asked to suspend since the last call. The event loop
     /// owns the terminal, so it carries the suspend out.
     pub fn take_suspend_request(&mut self) -> bool {
@@ -425,9 +436,110 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         }
     }
 
-    if !app.notifications.is_empty() {
-        crate::notifications::render_notification_banner(frame, &app.notifications, area);
+    // A pending approval owns input, so every notice waits until it is
+    // decided. An error notice is then modal (Esc dismisses it in either
+    // renderer).
+    app.next_shell.notice_shown.set(false);
+    if app.notifications.current_is_error() && approval.is_none() {
+        render_error_panel(frame, app, area, layout.composer);
+    } else if approval.is_none() {
+        render_toast(frame, app, layout.transcript);
     }
+}
+
+/// The current error notice, drawn by Next over the composer. Its text can
+/// quote provider or tool output, so it is made inert and wrapped.
+fn render_error_panel(frame: &mut Frame, app: &App, area: Rect, composer: Rect) {
+    let Some(notification) = app.notifications.current() else {
+        return;
+    };
+    let appearance = &app.next_presentation.appearance;
+    let width = usize::from(area.width.max(1));
+    let mut lines = wrap_line(
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "error",
+            &safe_one_line(&notification.message),
+        ),
+        width,
+    );
+    let max_rows = usize::from((area.height / 2).max(2)) - 1;
+    lines.truncate(max_rows);
+    lines.push(Line::from(Span::styled(
+        "Esc dismiss".to_string(),
+        appearance.style(Role::TextSubtle),
+    )));
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let bottom = (composer.y + composer.height).min(area.y + area.height);
+    let panel = Rect {
+        x: area.x,
+        y: bottom.saturating_sub(height).max(area.y),
+        width: area.width,
+        height,
+    };
+    frame.render_widget(Clear, panel);
+    frame.render_widget(Paragraph::new(lines), panel);
+}
+
+/// The current notification as one Next row at the top right of the
+/// transcript, in the selected color mode, so it never covers the header,
+/// an approval or the inspector. Its text can quote tool or model output, so
+/// it is made inert. When the inspector replaces the transcript the notice
+/// waits. Classic keeps its own banner.
+fn render_toast(frame: &mut Frame, app: &App, transcript: Option<Rect>) {
+    use crate::notifications::NotificationKind;
+
+    let (Some(notification), Some(area)) = (app.notifications.current(), transcript) else {
+        return;
+    };
+    let appearance = &app.next_presentation.appearance;
+    let width = 52u16.min(area.width.saturating_sub(2));
+    if width < 20 || area.height < 2 {
+        return;
+    }
+    let (status, word) = match notification.kind {
+        NotificationKind::Info => (Status::Evidence, "note"),
+        NotificationKind::Success => (Status::Evidence, "done"),
+        NotificationKind::Warning => (Status::Pending, "warning"),
+        NotificationKind::Error => (Status::Blocked, "error"),
+    };
+    let hint = if notification.dismissible {
+        "  Esc"
+    } else {
+        ""
+    };
+    let text_width = usize::from(width).saturating_sub(hint.chars().count());
+    let message = primitives::status_message(
+        appearance,
+        status,
+        word,
+        &safe_one_line(&notification.message),
+    );
+    let mut rows = wrap_line(message, text_width.saturating_sub(1).max(1));
+    let cut = rows.len() > 1;
+    let mut line = rows.drain(..).next().unwrap_or_default();
+    if cut {
+        line.spans.push(Span::styled(
+            "…".to_string(),
+            appearance.style(Role::TextSubtle),
+        ));
+    }
+    line.spans.push(Span::styled(
+        hint.to_string(),
+        appearance.style(Role::TextSubtle),
+    ));
+    let toast = Rect {
+        x: area.x + area.width.saturating_sub(width + 1),
+        y: area.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, toast);
+    frame.render_widget(Paragraph::new(line), toast);
+    app.next_shell.notice_shown.set(true);
 }
 
 /// Cells the composer prompt glyph and its following space occupy; the
@@ -477,6 +589,11 @@ fn project_name(app: &App) -> String {
         .unwrap_or_else(|| "no project".to_string())
 }
 
+/// Untrusted text made terminal safe and folded onto one line.
+fn safe_one_line(text: &str) -> String {
+    crate::application::view::terminal_safe(text).replace('\n', " ")
+}
+
 fn model_label(app: &App) -> Option<String> {
     if !app.model_name.is_empty() {
         return Some(app.model_name.clone());
@@ -508,6 +625,9 @@ fn workspace_line(appearance: &Appearance, app: &App, width: u16) -> Line<'stati
         parts.push((format!("{familiar} (unverified)"), Role::Evidence));
     }
     for (text, role) in parts {
+        // Titles come from the model or the user, and paths and names from
+        // config: show them inert, on one line.
+        let text = safe_one_line(&text);
         let cells =
             separator.chars().count() + unicode_width::UnicodeWidthStr::width(text.as_str());
         if line.width() + cells > usize::from(width) {
@@ -880,6 +1000,7 @@ fn render_inspector(
     match page {
         InspectorPage::Work => header.extend(work_scope_notes(appearance)),
         InspectorPage::Research => header.extend(research_scope_notes(appearance)),
+        InspectorPage::Memory => header.extend(memory_scope_notes(appearance)),
         _ => {}
     }
     let body = match page {
@@ -887,6 +1008,7 @@ fn render_inspector(
         InspectorPage::Session => session_page(appearance, app),
         InspectorPage::Work => work_page(appearance, app),
         InspectorPage::Research => research_page(appearance, app),
+        InspectorPage::Memory => memory_page(appearance, app),
         InspectorPage::Views => views_page(appearance, app),
     };
     let key = |action: &str| {
@@ -940,10 +1062,12 @@ fn render_inspector(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// A labelled value. Values can come from config, stored sessions or tools,
+/// so every one is made inert here; already-safe text is unchanged.
 fn field(appearance: &Appearance, name: &str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{name:<12}"), appearance.style(Role::TextMuted)),
-        Span::styled(value, appearance.style(Role::Text)),
+        Span::styled(safe_one_line(&value), appearance.style(Role::Text)),
     ])
 }
 
@@ -1020,8 +1144,7 @@ fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             "Session",
             app.session_title
                 .as_deref()
-                .map(crate::application::view::terminal_safe)
-                .unwrap_or_else(|| "untitled session".to_string()),
+                .map_or_else(|| "untitled session".to_string(), safe_one_line),
         ),
         field(
             appearance,
@@ -1075,6 +1198,166 @@ fn research_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
             "research jobs (#414)",
         ),
     ]
+}
+
+/// What the Memory page's rows are, and what it cannot do yet.
+fn memory_scope_notes(appearance: &Appearance) -> Vec<Line<'static>> {
+    vec![
+        primitives::status_message(
+            appearance,
+            Status::Evidence,
+            "read only",
+            "daemon reads, no fallback",
+        ),
+        primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "unavailable",
+            "reveal, selection (#415)",
+        ),
+    ]
+}
+
+fn memory_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
+    use crate::application::memory::MemorySnapshot;
+    use crate::application::view::terminal_safe;
+    use claurst_core::coven_daemon::MemoryPreview;
+
+    let safe = |text: &str| terminal_safe(text).replace('\n', " ");
+    // `/memory` is a different, engine-local surface: instruction files.
+    let not_here = field(
+        appearance,
+        "Not here",
+        "/memory is Local instructions".to_string(),
+    );
+    let notice = |status, word: &str, detail: &str| {
+        vec![
+            primitives::status_message(appearance, status, word, detail),
+            Line::default(),
+            not_here.clone(),
+        ]
+    };
+    let (rows, overview) = match &app.memory_snapshot {
+        MemorySnapshot::NotRead => {
+            return notice(Status::Pending, "reading", "asking the Coven daemon")
+        }
+        MemorySnapshot::Offline => {
+            return notice(
+                Status::Blocked,
+                "offline",
+                "daemon unreachable; no disk reads",
+            )
+        }
+        MemorySnapshot::UpdateRequired => {
+            return notice(
+                Status::Blocked,
+                "update required",
+                "this Coven daemon has no memory read API",
+            )
+        }
+        MemorySnapshot::Failed(reason) => return notice(Status::Blocked, "unavailable", reason),
+        MemorySnapshot::Loaded { rows, overview } => (rows, overview),
+    };
+
+    let mut lines = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "The daemon reports no familiar memory.".to_string(),
+            appearance.style(Role::TextMuted),
+        )));
+        lines.push(Line::default());
+    }
+    // Rows first, so a small terminal still shows an entry.
+    for row in rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "[familiar memory] ".to_string(),
+                appearance.style(Role::TextMuted),
+            ),
+            Span::styled(safe(&row.familiar_id), appearance.style(Role::Text)),
+            Span::styled(
+                " (unverified)".to_string(),
+                appearance.style(Role::TextMuted),
+            ),
+        ]));
+        match &row.preview {
+            MemoryPreview::Withheld => lines.push(field(
+                appearance,
+                "Preview",
+                "withheld: not cleared by the producer".to_string(),
+            )),
+            MemoryPreview::Allowed { title, excerpt } => {
+                let title = if title.trim().is_empty() {
+                    "untitled".to_string()
+                } else {
+                    safe(title)
+                };
+                lines.push(field(appearance, "Title", title));
+                if !excerpt.is_empty() {
+                    lines.push(field(appearance, "Excerpt", safe(excerpt)));
+                }
+            }
+        }
+        lines.push(field(appearance, "Reference", safe(&row.id)));
+        lines.push(field(
+            appearance,
+            "Updated",
+            row.updated_at
+                .as_deref()
+                .map_or("unknown".to_string(), safe),
+        ));
+        lines.push(field(
+            appearance,
+            "Source",
+            row.source_label
+                .as_deref()
+                .map_or("unknown".to_string(), safe),
+        ));
+        lines.push(field(
+            appearance,
+            "Check",
+            format!(
+                "{} (producer label, not attested)",
+                safe(&row.verification_state)
+            ),
+        ));
+        lines.push(Line::default());
+    }
+    let count = |value: Option<u64>| value.map_or("unknown".to_string(), |n| n.to_string());
+    match overview {
+        Ok(overview) => {
+            lines.push(field(
+                appearance,
+                "Entries",
+                format!(
+                    "{} entries in {} familiars",
+                    count(overview.entries),
+                    count(overview.familiars)
+                ),
+            ));
+            lines.push(field(
+                appearance,
+                "Index",
+                format!(
+                    "check {}; changes {}",
+                    safe(overview.verification_state.as_deref().unwrap_or("unknown")),
+                    if overview.mutations {
+                        "offered by the daemon, not here"
+                    } else {
+                        "off"
+                    },
+                ),
+            ));
+        }
+        Err(reason) => lines.push(primitives::status_message(
+            appearance,
+            Status::Blocked,
+            "no overview",
+            reason,
+        )),
+    }
+    lines.push(not_here);
+    lines
 }
 
 fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
@@ -1259,16 +1542,6 @@ fn work_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
 }
 
 fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
-    let view = |name: &str, detail: &str| {
-        let mut line = Line::from(Span::styled(
-            format!("  {name:<10}"),
-            appearance.style(Role::Text),
-        ));
-        line.spans.extend(
-            primitives::status_message(appearance, Status::Blocked, "unavailable", detail).spans,
-        );
-        line
-    };
     let mut lines = vec![
         primitives::list_item(appearance, "Chat      current", true),
         {
@@ -1303,7 +1576,22 @@ fn views_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
             );
             line
         },
-        view("Memory", "needs a qualified memory reader (#415)"),
+        {
+            let mut line = Line::from(Span::styled(
+                format!("  {:<10}", "Memory"),
+                appearance.style(Role::Text),
+            ));
+            line.spans.extend(
+                primitives::status_message(
+                    appearance,
+                    Status::Evidence,
+                    "read only",
+                    "Memory page; reveal and selection wait on #415",
+                )
+                .spans,
+            );
+            line
+        },
         Line::default(),
     ];
     let palette = app
