@@ -2141,6 +2141,37 @@ fn handle_bridge_permission_response(
     Some((pending.call_id.unwrap_or(pending.tool_use_id), allowed))
 }
 
+/// The command that reopens `session_id` from a fresh shell. A session kept
+/// anywhere but the standalone home names its home: the variables that chose
+/// it may not be set where the command is run.
+fn resume_command(
+    session_id: &str,
+    home: &std::path::Path,
+    standalone: Option<&std::path::Path>,
+) -> String {
+    let resume = format!("coven-code --resume {session_id}");
+    if standalone == Some(home) {
+        return resume;
+    }
+    let shown =
+        claurst_tui::application::view::terminal_safe(&home.to_string_lossy()).replace('\n', "^J");
+    format!("COVEN_CODE_HOME={} {resume}", shell_word(&shown))
+}
+
+/// `word` as one POSIX shell word: as it is when nothing in it is special,
+/// otherwise in single quotes.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@,%=".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
 fn permission_request_from_core(
     pending: &claurst_tools::PendingPermissionRequest,
 ) -> claurst_tui::dialogs::PermissionRequest {
@@ -2148,7 +2179,7 @@ fn permission_request_from_core(
     let tool_name = pending.request.tool_name.clone();
     let tool_use_id = pending.tool_use_id.clone();
 
-    match (tool_name.as_str(), pending.request.path.clone()) {
+    let request = match (tool_name.as_str(), pending.request.path.clone()) {
         ("Bash", Some(command)) => {
             let suggested_prefix = if command
                 .chars()
@@ -2194,7 +2225,8 @@ fn permission_request_from_core(
             reason,
             pending.request.path.clone(),
         ),
-    }
+    };
+    request.for_call(pending.call_id.clone())
 }
 
 /// One submitted logical turn, retained through failures and model-switch retries.
@@ -5863,7 +5895,9 @@ async fn run_interactive(
     // Classic keeps its existing exit.
     if app.renderer == claurst_tui::application::UiRenderer::Next {
         if let Some((handle, msgs_arc)) = current_query.take() {
-            let exit_report = claurst_tui::next::turn_exit_report(&app);
+            // Taken before the stop, which can still deliver results; the
+            // lines are chosen from what was saved.
+            let exit_report = claurst_tui::next::TurnExitReport::capture(&app);
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
             messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
             session.messages = messages.clone();
@@ -5880,7 +5914,7 @@ async fn run_interactive(
                 &mut cmd_ctx.messages,
             );
             persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
-            for line in exit_report {
+            for line in exit_report.lines(&session.messages) {
                 println!("{line}");
             }
             let saved = !session.messages.is_empty()
@@ -5888,7 +5922,15 @@ async fn run_interactive(
                     .await
                     .is_ok();
             if saved {
-                println!("Pick it up with: coven-code --resume {}", session.id);
+                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+                println!(
+                    "Pick it up with: {}",
+                    resume_command(
+                        &session.id,
+                        &claurst_core::config::Settings::config_dir(),
+                        standalone.as_deref(),
+                    )
+                );
             }
         }
     }
@@ -6746,6 +6788,67 @@ mod tests {
             },
             rx,
         )
+    }
+
+    #[test]
+    fn next_shows_the_call_that_asked_for_approval_as_awaiting_it() {
+        // The request's own id is synthetic; the model's call id is what the
+        // tool row is keyed by.
+        let (mut pending, _decision) = bridge_permission_fixture("perm-session-0");
+        pending.call_id = Some("call-1".into());
+        let mut app = claurst_tui::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        app.renderer = claurst_tui::application::UiRenderer::Next;
+        let scope = claurst_tui::application::SessionScope::default();
+        scope.apply(
+            &mut app,
+            claurst_tui::application::ScopedQueryEvent {
+                generation: scope.current(),
+                event: claurst_query::QueryEvent::ToolStart {
+                    tool_name: "Write".into(),
+                    tool_id: "call-1".into(),
+                    input_json: r#"{"file_path":"example.txt"}"#.into(),
+                },
+            },
+        );
+        app.permission_request = Some(permission_request_from_core(&pending).guarded());
+
+        let view = claurst_tui::application::view::TranscriptView::project(&app);
+        assert_eq!(
+            view.tools[0].state,
+            claurst_tui::application::view::ToolActivityState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn the_way_back_names_any_home_but_the_standalone_one() {
+        let standalone = std::path::Path::new("/home/me/.coven-code");
+        assert_eq!(
+            resume_command("s-1", standalone, Some(standalone)),
+            "coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/home/me/.coven/code"),
+                Some(standalone)
+            ),
+            "COVEN_CODE_HOME=/home/me/.coven/code coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command("s-1", std::path::Path::new("/tmp/it's here"), None),
+            r"COVEN_CODE_HOME='/tmp/it'\''s here' coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/tmp/a\u{1b}]0;x\u{7}\nb"),
+                None
+            ),
+            "COVEN_CODE_HOME='/tmp/a^[]0;x^G^Jb' coven-code --resume s-1"
+        );
     }
 
     #[test]

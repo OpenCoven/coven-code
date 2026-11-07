@@ -662,39 +662,78 @@ impl ShellState {
 /// process, so the turn ends with it: nothing is left working on their behalf,
 /// and a tool with no reported result has no known outcome.
 pub fn turn_exit_report(app: &App) -> Vec<String> {
-    let view = TranscriptView::project_without_text(app);
-    let open: Vec<String> = view
-        .tools
-        .iter()
-        .filter(|tool| {
-            tool.allowed != Some(false)
-                && matches!(
-                    tool.state,
-                    ToolActivityState::AwaitingApproval
-                        | ToolActivityState::Queued
-                        | ToolActivityState::Running
-                        | ToolActivityState::CancelRequested
-                )
-        })
-        .map(|tool| match &tool.target {
-            Some(target) => format!("No result from {} {target}", tool.name),
-            None => format!("No result from {}", tool.name),
-        })
-        .collect();
-    let mut report = vec![
-        "Quit during a turn. It stopped here: this session runs inside coven-code, so nothing \
-         carries it on."
-            .to_string(),
-    ];
-    if !open.is_empty() {
-        report.extend(open);
-        report.push(
-            "What these finished is unknown, and anything they started in the background may \
-             still be running."
-                .to_string(),
-        );
+    TurnExitReport::capture(app).lines(&app.messages)
+}
+
+/// What quitting mid-turn will report, taken before the turn is stopped. The
+/// stop can still deliver results, so [`TurnExitReport::lines`] reads the
+/// conversation as it was saved.
+#[derive(Debug, Clone, Default)]
+pub struct TurnExitReport {
+    /// Tool call id and the line naming it, for each tool still at work.
+    open: Vec<(String, String)>,
+}
+
+impl TurnExitReport {
+    pub fn capture(app: &App) -> Self {
+        let view = TranscriptView::project_without_text(app);
+        let open = view
+            .tools
+            .iter()
+            .filter(|tool| {
+                tool.allowed != Some(false)
+                    && matches!(
+                        tool.state,
+                        ToolActivityState::AwaitingApproval
+                            | ToolActivityState::Queued
+                            | ToolActivityState::Running
+                            | ToolActivityState::CancelRequested
+                    )
+            })
+            .map(|tool| {
+                let line = match &tool.target {
+                    Some(target) => format!("No result from {} {target}", tool.name),
+                    None => format!("No result from {}", tool.name),
+                };
+                (tool.id.clone(), line)
+            })
+            .collect();
+        Self { open }
     }
-    report
+
+    /// The report, leaving out every tool whose result `saved` holds.
+    pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
+        let answered: std::collections::HashSet<String> = saved
+            .iter()
+            .flat_map(|message| message.content_blocks())
+            .filter_map(|block| match block {
+                claurst_core::types::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    Some(tool_use_id)
+                }
+                _ => None,
+            })
+            .collect();
+        let open: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(id, _)| !answered.contains(id))
+            .map(|(_, line)| line.clone())
+            .collect();
+        let mut report = vec![
+            "Quit during a turn. It stopped here: this session runs inside coven-code, so \
+             nothing carries it on."
+                .to_string(),
+        ];
+        if !open.is_empty() {
+            report.extend(open);
+            report.push(
+                "What these finished is unknown, and anything they started in the background \
+                 may still be running."
+                    .to_string(),
+            );
+        }
+        report
+    }
 }
 
 pub fn render_next(frame: &mut Frame, app: &App) {

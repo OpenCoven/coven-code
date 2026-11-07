@@ -53,6 +53,9 @@ pub struct PermissionOption {
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub tool_use_id: String,
+    /// The model's id for the tool call that asked, when known. `tool_use_id`
+    /// keys the request and may be synthetic; tool rows are keyed by this.
+    pub call_id: Option<String>,
     pub tool_name: String,
     /// Short summary line shown when present.
     pub description: String,
@@ -86,6 +89,12 @@ impl PermissionRequest {
     /// Guard the request against stray keys (Next renderer, #411): focus
     /// the deny option, so the default action is never destructive, and
     /// ignore keys other than Escape until a quiet gap has passed.
+    /// Name the model's tool call this request asks about.
+    pub fn for_call(mut self, call_id: Option<String>) -> Self {
+        self.call_id = call_id;
+        self
+    }
+
     pub fn guarded(mut self) -> Self {
         self.selected_option = self
             .options
@@ -105,6 +114,7 @@ impl PermissionRequest {
     pub fn standard(tool_use_id: String, tool_name: String, description: String) -> Self {
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description: description.clone(),
             danger_explanation: String::new(),
@@ -133,6 +143,7 @@ impl PermissionRequest {
 
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description,
             danger_explanation,
@@ -162,6 +173,7 @@ impl PermissionRequest {
 
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description: String::new(),
             danger_explanation: command_reason_body(reason, &command),
@@ -182,6 +194,7 @@ impl PermissionRequest {
     ) -> Self {
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description: String::new(),
             danger_explanation: command_reason_body(reason, &command),
@@ -207,6 +220,7 @@ impl PermissionRequest {
 
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description,
             danger_explanation,
@@ -237,6 +251,7 @@ impl PermissionRequest {
 
         Self::opened(Self {
             tool_use_id,
+            call_id: None,
             tool_name,
             description,
             danger_explanation,

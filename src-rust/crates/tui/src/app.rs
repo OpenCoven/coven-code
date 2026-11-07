@@ -3514,11 +3514,17 @@ impl App {
             self.tool_use_blocks.clear();
             return;
         }
-        let running = self
+        // A tool that reported finishing did its work, even if its result has
+        // not arrived; only the ones still at work are interrupted.
+        let (finished, rest): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .filter(|block| block.status == ToolStatus::Running);
-        self.interrupted_tools.extend(running);
+            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_some());
+        self.interrupted_tools.extend(
+            rest.into_iter()
+                .filter(|block| block.status == ToolStatus::Running),
+        );
+        self.tool_use_blocks = finished;
     }
 
     /// Record a cancellation the loop performed without a key request

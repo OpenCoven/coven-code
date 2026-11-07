@@ -3978,6 +3978,8 @@ struct PreparedTool {
     name: String,
     input: Value,
     blocked_result: Option<ToolResult>,
+    /// Whether `ToolStart` was reported, so a refusal must report the end too.
+    started: bool,
 }
 
 /// Execute tool invocations through the common policy-aware tool path.
@@ -4011,6 +4013,7 @@ async fn execute_tool_blocks_with_hooks(
                 blocked_result: Some(ToolResult::error(format!(
                     "Goal authority denied tool: {error}"
                 ))),
+                started: false,
             });
             continue;
         }
@@ -4056,6 +4059,7 @@ async fn execute_tool_blocks_with_hooks(
                 blocked_result: Some(ToolResult::error(format!(
                     "Goal authority denied tool: {error}"
                 ))),
+                started: true,
             });
             continue;
         }
@@ -4084,6 +4088,7 @@ async fn execute_tool_blocks_with_hooks(
             name,
             input,
             blocked_result,
+            started: true,
         });
     }
 
@@ -4101,7 +4106,18 @@ async fn execute_tool_blocks_with_hooks(
         .iter()
         .map(|p| {
             if let Some(result) = p.blocked_result.clone() {
-                futures::future::Either::Left(async move { result })
+                // A refused tool is over as soon as the turn's tools start:
+                // its row should not read as running beside the others.
+                let finished = p.started.then(|| QueryEvent::ToolFinished {
+                    tool_id: p.id.clone(),
+                    is_error: result.is_error,
+                });
+                futures::future::Either::Left(async move {
+                    if let (Some(event), Some(tx)) = (finished, event_tx) {
+                        let _ = tx.send(event);
+                    }
+                    result
+                })
             } else {
                 let name = p.name.clone();
                 let input = p.input.clone();
@@ -8938,6 +8954,48 @@ mod tests {
             slow_gate.wait().await;
             assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
             assert_eq!(next_progress(&mut rx).await, "end quick");
+            assert_eq!(next_progress(&mut rx).await, "end slow");
+        };
+        tokio::join!(run, watch);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_a_hook_refuses_reports_finishing_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let slow_gate = Arc::new(tokio::sync::Barrier::new(2));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(RendezvousTool {
+                name: "Refused",
+                level: PermissionLevel::ReadOnly,
+                barrier: Arc::new(tokio::sync::Barrier::new(1)),
+            }),
+            Box::new(RendezvousTool {
+                name: "Slow",
+                level: PermissionLevel::Execute,
+                barrier: slow_gate.clone(),
+            }),
+        ];
+        let calls = [("refused", "Refused"), ("slow", "Slow")]
+            .map(|(id, name)| (id.to_string(), name.to_string(), serde_json::json!({})))
+            .to_vec();
+        let mut ctx = scheduling_ctx(dir.path());
+        ctx.config.hooks.insert(
+            HookEvent::PreToolUse,
+            vec![HookEntry {
+                command: "printf 'not this one' >&2; exit 2".to_string(),
+                tool_filter: Some("Refused".to_string()),
+                blocking: true,
+            }],
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let watch = async {
+            // Refused at once, while the other tool in the response still runs.
+            assert_eq!(next_progress(&mut rx).await, "finished refused error=true");
+            slow_gate.wait().await;
+            assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
+            assert_eq!(next_progress(&mut rx).await, "end refused");
             assert_eq!(next_progress(&mut rx).await, "end slow");
         };
         tokio::join!(run, watch);

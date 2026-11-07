@@ -277,10 +277,10 @@ impl TranscriptView {
         app.tool_use_blocks
             .iter()
             .map(|block| {
-                let awaiting_approval = app
-                    .permission_request
-                    .as_ref()
-                    .is_some_and(|request| request.tool_use_id == block.id);
+                let awaiting_approval = app.permission_request.as_ref().is_some_and(|request| {
+                    request.call_id.as_deref() == Some(block.id.as_str())
+                        || request.tool_use_id == block.id
+                });
                 let state = match (&block.status, block.run.finished) {
                     (ToolStatus::Done, _) | (ToolStatus::Running, Some((_, false))) => {
                         ToolActivityState::Done
@@ -299,7 +299,9 @@ impl TranscriptView {
             .chain(interrupted)
             .map(|(block, state)| ToolActivity {
                 id: block.id.clone(),
-                name: terminal_safe(&block.name),
+                // A name is one line: the exit report prints it to the shell,
+                // where a line break would start a line of its own.
+                name: one_line_safe(&block.name),
                 state,
                 target: tool_target(&block.input_json, project_root),
                 input: terminal_safe(&block.input_json),

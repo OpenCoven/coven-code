@@ -70,6 +70,18 @@ _states_edits() { # ui, scratch
     "$1: neither edit is refused as a stale review"
 }
 
+# The printed way back works from a shell that has none of the variables the
+# session was launched with: here the launch chose its home through COVEN_HOME.
+_states_resume_plain() { # scratch, captured report
+  local way; way="$(grep -o 'Pick it up with: .*' <<<"$2" | tail -1)"
+  way="${way#Pick it up with: }"
+  if [ -z "$way" ]; then _fail "next: the way back works from a plain shell" "no command in: $2"; return; fi
+  tui_type "cd $(printf '%q' "$1/project") && env -u COVEN_HOME -u COVEN_PARENT -u COVEN_CODE_HOME -u COVEN_CODE_TEST_HOME $(printf '%q ' "HOME=$1/home" COVEN_CODE_UI=next ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$(cat "$1/port")")${way/coven-code --resume/$COVEN_BIN --resume}"
+  tui_keys Enter
+  if wait_for "run: sleep 30" 15; then _pass "next: the way back works from a plain shell"
+  else _fail "next: the way back works from a plain shell" "ran: $way"$'\n'"$(tui_capture)"; fi
+}
+
 # Next: quitting during a turn says what is not known, and an idle quit says nothing.
 _states_quit() { # scratch
   if _states_launch next preview "$1"; then
@@ -82,12 +94,15 @@ _states_quit() { # scratch
     else
       _fail "next: quitting names the tool with no result" "$(tui_capture)"
     fi
+    # The way back is printed last, once the session is saved.
+    wait_for "coven-code --resume" 10 || true
     # The report is printed to the shell, which wraps it at the terminal width;
     # -J joins the wrapped rows back into the lines that were printed.
     local said; said="$(_tmux capture-pane -t "$TUI_SESSION" -p -J 2>/dev/null)"
     assert_contains "$said" "nothing carries it on" "next: quitting says nothing carries the turn on"
     assert_contains "$said" "is unknown" "next: quitting says the outcome is unknown"
     assert_contains "$said" "coven-code --resume" "next: quitting gives the way back"
+    _states_resume_plain "$1" "$said"
   fi
   tui_stop
   if _states_launch next preview "$1"; then
