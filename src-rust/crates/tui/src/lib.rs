@@ -379,8 +379,19 @@ pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
 /// The interactive terminal handed to the event loops.
 pub type AppTerminal = Terminal<QuietBackend<CrosstermBackend<Stdout>>>;
 
+/// The title most recently set, so it can be restored after a suspend.
+static LAST_TERMINAL_TITLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(unix)]
+fn last_terminal_title() -> Option<String> {
+    LAST_TERMINAL_TITLE.lock().ok()?.clone()
+}
+
 /// Set the terminal window title via OSC escape sequence.
 pub fn set_terminal_title(title: &str) {
+    if let Ok(mut last) = LAST_TERMINAL_TITLE.lock() {
+        *last = Some(title.to_string());
+    }
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
 }
 
@@ -402,6 +413,51 @@ pub fn terminal_title_topic(renderer: application::UiRenderer, topic: &str) -> S
                 _ => Some(ch),
             })
             .collect(),
+    }
+}
+
+/// Give the terminal back to the shell, run `stop`, then take it back.
+/// Returns whether `stop` ran: it does not if the terminal could not be
+/// handed back, and the terminal is set up again either way.
+///
+/// The new terminal has no previous frame, so the next draw repaints it all.
+#[cfg(unix)]
+pub fn suspend_terminal(
+    terminal: &mut AppTerminal,
+    renderer: application::UiRenderer,
+    stop: impl FnOnce(),
+) -> io::Result<bool> {
+    let title = last_terminal_title();
+    // Keyboard flags have one stack per screen and setup pushed on the
+    // alternate one, but restore pops after leaving it. Pop here too, or that
+    // stack grows on every suspend and programs run from the shell inherit it.
+    if should_push_keyboard_enhancement_for_process() {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let stopped = stop_if_restored(restore_terminal(terminal), stop);
+    *terminal = setup_terminal(renderer)?;
+    terminal.clear()?;
+    if let Some(title) = title {
+        set_terminal_title(&title);
+    }
+    Ok(stopped)
+}
+
+/// Run `stop` only if the terminal was handed back to the shell. Restoring
+/// stops at its first error, and stopping then would leave the shell in raw
+/// mode, on the alternate screen or with mouse capture on. Returns whether
+/// it ran.
+#[cfg(unix)]
+fn stop_if_restored(restored: io::Result<()>, stop: impl FnOnce()) -> bool {
+    match restored {
+        Ok(()) => {
+            stop();
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not hand the terminal back; not suspending");
+            false
+        }
     }
 }
 
@@ -1823,5 +1879,30 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("COVEN_CODE_VOICE", v);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_title_tests {
+    use super::*;
+
+    #[test]
+    fn the_last_title_is_remembered_for_a_resume() {
+        set_terminal_title("title before suspending");
+        assert_eq!(
+            last_terminal_title().as_deref(),
+            Some("title before suspending")
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_was_not_handed_back_is_not_stopped() {
+        let mut stopped = false;
+        let failed = Err(io::Error::other("raw mode stayed on"));
+        assert!(!stop_if_restored(failed, || stopped = true));
+        assert!(!stopped, "the shell would get a half-restored terminal");
+
+        assert!(stop_if_restored(Ok(()), || stopped = true));
+        assert!(stopped);
     }
 }

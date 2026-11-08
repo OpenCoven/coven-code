@@ -46,6 +46,7 @@ Chat	ctrl+k	openCommandPalette
 Chat	alt+i	toggleInspector
 Chat	alt+l	jumpToLive
 Chat	alt+g	jumpToStart
+Chat	ctrl+z	suspend
 Inspector	alt+i	closeInspector
 Inspector	escape	closeInspector
 Inspector	tab	nextInspectorPage
