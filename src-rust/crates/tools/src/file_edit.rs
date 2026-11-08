@@ -86,6 +86,7 @@ impl Tool for FileEditTool {
                 return ToolResult::error(format!("Failed to resolve {}: {}", path.display(), e))
             }
         };
+        let reviewed = ctx.files_under_review([path.clone()]).await;
         if let Err(e) = ctx.check_permission_for_path(
             self.name(),
             &format!("Edit {}", path.display()),
@@ -93,6 +94,9 @@ impl Tool for FileEditTool {
             false,
         ) {
             return ToolResult::error(e.to_string());
+        }
+        if let Err(refusal) = reviewed.ensure_unchanged().await {
+            return ToolResult::error(refusal);
         }
 
         // Read current content
