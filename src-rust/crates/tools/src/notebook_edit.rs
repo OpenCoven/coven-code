@@ -103,12 +103,16 @@ impl Tool for NotebookEditTool {
         }
 
         // Permission check
+        let reviewed = ctx.files_under_review([path.clone()]).await;
         if let Err(e) = ctx.check_permission(
             self.name(),
             &format!("Edit notebook {}", path.display()),
             false,
         ) {
             return ToolResult::error(e.to_string());
+        }
+        if let Err(refusal) = reviewed.ensure_unchanged().await {
+            return ToolResult::error(refusal);
         }
 
         // Read notebook

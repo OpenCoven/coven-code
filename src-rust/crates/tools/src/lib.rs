@@ -58,6 +58,39 @@ pub mod web_search;
 pub mod worktree;
 
 // Re-exports for convenience.
+/// How files stood when approval to change them was asked for. Only metadata is
+/// kept: nothing may be read before the approval, and looking at a device or a
+/// huge file must cost nothing.
+#[derive(Debug, Default)]
+pub struct ReviewedFiles(Vec<(PathBuf, Option<FileStamp>)>);
+
+type FileStamp = (u64, std::time::SystemTime);
+
+async fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+impl ReviewedFiles {
+    pub fn extend(&mut self, other: ReviewedFiles) {
+        self.0.extend(other.0);
+    }
+
+    /// The refusal to give the model if a file no longer stands as reviewed.
+    pub async fn ensure_unchanged(&self) -> Result<(), String> {
+        for (path, reviewed) in &self.0 {
+            if file_stamp(path).await != *reviewed {
+                return Err(format!(
+                    "{} changed while waiting for approval, so nothing was written. \
+                     Read it again before retrying.",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub use apply_patch::ApplyPatchTool;
 pub use ask_user::AskUserQuestionTool;
 pub use bash::BashTool;
@@ -432,6 +465,22 @@ impl ToolContext {
         let request =
             self.build_permission_request(tool_name, description, None, is_read_only, None);
         self.request_permission_inner(request)
+    }
+
+    /// Note how `paths` stand before asking for approval to change them. Holds
+    /// nothing unless this session's approvals are bound to file content.
+    pub async fn files_under_review(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> ReviewedFiles {
+        let mut reviewed = ReviewedFiles::default();
+        if self.permission_handler.binds_approvals_to_content() {
+            for path in paths {
+                let stamp = file_stamp(&path).await;
+                reviewed.0.push((path, stamp));
+            }
+        }
+        reviewed
     }
 
     pub fn check_permission_for_path(
