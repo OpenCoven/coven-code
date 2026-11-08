@@ -35,7 +35,7 @@ These bindings are active in all contexts.
 | Key | Action | Description |
 |-----|--------|-------------|
 | `Ctrl+C` | interrupt | Interrupt the current operation (non-rebindable) |
-| `Ctrl+D` | exit | Exit Coven Code (non-rebindable) |
+| `Ctrl+D` | exit | Press twice within 2 seconds on an empty prompt to exit Coven Code (non-rebindable) |
 | `Ctrl+L` | redraw | Redraw the terminal screen |
 | `Ctrl+R` | historySearch | Open interactive history search |
 | `Ctrl+B` | createBranch | Create a new git branch |
@@ -237,7 +237,7 @@ The following keys have fixed behavior and cannot be rebound:
 | Key | Fixed behavior |
 |-----|---------------|
 | `Ctrl+C` | Interrupt current operation / send SIGINT to foreground process |
-| `Ctrl+D` | Exit Coven Code when input is empty; signal EOF when input has content |
+| `Ctrl+D` | Press twice within 2 seconds on an empty prompt to exit; does nothing while the prompt has content |
 | `Ctrl+M` | Identical to `Enter` at the terminal level (terminals emit `CR` for both) |
 
 These keys are handled at the terminal input layer before the keybinding system processes events. If any of them appear as a `chord` in `keybindings.json`, Coven Code:

@@ -316,6 +316,56 @@ fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending()
 }
 
 #[test]
+fn deltas_still_queued_when_a_turn_is_cancelled_cannot_restart_it() {
+    let interrupt = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    for cancel_key in [esc(), interrupt] {
+        let mut app = next_app();
+        app.push_message(Message::user("run it".to_string()));
+        apply(&mut app, delta("delivered in time"));
+        app.handle_key_event(cancel_key);
+        assert!(app.take_cancellation_request());
+        assert!(!app.is_streaming);
+
+        // The worker's backlog keeps arriving until the runtime settles.
+        apply(&mut app, delta("too late"));
+        assert!(!app.is_streaming, "{cancel_key:?} restarted the turn");
+        assert!(app.streaming_text.is_empty(), "{cancel_key:?}");
+        assert!(text_of(&draw(&app, 80, 24).0).contains("cancelling"));
+
+        // Once settled, the next turn streams as usual.
+        app.settle_cancellation();
+        apply(&mut app, delta("next turn"));
+        assert!(app.is_streaming, "{cancel_key:?}");
+        assert_eq!(app.streaming_text, "next turn", "{cancel_key:?}");
+    }
+
+    // Ctrl+C reaches the exit sequence while the backlog is still arriving
+    // instead of cancelling the same turn again on every press.
+    let mut app = next_app();
+    app.push_message(Message::user("run it".to_string()));
+    apply(&mut app, delta("delivered in time"));
+    app.handle_key_event(interrupt);
+    assert!(app.take_cancellation_request());
+    for press in 0..2 {
+        assert!(!app.should_exit, "exited before press {press}");
+        apply(&mut app, delta("too late"));
+        app.handle_key_event(interrupt);
+    }
+    assert!(app.should_exit);
+
+    // Classic keeps its existing handling of late deltas.
+    let mut classic = next_app();
+    classic.renderer = UiRenderer::Classic;
+    classic.push_message(Message::user("run it".to_string()));
+    apply(&mut classic, delta("delivered in time"));
+    classic.handle_key_event(esc());
+    assert!(!classic.is_streaming);
+    apply(&mut classic, delta("too late"));
+    assert!(classic.is_streaming);
+    assert_eq!(classic.streaming_text, "too late");
+}
+
+#[test]
 fn a_scrolled_reader_keeps_position_while_output_streams_and_can_jump_to_live() {
     let mut app = next_app();
     with_history(&mut app, 40);
