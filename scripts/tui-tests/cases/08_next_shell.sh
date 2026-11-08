@@ -106,6 +106,9 @@ tc_next_shell() {
       assert_contains "$s" "working" "the turn is still running at ${size/ /x}"
     done
     _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40
+    tui_keys M-g
+    if wait_for "stream please" 5; then _pass "Alt+G goes to the start of the transcript"
+    else _fail "Alt+G goes to the start of the transcript" "$(tui_capture)"; fi
     tui_keys M-l
     if wait_absent "scrolled up" 5; then _pass "Alt+L jumps back to live output"
     else _fail "Alt+L jumps back to live output" "$(tui_capture)"; fi

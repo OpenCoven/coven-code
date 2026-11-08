@@ -185,37 +185,87 @@ fn result_text(content: &ToolResultContent) -> Cow<'_, str> {
     }
 }
 
-/// Error text with each `scheme://…` token replaced by its [`display_url`]
-/// form, so a failed request never shows credentials or a query string.
+/// Error text with each URL replaced by its [`display_url`] form, so a failed
+/// request never shows credentials or a query string. A URL starts at a colon
+/// followed by `//`, after any scheme or none, or at a special scheme
+/// (`ftp`, `file`, `http`, `https`, `ws` or `wss`), which the client's parser
+/// also reads without `//`. A scheme is the whole run of ASCII letters,
+/// digits, `+`, `-` and `.` before the colon: neither `backend-http:8080`
+/// nor `x-https:…` starts an HTTP URL, since the parser reads each as a scheme
+/// of its own. A URL runs to the next ASCII whitespace, so brackets, quotes
+/// and other spaces, which the client accepts inside a URL, stay in it. The
+/// client also accepts a space or a form feed and drops tabs and line breaks,
+/// so a URL written with those inside is cut there; that is a stated limit.
+/// Punctuation that closes the sentence or an outer bracket is shown after the
+/// URL. A URL with no `@`, `?` or `#` has nothing to hide, so ordinary text
+/// such as `http::StatusCode` is shown as written. Opaque text after a scheme
+/// that is not special, such as `x:?q`, is shown as written.
 fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(found) = rest.find("://") {
-        let start = rest[..found]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map_or(0, |at| at + 1);
-        let end = rest[found..]
-            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\''))
-            .map_or(rest.len(), |at| found + at);
-        out.push_str(&rest[..start]);
-        if start == found {
-            // No scheme before `://`; keep the separator and move on.
-            out.push_str("://");
-            rest = &rest[found + 3..];
+    for piece in text.split_inclusive(|c: char| c.is_ascii_whitespace()) {
+        let word = piece.trim_end_matches(|c: char| c.is_ascii_whitespace());
+        redact_word(word, &mut out);
+        out.push_str(&piece[word.len()..]);
+    }
+    out
+}
+
+/// One word of [`redact_urls`]: the text before its first URL as written, then
+/// that URL as [`display_url`] shows it. The URL runs to the end of the word,
+/// so any later URL in the word is part of it, and an `@` past its host hides
+/// its path. Each word is read once.
+fn redact_word(word: &str, out: &mut String) {
+    let mut scheme_start = 0;
+    for (at, c) in word.char_indices() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') {
             continue;
         }
-        let url = &rest[start..end];
-        // A trailing `:` belongs to the sentence ("Failed to fetch URL: …").
-        let (url, colon) = match url.strip_suffix(':') {
-            Some(url) => (url, ":"),
-            None => (url, ""),
-        };
-        out.push_str(&display_url(url));
-        out.push_str(colon);
-        rest = &rest[end..];
+        let start = scheme_start;
+        scheme_start = at + c.len_utf8();
+        let scheme = &word[start..at];
+        if c == ':' && (word[at + 1..].starts_with("//") || is_special(scheme)) {
+            let (url, after) = split_trailing_punctuation(&word[start..]);
+            if !url.contains(['@', '?', '#']) {
+                break;
+            }
+            out.push_str(&word[..start]);
+            out.push_str(&display_url(url));
+            out.push_str(after);
+            return;
+        }
     }
-    out.push_str(rest);
-    out
+    out.push_str(word);
+}
+
+/// A token split before the punctuation that ends it: `:`, `,`, `.`, `;`, `>`,
+/// quotes, and a `)` or `]` with no opening partner in the token. That
+/// punctuation never holds a credential, and keeping `[::1]` whole lets the
+/// client's parser read it.
+fn split_trailing_punctuation(token: &str) -> (&str, &str) {
+    let (opening_parens, opening_brackets) =
+        (token.matches('(').count(), token.matches('[').count());
+    let (mut closing_parens, mut closing_brackets) =
+        (token.matches(')').count(), token.matches(']').count());
+    let mut end = token.len();
+    while let Some(last) = token[..end].chars().next_back() {
+        let closes = match last {
+            ')' if closing_parens > opening_parens => {
+                closing_parens -= 1;
+                true
+            }
+            ']' if closing_brackets > opening_brackets => {
+                closing_brackets -= 1;
+                true
+            }
+            ':' | ',' | '.' | ';' | '>' | '"' | '\'' => true,
+            _ => false,
+        };
+        if !closes {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    token.split_at(end)
 }
 
 /// Hits in the search tool's numbered form: a `N. **title**` line directly
@@ -251,22 +301,83 @@ fn numbered_title(line: &str) -> Option<&str> {
     rest.strip_suffix("**")
 }
 
+/// The schemes the client's parser treats as special: it accepts them without
+/// exactly `//` after the colon, and reads a `\` in them as a `/`.
+const SPECIAL_SCHEMES: [&str; 6] = ["ftp", "file", "http", "https", "ws", "wss"];
+
+fn is_special(scheme: &str) -> bool {
+    SPECIAL_SCHEMES
+        .iter()
+        .any(|known| scheme.eq_ignore_ascii_case(known))
+}
+
 /// A URL shown without credentials, query or fragment, which can carry
-/// secrets. Text without a `scheme://` is shown as is, made safe. A backslash
-/// ends the host, as it does for the HTTP client, so `a.com\@b.com` shows
-/// `a.com`, the host actually contacted.
+/// secrets. A path holding an `@` is hidden as a whole, since a URL written in
+/// it can carry credentials before the `@`. Where the client reads a special
+/// scheme, a backslash ends the host, as it does for the client, so
+/// `a.com\@b.com` shows `a.com`, the host actually contacted. A URL the
+/// client's parser reads differently from exactly `scheme://`, such as
+/// `https:user:pw@host` or one with a tab inside its `//`, is shown in the
+/// parser's form. One it reads without a host, such as `x:?q`, shows its path
+/// without its query or fragment, or only its scheme if the path holds an `@`.
+/// A special-scheme URL it cannot parse at all shows only its scheme. Text it
+/// cannot parse, without a `scheme://`, is shown as is, made safe.
 pub fn display_url(raw: &str) -> String {
-    let raw = raw.trim();
+    let written = raw.trim();
+    let parsed = reqwest::Url::parse(written).ok();
+    let special = parsed.as_ref().is_some_and(|url| is_special(url.scheme()));
+    let normalized = parsed.filter(|_| !plain_authority(written));
+    if normalized.is_none() && !plain_authority(written) {
+        if let Some(scheme) = special_scheme(written) {
+            return format!("{scheme}:…");
+        }
+    }
+    // With no host, the parser's form has no `scheme://` of its own to split
+    // at, so it is shown up to its path, and not at all if `@` is written there.
+    if let Some(url) = normalized.as_ref().filter(|url| url.host().is_none()) {
+        let before_query = &written[..written.find(['?', '#']).unwrap_or(written.len())];
+        if before_query.contains('@') {
+            return format!("{}:…", url.scheme());
+        }
+        let marker = match (url.query(), url.fragment()) {
+            (Some(_), _) => "?…",
+            (None, Some(_)) => "#…",
+            _ => "",
+        };
+        let form = url.as_str();
+        let path_end = form.find(['?', '#']).unwrap_or(form.len());
+        return one_line(&format!("{}{marker}", &form[..path_end]));
+    }
+    let raw = normalized.as_ref().map_or(written, reqwest::Url::as_str);
     let Some((scheme, rest)) = raw.split_once("://") else {
         return one_line(raw);
     };
-    let authority_end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    let authority_end = if special {
+        rest.find(['/', '\\', '?', '#'])
+    } else {
+        rest.find(['/', '?', '#'])
+    }
+    .unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     let path_end = tail.find(['?', '#']).unwrap_or(tail.len());
     let (path, extra) = tail.split_at(path_end);
+    // The client's form can drop a `..` segment holding an `@`, so the text as
+    // written decides: any `@` before its query but the one that ends the
+    // credentials is in the path.
+    let path_holds_at = match &normalized {
+        Some(url) => {
+            let before_query = &written[..written.find(['?', '#']).unwrap_or(written.len())];
+            let credentials = !url.username().is_empty() || url.password().is_some();
+            before_query.matches('@').count() > usize::from(credentials)
+        }
+        None => path.contains('@'),
+    };
+    if path_holds_at {
+        return one_line(&format!("{scheme}://{host}/…"));
+    }
     let marker = if extra.starts_with('?') {
         "?…"
     } else if extra.is_empty() {
@@ -275,6 +386,30 @@ pub fn display_url(raw: &str) -> String {
         "#…"
     };
     one_line(&format!("{scheme}://{host}{path}{marker}"))
+}
+
+/// Whether the split in [`display_url`] finds the host the HTTP client
+/// contacts: exactly `//` after the scheme, and no tab or newline, which the
+/// client deletes before it parses.
+fn plain_authority(raw: &str) -> bool {
+    !raw.contains(['\t', '\n', '\r'])
+        && raw.split_once(':').is_some_and(|(_, rest)| {
+            rest.strip_prefix("//")
+                .is_some_and(|authority| !authority.starts_with(['/', '\\']))
+        })
+}
+
+/// The text's scheme when it is special, ignoring case and the control
+/// characters and spaces the client's parser would drop.
+fn special_scheme(raw: &str) -> Option<&'static str> {
+    let (scheme, _) = raw.split_once(':')?;
+    let scheme: String = scheme
+        .chars()
+        .filter(|c| !(c.is_ascii_control() || *c == ' '))
+        .collect();
+    SPECIAL_SCHEMES
+        .into_iter()
+        .find(|known| scheme.eq_ignore_ascii_case(known))
 }
 
 /// Terminal-safe text on one row.
@@ -418,6 +553,56 @@ mod tests {
         assert_eq!(display_url("http://example.com"), "http://example.com");
         assert_eq!(display_url("file:///etc/passwd"), "file:///etc/passwd");
         assert_eq!(display_url("not a url\u{1b}[2J"), "not a url^[[2J");
+        // A URL in the path can hold credentials before an `@`.
+        assert_eq!(
+            display_url("https://a.example/x/https://user:secret@b.example/y"),
+            "https://a.example/…"
+        );
+        assert_eq!(
+            display_url("https://a.example/@user/post?q"),
+            "https://a.example/…"
+        );
+        // Both forms with a host are made terminal-safe too.
+        assert_eq!(
+            display_url("https://h\u{1b}]0;t\u{7}/x"),
+            "https://h^[]0;t^G/x"
+        );
+        assert_eq!(display_url("https://h\u{1b}/a@b"), "https://h^[/…");
+    }
+
+    #[test]
+    fn http_urls_the_client_reads_differently_are_still_redacted() {
+        // The HTTP client accepts any run of `/` and `\` after `https:`,
+        // including none, and still sends the credentials it finds.
+        for raw in [
+            "https:user:secret@api.example.com/v1?token=abc#frag",
+            "https:/user:secret@api.example.com/v1?token=abc#frag",
+            "https:\\user:secret@api.example.com/v1?token=abc#frag",
+            "https:///user:secret@api.example.com/v1?token=abc#frag",
+            "https://\\user:secret@api.example.com/v1?token=abc#frag",
+        ] {
+            let parsed = reqwest::Url::parse(raw).unwrap();
+            assert_eq!(parsed.username(), "user", "{raw}");
+            assert_eq!(parsed.host_str(), Some("api.example.com"), "{raw}");
+            assert_eq!(display_url(raw), "https://api.example.com/v1?…", "{raw}");
+            let messages = vec![
+                call("f", "WebFetch", json!({ "url": raw })),
+                result("f", &format!("Failed to fetch {raw}: builder error"), true),
+            ];
+            let view = ResearchView::from_messages(&messages, &[]);
+            let row = format!("{:?}", view.items[0]);
+            assert!(!row.contains("secret"), "{row}");
+            assert!(!row.contains("token=abc"), "{row}");
+        }
+        // Error text is read token by token, so these two only reach
+        // `display_url` through the call's input.
+        for raw in [
+            "https://\n/user:secret@api.example.com/v1?token=abc",
+            "https:/\t/user:secret@api.example.com/v1?token=abc",
+        ] {
+            assert_eq!(reqwest::Url::parse(raw).unwrap().username(), "user");
+            assert_eq!(display_url(raw), "https://api.example.com/v1?…", "{raw:?}");
+        }
     }
 
     #[test]
@@ -468,15 +653,229 @@ mod tests {
     }
 
     #[test]
+    fn error_text_with_letters_outside_ascii_before_a_colon_is_kept() {
+        for text in [
+            "Failed to fetch bücher.de: builder error",
+            "Größe: 3",
+            "エラー: x",
+        ] {
+            assert_eq!(redact_urls(text), text);
+        }
+    }
+
+    #[test]
+    fn urls_inside_brackets_or_quotes_or_after_a_label_are_redacted() {
+        for error in [
+            "Failed to fetch https:user:secret@[::1]/v1?token=abc: builder error",
+            "Failed to fetch https://h.example/v1?f=(a)&token=abc: builder error",
+            "error sending request for url (https://user:secret@h.example/?token=abc)",
+            "URL:https:user:secret@h.example/?token=abc",
+            "url=\"https://user:secret@h.example/?token=abc\"",
+            "<https://user:secret@h.example/?token=abc>",
+            "Größe:https://user:secret@h.example/?token=abc",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(!shown.contains("token=abc"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn punctuation_after_a_url_stays_after_its_redacted_form() {
+        assert_eq!(
+            redact_urls("Failed to fetch https://u:pw@h.example/x: timed out"),
+            "Failed to fetch https://h.example/x: timed out"
+        );
+        assert_eq!(
+            redact_urls("(see https://u:pw@h.example/a)."),
+            "(see https://h.example/a)."
+        );
+        assert_eq!(
+            redact_urls("at https://u:pw@[::1]/v1, then"),
+            "at https://[::1]/v1, then"
+        );
+        // Inside a query, these would be hidden with it.
+        assert_eq!(
+            redact_urls(
+                "<https://h.example/?q=1> url=\"https://h.example/?q=2\" 'https://h.example/?q=3';"
+            ),
+            "<https://h.example/?…> url=\"https://h.example/?…\" 'https://h.example/?…';"
+        );
+    }
+
+    #[test]
+    fn colons_that_start_no_url_are_not_read_as_one() {
+        for text in [
+            "a:".repeat(50_000),
+            "at 12:34:56 on fe80::1:2 from std::io::Error".to_string(),
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            "enable-https:true on web-https:443".to_string(),
+            "http://backend-http:8080/api".to_string(),
+            "use http::StatusCode or http::uri::InvalidUri".to_string(),
+            "hyper::http::Error(InvalidUri)".to_string(),
+            "listening ports http:80 https:443, ports=http:80,https:443".to_string(),
+            "proxy_https:off HTTP:404 http:/".to_string(),
+        ] {
+            assert_eq!(redact_urls(&text), text);
+        }
+        assert_eq!(
+            redact_urls("Failed to fetch https://h.example/x#frag"),
+            "Failed to fetch https://h.example/x#…"
+        );
+    }
+
+    #[test]
+    fn a_word_is_read_once_however_many_urls_it_holds() {
+        let read = "https://a/".repeat(7);
+        assert_eq!(
+            redact_urls(&format!("{read}https://user:secret@b/ x")),
+            "https://a/… x"
+        );
+        let many = "https://a/".repeat(10_000);
+        assert_eq!(redact_urls(&many), many);
+        assert_eq!(redact_urls(&"https://u:p@a/".repeat(10_000)), "https://a/…");
+    }
+
+    #[test]
+    fn a_url_with_an_empty_scheme_or_a_space_inside_is_redacted() {
+        for error in [
+            "x(://user:secret@h.example/?token=abc)",
+            "a:://user:secret@h.example/?token=abc",
+            "Failed to fetch https://h.example/?a=1\u{a0}token=abc: timed out",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(!shown.contains("token=abc"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_url_inside_another_never_shows_its_credentials() {
+        for error in [
+            "a:https:/h/x://user:secret@b.example/",
+            "https://a.example/x\u{a0}https://user:secret@b.example/?q",
+            "https://a.example/x/https://user:secret@b.example/?q",
+            "https://a.example/x\u{1}https:user:secret@b.example/",
+            "https:a.example/x\u{a0}https:user:secret@b.example/",
+            "https://a.example/x\u{1}https:///user:secret@b.example/",
+            "https://a.example/https://user:secret\u{7f}@b.example/",
+            "https://a.example/https://user:secret\u{1c}@b.example/",
+            "xhttp:https://user:secret@b.example/",
+            "https://backend-https:/https://user:secret@b.example/?q",
+            "https:x@https://user:secret@b.example/",
+            "https://a.example/x/foo://user:secret\\x@b.example/",
+            "HTTP:foo://user:secret\\x@b.example/",
+            "https:a.example/foo://user:secret\\x@b.example/../y",
+            "file:/foo://user:secret\\x@b.example/../y",
+        ] {
+            let shown = redact_urls(error);
+            assert!(!shown.contains("secret"), "{shown}");
+        }
+        assert_eq!(
+            redact_urls("(https://a.example/x/https://user:secret@b.example/?q)."),
+            "(https://a.example/…)."
+        );
+        // The client reads `https` here as the host, with an empty port.
+        assert_eq!(
+            redact_urls("HTTP:https://user:secret@b.example/"),
+            "http://https/…"
+        );
+        assert_eq!(
+            redact_urls("(https://u:pw@a/x/https://b/(?q))"),
+            "(https://a/x/https://b/(?…)"
+        );
+    }
+
+    #[test]
+    fn a_closing_bracket_is_kept_in_the_url_while_it_has_a_partner() {
+        assert_eq!(redact_urls("(https:u:pw@[::1])"), "(https://[::1]/)");
+        assert_eq!(
+            redact_urls("((https://u:pw@h.example/?q=(a)))"),
+            "((https://h.example/?…))"
+        );
+    }
+
+    #[test]
+    fn an_http_url_the_client_cannot_parse_shows_only_its_scheme() {
+        assert!(reqwest::Url::parse("https:user:secret@h%zz/x?token=abc").is_err());
+        assert_eq!(display_url("https:user:secret@h%zz/x?token=abc"), "https:…");
+        assert_eq!(display_url("HTTP:user:secret@h%zz/"), "http:…");
+        // With exactly `//` the plain split already finds the host. Text the
+        // parser rejects is split as for any scheme, so a backslash does not
+        // end its host.
+        assert_eq!(display_url("https://user:secret@h%zz/x"), "https://h%zz/x");
+        assert_eq!(display_url("https://user:secret\\x@h%zz/"), "https://h%zz/");
+    }
+
+    #[test]
     fn a_backslash_ends_the_host_so_it_cannot_be_spoofed() {
         let shown = display_url("https://evil.com\\@good.com/");
         assert!(shown.starts_with("https://evil.com"), "{shown}");
         assert!(!shown.starts_with("https://good.com"), "{shown}");
+        // The client also reads a backslash in the path as a `/`.
+        assert_eq!(
+            display_url("https://evil.com\\x\\@good.com/"),
+            "https://evil.com/…"
+        );
     }
 
     #[test]
     fn other_schemes_never_show_credentials_or_query() {
         assert_eq!(display_url("ftp://u:p@h/?tok"), "ftp://h/?…");
+        // The parser deletes a tab or newline, here inside the `//`.
+        assert_eq!(
+            display_url("foo:/\t/user:secret@h.example/?token=abc"),
+            "foo://h.example/?…"
+        );
+        // A backslash is part of the credentials in a scheme that is not
+        // special, as the client's parser reads it.
+        let parsed = reqwest::Url::parse("foo://user:secret\\x@b.example/").unwrap();
+        assert_eq!(parsed.password(), Some("secret%5Cx"));
+        assert_eq!(
+            display_url("foo://user:secret\\x@b.example/"),
+            "foo://b.example/"
+        );
+    }
+
+    #[test]
+    fn a_url_without_a_host_never_shows_a_url_inside_it() {
+        for (raw, shown) in [
+            ("x:?https://a/x/https://user:secret@b/", "x:?…"),
+            ("x:#https:///user:secret@b/", "x:#…"),
+            ("foo:/p?https://a/x/https://user:secret@b/", "foo:/p?…"),
+            ("foo:/x/https:user:secret@b/", "foo:…"),
+            ("foo:/x/https://../user:secret@b/", "foo:…"),
+            ("mailto:a@b.c?subject=x", "mailto:…"),
+            ("x:?q", "x:?…"),
+            ("urn:isbn:0451450523", "urn:isbn:0451450523"),
+        ] {
+            assert_eq!(display_url(raw), shown, "{raw}");
+        }
+    }
+
+    #[test]
+    fn every_special_scheme_is_read_as_the_client_reads_it() {
+        for (raw, shown) in [
+            ("ftp:user:secret@h.example/?token=abc", "ftp://h.example/?…"),
+            ("ws:user:secret@h.example/?token=abc", "ws://h.example/?…"),
+            (
+                "wss:/user:secret@h.example/?token=abc",
+                "wss://h.example/?…",
+            ),
+            ("ftp:\\user:secret@h.example/", "ftp://h.example/"),
+            ("file:/etc/x?token=abc", "file:///etc/x?…"),
+        ] {
+            assert_eq!(display_url(raw), shown, "{raw}");
+        }
+        let error = "Failed to fetch ftp:user:secret@h.example/?token=abc: builder error for url (ftp://user:secret@h.example/?token=abc)";
+        let shown = redact_urls(error);
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains("token=abc"), "{shown}");
+        // The parser drops a tab inside the scheme.
+        assert_eq!(
+            display_url("ht\ttps:user:secret@h%zz/?token=abc"),
+            "https:…"
+        );
     }
 
     #[test]

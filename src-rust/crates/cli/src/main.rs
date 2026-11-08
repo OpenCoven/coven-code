@@ -2365,6 +2365,27 @@ async fn settle_abandoned_turn(
 
 type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
 
+/// How long quitting waits for a running turn to stop before saving what it
+/// already holds. A cancelled turn normally stops well within this; the bound
+/// is for a tool or approval that does not react to the token.
+const TURN_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Wait for a cancelled turn after the interactive loop has exited, and return
+/// the conversation it left behind. The queue goes first: nothing drains it any
+/// more, so the forwarder could otherwise wait on it and hold the worker open.
+async fn stop_turn_for_exit(
+    mut handle: tokio::task::JoinHandle<claurst_query::QueryOutcome>,
+    messages: &MessagesArc,
+    queue: tokio::sync::mpsc::Receiver<claurst_tui::application::ScopedQueryEvent>,
+    wait: std::time::Duration,
+) -> Vec<claurst_core::types::Message> {
+    drop(queue);
+    if tokio::time::timeout(wait, &mut handle).await.is_err() {
+        handle.abort();
+    }
+    messages.lock().await.clone()
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -2905,6 +2926,15 @@ async fn run_interactive(
         eprintln!("warning: {warning}");
     }
     let renderer = renderer_selection.renderer;
+    // Next ties an approval to the file as it stood when asked. Classic keeps its
+    // existing approvals.
+    let mut tool_ctx = tool_ctx;
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        tool_ctx.permission_handler =
+            Arc::new(claurst_core::permissions::ContentBoundApprovals::new(
+                tool_ctx.permission_handler.clone(),
+            ));
+    }
 
     // Set up terminal
     let mut terminal = setup_terminal(renderer)?;
@@ -5659,6 +5689,28 @@ async fn run_interactive(
     // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
     // Still join the worker if restoration fails, then report that error below.
     let terminal_result = restore_terminal(&mut terminal);
+    // Quitting mid-turn stops the worker and keeps what it delivered. Next only:
+    // Classic keeps its existing exit.
+    if app.renderer == claurst_tui::application::UiRenderer::Next {
+        if let Some((handle, msgs_arc)) = current_query.take() {
+            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+            messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
+            session.messages = messages.clone();
+            session.updated_at = chrono::Utc::now();
+            session.model =
+                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+            session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+            rollback_unattempted_turn(
+                goal_turn.as_ref(),
+                false,
+                &mut messages,
+                &mut app,
+                &mut session,
+                &mut cmd_ctx.messages,
+            );
+            persist_interactive_session(&session, goal_turn.as_ref()).await;
+        }
+    }
     if let Some(mut runtime) = bridge_runtime.take() {
         runtime.supplementary_tasks.shutdown().await;
         if let Err(error) = (&mut runtime.primary_task).await {
@@ -6389,6 +6441,54 @@ mod tests {
         .await
         .expect("forwarder must stop once the interactive queue is closed");
         drop(turn_tx);
+    }
+
+    #[tokio::test]
+    async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, queue) = tokio::sync::mpsc::channel(1);
+        for _ in 0..3 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status("backlog".into()))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let worker_messages = messages.clone();
+        let handle = tokio::spawn(async move {
+            forward_scoped_events(turn_rx, events, Default::default()).await;
+            *worker_messages.lock().await =
+                vec![claurst_core::types::Message::user("kept".to_string())];
+            claurst_query::QueryOutcome::Cancelled
+        });
+        // Let the forwarder fill the queue and block on it.
+        tokio::task::yield_now().await;
+
+        let wait = std::time::Duration::from_secs(30);
+        let kept = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_turn_for_exit(handle, &messages, queue, wait),
+        )
+        .await
+        .expect("a closed queue must free the worker, not run out the wait");
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quitting_does_not_wait_forever_for_a_turn_that_ignores_cancellation() {
+        let prompt = vec![claurst_core::types::Message::user("prompt".to_string())];
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(prompt));
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(std::future::pending::<claurst_query::QueryOutcome>());
+
+        let kept = stop_turn_for_exit(
+            handle,
+            &messages,
+            queue,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(kept.len(), 1, "the prompt is still saved");
     }
 
     #[test]

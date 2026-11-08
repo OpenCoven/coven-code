@@ -12,12 +12,52 @@
 //! renderer.
 
 use crate::app::{App, ToolStatus};
-use claurst_core::types::{ContentBlock, MessageContent, Role};
+use claurst_core::types::{ContentBlock, Message, MessageContent, Role};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryRole {
     User,
     Assistant,
+}
+
+/// All of a stored message that its [`TranscriptEntry`] depends on, before
+/// the text is made inert. Equal sources project to equal entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntrySource {
+    role: EntryRole,
+    text: String,
+    attachments: Vec<String>,
+}
+
+impl EntrySource {
+    pub fn of(message: &Message) -> Self {
+        Self {
+            role: match message.role {
+                Role::User => EntryRole::User,
+                Role::Assistant => EntryRole::Assistant,
+            },
+            text: message.get_all_text(),
+            attachments: match &message.content {
+                MessageContent::Blocks(blocks) => {
+                    blocks.iter().filter_map(attachment_label).collect()
+                }
+                MessageContent::Text(_) => Vec::new(),
+            },
+        }
+    }
+
+    /// The entry to show, or `None` for a message with nothing to display.
+    pub fn project(&self) -> Option<TranscriptEntry> {
+        let text = terminal_safe(&self.text);
+        if text.trim().is_empty() && self.attachments.is_empty() {
+            return None;
+        }
+        Some(TranscriptEntry {
+            role: self.role,
+            text,
+            attachments: self.attachments.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,28 +213,19 @@ impl TranscriptView {
         let entries = app
             .messages
             .iter()
-            .filter_map(|message| {
-                let text = terminal_safe(&message.get_all_text());
-                let attachments: Vec<String> = match &message.content {
-                    MessageContent::Blocks(blocks) => {
-                        blocks.iter().filter_map(attachment_label).collect()
-                    }
-                    MessageContent::Text(_) => Vec::new(),
-                };
-                if text.trim().is_empty() && attachments.is_empty() {
-                    return None;
-                }
-                let role = match message.role {
-                    Role::User => EntryRole::User,
-                    Role::Assistant => EntryRole::Assistant,
-                };
-                Some(TranscriptEntry {
-                    role,
-                    text,
-                    attachments,
-                })
-            })
+            .filter_map(|message| EntrySource::of(message).project())
             .collect();
+        Self::with_entries(app, entries, terminal_safe(&app.streaming_text))
+    }
+
+    /// Everything except the conversation text: `entries` and `live_text`
+    /// stay empty. For a renderer that keeps its own rows for them, so a
+    /// frame does not re-project the whole conversation.
+    pub fn project_without_text(app: &App) -> Self {
+        Self::with_entries(app, Vec::new(), String::new())
+    }
+
+    fn with_entries(app: &App, entries: Vec<TranscriptEntry>, live_text: String) -> Self {
         let project_root = app.config.project_dir.as_deref();
         let cancelling = app.cancellation != crate::application::TurnCancellation::Idle;
         let interrupted = app.interrupted_tools.iter().map(|block| {
@@ -245,7 +276,7 @@ impl TranscriptView {
             });
         Self {
             entries,
-            live_text: terminal_safe(&app.streaming_text),
+            live_text,
             is_streaming: app.is_streaming,
             tools,
             permission,

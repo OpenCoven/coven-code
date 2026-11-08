@@ -301,6 +301,7 @@ pub fn default_bindings() -> Vec<ParsedBinding> {
         // Next renderer only; Classic treats these chords as unbound.
         ("alt+i", "toggleInspector", KeyContext::Chat),
         ("alt+l", "jumpToLive", KeyContext::Chat),
+        ("alt+g", "jumpToStart", KeyContext::Chat),
         ("ctrl+z", "suspend", KeyContext::Chat),
         // Hints show the newest default, so Escape is listed last.
         ("alt+i", "closeInspector", KeyContext::Inspector),
