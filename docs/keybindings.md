@@ -20,6 +20,7 @@ This document covers all keyboard shortcuts in Coven Code, how to customize them
 6. [Special Input Behaviors](#special-input-behaviors)
    - [Shift+Enter for Newline](#shiftenter-for-newline)
    - [ESC During Streaming](#esc-during-streaming)
+   - [Selection When the Screen Moves](#selection-when-the-screen-moves)
    - [@file Injection with Typeahead](#file-injection-with-typeahead)
 7. [Non-English Keyboard Layout Support](#non-english-keyboard-layout-support)
 
@@ -327,6 +328,17 @@ This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` a
 In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the same way `Ctrl+C` does, and the status shows `cancelling` until the runtime has actually stopped it. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
+
+### Selection When the Screen Moves
+
+In the Next renderer (`COVEN_CODE_UI=next`), a mouse selection keeps the text you
+selected. If a resize, a scroll or new output moves other text under it, the mark
+goes away and the status line shows `selection kept`. Copying then gives the
+original text, not what moved under it. `Ctrl+Shift+C` copies it in a terminal
+that passes `Ctrl+Shift+C` on as its own key; other terminals send it as `Ctrl+C`
+or keep it for their own copy. `Ctrl+C` does not copy: it still cancels a running
+turn, or clears the draft and asks you to press it again to exit. Typing, pasting
+or making a new selection lets the selection go.
 
 ### @file Injection with Typeahead
 

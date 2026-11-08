@@ -28,7 +28,7 @@ use claurst_core::appearance::Density;
 use claurst_core::keybindings::{KeyContext, KeybindingResolver, UserKeybindings};
 use claurst_core::types::Message;
 use primitives::Status;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
@@ -226,7 +226,15 @@ pub struct ShellState {
     /// Whether the last frame showed the current notice. A notice waits while
     /// the inspector replaces the transcript, and Esc must not dismiss it unseen.
     notice_shown: Cell<bool>,
+    /// The selection's cells at the last frame. A change means the user moved
+    /// the selection; no change means anything different under it moved there.
+    selection_cells: Cell<Option<SelectionCells>>,
+    /// The screen moved under the selection, so `App::selection_text` holds
+    /// what was selected and no cell on screen shows it.
+    selection_kept: Cell<bool>,
 }
+
+type SelectionCells = ((u16, u16), (u16, u16));
 
 /// Wrapped rows of the conversation, kept between frames so a frame does not
 /// re-sanitize or re-wrap text that has not changed. Each frame still compares
@@ -523,7 +531,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
             app.last_selectable_area.set(transcript);
             render_transcript(frame, app, &view, transcript);
             crate::render::cache_selectable_row_text(frame, app);
-            crate::render::apply_selection_highlight(frame, app);
+            draw_selection(frame, app);
         }
         None => {
             app.last_msg_area.set(Rect::default());
@@ -584,6 +592,49 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         render_error_panel(frame, app, area, layout.composer);
     } else if approval.is_none() {
         render_toast(frame, app, layout.transcript);
+    }
+}
+
+/// Mark the selection, unless the screen has moved under it.
+///
+/// A selection is stored as screen cells, and its text is read back from them
+/// every frame. A resize, a scroll or streamed rows can put other text in those
+/// cells, and copying would then return text nobody selected. So once the cells
+/// stop changing the text is fixed: if they show anything else, the mark goes
+/// and the text stays available to copy until typing, a paste or a new
+/// selection lets it go.
+fn draw_selection(frame: &mut Frame, app: &App) {
+    let shell = &app.next_shell;
+    let cells = app.selection_anchor.zip(app.selection_focus);
+    let moved_by_user = shell.selection_cells.replace(cells) != cells;
+    if moved_by_user {
+        shell.selection_kept.set(false);
+    }
+    if shell.selection_kept.get() {
+        return;
+    }
+    let selected = app.selection_text.borrow().clone();
+    if moved_by_user || selected.is_empty() {
+        crate::render::apply_selection_highlight(frame, app);
+        return;
+    }
+    let Some(((column, row), _)) = cells else {
+        return;
+    };
+    if !app
+        .last_selectable_area
+        .get()
+        .contains(Position::new(column, row))
+    {
+        shell.selection_kept.set(true);
+        return;
+    }
+    let unmarked = frame.buffer_mut().clone();
+    crate::render::apply_selection_highlight(frame, app);
+    if *app.selection_text.borrow() != selected {
+        *frame.buffer_mut() = unmarked;
+        *app.selection_text.borrow_mut() = selected;
+        shell.selection_kept.set(true);
     }
 }
 
@@ -1831,6 +1882,12 @@ fn status_line(appearance: &Appearance, app: &App, view: &TranscriptView) -> Lin
     } else {
         vec![Span::styled("ready", appearance.style(Role::TextMuted))]
     };
+    if app.next_shell.selection_kept.get() {
+        spans.push(Span::styled(
+            format!(" {separator} selection kept"),
+            appearance.style(Role::TextMuted),
+        ));
+    }
     let running = view
         .tools
         .iter()

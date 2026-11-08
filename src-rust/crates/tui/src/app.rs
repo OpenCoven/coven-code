@@ -5291,10 +5291,9 @@ impl App {
             KeybindingResult::Unbound | KeybindingResult::NoMatch => {}
         }
 
-        // Clear any active text selection on key press (except Ctrl+C which copies it).
-        let is_copy =
-            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-        if !is_copy && self.selection_anchor.is_some() {
+        // Clear any active text selection on key press, except the key that
+        // copies it.
+        if !self.keeps_selection_for_copy(&key) && self.selection_anchor.is_some() {
             self.selection_anchor = None;
             self.selection_focus = None;
             *self.selection_text.borrow_mut() = String::new();
@@ -6873,6 +6872,19 @@ impl App {
         *self.selection_text.borrow_mut() = String::new();
     }
 
+    /// Whether this key reaches the copy branch with the selection still set.
+    /// That branch takes Ctrl with `c` or `C`, and a terminal can report
+    /// Ctrl+Shift+C either way, so Next keeps the selection for both. Classic
+    /// keeps it only for `c`, as it always has.
+    fn keeps_selection_for_copy(&self, key: &KeyEvent) -> bool {
+        key.modifiers.contains(KeyModifiers::CONTROL)
+            && match key.code {
+                KeyCode::Char('c') => true,
+                KeyCode::Char('C') => self.renderer == crate::application::UiRenderer::Next,
+                _ => false,
+            }
+    }
+
     /// Show context menu at the given position.
     fn show_context_menu(&mut self, x: u16, y: u16, kind: ContextMenuKind) {
         self.context_menu_state = Some(ContextMenuState {
@@ -7017,6 +7029,12 @@ impl App {
     pub fn handle_paste_data(&mut self, data: String) {
         use crate::image_paste::PastedImage;
         use crate::prompt_input::detect_pasted_path;
+
+        // Fast typing arrives as a paste burst, so it has to let go of a
+        // selection the way a typed key does.
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.clear_selection();
+        }
 
         if let Some(path) = detect_pasted_path(&data) {
             let ext = path
@@ -8280,6 +8298,27 @@ mod tests {
         let mut app = App::new(config, cost_tracker);
         app.install_command_catalog(test_command_catalog());
         app
+    }
+
+    #[test]
+    fn next_keeps_a_selection_for_either_form_of_ctrl_shift_c() {
+        let ctrl_shift = |c| {
+            KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )
+        };
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('c')));
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('C')));
+        assert!(
+            !app.keeps_selection_for_copy(&KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT))
+        );
+        // Classic is unchanged.
+        app.renderer = crate::application::UiRenderer::Classic;
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('c')));
+        assert!(!app.keeps_selection_for_copy(&ctrl_shift('C')));
     }
 
     #[test]
