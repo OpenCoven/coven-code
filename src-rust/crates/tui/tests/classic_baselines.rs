@@ -112,8 +112,9 @@ fn streaming() -> App {
     // not carry a wall-clock elapsed value.
     app.turn_start = None;
     app.is_streaming = true;
-    app.streaming_text =
-        "The engine exposes a small versioned CLI surface that coven drives over".to_string();
+    app.streaming_text = "The engine exposes a small versioned CLI surface that coven drives over"
+        .to_string()
+        .into();
     app
 }
 

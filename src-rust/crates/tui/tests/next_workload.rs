@@ -87,7 +87,8 @@ fn workload_app() -> App {
         Message::assistant(diff),
         Message::assistant(binary),
         Message::assistant("final words"),
-    ];
+    ]
+    .into();
     app
 }
 
@@ -223,12 +224,13 @@ fn kept_rows_never_outlive_what_they_were_built_from() {
             Message::user("alpha question"),
             Message::assistant("bravo answer"),
             Message::assistant("charlie notes"),
-        ];
+        ]
+        .into();
         app
     }
     fn same_as_fresh(app: &App, messages: &[Message], width: u16, step: &str) {
         let mut fresh = small();
-        fresh.messages = messages.to_vec();
+        fresh.messages = messages.to_vec().into();
         fresh.next_presentation = app.next_presentation.clone();
         assert_eq!(
             text_of(&draw(app, width, 24)),
@@ -335,7 +337,10 @@ fn observation_frame_cost_while_streaming() {
     app.messages.truncate(1);
     let mut times = Vec::new();
     for lines in [1_000, 100_000] {
-        app.streaming_text = (1..=lines).map(|n| format!("live line {n:06}\n")).collect();
+        app.streaming_text = (1..=lines)
+            .map(|n| format!("live line {n:06}\n"))
+            .collect::<String>()
+            .into();
         draw(&app, 80, 24);
         let started = std::time::Instant::now();
         for n in 0..3 {

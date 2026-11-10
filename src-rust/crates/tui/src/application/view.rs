@@ -225,7 +225,12 @@ impl TranscriptView {
         Self::with_entries(app, Vec::new(), String::new())
     }
 
-    fn with_entries(app: &App, entries: Vec<TranscriptEntry>, live_text: String) -> Self {
+    /// Small per-frame state; Next retains its tracked tool projection separately.
+    pub fn project_chrome(app: &App) -> Self {
+        Self::with_tools(app, Vec::new(), String::new(), Vec::new())
+    }
+
+    pub(crate) fn project_tools(app: &App) -> Vec<ToolActivity> {
         let project_root = app.config.project_dir.as_deref();
         let cancelling = app.cancellation != crate::application::TurnCancellation::Idle;
         let interrupted = app.interrupted_tools.iter().map(|block| {
@@ -236,8 +241,7 @@ impl TranscriptView {
             };
             (block, state)
         });
-        let tools = app
-            .tool_use_blocks
+        app.tool_use_blocks
             .iter()
             .map(|block| {
                 let state = match block.status {
@@ -257,7 +261,20 @@ impl TranscriptView {
                 output: block.output_preview.as_deref().map(terminal_safe),
                 allowed: app.permission_decisions.get(&block.id).copied(),
             })
-            .collect();
+            .collect()
+    }
+
+    fn with_entries(app: &App, entries: Vec<TranscriptEntry>, live_text: String) -> Self {
+        let tools = Self::project_tools(app);
+        Self::with_tools(app, entries, live_text, tools)
+    }
+
+    fn with_tools(
+        app: &App,
+        entries: Vec<TranscriptEntry>,
+        live_text: String,
+        tools: Vec<ToolActivity>,
+    ) -> Self {
         let permission = app
             .permission_request
             .as_ref()

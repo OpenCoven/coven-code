@@ -17,6 +17,7 @@
 pub mod layout;
 pub mod primitives;
 pub mod style;
+pub mod tracked;
 
 use crate::app::App;
 use crate::application::view::{
@@ -225,6 +226,7 @@ pub struct ShellState {
     anchor: Cell<ReadingAnchor>,
     suspend_requested: bool,
     transcript_rows: RefCell<TranscriptRows>,
+    tool_rows: RefCell<ToolRows>,
     /// Whether the last frame showed the current notice. A notice waits while
     /// the inspector replaces the transcript, and Esc must not dismiss it unseen.
     notice_shown: Cell<bool>,
@@ -238,32 +240,32 @@ pub struct ShellState {
 
 type SelectionCells = ((u16, u16), (u16, u16));
 
-/// Wrapped rows of the conversation, kept between frames so a frame does not
-/// re-sanitize or re-wrap text that has not changed. Each frame still compares
-/// every message with the source of its rows, and tool rows are still built
-/// per frame, so a very long session keeps a small linear cost. This also holds
-/// a second copy of the conversation's text.
-///
-/// A message is rebuilt when the content it is shown from changes. That is
-/// checked by comparing content, not through a change counter: `App::messages`
-/// is written from many places, and a missed signal would show stale text.
+/// Rows retained until their tracked source or layout changes. Mutation
+/// identities include indexed edits and same-length replacement; unchanged
+/// frames need neither source clones nor comparisons of preceding history.
 #[derive(Debug, Default)]
 struct TranscriptRows {
     layout: Option<(usize, Appearance, Density)>,
     messages: Vec<(EntrySource, Vec<Line<'static>>)>,
     messages_total: usize,
+    message_ends: Vec<usize>,
+    messages_stamp: Option<tracked::Stamp>,
+    live_stamp: Option<tracked::Stamp>,
     /// The complete lines of the streaming answer that `live_rows` shows.
-    live_source: String,
-    live_rows: Vec<Line<'static>>,
-    /// Rows of the streaming answer's unfinished last line.
-    live_partial: Vec<Line<'static>>,
+    live_processed: usize,
+    // Index visual rows without reallocating/copying the entire streaming
+    // history when an appended row crosses a contiguous vector's capacity.
+    live_rows: std::collections::BTreeMap<usize, Line<'static>>,
+    live_tail: Vec<Line<'static>>,
+    #[cfg(test)]
+    visited_groups: Cell<usize>,
 }
 
 impl TranscriptRows {
     fn sync(
         &mut self,
-        messages: &[Message],
-        streaming: &str,
+        messages: &tracked::Tracked<Vec<Message>>,
+        streaming: &tracked::Tracked<String>,
         presentation: &NextPresentation,
         width: usize,
     ) {
@@ -271,89 +273,243 @@ impl TranscriptRows {
         if self.layout != Some(layout) {
             self.layout = Some(layout);
             self.messages.clear();
-            self.live_source.clear();
+            self.live_processed = 0;
+            self.live_tail.clear();
+            self.messages_stamp = None;
+            self.live_stamp = None;
             self.live_rows.clear();
         }
-        self.messages.truncate(messages.len());
-        for (index, message) in messages.iter().enumerate() {
-            let source = EntrySource::of(message);
-            match self.messages.get_mut(index) {
-                Some((cached, _)) if *cached == source => {}
-                slot => {
-                    let rows = source
-                        .project()
-                        .map(|entry| entry_lines(presentation, &entry))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .flat_map(|line| wrap_line(line, width))
-                        .collect();
-                    match slot {
-                        Some(cached) => *cached = (source, rows),
-                        None => self.messages.push((source, rows)),
+        let stamp = messages.stamp();
+        if self.messages_stamp.as_ref() != Some(&stamp) {
+            let first = messages
+                .take_dirty_from()
+                .min(self.messages.len())
+                .min(messages.len());
+            self.messages.truncate(messages.len());
+            for (index, message) in messages.iter().enumerate().skip(first) {
+                let source = EntrySource::of(message);
+                match self.messages.get_mut(index) {
+                    Some((cached, _)) if *cached == source => {}
+                    slot => {
+                        let rows = source
+                            .project()
+                            .map(|entry| entry_lines(presentation, &entry))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|line| wrap_line(line, width))
+                            .collect();
+                        match slot {
+                            Some(cached) => *cached = (source, rows),
+                            None => self.messages.push((source, rows)),
+                        }
                     }
                 }
             }
+            self.message_ends.truncate(first);
+            let mut total = self.message_ends.last().copied().unwrap_or(0);
+            for (_, rows) in self.messages.iter().skip(first) {
+                total += rows.len();
+                self.message_ends.push(total);
+            }
+            self.messages_total = total;
+            self.messages_stamp = Some(stamp);
         }
-        self.messages_total = self.messages.iter().map(|(_, rows)| rows.len()).sum();
-        self.sync_live(streaming, presentation, width);
+        let stamp = streaming.stamp();
+        if self.live_stamp.as_ref() != Some(&stamp) {
+            let dirty = streaming.take_dirty_from();
+            if self.live_stamp.is_none()
+                || dirty < self.live_processed
+                || streaming.len() < self.live_processed
+            {
+                self.live_processed = 0;
+                self.live_tail.clear();
+                self.live_rows.clear();
+            }
+            self.sync_live(streaming, presentation, width);
+            self.live_stamp = Some(stamp);
+        }
     }
 
-    /// `terminal_safe` and line splitting look at one character at a time, so
-    /// text split after a newline gives the same rows as the whole text.
+    /// Rewrap only the final two visual rows and the new delta. Keeping two
+    /// rows lets a newly extended grapheme move back across the last wrap
+    /// boundary (variation selectors and ZWJ sequences can change its width).
+    /// Earlier visual rows are indexed and never copied on ordinary append.
     fn sync_live(&mut self, streaming: &str, presentation: &NextPresentation, width: usize) {
         let appearance = &presentation.appearance;
-        let wrapped = |text: &str| -> Vec<Line<'static>> {
-            terminal_safe(text)
-                .lines()
-                .flat_map(|content| wrap_line(text_line(appearance, content), width))
-                .collect()
-        };
-        let complete = streaming.rfind('\n').map_or(0, |newline| newline + 1);
-        let (complete, partial) = streaming.split_at(complete);
-        if !complete.starts_with(self.live_source.as_str()) {
-            self.live_source.clear();
-            self.live_rows.clear();
+        for piece in streaming[self.live_processed..].split_inclusive('\n') {
+            let newline = piece.ends_with('\n');
+            let text = piece.strip_suffix('\n').unwrap_or(piece);
+            let mut suffix = String::new();
+            for row in &self.live_tail {
+                for span in &row.spans {
+                    suffix.push_str(&span.content);
+                }
+            }
+            suffix.push_str(&terminal_safe(text));
+            let mut rows = if suffix.is_empty() {
+                Vec::new()
+            } else {
+                wrap_line(text_line(appearance, &suffix), width)
+            };
+            let retained = if newline { 0 } else { 2 };
+            let complete = rows.len().saturating_sub(retained);
+            for row in rows.drain(..complete) {
+                self.live_rows.insert(self.live_rows.len(), row);
+            }
+            self.live_tail = rows;
+            if newline && complete == 0 {
+                // A genuine blank logical line still occupies one row.
+                self.live_rows
+                    .insert(self.live_rows.len(), text_line(appearance, ""));
+            }
         }
-        let new = &complete[self.live_source.len()..];
-        if !new.is_empty() {
-            self.live_rows.extend(wrapped(new));
-            self.live_source.push_str(new);
-        }
-        self.live_partial = wrapped(partial);
+        self.live_processed = streaming.len();
     }
 
     /// Up to `count` rows from row `start`, across the messages, then `tools`
     /// (tool rows and the live label), then the streaming answer.
     fn visible(&self, tools: &[Line<'static>], start: usize, count: usize) -> Vec<Line<'static>> {
-        let mut skip = start;
+        #[cfg(test)]
+        self.visited_groups.set(0);
+        let first = self.message_ends.partition_point(|end| *end <= start);
+        let mut skip = start.saturating_sub(if first == 0 {
+            0
+        } else {
+            self.message_ends[first - 1]
+        });
         let mut lines = Vec::with_capacity(count);
-        let groups = self
-            .messages
-            .iter()
-            .map(|(_, rows)| rows.as_slice())
-            .chain([
-                tools,
-                self.live_rows.as_slice(),
-                self.live_partial.as_slice(),
-            ]);
+        // Equal cumulative ends describe display-empty messages. Jump over
+        // each run instead of walking invisible tool/thinking-only history.
+        let groups =
+            std::iter::successors((first < self.messages.len()).then_some(first), |&index| {
+                let end = self.message_ends[index];
+                let next = self
+                    .message_ends
+                    .partition_point(|candidate| *candidate <= end);
+                (next < self.messages.len()).then_some(next)
+            })
+            .map(|index| self.messages[index].1.as_slice())
+            .chain([tools]);
         for rows in groups {
+            #[cfg(test)]
+            self.visited_groups.set(self.visited_groups.get() + 1);
             if lines.len() == count {
-                break;
+                return lines;
             }
             if skip >= rows.len() {
                 skip -= rows.len();
                 continue;
             }
-            let wanted = count - lines.len();
-            lines.extend(rows[skip..].iter().take(wanted).cloned());
+            lines.extend(rows[skip..].iter().take(count - lines.len()).cloned());
             skip = 0;
+        }
+        if lines.len() < count {
+            lines.extend(
+                self.live_rows
+                    .range(skip..)
+                    .take(count - lines.len())
+                    .map(|(_, row)| row.clone()),
+            );
+            // The tail follows every indexed complete visual row.
+            if lines.len() < count {
+                let tail_skip = skip.saturating_sub(self.live_rows.len());
+                lines.extend(
+                    self.live_tail
+                        .iter()
+                        .skip(tail_skip)
+                        .take(count - lines.len())
+                        .cloned(),
+                );
+            }
         }
         lines
     }
 
     /// Rows `visible` can return, given the size of `tools`.
     fn total(&self, tools: usize) -> usize {
-        self.messages_total + tools + self.live_rows.len() + self.live_partial.len()
+        self.messages_total + tools + self.live_rows.len() + self.live_tail.len()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ToolKey {
+    active: tracked::Stamp,
+    interrupted: tracked::Stamp,
+    decisions: tracked::Stamp,
+    cancellation: TurnCancellation,
+    project: Option<std::path::PathBuf>,
+    live: bool,
+}
+
+#[derive(Debug, Default)]
+struct ToolRows {
+    key: Option<ToolKey>,
+    layout: Option<(usize, Appearance)>,
+    tools: Vec<ToolActivity>,
+    rows: Vec<Line<'static>>,
+    running: usize,
+    detail_layout: Option<(usize, Appearance)>,
+    details: Vec<Line<'static>>,
+}
+
+impl ToolRows {
+    fn sync_details(&mut self, presentation: &NextPresentation, width: usize) {
+        let layout = (width, presentation.appearance);
+        if self.detail_layout != Some(layout) {
+            let appearance = &presentation.appearance;
+            self.details = self
+                .tools
+                .iter()
+                .flat_map(|tool| {
+                    std::iter::once(tool_line(appearance, tool, true))
+                        .chain(tool_detail(appearance, tool))
+                })
+                .flat_map(|line| wrap_line(line, width))
+                .collect();
+            self.detail_layout = Some(layout);
+        }
+    }
+
+    fn sync(&mut self, app: &App, width: usize) {
+        let key = ToolKey {
+            active: app.tool_use_blocks.stamp(),
+            interrupted: app.interrupted_tools.stamp(),
+            decisions: app.permission_decisions.stamp(),
+            cancellation: app.cancellation,
+            project: app.config.project_dir.clone(),
+            live: !app.streaming_text.is_empty(),
+        };
+        let changed = self.key.as_ref() != Some(&key);
+        if changed {
+            self.tools = TranscriptView::project_tools(app);
+            self.running = self
+                .tools
+                .iter()
+                .filter(|tool| tool.state == ToolActivityState::Running)
+                .count();
+            self.key = Some(key);
+            self.detail_layout = None;
+        }
+        let layout = (width, app.next_presentation.appearance);
+        if changed || self.layout != Some(layout) {
+            self.rows = self
+                .tools
+                .iter()
+                .flat_map(|tool| {
+                    wrap_line(
+                        tool_line(&app.next_presentation.appearance, tool, false),
+                        width,
+                    )
+                })
+                .collect();
+            if !app.streaming_text.is_empty() {
+                self.rows.push(primitives::transcript_label(
+                    &app.next_presentation.appearance,
+                    "coven",
+                ));
+            }
+            self.layout = Some(layout);
+        }
     }
 }
 
@@ -495,7 +651,7 @@ pub fn render_next(frame: &mut Frame, app: &App) {
 
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
-    let view = TranscriptView::project_without_text(app);
+    let view = TranscriptView::project_chrome(app);
     let area = frame.area();
     let width = usize::from(area.width.max(1));
 
@@ -523,6 +679,16 @@ pub fn render_next(frame: &mut Frame, app: &App) {
         app.next_shell.inspector.is_some() && approval.is_none(),
         hint_rows,
         u16::try_from(composer.len()).unwrap_or(u16::MAX),
+    );
+
+    app.next_shell.tool_rows.borrow_mut().sync(
+        app,
+        usize::from(
+            layout
+                .transcript
+                .map_or(area.width, |pane| pane.width)
+                .max(1),
+        ),
     );
 
     frame.render_widget(
@@ -754,8 +920,9 @@ fn composer_cursor(draft: &str, cursor: usize, width: usize) -> (usize, usize) {
     let walk = |text: &str| {
         let mut row = 0;
         let mut used = COMPOSER_LEAD.min(width);
-        for ch in text.chars() {
-            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let span = Span::raw(text);
+        for grapheme in span.styled_graphemes(ratatui::style::Style::default()) {
+            let cells = unicode_width::UnicodeWidthStr::width(grapheme.symbol);
             if used + cells > width && used > 0 {
                 row += 1;
                 used = 0;
@@ -866,24 +1033,6 @@ fn entry_lines(presentation: &NextPresentation, entry: &TranscriptEntry) -> Vec<
     }));
     if presentation.density == Density::Comfortable {
         lines.push(Line::default());
-    }
-    lines
-}
-
-/// Rows between the committed messages and the streaming answer.
-fn tool_and_label_lines(
-    presentation: &NextPresentation,
-    view: &TranscriptView,
-    streaming: bool,
-) -> Vec<Line<'static>> {
-    let appearance = &presentation.appearance;
-    let mut lines: Vec<Line<'static>> = view
-        .tools
-        .iter()
-        .map(|tool| tool_line(appearance, tool, false))
-        .collect();
-    if streaming {
-        lines.push(primitives::transcript_label(appearance, "coven"));
     }
     lines
 }
@@ -1137,28 +1286,24 @@ fn approval_lines(
     }
 }
 
-fn render_transcript(frame: &mut Frame, app: &App, view: &TranscriptView, area: Rect) {
+fn render_transcript(frame: &mut Frame, app: &App, _view: &TranscriptView, area: Rect) {
     let presentation = &app.next_presentation;
     let appearance = &presentation.appearance;
     let width = usize::from(area.width.max(1));
-    let tools: Vec<Line<'static>> =
-        tool_and_label_lines(presentation, view, !app.streaming_text.is_empty())
-            .into_iter()
-            .flat_map(|line| wrap_line(line, width))
-            .collect();
+    let tools = app.next_shell.tool_rows.borrow();
     let mut rows = app.next_shell.transcript_rows.borrow_mut();
     rows.sync(&app.messages, &app.streaming_text, presentation, width);
     // A scrolled reader gets a notice row at the bottom of the pane.
     let notice_rows = usize::from(!app.auto_scroll && area.height > 1);
     let height = usize::from(area.height).saturating_sub(notice_rows);
     let (start, unseen) = app.next_shell.window(
-        rows.total(tools.len()),
+        rows.total(tools.rows.len()),
         height,
         area.width,
         app.auto_scroll,
         app.scroll_offset,
     );
-    let mut lines = rows.visible(&tools, start, height);
+    let mut lines = rows.visible(&tools.rows, start, height);
     if notice_rows > 0 {
         lines.resize(height, Line::default());
         let jump = app
@@ -1219,7 +1364,7 @@ fn render_inspector(
         _ => {}
     }
     let body = match page {
-        InspectorPage::Activity => activity_page(appearance, app, view),
+        InspectorPage::Activity => Vec::new(),
         InspectorPage::Session => session_page(appearance, app),
         InspectorPage::Work => work_page(appearance, app),
         InspectorPage::Research => research_page(appearance, app),
@@ -1266,6 +1411,46 @@ fn render_inspector(
     let footer_rows = footer.len().min(height);
     header.truncate(height - footer_rows);
     let body_rows = height - footer_rows - header.len();
+    if page == InspectorPage::Activity {
+        let (prefix, suffix) = activity_page(appearance, app, view);
+        let prefix: Vec<_> = prefix
+            .into_iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+        let suffix: Vec<_> = suffix
+            .into_iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+        let mut tools = app.next_shell.tool_rows.borrow_mut();
+        tools.sync_details(&app.next_presentation, width);
+        let total = prefix.len() + tools.details.len() + suffix.len();
+        let scroll_max = total.saturating_sub(body_rows);
+        app.next_shell.inspector_scroll_max.set(scroll_max);
+        let mut skip = app.next_shell.inspector_scroll.min(scroll_max);
+        let mut visible = Vec::with_capacity(body_rows);
+        for rows in [
+            prefix.as_slice(),
+            tools.details.as_slice(),
+            suffix.as_slice(),
+        ] {
+            if skip >= rows.len() {
+                skip -= rows.len();
+                continue;
+            }
+            visible.extend(rows[skip..].iter().take(body_rows - visible.len()).cloned());
+            skip = 0;
+            if visible.len() == body_rows {
+                break;
+            }
+        }
+        let mut lines = header;
+        lines.extend(visible);
+        lines.resize(height - footer_rows, Line::default());
+        lines.extend(footer.into_iter().take(footer_rows));
+        frame.render_widget(Clear, area);
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
     let scroll_max = body.len().saturating_sub(body_rows);
     app.next_shell.inspector_scroll_max.set(scroll_max);
     let scroll = app.next_shell.inspector_scroll.min(scroll_max);
@@ -1286,7 +1471,11 @@ fn field(appearance: &Appearance, name: &str, value: String) -> Line<'static> {
     ])
 }
 
-fn activity_page(appearance: &Appearance, app: &App, view: &TranscriptView) -> Vec<Line<'static>> {
+fn activity_page(
+    appearance: &Appearance,
+    app: &App,
+    view: &TranscriptView,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let mut lines = Vec::new();
     if app.cancellation != TurnCancellation::Idle {
         lines.push(primitives::status_message(
@@ -1303,16 +1492,15 @@ fn activity_page(appearance: &Appearance, app: &App, view: &TranscriptView) -> V
             "a response is streaming",
         ));
     }
-    if view.tools.is_empty() {
+    let tools = app.next_shell.tool_rows.borrow();
+    if tools.tools.is_empty() {
         lines.push(Line::from(Span::styled(
             "No tool activity in this turn.",
             appearance.style(Role::TextMuted),
         )));
     }
-    for tool in &view.tools {
-        lines.push(tool_line(appearance, tool, true));
-        lines.extend(tool_detail(appearance, tool));
-    }
+    let prefix = lines;
+    let mut lines = Vec::new();
     if !app.queued_messages.is_empty() {
         lines.push(field(
             appearance,
@@ -1328,7 +1516,7 @@ fn activity_page(appearance: &Appearance, app: &App, view: &TranscriptView) -> V
         "Tool detail and diffs arrive with #411.",
         appearance.style(Role::TextSubtle),
     )));
-    lines
+    (prefix, lines)
 }
 
 fn session_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
@@ -1829,8 +2017,8 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     let mut used = 0;
     for span in line.spans {
         let mut text = String::new();
-        for ch in span.content.chars() {
-            let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        for grapheme in span.styled_graphemes(span.style) {
+            let cells = unicode_width::UnicodeWidthStr::width(grapheme.symbol);
             if used + cells > width && used > 0 {
                 if !text.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut text), span.style));
@@ -1838,7 +2026,7 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 used = 0;
             }
-            text.push(ch);
+            text.push_str(grapheme.symbol);
             used += cells;
         }
         if !text.is_empty() {
@@ -1897,11 +2085,7 @@ fn status_line(appearance: &Appearance, app: &App, view: &TranscriptView) -> Lin
             appearance.style(Role::TextMuted),
         ));
     }
-    let running = view
-        .tools
-        .iter()
-        .filter(|tool| tool.state == ToolActivityState::Running)
-        .count();
+    let running = app.next_shell.tool_rows.borrow().running;
     if running > 0 {
         spans.push(Span::styled(
             format!(" {separator} {running} tool(s) running"),
@@ -1952,6 +2136,17 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     #[test]
+    fn wrapped_graphemes_and_composer_cursor_use_the_same_cell_width() {
+        let text = "\u{1f469}\u{200d}\u{1f4bb}x";
+        let wrapped = wrap_line(Line::from(text.to_string()), 2);
+        assert_eq!(
+            wrapped.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["\u{1f469}\u{200d}\u{1f4bb}", "x"]
+        );
+        assert_eq!(composer_cursor(text, text.len(), 4), (1, 1));
+    }
+
+    #[test]
     fn wrapping_keeps_each_span_style_on_both_sides_of_the_break() {
         let red = Style::default().fg(Color::Red);
         let blue = Style::default().fg(Color::Blue);
@@ -1982,121 +2177,203 @@ mod tests {
 #[cfg(test)]
 mod transcript_rows_tests {
     use super::*;
-
-    fn first_row_address(rows: &TranscriptRows, index: usize) -> *const Line<'static> {
-        rows.messages[index].1.as_ptr()
-    }
-
-    #[test]
-    fn only_a_changed_message_is_rebuilt() {
-        let presentation = NextPresentation::default();
-        let mut messages = vec![
-            Message::user("first"),
-            Message::assistant("second"),
-            Message::assistant("third"),
-        ];
-        let mut rows = TranscriptRows::default();
-        rows.sync(&messages, "", &presentation, 40);
-        let kept = [
-            first_row_address(&rows, 0),
-            first_row_address(&rows, 1),
-            first_row_address(&rows, 2),
-        ];
-
-        rows.sync(&messages, "", &presentation, 40);
-        assert_eq!(first_row_address(&rows, 0), kept[0]);
-        assert_eq!(first_row_address(&rows, 1), kept[1]);
-        assert_eq!(first_row_address(&rows, 2), kept[2]);
-
-        messages[1] = Message::assistant("SECOND");
-        rows.sync(&messages, "", &presentation, 40);
-        assert_eq!(first_row_address(&rows, 0), kept[0]);
-        assert_eq!(first_row_address(&rows, 2), kept[2]);
-        let text: String = rows.messages[1]
-            .1
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
-        assert!(text.contains("SECOND"), "{text}");
-
-        rows.sync(&messages, "", &presentation, 20);
-        let total = rows.total(0);
-        assert!(total > 0);
-        assert_eq!(rows.visible(&[], total, 5).len(), 0);
-    }
-
-    #[test]
-    fn visible_rows_cross_messages_and_reach_the_live_rows() {
-        let presentation = NextPresentation::default();
-        let messages = vec![Message::user("one"), Message::assistant("two")];
-        let mut rows = TranscriptRows::default();
-        rows.sync(&messages, "live\npart", &presentation, 40);
-        let tools = vec![Line::from("tool")];
-        let total = rows.total(tools.len());
-        let all: Vec<String> = rows
-            .visible(&tools, 0, total)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(all.len(), total);
-        assert_eq!(all[total - 3..], ["tool", "live", "part"]);
-        assert_eq!(rows.visible(&tools, total - 1, 10).len(), 1);
-        assert_eq!(rows.visible(&tools, 1, 2).len(), 2);
-    }
+    use tracked::Tracked;
 
     fn live_text(rows: &TranscriptRows) -> Vec<String> {
-        rows.visible(&[], rows.messages_total, usize::MAX >> 40)
+        rows.visible(&[], rows.messages_total, 10_000)
             .iter()
             .map(ToString::to_string)
             .collect()
     }
 
-    /// Rows built in pieces must equal rows built from the whole text.
+    #[test]
+    fn visible_rows_skip_display_empty_history_groups() {
+        let presentation = NextPresentation::default();
+        let mut messages: Tracked<Vec<Message>> = vec![Message::user("first")].into();
+        for _ in 0..100_000 {
+            messages.push(Message::assistant(""));
+        }
+        messages.push(Message::assistant("last"));
+        let live = "live".into();
+        let mut rows = TranscriptRows::default();
+        rows.sync(&messages, &live, &presentation, 80);
+        let all = rows
+            .visible(&[], 0, 24)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(all.iter().any(|line| line == "first"));
+        assert!(all.iter().any(|line| line == "last"));
+        assert!(all.iter().any(|line| line == "live"));
+        assert!(
+            rows.visited_groups.get() <= 3,
+            "visited {} groups",
+            rows.visited_groups.get()
+        );
+    }
+
+    #[test]
+    fn only_a_changed_message_is_rebuilt() {
+        let presentation = NextPresentation::default();
+        let mut messages: Tracked<Vec<Message>> = vec![
+            Message::user("first"),
+            Message::assistant("second"),
+            Message::assistant("third"),
+        ]
+        .into();
+        let live: Tracked<String> = String::new().into();
+        let mut rows = TranscriptRows::default();
+        rows.sync(&messages, &live, &presentation, 40);
+        let kept = [rows.messages[0].1.as_ptr(), rows.messages[2].1.as_ptr()];
+        let stamp = rows.messages_stamp.clone();
+        rows.sync(&messages, &live, &presentation, 40);
+        assert_eq!(rows.messages_stamp, stamp);
+        messages[1] = Message::assistant("SECOND");
+        rows.sync(&messages, &live, &presentation, 40);
+        assert_eq!(rows.messages[0].1.as_ptr(), kept[0]);
+        assert_eq!(rows.messages[2].1.as_ptr(), kept[1]);
+        assert!(rows.messages[1]
+            .1
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>()
+            .contains("SECOND"));
+        rows.sync(&messages, &live, &presentation, 20);
+        assert!(rows.total(0) > 0);
+        assert!(rows.visible(&[], rows.total(0), 5).is_empty());
+    }
+
+    #[test]
+    fn visible_rows_cross_messages_and_reach_the_live_rows() {
+        let presentation = NextPresentation::default();
+        let messages = vec![Message::user("one"), Message::assistant("two")].into();
+        let live = "live\npart".into();
+        let mut rows = TranscriptRows::default();
+        rows.sync(&messages, &live, &presentation, 40);
+        let tools = vec![Line::from("tool")];
+        let total = rows.total(tools.len());
+        let all = rows
+            .visible(&tools, 0, total)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(all.len(), total);
+        assert_eq!(all[total - 3..], ["tool", "live", "part"]);
+        for start in 0..=total {
+            for count in [0, 1, 2, 5, total] {
+                assert_eq!(
+                    rows.visible(&tools, start, count)
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    all.iter()
+                        .skip(start)
+                        .take(count)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_stream_shows_the_same_rows_however_it_arrives() {
         let presentation = NextPresentation::default();
-        let text = "alpha\u{1b}]52;c;eA\u{7}\r\n\n漢字 ".to_string()
+        let messages = Vec::<Message>::new().into();
+        // Include width-changing selectors and ZWJ across chunk boundaries.
+        let text = "alpha\u{1b}]52;c;eA\u{7}\r\n\n漢字 \u{1f469}\u{200d}\u{1f4bb} ".to_string()
             + &"wide 漢字 text ".repeat(9)
             + "\nlast line\n\ntail \u{9b}31m end";
         let mut whole = TranscriptRows::default();
-        whole.sync(&[], &text, &presentation, 17);
+        whole.sync(&messages, &text.clone().into(), &presentation, 17);
         for step in [1, 2, 3, 7, 40] {
             let mut rows = TranscriptRows::default();
-            let cuts: Vec<usize> = text
+            let mut live: Tracked<String> = String::new().into();
+            let mut from = 0;
+            for cut in text
                 .char_indices()
                 .map(|(index, _)| index)
                 .step_by(step)
                 .chain([text.len()])
-                .collect();
-            for cut in cuts {
-                rows.sync(&[], &text[..cut], &presentation, 17);
+            {
+                live.push_str(&text[from..cut]);
+                rows.sync(&messages, &live, &presentation, 17);
+                from = cut;
             }
             assert_eq!(live_text(&rows), live_text(&whole), "step {step}");
         }
     }
 
     #[test]
+    fn chunk_boundaries_match_fresh_wrapping_for_context_sensitive_graphemes() {
+        let presentation = NextPresentation::default();
+        let messages = Vec::<Message>::new().into();
+        let alphabet = [
+            "a",
+            " ",
+            "\r",
+            "\t",
+            "漢",
+            "\u{1f469}",
+            "\u{200d}",
+            "\u{1f4bb}",
+            "\u{fe0e}",
+            "\u{fe0f}",
+            "\u{301}",
+            "\u{1f1fa}",
+            "\u{1f1f8}",
+            "ل",
+            "ا",
+            "\n",
+        ];
+        let mut seed = 17_u64;
+        let mut chunks = Vec::new();
+        for _ in 0..128 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            chunks.push(alphabet[((seed >> 32) as usize) % alphabet.len()]);
+        }
+        for width in [1, 2, 3, 4, 7, 17, 40] {
+            let mut rows = TranscriptRows::default();
+            let mut live: Tracked<String> = String::new().into();
+            for chunk in &chunks {
+                live.push_str(chunk);
+                rows.sync(&messages, &live, &presentation, width);
+                let mut fresh = TranscriptRows::default();
+                fresh.sync(&messages, &live.clone().into(), &presentation, width);
+                assert_eq!(
+                    live_text(&rows),
+                    live_text(&fresh),
+                    "width {width}, source {:?}",
+                    live.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn stream_rows_are_kept_as_it_grows_and_dropped_when_it_is_replaced() {
         let presentation = NextPresentation::default();
+        let messages = Vec::<Message>::new().into();
+        let mut live: Tracked<String> = "one\ntwo\nthr".into();
         let mut rows = TranscriptRows::default();
-        rows.sync(&[], "one\ntwo\nthr", &presentation, 40);
-        let kept = rows.live_rows.as_ptr();
-        rows.sync(&[], "one\ntwo\nthree", &presentation, 40);
+        rows.sync(&messages, &live, &presentation, 40);
+        let first = rows.live_rows.get(&0).unwrap() as *const Line<'static>;
+        live.push_str("ee");
+        rows.sync(&messages, &live, &presentation, 40);
         assert_eq!(
-            rows.live_rows.as_ptr(),
-            kept,
-            "no rebuild for a partial line"
+            rows.live_rows.get(&0).unwrap() as *const Line<'static>,
+            first
         );
         assert_eq!(live_text(&rows), ["one", "two", "three"]);
-
-        // Same length, different text: a retry starting over.
-        rows.sync(&[], "uno\ndos\ntres", &presentation, 40);
+        live = "uno\ndos\ntres".into();
+        rows.sync(&messages, &live, &presentation, 40);
         assert_eq!(live_text(&rows), ["uno", "dos", "tres"]);
-        rows.sync(&[], "", &presentation, 40);
+        live.clear();
+        rows.sync(&messages, &live, &presentation, 40);
         assert!(live_text(&rows).is_empty());
-        // A narrower pane rewraps kept rows.
-        rows.sync(&[], "abcdefgh\nx", &presentation, 40);
-        rows.sync(&[], "abcdefgh\nx", &presentation, 4);
+        live.push_str("abcdefgh\nx");
+        rows.sync(&messages, &live, &presentation, 40);
+        rows.sync(&messages, &live, &presentation, 4);
         assert_eq!(live_text(&rows), ["abcd", "efgh", "x"]);
     }
 }

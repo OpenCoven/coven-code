@@ -2036,9 +2036,9 @@ fn handle_bridge_permission_response(
     tool_use_id: &str,
     response: claurst_bridge::PermissionResponseKind,
 ) -> Option<(String, bool)> {
-    if !dialog
+    if dialog
         .as_ref()
-        .is_some_and(|pr| pr.tool_use_id == tool_use_id)
+        .is_none_or(|pr| pr.tool_use_id != tool_use_id)
     {
         return None;
     }
@@ -2299,11 +2299,11 @@ fn rollback_unattempted_turn(
         removed
     };
     remove_owned(messages);
-    let mut visible = std::mem::take(&mut app.messages);
+    let mut visible = std::mem::take(&mut app.messages).into_inner();
     if remove_owned(&mut visible) > 0 {
         app.replace_messages(visible);
     } else {
-        app.messages = visible;
+        app.messages = visible.into();
     }
     remove_owned(&mut session.messages);
     for checkpoint in &mut session.checkpoints {
