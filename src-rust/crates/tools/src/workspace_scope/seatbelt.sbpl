@@ -116,3 +116,12 @@
 ; PTYs created before entering seatbelt may lack the extension; allow ioctl
 ; on those slave ttys so interactive shells detect a TTY and remain functional.
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
+
+; Coven supervises a single process group. A shell and its children may fork
+; and exec, but may not leave the group. Darwin's posix_spawn attributes can
+; also create a separate group or session, so this profile requires fork/exec.
+(deny syscall-unix
+  (syscall-number SYS_setsid)
+  (syscall-number SYS_setpgid)
+  (syscall-number SYS_posix_spawn)
+  (with send-signal SIGSYS))

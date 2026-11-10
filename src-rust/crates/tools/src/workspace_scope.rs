@@ -284,6 +284,7 @@ pub fn kernel_probe(args: &[String]) -> io::Result<()> {
     if count == 0 || count >= paths.len() {
         return Err(invalid("Invalid sandbox probe root count."));
     }
+    verify_process_group_boundary()?;
     for (i, path) in paths.iter().enumerate() {
         let path = CString::new(path.as_str()).map_err(io::Error::other)?;
         // SAFETY: both strings are NUL-terminated and live through the call;
@@ -305,6 +306,47 @@ pub fn kernel_probe(args: &[String]) -> io::Result<()> {
                 "Workspace sandbox reported unexpected file access.",
             ));
         }
+    }
+    Ok(())
+}
+
+/// A pathname sandbox alone cannot keep a child in Coven's process group.
+#[cfg(target_os = "macos")]
+fn verify_process_group_boundary() -> io::Result<()> {
+    use nix::libc;
+    let refused =
+        |result| result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    // SAFETY: these syscalls act only on the short-lived probe process.
+    if !refused(unsafe { libc::setsid() }) || !refused(unsafe { libc::setpgid(0, 0) }) {
+        return Err(io::Error::other(
+            "The workspace sandbox did not contain the process group.",
+        ));
+    }
+    let mut child = 0;
+    let program = c"/usr/bin/true".as_ptr();
+    let argv = [program.cast_mut(), std::ptr::null_mut()];
+    let environment = [std::ptr::null_mut()];
+    // SAFETY: program, argument and environment pointers live until
+    // posix_spawn returns. Both arrays are null-terminated. If permitted
+    // unexpectedly, reap the harmless child before rejecting the policy.
+    let status = unsafe {
+        libc::posix_spawn(
+            &mut child,
+            program,
+            std::ptr::null(),
+            std::ptr::null(),
+            argv.as_ptr(),
+            environment.as_ptr(),
+        )
+    };
+    if status == 0 {
+        // SAFETY: child is the owned, successfully launched process.
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
+    }
+    if status != libc::EPERM {
+        return Err(io::Error::other(
+            "The workspace sandbox did not contain process spawning.",
+        ));
     }
     Ok(())
 }
