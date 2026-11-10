@@ -275,6 +275,10 @@ struct Cli {
     )]
     hosted_repair: bool,
 
+    /// Bind the headless engine to the Chat host's per-run workspace policy.
+    #[arg(long, hide = true)]
+    chat_workspace_policy_v1: Option<PathBuf>,
+
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
     workload: Option<String>,
@@ -441,12 +445,30 @@ fn abandon_interactive_turn(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use claurst_tools::workspace_scope;
+    use std::path::Path;
+    let raw_args: Vec<String> = std::env::args().collect();
+    match raw_args.get(1).map(String::as_str) {
+        Some(workspace_scope::KERNEL_PROBE) => {
+            return Ok(workspace_scope::kernel_probe(&raw_args[2..])?);
+        }
+        Some(workspace_scope::VERIFY_POLICY) => {
+            let [_, _, file] = raw_args.as_slice() else {
+                anyhow::bail!("Workspace sandbox verification requires exactly one policy file.");
+            };
+            let file = Path::new(file);
+            workspace_scope::WorkspaceScope::read(file, &std::env::current_dir()?)?
+                .verify(file)
+                .await?
+                .write_receipt(std::io::stdout().lock())?;
+            return Ok(());
+        }
+        _ => {}
+    }
     // Perform a best-effort, non-fatal relocation of the engine home from the
     // legacy ~/.coven-code/ to ~/.coven/code/ when running under the unified
     // coven CLI.  Must run before any Settings::load() or auth/config access.
     claurst_core::home_migration::migrate_if_needed();
-
-    let raw_args: Vec<String> = std::env::args().collect();
 
     // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
     // This must run before the top-level --version handler so
@@ -599,6 +621,27 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     };
 
+    let scoped_workspace = cli.chat_workspace_policy_v1.as_deref();
+    let verified_scope = if let Some(file) = &scoped_workspace {
+        anyhow::ensure!(
+            is_headless
+                && cli.output_format == CliOutputFormat::StreamJson
+                && cli.context.is_none()
+                && !cli.hosted_review
+                && !cli.hosted_repair
+                && !cli.dangerously_skip_permissions
+                && cli.add_dir.is_empty(),
+            "Workspace access requires a dedicated Coven Code Chat stream."
+        );
+        Some(
+            workspace_scope::WorkspaceScope::read(file, &cwd)?
+                .verify(file)
+                .await?,
+        )
+    } else {
+        None
+    };
+
     debug!(cwd = %cwd.display(), "Starting Coven Code");
 
     // Load settings from disk (hierarchical: global < project)
@@ -658,6 +701,20 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.auto_commits {
         config.auto_commits = Some(true);
+    }
+    if scoped_workspace.is_some() {
+        // The scoped tools are selected independently of hosted review. Reuse
+        // its startup gates for plugins, MCP and automatic memory writes.
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_write_tools = true;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
+        config.hosted_review.allow_user_memory = true;
+        config.hooks.clear();
+        config.formatter.clear();
+        config.auto_commits = Some(false);
+        config.permission_mode = PermissionMode::Default;
     }
     config.project_dir = Some(cwd.clone());
     if let Some(p) = &cli.provider {
@@ -725,6 +782,16 @@ async fn main() -> anyhow::Result<()> {
         (String::new(), false)
     };
 
+    if let Some(scope) = verified_scope {
+        anyhow::ensure!(
+            active_provider != "anthropic" || !api_key.is_empty(),
+            "Workspace write access with Coven Code requires direct Anthropic credentials. Configure an API key or use an engine with verified subscription support."
+        );
+        scope.emit_admission(&cwd, std::io::stdout().lock())?;
+        scope.install()?;
+        config.additional_dirs = workspace_scope::additional_roots();
+    }
+
     let client_config = claurst_api::client::ClientConfig {
         api_key: api_key.clone(),
         api_base: config.resolve_anthropic_api_base(),
@@ -755,7 +822,12 @@ async fn main() -> anyhow::Result<()> {
         &settings,
     )));
 
-    let permission_handler: Arc<dyn claurst_core::PermissionHandler> = if is_headless {
+    let permission_handler: Arc<dyn claurst_core::PermissionHandler> = if scoped_workspace.is_some()
+    {
+        Arc::new(workspace_scope::ScopedPermissionHandler(
+            permission_manager.clone(),
+        ))
+    } else if is_headless {
         Arc::new(AutoPermissionHandler::with_manager(
             permission_manager.clone(),
         ))
@@ -941,13 +1013,15 @@ async fn main() -> anyhow::Result<()> {
     // Spawn the background cron scheduler (fires cron tasks at scheduled times).
     // Cancelled automatically when the process exits since we use a shared token.
     let cron_cancel = tokio_util::sync::CancellationToken::new();
-    claurst_query::start_cron_scheduler(
-        client.clone(),
-        tools.clone(),
-        tool_ctx.clone(),
-        query_config.clone(),
-        cron_cancel.clone(),
-    );
+    if scoped_workspace.is_none() {
+        claurst_query::start_cron_scheduler(
+            client.clone(),
+            tools.clone(),
+            tool_ctx.clone(),
+            query_config.clone(),
+            cron_cancel.clone(),
+        );
+    }
 
     // --print / headless mode
     if is_headless {

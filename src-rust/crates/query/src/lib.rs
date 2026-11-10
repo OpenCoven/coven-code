@@ -2218,8 +2218,10 @@ pub async fn run_query_loop(
                 // that keys added at runtime via /connect are picked up
                 // immediately — even when the provider was pre-registered at
                 // startup with a stale or missing key.
-                let runtime_provider =
-                    claurst_api::registry::runtime_provider_for(&provider_id_str);
+                let runtime_provider = claurst_api::registry::runtime_provider_for(
+                    &provider_id_str,
+                    !claurst_tools::workspace_scope::active(),
+                );
 
                 let registry_provider = if runtime_provider.is_some() {
                     // Fresh auth_store key available — use it instead of the

@@ -85,7 +85,10 @@ pub fn canonical_provider_id(id: &str) -> &str {
     }
 }
 
-pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
+pub fn runtime_provider_for(
+    provider_id: &str,
+    allow_delegated_tools: bool,
+) -> Option<Arc<dyn LlmProvider>> {
     match provider_id {
         "codex" | "openai-codex" => {
             return CodexProvider::from_stored().map(|p| Arc::new(p) as Arc<dyn LlmProvider>);
@@ -98,7 +101,7 @@ pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
         Some(key) if !key.is_empty() => provider_from_key(provider_id, key),
         // Claude without an API key runs through the local `claude` CLI —
         // never through an imported OAuth token, which gets rate limited.
-        _ if provider_id == "anthropic" => {
+        _ if provider_id == "anthropic" && allow_delegated_tools => {
             Some(Arc::new(ClaudeCliProvider::new()) as Arc<dyn LlmProvider>)
         }
         _ => None,

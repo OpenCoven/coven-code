@@ -84,7 +84,7 @@ impl Tool for FileWriteTool {
         // Ensure parent directories exist
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                if let Err(e) = crate::workspace_scope::create_dir_all(parent).await {
                     return ToolResult::error(format!(
                         "Failed to create directory {}: {}",
                         parent.display(),
@@ -112,7 +112,7 @@ impl Tool for FileWriteTool {
         let is_new = !existed;
 
         // Write the file
-        if let Err(e) = tokio::fs::write(&path, &params.content).await {
+        if let Err(e) = crate::workspace_scope::write(&path, &params.content).await {
             return ToolResult::error(format!("Failed to write file {}: {}", path.display(), e));
         }
 

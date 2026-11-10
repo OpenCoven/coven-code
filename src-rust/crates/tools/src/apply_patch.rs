@@ -435,7 +435,7 @@ impl Tool for ApplyPatchTool {
         // ----------------------------------------------------------------
 
         for (path, original_bytes, new_content) in &to_write {
-            if let Err(e) = tokio::fs::write(path, new_content).await {
+            if let Err(e) = crate::workspace_scope::write(path, new_content).await {
                 return ToolResult::error(format!("Failed to write {}: {}", path.display(), e));
             }
             ctx.record_file_change(

@@ -104,9 +104,10 @@ impl Tool for NotebookEditTool {
 
         // Permission check
         let reviewed = ctx.files_under_review([path.clone()]).await;
-        if let Err(e) = ctx.check_permission(
+        if let Err(e) = ctx.check_permission_for_path(
             self.name(),
             &format!("Edit notebook {}", path.display()),
+            path.clone(),
             false,
         ) {
             return ToolResult::error(e.to_string());
@@ -185,7 +186,7 @@ impl Tool for NotebookEditTool {
                         return ToolResult::error(format!("Failed to serialize notebook: {}", e))
                     }
                 };
-                if let Err(e) = tokio::fs::write(&path, &updated).await {
+                if let Err(e) = crate::workspace_scope::write(&path, &updated).await {
                     return ToolResult::error(format!("Failed to write notebook: {}", e));
                 }
                 ctx.record_file_change(
