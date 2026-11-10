@@ -85,7 +85,12 @@ pub fn canonical_provider_id(id: &str) -> &str {
     }
 }
 
-pub fn runtime_provider_for(
+pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
+    runtime_provider_for_with_delegation(provider_id, true)
+}
+
+/// Scoped callers can require providers whose tools remain in this runtime.
+pub fn runtime_provider_for_with_delegation(
     provider_id: &str,
     allow_delegated_tools: bool,
 ) -> Option<Arc<dyn LlmProvider>> {

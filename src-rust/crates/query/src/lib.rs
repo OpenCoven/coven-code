@@ -2218,7 +2218,7 @@ pub async fn run_query_loop(
                 // that keys added at runtime via /connect are picked up
                 // immediately — even when the provider was pre-registered at
                 // startup with a stale or missing key.
-                let runtime_provider = claurst_api::registry::runtime_provider_for(
+                let runtime_provider = claurst_api::registry::runtime_provider_for_with_delegation(
                     &provider_id_str,
                     !claurst_tools::workspace_scope::active(),
                 );
