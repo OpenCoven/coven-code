@@ -55,6 +55,7 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+pub mod workspace_scope;
 pub mod worktree;
 
 // Re-exports for convenience.
@@ -405,7 +406,10 @@ impl ToolContext {
                 claurst_core::error::ClaudeError::PermissionDenied(error.to_string())
             })?;
         let interactive_reason = request.details.clone();
-        let decision = self.permission_handler.request_permission(&request);
+        let decision = workspace_scope::apply(
+            &request,
+            self.permission_handler.request_permission(&request),
+        );
         let result = match decision {
             PermissionDecision::Allow | PermissionDecision::AllowPermanently => Ok(()),
             PermissionDecision::Ask { reason } if self.non_interactive => {
@@ -757,8 +761,13 @@ pub fn all_tool_names() -> &'static [&'static str] {
 
 /// Return all built-in tools (excluding AgentTool, which lives in cc-query).
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
-    vec![
-        Box::new(PtyBashTool),
+    let bash: Box<dyn Tool> = if workspace_scope::active() {
+        Box::new(BashTool)
+    } else {
+        Box::new(PtyBashTool)
+    };
+    let tools: Vec<Box<dyn Tool>> = vec![
+        bash,
         Box::new(FileReadTool),
         Box::new(FileEditTool),
         Box::new(FileWriteTool),
@@ -805,11 +814,23 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         // Computer Use is only available when compiled with the feature flag.
         #[cfg(feature = "computer-use")]
         Box::new(computer_use::ComputerUseTool),
-    ]
+    ];
+    tools
+        .into_iter()
+        .filter(|tool| !workspace_scope::active() || workspace_scope::permits_tool(tool.name()))
+        .collect()
 }
 
 /// Find a tool by name (case-sensitive).
 pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
+    if workspace_scope::active() {
+        if !workspace_scope::permits_tool(name) {
+            return None;
+        }
+        if name == "Bash" {
+            return Some(Box::new(BashTool));
+        }
+    }
     match name {
         claurst_core::constants::TOOL_NAME_BASH => Some(Box::new(PtyBashTool)),
         claurst_core::constants::TOOL_NAME_FILE_READ => Some(Box::new(FileReadTool)),

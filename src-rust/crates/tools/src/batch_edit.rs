@@ -97,8 +97,20 @@ impl Tool for BatchEditTool {
             .map(|edit| ctx.resolve_path(&edit.file_path))
             .collect();
         let reviewed = ctx.files_under_review(targets).await;
-        if let Err(e) =
-            ctx.check_permission(self.name(), &format!("BatchEdit: {}", description), false)
+        if crate::workspace_scope::active() {
+            for edit in &params.edits {
+                let path = ctx.resolve_path(&edit.file_path);
+                if let Err(e) = ctx.check_permission_for_path(
+                    self.name(),
+                    &format!("BatchEdit: {description}"),
+                    path.clone(),
+                    false,
+                ) {
+                    return ToolResult::error(e.to_string());
+                }
+            }
+        } else if let Err(e) =
+            ctx.check_permission(self.name(), &format!("BatchEdit: {description}"), false)
         {
             return ToolResult::error(e.to_string());
         }
@@ -175,7 +187,7 @@ impl Tool for BatchEditTool {
 
         for (path_str, original, new_content) in &prepared {
             let path = std::path::Path::new(path_str);
-            match tokio::fs::write(path, new_content).await {
+            match crate::workspace_scope::write(path, new_content).await {
                 Ok(()) => {
                     written.push((path_str.clone(), original.clone()));
                     ctx.record_file_change(
@@ -189,7 +201,7 @@ impl Tool for BatchEditTool {
                     // Attempt rollback of already-written files.
                     let mut rollback_errors: Vec<String> = Vec::new();
                     for (rb_path, rb_original) in &written {
-                        if let Err(re) = std::fs::write(rb_path, rb_original) {
+                        if let Err(re) = crate::workspace_scope::write(rb_path, rb_original).await {
                             rollback_errors.push(format!("  rollback {}: {}", rb_path, re));
                         }
                     }

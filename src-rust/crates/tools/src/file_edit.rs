@@ -137,7 +137,7 @@ impl Tool for FileEditTool {
         };
 
         // Write back
-        if let Err(e) = tokio::fs::write(&path, &new_content).await {
+        if let Err(e) = crate::workspace_scope::write(&path, &new_content).await {
             return ToolResult::error(format!("Failed to write file {}: {}", path.display(), e));
         }
 
