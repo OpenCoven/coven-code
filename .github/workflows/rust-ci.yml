@@ -129,6 +129,12 @@ jobs:
         working-directory: src-rust
         run: cargo test --workspace --locked --quiet
 
+      # Allocation/work gates are serial because their counting allocator is
+      # process-global. Wall-clock observations stay opt-in and are not CI gates.
+      - name: Next transcript allocation regressions
+        working-directory: src-rust
+        run: cargo test -p claurst-tui --locked --test next_frame_perf -- --ignored --skip measure_active_frames --test-threads=1
+
       # Contract-freeze fixtures (coven/docs/ENGINE-CONTRACT.md surfaces,
       # slash-command registry, default keybindings, Classic TUI baselines).
       # Already covered by the workspace run above; repeated by name so a

@@ -131,8 +131,9 @@ fn hostile_app(variant: Variant) -> App {
                 is_error: Some(false),
             },
         ]),
-    ];
-    app.streaming_text = HOSTILE.to_string();
+    ]
+    .into();
+    app.streaming_text = HOSTILE.to_string().into();
     app.status_message = Some(HOSTILE.to_string());
     app.session_title = Some(HOSTILE.to_string());
     app.tool_use_blocks = vec![ToolUseBlock {
@@ -142,7 +143,8 @@ fn hostile_app(variant: Variant) -> App {
         status: ToolStatus::Running,
         output_preview: Some(HOSTILE.to_string()),
         input_json: json!({ "command": HOSTILE }).to_string(),
-    }];
+    }]
+    .into();
     if variant == Variant::Approval {
         app.permission_request = Some(
             PermissionRequest::bash(

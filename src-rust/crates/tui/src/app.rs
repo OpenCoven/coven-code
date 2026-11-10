@@ -605,7 +605,7 @@ pub struct App {
     // Core state
     pub config: Config,
     pub cost_tracker: Arc<CostTracker>,
-    pub messages: Vec<Message>,
+    pub messages: crate::next::tracked::Tracked<Vec<Message>>,
     /// Combined display list kept in sync with `messages`: real conversation turns
     /// plus injected system annotations. Used by the renderer so it can iterate
     /// a single sequence instead of merging two lists on every frame.
@@ -620,7 +620,7 @@ pub struct App {
     /// Transcript message selected by a pointer interaction, when any.
     pub selected_transcript_message: Option<usize>,
     pub is_streaming: bool,
-    pub streaming_text: String,
+    pub streaming_text: crate::next::tracked::Tracked<String>,
     pub streaming_thinking: String,
     pub status_message: Option<String>,
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
@@ -628,7 +628,7 @@ pub struct App {
     pub should_exit: bool,
 
     // Extended state
-    pub tool_use_blocks: Vec<ToolUseBlock>,
+    pub tool_use_blocks: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
     pub permission_request: Option<PermissionRequest>,
     pub frame_count: u64,
     pub token_count: u32,
@@ -683,10 +683,11 @@ pub struct App {
     /// The current view was saved by a resume request still in flight.
     resume_saved_view: bool,
     /// Permission decisions by tool use id (true = allowed).
-    pub permission_decisions: std::collections::HashMap<String, bool>,
+    pub permission_decisions:
+        crate::next::tracked::Tracked<std::collections::HashMap<String, bool>>,
     /// Tool rows of a cancelled turn, kept as evidence until the next user
     /// turn; the live list is cleared on cancel.
-    pub interrupted_tools: Vec<ToolUseBlock>,
+    pub interrupted_tools: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
     // CLI control-key routing and the normal UI handler resolve each event once.
     resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
@@ -1248,7 +1249,7 @@ impl App {
         let mut app = Self {
             config,
             cost_tracker,
-            messages: Vec::new(),
+            messages: Vec::new().into(),
             display_messages: Vec::new(),
             system_annotations: Vec::new(),
             input: String::new(),
@@ -1258,12 +1259,12 @@ impl App {
             scroll_offset: 0,
             selected_transcript_message: None,
             is_streaming: false,
-            streaming_text: String::new(),
+            streaming_text: String::new().into(),
             streaming_thinking: String::new(),
             status_message: None,
             spinner_verb: None,
             should_exit: false,
-            tool_use_blocks: Vec::new(),
+            tool_use_blocks: Vec::new().into(),
             permission_request: None,
             frame_count: 0,
             token_count: 0,
@@ -1290,8 +1291,8 @@ impl App {
             scope_views: std::collections::HashMap::new(),
             pending_resume: None,
             resume_saved_view: false,
-            permission_decisions: std::collections::HashMap::new(),
-            interrupted_tools: Vec::new(),
+            permission_decisions: std::collections::HashMap::new().into(),
+            interrupted_tools: Vec::new().into(),
             resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,
@@ -1763,7 +1764,7 @@ impl App {
         }
 
         let thinking = std::mem::take(&mut self.streaming_thinking);
-        let text = std::mem::take(&mut self.streaming_text);
+        let text = std::mem::take(&mut self.streaming_text).into_inner();
 
         let mut blocks = Vec::new();
         if !thinking.trim().is_empty() {
@@ -2919,7 +2920,7 @@ impl App {
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        self.messages = messages;
+        self.messages = messages.into();
         // Resume, rewind and clear replace the conversation; interruption
         // evidence from the old one no longer describes what is shown.
         self.interrupted_tools.clear();

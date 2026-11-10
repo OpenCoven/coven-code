@@ -106,7 +106,8 @@ fn research_app() -> App {
             "HTTP 404 Not Found when fetching https://example.com/gone",
             true,
         ),
-    ];
+    ]
+    .into();
     app.next_shell.inspector = Some(InspectorPage::Research);
     app
 }
@@ -178,7 +179,8 @@ fn an_interrupted_call_is_not_shown_as_pending() {
         "toolu_cut",
         "WebFetch",
         json!({"url": "https://example.com/slow"}),
-    )];
+    )]
+    .into();
     app.next_shell.inspector = Some(InspectorPage::Research);
     assert!(draw(&app, 80, 24).contains("no result yet"));
     app.interrupted_tools.push(claurst_tui::app::ToolUseBlock {
@@ -230,7 +232,8 @@ fn a_failed_fetch_never_shows_credentials_or_query() {
             "HTTP 401 Unauthorized when fetching https://user:secret@api.example.com/v1?token=abc",
             true,
         ),
-    ];
+    ]
+    .into();
     app.next_shell.inspector = Some(InspectorPage::Research);
     let text = draw(&app, 160, 30);
     assert!(text.contains("HTTP 401"), "{text}");
@@ -248,7 +251,7 @@ fn a_search_whose_output_is_not_parsed_says_so() {
             "**Wikipedia**\nRatatui is a library\nURL: https://example.com/\n\n- related\n  https://example.com/r\n",
             false,
         ),
-    ];
+    ].into();
     app.next_shell.inspector = Some(InspectorPage::Research);
     let text = draw(&app, 100, 30);
     assert!(text.contains("none parsed"), "{text}");
@@ -264,7 +267,8 @@ fn a_call_without_a_result_after_the_next_prompt_is_not_pending() {
             json!({"url": "https://example.com/slow"}),
         ),
         claurst_core::types::Message::user("next prompt"),
-    ];
+    ]
+    .into();
     app.next_shell.inspector = Some(InspectorPage::Research);
     let text = draw(&app, 80, 24);
     assert!(!text.contains("no result yet"), "{text}");

@@ -831,7 +831,7 @@ mod tests {
     fn test_ctrl_c_cancels_streaming() {
         let mut app = make_app();
         app.is_streaming = true;
-        app.streaming_text = "partial".to_string();
+        app.streaming_text = "partial".to_string().into();
         app.handle_key_event(ctrl(KeyCode::Char('c')));
         assert!(!app.is_streaming);
         assert!(!app.should_exit);
@@ -1690,7 +1690,7 @@ mod tests {
     fn test_turn_complete_flushes_streaming_text() {
         let mut app = make_app();
         app.is_streaming = true;
-        app.streaming_text = "partial response".to_string();
+        app.streaming_text = "partial response".to_string().into();
         app.handle_query_event(claurst_query::QueryEvent::TurnComplete {
             turn: 1,
             stop_reason: "end_turn".to_string(),

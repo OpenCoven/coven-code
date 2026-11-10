@@ -3762,7 +3762,7 @@ mod welcome_tests {
         assert!(should_render_status_row(&app));
         app.streaming_thinking = "let me think".to_string();
         assert_eq!(streaming_status_label(&app), "Reasoning");
-        app.streaming_text = "let me think".to_string();
+        app.streaming_text = "let me think".to_string().into();
         // Text is more user-visible than reasoning, so it wins the race.
         assert_eq!(streaming_status_label(&app), "Generating");
     }
@@ -3789,7 +3789,7 @@ mod welcome_tests {
         // "thinking" / "thinking…" are placeholders — they should NOT win
         // over more informative state.
         app.status_message = Some("thinking".to_string());
-        app.streaming_text = "hello".to_string();
+        app.streaming_text = "hello".to_string().into();
         assert_eq!(streaming_status_label(&app), "Generating");
     }
 

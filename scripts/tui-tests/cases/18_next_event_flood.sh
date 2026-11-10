@@ -112,7 +112,9 @@ _next_event_flood_journey() {
   s="$(tui_capture)"
   assert_contains "$s" "working" "the burst was still running when the key painted"
   tui_keys Escape
-  if wait_for "cancelling" 5; then _pass "Escape is acknowledged during the burst"
+  # A fast cancellation can settle before tmux captures the intermediate frame.
+  # Match both "cancelling" and "Cancelled", as the Ctrl+C check does below.
+  if wait_for "ancel" 5; then _pass "Escape is acknowledged during the burst"
   else _fail "Escape is acknowledged during the burst" "$(tui_capture)"; fi
   if wait_absent "cancelling" 180; then _pass "the cancelled turn settles"
   else _fail "the cancelled turn settles" "$(tui_capture)"; fi
