@@ -90,6 +90,107 @@ async fn remove_worktree(git_root: &Path, worktree_dir: &Path) {
 
 pub struct AgentTool;
 
+/// Execution acknowledgement, independent of Monitor's presentation status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentCompletion {
+    Succeeded,
+    Partial,
+    Cancelled,
+    Failed,
+}
+
+struct BackgroundObservation {
+    lease: Arc<std::fs::File>,
+    cancel: CancellationToken,
+    completed: tokio::sync::oneshot::Sender<AgentCompletion>,
+}
+
+/// Internal Tool adapter preserves the boxed async Tool boundary that breaks
+/// recursive query futures, while transporting typed lifecycle ownership.
+pub(crate) struct ObservedAgentTool {
+    observation: std::sync::Mutex<Option<BackgroundObservation>>,
+}
+
+impl ObservedAgentTool {
+    pub(crate) fn new(
+        lease: Arc<std::fs::File>,
+        cancel: CancellationToken,
+    ) -> (Self, tokio::sync::oneshot::Receiver<AgentCompletion>) {
+        let (completed, receiver) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                observation: std::sync::Mutex::new(Some(BackgroundObservation {
+                    lease,
+                    cancel,
+                    completed,
+                })),
+            },
+            receiver,
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for ObservedAgentTool {
+    fn name(&self) -> &str {
+        AgentTool.name()
+    }
+    fn description(&self) -> &str {
+        AgentTool.description()
+    }
+    fn permission_level(&self) -> PermissionLevel {
+        AgentTool.permission_level()
+    }
+    fn input_schema(&self) -> Value {
+        AgentTool.input_schema()
+    }
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let observation = match self.observation.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => return ToolResult::error("Agent lifecycle ownership is poisoned"),
+        };
+        let Some(observation) = observation else {
+            return ToolResult::error("Observed agent can only be launched once");
+        };
+        AgentTool::execute_agent(input, ctx, Some(observation)).await
+    }
+}
+
+async fn supervise_background<Q, C>(
+    query: Q,
+    cleanup: C,
+    agent_id: String,
+    observation: Option<BackgroundObservation>,
+) where
+    Q: std::future::Future<Output = QueryOutcome> + Send + 'static,
+    C: std::future::Future<Output = ()> + Send,
+{
+    // Joining a separate query task makes its panic observable and still lets
+    // this owner attempt cleanup. No abort handle is exposed to the waiter.
+    let outcome = match tokio::spawn(query).await {
+        Ok(outcome) => outcome,
+        Err(error) => QueryOutcome::Error(claurst_core::error::ClaudeError::Api(format!(
+            "Agent execution task failed: {error}"
+        ))),
+    };
+    cleanup.await;
+    let completion = match &outcome {
+        QueryOutcome::EndTurn { .. } => AgentCompletion::Succeeded,
+        QueryOutcome::MaxTokens { .. } => AgentCompletion::Partial,
+        QueryOutcome::Cancelled => AgentCompletion::Cancelled,
+        QueryOutcome::Error(_) | QueryOutcome::BudgetExceeded { .. } => AgentCompletion::Failed,
+    };
+    let result_text = format_outcome(&outcome);
+    claurst_core::tasks::global_registry().append_output(&agent_id, &result_text);
+    claurst_core::tasks::global_registry()
+        .finish_if_running(&agent_id, background_status(&outcome, &result_text));
+    if let Some(observer) = observation {
+        // The supervisor retains its lease through the cleanup attempt and
+        // bookkeeping. The caller retains another through state persistence.
+        let _ = observer.completed.send(completion);
+    }
+}
+
 fn build_model_registry() -> ModelRegistry {
     let mut registry = ModelRegistry::new();
     if let Some(cache_dir) = dirs::cache_dir() {
@@ -217,10 +318,24 @@ impl Tool for AgentTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        AgentTool::execute_agent(input, ctx, None).await
+    }
+}
+
+impl AgentTool {
+    async fn execute_agent(
+        input: Value,
+        ctx: &ToolContext,
+        observation: Option<BackgroundObservation>,
+    ) -> ToolResult {
         let params: AgentInput = match serde_json::from_value(input) {
             Ok(p) => p,
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
+
+        if observation.is_some() && !params.run_in_background {
+            return ToolResult::error("Observed agent requires background execution");
+        }
 
         let mut child_ctx = ctx.clone();
         child_ctx.goal_turn = ctx.goal_turn.for_child_work();
@@ -266,7 +381,7 @@ impl Tool for AgentTool {
 
         let system_prompt = params.system_prompt.unwrap_or_else(|| {
             let mut prompt = "You are a specialized AI agent helping with a specific sub-task. \
-             Complete the task thoroughly and return your findings."
+                 Complete the task thoroughly and return your findings."
                 .to_string();
 
             // Append plugin-contributed agent definitions so the sub-agent
@@ -381,7 +496,10 @@ impl Tool for AgentTool {
         // Background mode: spawn and return agent_id immediately.
         // -----------------------------------------------------------------------
         if params.run_in_background {
-            let cancel = CancellationToken::new();
+            let cancel = observation
+                .as_ref()
+                .map(|observer| observer.cancel.clone())
+                .unwrap_or_default();
             let mut task = claurst_core::tasks::BackgroundTask::new(format!(
                 "subagent: {}",
                 params.description
@@ -400,9 +518,13 @@ impl Tool for AgentTool {
             let prompt_bg = params.prompt.clone();
             let agent_id_bg = agent_id.clone();
 
-            tokio::spawn(async move {
+            let execution_lease = observation
+                .as_ref()
+                .map(|observer| Arc::clone(&observer.lease));
+            let query = async move {
+                let _execution_lease = execution_lease;
                 let mut messages = vec![Message::user(prompt_bg)];
-                let outcome = run_query_loop(
+                run_query_loop(
                     client_bg.as_ref(),
                     &mut messages,
                     &agent_tools_bg,
@@ -413,39 +535,32 @@ impl Tool for AgentTool {
                     cancel,
                     None,
                 )
-                .await;
-
-                // Cleanup worktree if one was created.
+                .await
+            };
+            let cleanup = async move {
                 if let (Some(root), Some(wt)) = (git_root, worktree_path) {
                     remove_worktree(&root, &wt).await;
                 }
-
-                let result_text = format_outcome(&outcome);
-                claurst_core::tasks::global_registry().append_output(&agent_id_bg, &result_text);
-
-                // Only a still-running task is finished; a prior monitor
-                // cancellation is kept without a separate read-then-update race.
-                let status = background_status(&outcome, &result_text);
-                claurst_core::tasks::global_registry().finish_if_running(&agent_id_bg, status);
-
-                debug!(
-                    agent_id = %agent_id_bg,
-                    description = %description_bg,
-                    "Background agent completed"
-                );
-            });
+            };
+            tokio::spawn(supervise_background(
+                query,
+                cleanup,
+                agent_id_bg,
+                observation,
+            ));
+            debug!(description = %description_bg, "Background agent launched");
 
             return ToolResult::success(
-                serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "running",
-                    "message": format!(
-                        "Agent '{}' started in background. Use monitor with action=status/output and task_id='{}'.",
-                        params.description, agent_id
-                    )
-                })
-                .to_string(),
-            );
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": "running",
+                        "message": format!(
+                            "Agent '{}' started in background. Use monitor with action=status/output and task_id='{}'.",
+                            params.description, agent_id
+                        )
+                    })
+                    .to_string(),
+                );
         }
 
         // -----------------------------------------------------------------------
@@ -665,6 +780,176 @@ pub fn init_team_swarm_runner() {
 mod tests {
     use super::*;
     use claurst_core::{error::ClaudeError, tasks::TaskStatus, types::UsageInfo};
+
+    #[tokio::test]
+    async fn completion_receipt_follows_cleanup_and_distinguishes_partial_output() {
+        for partial in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let dream = crate::auto_dream::AutoDream::new(
+                home.path().join("memory"),
+                home.path().join("conversations"),
+            );
+            let lease = dream.acquire_lock().await.unwrap();
+            let cancel = CancellationToken::new();
+            let task = claurst_core::tasks::BackgroundTask::new("receipt fixture")
+                .with_cancel_token(cancel.clone());
+            let id = task.id.clone();
+            claurst_core::tasks::global_registry().register(task);
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let outcome = if partial {
+                QueryOutcome::MaxTokens {
+                    partial_message: Message::assistant("partial"),
+                    usage: UsageInfo::default(),
+                }
+            } else {
+                QueryOutcome::EndTurn {
+                    message: Message::assistant("done"),
+                    usage: UsageInfo::default(),
+                }
+            };
+            let supervisor = tokio::spawn(supervise_background(
+                async move { outcome },
+                async move {
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                },
+                id.clone(),
+                Some(BackgroundObservation {
+                    lease: Arc::clone(&lease),
+                    cancel,
+                    completed: tx,
+                }),
+            ));
+            entered_rx.await.unwrap();
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            drop(lease);
+            assert!(
+                dream.acquire_lock().await.is_err(),
+                "cleanup still owns exclusion"
+            );
+            release_tx.send(()).unwrap();
+            supervisor.await.unwrap();
+            assert_eq!(
+                rx.await.unwrap(),
+                if partial {
+                    AgentCompletion::Partial
+                } else {
+                    AgentCompletion::Succeeded
+                }
+            );
+            let task = claurst_core::tasks::global_registry().get(&id).unwrap();
+            assert_eq!(task.status, TaskStatus::Completed);
+            assert!(dream.acquire_lock().await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_monitor_and_dropped_waiter_do_not_release_execution_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let dream = crate::auto_dream::AutoDream::new(
+            home.path().join("memory"),
+            home.path().join("conversations"),
+        );
+        let lease = dream.acquire_lock().await.unwrap();
+        let cancel = CancellationToken::new();
+        let task = claurst_core::tasks::BackgroundTask::new("cancel receipt fixture")
+            .with_cancel_token(cancel.clone());
+        let id = task.id.clone();
+        claurst_core::tasks::global_registry().register(task);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let waiter_task = crate::auto_dream::ConsolidationTask {
+            prompt: String::new(),
+            memory_dir: home.path().join("memory"),
+            state_file: home.path().join("memory/.consolidation_state.json"),
+            lock_file: home.path().join("memory/.consolidation_lock"),
+            lock: Arc::clone(&lease),
+        };
+        let waiter = tokio::spawn(crate::auto_dream::AutoDream::finish_after_execution(
+            waiter_task,
+            rx,
+            cancel.clone(),
+            Default::default(),
+            "s".into(),
+        ));
+        let (query_started_tx, query_started_rx) = tokio::sync::oneshot::channel();
+        let worker_cancel = cancel.clone();
+        let worker_lease = Arc::clone(&lease);
+        let supervisor = tokio::spawn(supervise_background(
+            async move {
+                let _lease = worker_lease;
+                query_started_tx.send(()).unwrap();
+                worker_cancel.cancelled().await;
+                QueryOutcome::Cancelled
+            },
+            async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+            },
+            id.clone(),
+            Some(BackgroundObservation {
+                lease: Arc::clone(&lease),
+                cancel,
+                completed: tx,
+            }),
+        ));
+        query_started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(lease);
+        assert!(
+            dream.acquire_lock().await.is_err(),
+            "aborted waiter cannot unlock a live query"
+        );
+        claurst_core::tasks::global_registry().cancel(&id);
+        entered_rx.await.unwrap();
+        assert_eq!(
+            claurst_core::tasks::global_registry()
+                .get(&id)
+                .unwrap()
+                .status,
+            TaskStatus::Cancelled
+        );
+        assert!(dream.acquire_lock().await.is_err());
+        release_tx.send(()).unwrap();
+        supervisor.await.unwrap();
+        assert!(dream.acquire_lock().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn query_panic_still_attempts_cleanup_before_failed_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let dream = crate::auto_dream::AutoDream::new(
+            home.path().join("memory"),
+            home.path().join("conversations"),
+        );
+        let lease = dream.acquire_lock().await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_flag = Arc::clone(&cleaned);
+        supervise_background(
+            async { panic!("query panic fixture") },
+            async move {
+                cleanup_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            uuid::Uuid::new_v4().to_string(),
+            Some(BackgroundObservation {
+                lease,
+                cancel: CancellationToken::new(),
+                completed: tx,
+            }),
+        )
+        .await;
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(rx.await.unwrap(), AgentCompletion::Failed);
+        assert!(dream.acquire_lock().await.is_ok());
+    }
 
     #[test]
     fn monitor_cancel_stops_background_agent_request() {
