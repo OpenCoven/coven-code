@@ -177,7 +177,7 @@ impl WorkspaceScope {
                 .current_dir(&self.primary_root)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .kill_on_drop(true)
                 .status(),
         )
@@ -301,10 +301,16 @@ pub fn kernel_probe(args: &[String]) -> io::Result<()> {
         // decision, check the real UID's access without creating a file.
         let filesystem_denied =
             i < count && unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) } != 0;
-        if result != i32::from(i >= count) || filesystem_denied {
-            return Err(io::Error::other(
-                "Workspace sandbox reported unexpected file access.",
-            ));
+        if result != i32::from(i >= count) {
+            return Err(io::Error::other(format!(
+                "Workspace sandbox returned an unexpected file policy for root {i}."
+            )));
+        }
+        if filesystem_denied {
+            return Err(io::Error::other(format!(
+                "Workspace sandbox could not write to allowed folder {i}: {}",
+                io::Error::last_os_error()
+            )));
         }
     }
     Ok(())
@@ -317,9 +323,15 @@ fn verify_process_group_boundary() -> io::Result<()> {
     let refused =
         |result| result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     // SAFETY: these syscalls act only on the short-lived probe process.
-    if !refused(unsafe { libc::setsid() }) || !refused(unsafe { libc::setpgid(0, 0) }) {
+    if !refused(unsafe { libc::setsid() }) {
         return Err(io::Error::other(
-            "The workspace sandbox did not contain the process group.",
+            "The workspace sandbox did not refuse a new process session.",
+        ));
+    }
+    // SAFETY: the zero arguments mean this process and a group with its own ID.
+    if !refused(unsafe { libc::setpgid(0, 0) }) {
+        return Err(io::Error::other(
+            "The workspace sandbox did not refuse a new process group.",
         ));
     }
     let mut child = 0;
@@ -344,9 +356,9 @@ fn verify_process_group_boundary() -> io::Result<()> {
         unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
     }
     if status != libc::EPERM {
-        return Err(io::Error::other(
-            "The workspace sandbox did not contain process spawning.",
-        ));
+        return Err(io::Error::other(format!(
+            "The workspace sandbox did not refuse posix_spawn (returned {status})."
+        )));
     }
     Ok(())
 }
