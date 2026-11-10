@@ -4,6 +4,7 @@ use claurst_api::{
     providers::ClaudeCliProvider,
 };
 use claurst_core::types::{ContentBlock, Message};
+use futures::StreamExt;
 use std::{
     fs,
     os::unix::{fs::PermissionsExt, process::CommandExt},
@@ -24,6 +25,16 @@ if case == 'diagnostic':
     sys.stderr.write('  fixture startup diagnostic\n')
     sys.stderr.flush()
     sys.exit(1)
+if case == 'oversized':
+    for _ in range(1024):
+        os.write(2, b'x' * 4096)
+    os.write(2, b'final failure diagnostic\n')
+    sys.exit(1)
+if case == 'invalid-utf8':
+    os.write(2, b'partial diagnostic\xff final diagnostic\n')
+    sys.exit(1)
+if case in ('held-diagnostic', 'stream-eof'):
+    os.write(2, b'diagnostic before descendant held pipe\n')
 if case == 'success':
     print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'fixture response'}]}}), flush=True)
     print(json.dumps({'type':'result'}), flush=True)
@@ -49,10 +60,15 @@ if child == 0:
         time.sleep(0.01)
 while not (root / 'descendant').exists():
     time.sleep(0.01)
-if case == 'early-error':
+if case in ('early-error', 'held-diagnostic'):
     sys.exit(1)
-if case == 'stream-drop':
+if case in ('stream-drop', 'stream-cancel', 'stream-eof'):
     print(json.dumps({'type':'system','session_id':'fixture','model':'fixture'}), flush=True)
+if case == 'stream-eof':
+    sys.exit(1)
+if case == 'success-inherited':
+    print(json.dumps({'type':'result'}), flush=True)
+    sys.exit(0)
 time.sleep(60)
 "#;
 
@@ -180,6 +196,31 @@ fn normal_response_is_preserved() {
     run_case("success");
 }
 
+#[test]
+fn oversized_startup_diagnostic_retains_bounded_tail() {
+    run_case("oversized");
+}
+#[test]
+fn invalid_utf8_keeps_partial_diagnostics() {
+    run_case("invalid-utf8");
+}
+#[test]
+fn inherited_stderr_retains_diagnostics_without_waiting_for_eof() {
+    run_case("held-diagnostic");
+}
+#[test]
+fn stream_eof_retains_diagnostics_without_waiting_for_descendant() {
+    run_case("stream-eof");
+}
+#[test]
+fn polled_stream_cancellation_closes_stderr_reader() {
+    run_case("stream-cancel");
+}
+#[test]
+fn normal_stream_completion_closes_inherited_stderr() {
+    run_case("success-inherited");
+}
+
 async fn wait_for_pid(root: &Path) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while fs::read_to_string(root.join("pid"))
@@ -245,20 +286,57 @@ fn stderr_fixture_worker() {
                     _ = wait_for_file(&root, "descendant") => {}
                 }
             }
-        } else if case == "stream-drop" {
+        } else if case == "stream-drop" || case == "stream-cancel" {
             let stream = tokio::time::timeout(Duration::from_secs(3), provider.create_message_stream(request)).await.unwrap().unwrap();
+            let mut stream = stream;
+            if case == "stream-cancel" {
+                assert!(stream.next().await.unwrap().is_ok());
+                tokio::select! {
+                    event = stream.next() => panic!("unexpected event: {event:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
             drop(stream);
+        } else if case == "stream-eof" || case == "success-inherited" {
+            let mut stream = provider.create_message_stream(request).await.unwrap();
+            let events = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut events = Vec::new();
+                while let Some(event) = stream.next().await {
+                    if event.is_err() || matches!(&event, Ok(claurst_api::provider_types::StreamEvent::MessageStop)) {
+                        // Keep the suspended stream alive: collection must have
+                        // released the pipe before publishing its terminal event.
+                        fs::write(root.join("release"), "release").unwrap();
+                        wait_for_file(&root, "broken-pipe").await;
+                    }
+                    events.push(event);
+                }
+                events
+            }).await.expect("stream waited for inherited stderr");
+            if case == "stream-eof" {
+                assert!(events.iter().any(|event| matches!(event, Err(ProviderError::StreamError { message, .. }) if message.contains("diagnostic before descendant held pipe"))));
+            } else {
+                assert!(events.iter().all(Result::is_ok));
+                assert!(events.iter().any(|event| matches!(event, Ok(claurst_api::provider_types::StreamEvent::MessageStop))));
+            }
         } else if case == "success" {
             let response = tokio::time::timeout(Duration::from_secs(3), provider.create_message(request)).await.unwrap().unwrap();
             assert!(matches!(response.content.as_slice(), [ContentBlock::Text { text }] if text == "fixture response"));
         } else {
             let result = tokio::time::timeout(Duration::from_secs(3), provider.create_message_stream(request)).await.unwrap();
             let error = match result { Ok(_) => panic!("expected startup failure"), Err(error) => error };
-            let expected = if case == "diagnostic" { "claude CLI exited without producing output: fixture startup diagnostic" } else { "claude CLI exited without producing output" };
+            if case == "oversized" {
+                assert!(matches!(&error, ProviderError::Other { message, .. } if message.len() < 20_000 && message.contains("final failure diagnostic") && message.contains("truncated")), "{error}");
+            } else if case == "invalid-utf8" {
+                assert!(matches!(&error, ProviderError::Other { message, .. } if message.contains("partial diagnostic") && message.contains("final diagnostic")), "{error}");
+            } else if case == "held-diagnostic" {
+                assert!(matches!(&error, ProviderError::Other { message, .. } if message.contains("diagnostic before descendant held pipe")), "{error}");
+            } else {
+            let expected = if case == "diagnostic" { "claude CLI exited without producing output: fixture startup diagnostic" } else { "claude CLI exited without producing output: [stderr collection stopped before EOF]" };
             assert!(matches!(error, ProviderError::Other { message, .. } if message == expected));
+            }
         }
         wait_for_pid(&root).await;
-        if case != "success" && case != "diagnostic" {
+        if !matches!(case.as_str(), "success" | "diagnostic" | "oversized" | "invalid-utf8") {
             wait_for_file(&root, "descendant").await;
             let descendant = fs::read_to_string(root.join("descendant")).unwrap().parse::<u32>().unwrap();
             assert!(descendant >= 2);

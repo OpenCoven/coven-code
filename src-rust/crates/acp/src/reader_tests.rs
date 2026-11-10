@@ -239,3 +239,112 @@ async fn reader_error_waits_for_blocked_dispatch_then_propagates() {
     );
     assert_transport_error(result, std::io::ErrorKind::ConnectionReset);
 }
+
+#[tokio::test]
+async fn saturated_handlers_reject_excess_and_route_cancel_before_output_unblocks() {
+    use tokio::io::AsyncWriteExt;
+    let gate = Arc::new(StdMutex::new(Gate::default()));
+    let entered = Arc::new(Notify::new());
+    let server = server(Connection::new(GateWriter {
+        gate: gate.clone(),
+        entered: entered.clone(),
+    }));
+    let session =
+        sessions::SessionState::new(acp::SessionId::new("fixture"), "/unused-fixture".into());
+    let token = session.cancel_token.lock().clone();
+    server.sessions.insert(session);
+    let (mut input, reader) = tokio::io::duplex(16384);
+    let task = tokio::spawn(run_connection(server, reader));
+    for id in 0..64 {
+        input
+            .write_all(format!("{{\"id\":{id},\"method\":\"session/load\"}}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    input
+        .write_all(b"{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"fixture\"}}\n")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+        .await
+        .expect("cancel must bypass both saturated handlers and blocked output");
+    assert!(!task.is_finished());
+    {
+        let mut state = gate.lock().unwrap();
+        state.released = true;
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
+        }
+    }
+    drop(input);
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bytes = gate.lock().unwrap().bytes.clone();
+    let responses: Vec<Value> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 64);
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| r["error"]["code"] == -32601)
+            .count(),
+        32
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| r["error"]["code"] == -32000)
+            .count(),
+        32
+    );
+    let mut ids: Vec<i64> = responses
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, (0..64).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn eof_reaps_handlers_when_client_never_reads() {
+    let (_unread, writer) = tokio::io::duplex(1);
+    let server = server(Connection::new(writer));
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        run_connection(server.clone(), REQUEST),
+    )
+    .await
+    .expect("bounded shutdown must retire blocked writers");
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("ACP reader loop failed"));
+    assert_eq!(
+        Arc::strong_count(&server),
+        1,
+        "dispatcher retained server after shutdown"
+    );
+}
+
+#[tokio::test]
+async fn oversized_unterminated_input_is_rejected_before_eof() {
+    use tokio::io::AsyncWriteExt;
+    let server = server(Connection::new(tokio::io::sink()));
+    let (mut input, reader) = tokio::io::duplex(4096);
+    let task = tokio::spawn(run_connection(server, reader));
+    let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
+    input.write_all(&oversized).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = result.unwrap_err();
+    assert!(format!("{error:#}").contains("frame exceeds 8 MiB"));
+    drop(input);
+}

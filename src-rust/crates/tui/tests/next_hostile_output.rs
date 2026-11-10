@@ -76,6 +76,7 @@ fn hostile_app(variant: Variant) -> App {
     };
     let mut app = App::new(config, CostTracker::new());
     app.session_id = Some(HOSTILE.to_string());
+    app.diagnostic_log_path = Some(format!("/logs/{HOSTILE}").into());
     app.has_credentials = true;
     app.renderer = UiRenderer::Next;
     app.turn_start = None;
@@ -373,15 +374,15 @@ fn the_next_toast_shows_kind_text_and_the_way_to_dismiss_it() {
 }
 
 #[test]
-fn the_terminal_title_topic_carries_no_control_characters_in_next() {
+fn the_terminal_title_topic_carries_no_control_characters_in_both_renderers() {
     let hostile = "show me\u{7}\u{1b}]52;c;cHduZWQ=\u{7}\u{1b}]0;PWNED\u{9c}\nnext";
     let topic = claurst_tui::terminal_title_topic(UiRenderer::Next, hostile);
     assert!(!topic.chars().any(is_unsafe), "{}", topic.escape_debug());
     assert!(topic.starts_with("show me"), "{topic}");
-    // Classic is unchanged by this slice; its title is tracked separately.
+    // #437 applies the same safe title policy to Classic.
     assert_eq!(
         claurst_tui::terminal_title_topic(UiRenderer::Classic, hostile),
-        hostile
+        topic
     );
 }
 

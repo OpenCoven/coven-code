@@ -383,9 +383,7 @@ async fn record_and_transcribe(
                 let _ = event_tx.send(VoiceEvent::TranscriptReady(text)).await;
             }
             Err(e) => {
-                let _ = event_tx
-                    .send(VoiceEvent::Error(format!("Transcription failed: {}", e)))
-                    .await;
+                let _ = event_tx.send(VoiceEvent::Error(e.to_string())).await;
             }
         }
         Ok(())
@@ -512,6 +510,27 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
 // Speech-to-text transcription
 // ---------------------------------------------------------------------------
 
+// Do not retain the reqwest error as a source: its URL, redirect target and
+// lower-level diagnostics can contain credentials even with without_url().
+fn transcription_request_error(error: reqwest::Error) -> anyhow::Error {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection"
+    } else if error.is_builder() {
+        "builder"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
+    };
+    anyhow::anyhow!("Transcription failed ({category})")
+}
+
 /// Send `audio_samples` to a Whisper-compatible endpoint and return the
 /// transcript text.
 #[cfg_attr(not(feature = "voice"), allow(dead_code))]
@@ -525,15 +544,29 @@ async fn transcribe_audio(
 ) -> anyhow::Result<String> {
     let wav_data = encode_wav(audio_samples, sample_rate)?;
 
+    transcribe_wav(wav_data, api_key, language, model, endpoint_url).await
+}
+
+/// Transcribe an encoded WAV without retaining endpoint, body or credential
+/// details in errors. Recording and pre-encoded callers share this boundary.
+pub async fn transcribe_wav(
+    wav_data: Vec<u8>,
+    api_key: &str,
+    language: Option<&str>,
+    model: &str,
+    endpoint_url: Option<&str>,
+) -> anyhow::Result<String> {
     let url = endpoint_url.unwrap_or("https://api.openai.com/v1/audio/transcriptions");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
-        .build()?;
+        .build()
+        .map_err(transcription_request_error)?;
 
     let file_part = reqwest::multipart::Part::bytes(wav_data)
         .file_name("audio.wav")
-        .mime_str("audio/wav")?;
+        .mime_str("audio/wav")
+        .map_err(transcription_request_error)?;
 
     let mut form = reqwest::multipart::Form::new()
         .text("model", model.to_string())
@@ -548,19 +581,15 @@ async fn transcribe_audio(
         .bearer_auth(api_key)
         .multipart(form)
         .send()
-        .await?;
+        .await
+        .map_err(transcription_request_error)?;
 
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Transcription API returned {}: {}",
-            status,
-            body
-        ));
+        return Err(anyhow::anyhow!("Transcription API returned {status}"));
     }
 
-    let json: serde_json::Value = response.json().await?;
+    let json: serde_json::Value = response.json().await.map_err(transcription_request_error)?;
     let text = json["text"].as_str().unwrap_or("").trim().to_string();
     Ok(text)
 }
@@ -585,6 +614,9 @@ pub fn global_voice_recorder() -> Arc<Mutex<VoiceRecorder>> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod transcription_tests;
 
 #[cfg(test)]
 mod tests {

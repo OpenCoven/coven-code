@@ -112,13 +112,68 @@ async fn run_scheduler_loop(
                         cost_usd,
                         limit_usd,
                     } => {
-                        eprintln!(
-                            "[cron] task {} budget exceeded: spent ${:.4} of ${:.4}",
-                            task_id, cost_usd, limit_usd
-                        );
+                        report_budget_exceeded(&task_id, cost_usd, limit_usd);
                     }
                 }
             });
         }
+    }
+}
+
+fn report_budget_exceeded(task_id: &str, cost_usd: f64, limit_usd: f64) {
+    // Query logs are suppressed by the CLI; use the shared diagnostic target
+    // to retain this background warning. Debug formatting escapes task controls.
+    tracing::warn!(target: "claurst_core::child_diagnostics",
+        task = ?task_id, cost_usd, limit_usd, "Cron task budget exceeded");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tracing::{field::Visit, span, Event, Metadata, Subscriber};
+
+    #[derive(Clone, Default)]
+    struct Diagnostics(Arc<Mutex<String>>);
+    impl Subscriber for Diagnostics {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            // Exercise the CLI's suppression of ordinary query diagnostics.
+            !metadata.target().starts_with("claurst_query")
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            struct Fields<'a>(&'a mut String);
+            impl Visit for Fields<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    write!(self.0, "{field}={value:?};").unwrap();
+                }
+            }
+            event.record(&mut Fields(&mut self.0.lock().unwrap()));
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    #[test]
+    fn budget_warning_survives_query_filter_with_inert_task_text() {
+        let diagnostics = Diagnostics::default();
+        tracing::subscriber::with_default(diagnostics.clone(), || {
+            tracing::warn!("ordinary query message must be suppressed");
+            report_budget_exceeded("fixture\n\x1b]52;payload\x07", 1.5, 1.0);
+        });
+        let text = diagnostics.0.lock().unwrap();
+        assert!(text.contains("Cron task budget exceeded"));
+        assert!(text.contains("cost_usd=1.5") && text.contains("limit_usd=1"));
+        assert!(!text.contains("ordinary query message"));
+        assert!(!text.contains(['\x1b', '\n', '\x07']));
     }
 }

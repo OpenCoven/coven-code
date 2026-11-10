@@ -116,8 +116,9 @@ Type `/` for contextual suggestions, or open the command palette with Ctrl+K. En
 | `/stash` | `/stash <link\|attach>` | Store useful links and attachments |
 | `/stash link` | `/stash link [arguments]` | Store and manage links |
 | `/stash attach` | `/stash attach [arguments]` | Store and manage attachments |
-| `/status` | `/status [doctor]` | Show comprehensive system and session status |
+| `/status` | `/status [doctor\|logs]` | Show comprehensive system and session status |
 | `/status doctor` | `/status doctor` | Run diagnostic checks |
+| `/status logs` | `/status logs` | Read recent diagnostics in the interactive terminal |
 | `/update` | `/update <version\|notes>` | Check for updates and download the latest release |
 | `/update version` | `/update version` | Show the installed Coven version |
 | `/update notes` | `/update notes` | Show recent Coven release notes |

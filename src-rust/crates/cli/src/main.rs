@@ -176,6 +176,10 @@ struct Cli {
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
 
+    /// Save bounded private diagnostic logs for this interactive session
+    #[arg(long = "diagnostics", action = ArgAction::SetTrue)]
+    diagnostics: bool,
+
     /// API key for the active provider (overrides provider-specific env vars)
     #[arg(long = "api-key")]
     api_key: Option<String>,
@@ -585,25 +589,30 @@ async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(log_filter)
         .with_target(false);
-    let diagnostic_log = if !is_headless
-        && !cli.dump_system_prompt
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        let directory = claurst_core::config::config_home().join("logs");
-        let log = diagnostics::DiagnosticLog::open(&directory).with_context(|| {
-            format!(
-                "Could not open private diagnostics in {}",
-                directory.display()
-            )
-        })?;
-        subscriber
-            .with_ansi(false)
-            .log_internal_errors(false)
-            .with_writer(log.clone())
-            .init();
+    let diagnostic_log = if !is_headless && !cli.dump_system_prompt {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let log = if cli.diagnostics {
+            let directory = claurst_core::config::config_home().join("logs");
+            diagnostics::DiagnosticLog::open(&directory).with_context(|| {
+                format!(
+                    "Could not open private diagnostics in {}",
+                    directory.display()
+                )
+            })?
+        } else {
+            diagnostics::DiagnosticLog::memory()
+        };
+        let subscriber = subscriber.with_ansi(false).log_internal_errors(false);
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            subscriber.with_writer(log.clone()).init();
+        } else {
+            // Explicit stderr redirection remains under the caller's control.
+            subscriber
+                .with_writer(log.clone().and(std::io::stderr))
+                .init();
+        }
         Some(log)
     } else {
-        // Keep headless stdout protocol-safe and respect explicit stderr redirection.
         subscriber
             .without_time()
             .with_writer(std::io::stderr)
@@ -2428,7 +2437,7 @@ async fn settle_abandoned_turn(
             session,
             command_messages,
         ) {
-            persist_interactive_session(session, owner.as_ref()).await;
+            persist_interactive_session(session, owner.as_ref(), &mut app.notifications).await;
         }
         // Keep authority until the cancelled task has drained its partial output.
         if !query_running {
@@ -2524,9 +2533,38 @@ impl InteractiveQuery {
     }
 }
 
+const SESSION_SAVE_WARNING: &str = "Session not saved; retry before exit.";
+
+async fn save_session_with_warning(
+    session: &claurst_core::history::ConversationSession,
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
+    operation: &str,
+) -> bool {
+    use claurst_tui::notifications::NotificationKind;
+    match claurst_core::history::save_session(session).await {
+        Ok(()) => {
+            notifications.notifications.retain(|notification| {
+                notification.kind != NotificationKind::Warning
+                    || notification.message != SESSION_SAVE_WARNING
+            });
+            true
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, operation, %error, "Failed to persist session");
+            notifications.push(
+                NotificationKind::Warning,
+                SESSION_SAVE_WARNING.to_owned(),
+                None,
+            );
+            false
+        }
+    }
+}
+
 async fn persist_interactive_session(
     session: &claurst_core::history::ConversationSession,
     owner: Option<&InteractiveTurn>,
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
 ) {
     // A recoverable preparation/auth failure can finish without an attempt.
     // Delay indexing its synthetic UUID until attempted; a later stale retry
@@ -2540,7 +2578,7 @@ async fn persist_interactive_session(
         })
         .and_then(|owner| owner.synthetic_uuid.as_deref());
     // JSON is primary storage; index only the finalized transcript.
-    let _ = claurst_core::history::save_session(session).await;
+    save_session_with_warning(session, notifications, "transcript update").await;
 
     // Also index into SQLite for /search support
     {
@@ -3120,8 +3158,14 @@ async fn run_interactive(
         None => claurst_tui::application::SessionOwnership::EngineLocal,
     };
     if let Some(log) = &diagnostic_log {
+        app.diagnostic_log_path = log.path().map(std::path::Path::to_path_buf);
+        app.diagnostic_buffer = log.take_snapshot();
+        let location = log
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "memory only; not saved".into());
         app.push_system_message(
-            format!("Diagnostics: {}", log.path().display()),
+            format!("Diagnostics: {location} · /status logs"),
             claurst_tui::app::SystemMessageStyle::Info,
         );
     }
@@ -3384,11 +3428,16 @@ async fn run_interactive(
     let mut memory_poll = MemoryPoll::default();
     'main: loop {
         if let Some(log) = &diagnostic_log {
+            if let Some(snapshot) = log.take_snapshot() {
+                app.diagnostic_buffer = Some(snapshot);
+            }
             if let Some(error) = log.take_error() {
                 app.push_system_message(
                     format!(
                         "Diagnostic logging stopped: {error}. File: {}",
-                        log.path().display()
+                        log.path()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "memory only".into())
                     ),
                     claurst_tui::app::SystemMessageStyle::Warning,
                 );
@@ -3433,11 +3482,37 @@ async fn run_interactive(
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
 
-        // Draw the UI
-        terminal.draw(|f| match renderer {
-            claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
-            claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
+        // Opt-in trace timing separates widget/layout work from completed draw
+        // (including backend diff and terminal writes). No content is recorded.
+        let measure_frame =
+            tracing::enabled!(target: "coven_code::render_timing", tracing::Level::TRACE);
+        let draw_started = measure_frame.then(std::time::Instant::now);
+        let mut render_elapsed = None;
+        let mut cells = (0, 0);
+        terminal.draw(|f| {
+            let render_started = measure_frame.then(std::time::Instant::now);
+            let area = f.area();
+            cells = (area.width, area.height);
+            match renderer {
+                claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
+                claurst_tui::application::UiRenderer::Next => {
+                    claurst_tui::next::render_next(f, &app)
+                }
+            }
+            render_elapsed = render_started.map(|start| start.elapsed());
         })?;
+        if let (Some(draw_started), Some(render_elapsed)) = (draw_started, render_elapsed) {
+            let draw_elapsed = draw_started.elapsed();
+            tracing::trace!(
+                target: "coven_code::render_timing",
+                renderer = ?renderer, cols = cells.0, rows = cells.1,
+                active = app.is_streaming,
+                render_ns = render_elapsed.as_nanos(), draw_ns = draw_elapsed.as_nanos(),
+                input_chars = app.prompt_input.text.chars().count(),
+                scroll_offset = app.scroll_offset, follow = app.auto_scroll,
+                "TUI frame timing"
+            );
+        }
         app.settle_scroll_anchor();
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
@@ -3546,6 +3621,11 @@ async fn run_interactive(
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
+                        let (name, args) = claurst_tui::input::parse_slash_command(&input);
+                        if name.eq_ignore_ascii_case("status") && args.trim() == "logs" {
+                            app.intercept_slash_command_with_args("status", "logs");
+                            continue;
+                        }
                         if !input.is_empty() {
                             let preview: String = input.chars().take(40).collect();
                             app.queued_messages.push_back(input);
@@ -3721,8 +3801,9 @@ async fn run_interactive(
                             // Always runs — some commands need BOTH (e.g. /clear clears
                             // app state via TUI AND the messages vec via CLI).
                             cmd_ctx.messages = messages.clone();
-                            let picker_only = canonical_path.as_deref() == Some("session resume")
-                                && cmd_args.split_whitespace().count() == 1;
+                            let picker_only = (canonical_path.as_deref() == Some("session resume")
+                                && cmd_args.split_whitespace().count() == 1)
+                                || canonical_path.as_deref() == Some("status logs");
                             let cli_result = if handled_by_tui && (canonical_path.is_none() || picker_only) {
                                 None
                             } else {
@@ -3839,13 +3920,16 @@ async fn run_interactive(
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
                                     if app.renderer == claurst_tui::application::UiRenderer::Next {
-            app.session_title = session.title.clone();
-        }
-                                    let _ = claurst_core::history::save_session(&session).await;
+                                        app.session_title = session.title.clone();
+                                    }
+                                    let saved = save_session_with_warning(&session, &mut app.notifications, "rename").await;
                                     let shown = claurst_tui::terminal_title_topic(renderer, &title);
                                     claurst_tui::update_terminal_title(Some(&shown));
-                                    app.status_message =
-                                        Some(format!("Session renamed to \"{}\".", title));
+                                    app.status_message = Some(if saved {
+                                        format!("Session renamed to \"{}\".", title)
+                                    } else {
+                                        "Session renamed in memory; not saved.".to_owned()
+                                    });
                                 }
                                 Some(CommandResult::RefreshProviderState) => {
                                     if app.is_streaming || current_query.is_some() {
@@ -4155,7 +4239,7 @@ async fn run_interactive(
 
                         if rollback_unattempted_turn(goal_turn.as_ref(), true, &mut messages,
                             &mut app, &mut session, &mut cmd_ctx.messages) {
-                            persist_interactive_session(&session, goal_turn.as_ref()).await;
+                            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
                         }
                         app.rate_limit_recovery.dismiss();
                         app.rate_limit_recovery.take_abandoned();
@@ -4852,7 +4936,12 @@ async fn run_interactive(
                         // Persist the session URL into the saved session record.
                         session.remote_session_url = Some(session_url.clone());
                         session.updated_at = chrono::Utc::now();
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote connection",
+                        )
+                        .await;
 
                         // Wire the BridgeSessionInfo relay so live tool/text events reach
                         // the web UI via /api/bridge/sessions. This runs alongside
@@ -4962,7 +5051,12 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                         cmd_ctx.session_title = Some(title.clone());
                         app.session_title = Some(title);
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote rename",
+                        )
+                        .await;
                     }
                     Ok(TuiBridgeEvent::Error(msg)) => {
                         app.bridge_state = BridgeConnectionState::Failed {
@@ -5028,7 +5122,8 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             ) {
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
             }
             app.rate_limit_recovery.dismiss();
             app.rate_limit_recovery.take_abandoned();
@@ -5541,7 +5636,8 @@ async fn run_interactive(
                     &mut cmd_ctx.messages,
                 );
                 *msgs_arc.lock().await = messages.clone();
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
 
                 // --- Goal continuation ---
                 // After every completed turn check if there is an active goal.
@@ -5782,7 +5878,7 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             );
-            persist_interactive_session(&session, goal_turn.as_ref()).await;
+            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -7739,3 +7835,6 @@ mod tests {
 
 #[cfg(test)]
 mod goal_dispatch_tests;
+
+#[cfg(test)]
+mod session_save_tests;

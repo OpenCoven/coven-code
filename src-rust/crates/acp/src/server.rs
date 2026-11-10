@@ -35,30 +35,32 @@ impl AgentServer {
     /// in-flight work to finish before shutting down.
     pub fn dispatch(self: &Arc<Self>, msg: Inbound) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
-        tokio::spawn(async move {
-            match msg {
-                Inbound::Request { id, method, params } => {
-                    let response = this.handle_request(&method, params).await;
-                    let result = match response {
-                        Ok(value) => this.connection.send_response(id, value).await,
-                        Err(err) => this.connection.send_error_response(id, err).await,
-                    };
-                    if let Err(e) = result {
-                        let io_kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
-                        warn!(
-                            method = diagnostic_method(&method),
-                            method_bytes = method.len(),
-                            error_class = if io_kind.is_some() { "io" } else { "other" },
-                            ?io_kind,
-                            "ACP: failed to send response"
-                        );
-                    }
-                }
-                Inbound::Notification { method, params } => {
-                    this.handle_notification(&method, params).await;
+        tokio::spawn(async move { this.handle_message(msg).await })
+    }
+
+    pub(crate) async fn handle_message(self: &Arc<Self>, msg: Inbound) {
+        match msg {
+            Inbound::Request { id, method, params } => {
+                let response = self.handle_request(&method, params).await;
+                let result = match response {
+                    Ok(value) => self.connection.send_response(id, value).await,
+                    Err(err) => self.connection.send_error_response(id, err).await,
+                };
+                if let Err(e) = result {
+                    let io_kind = e.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+                    warn!(
+                        method = diagnostic_method(&method),
+                        method_bytes = method.len(),
+                        error_class = if io_kind.is_some() { "io" } else { "other" },
+                        ?io_kind,
+                        "ACP: failed to send response"
+                    );
                 }
             }
-        })
+            Inbound::Notification { method, params } => {
+                self.handle_notification(&method, params).await;
+            }
+        }
     }
 
     async fn handle_request(
@@ -110,6 +112,14 @@ impl AgentServer {
     }
 
     async fn handle_notification(self: &Arc<Self>, method: &str, params: Option<Value>) {
+        self.handle_control_notification(method, params);
+    }
+
+    pub(crate) fn handle_control_notification(
+        self: &Arc<Self>,
+        method: &str,
+        params: Option<Value>,
+    ) {
         debug!(
             method = diagnostic_method(method),
             method_bytes = method.len(),

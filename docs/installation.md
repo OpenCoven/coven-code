@@ -121,7 +121,7 @@ coven-code --version
 Example engine output:
 
 ```
-coven-code 0.9.0
+coven-code 0.9.1
 ```
 
 Use `command -v coven-code` on Unix or `Get-Command coven-code` in PowerShell to

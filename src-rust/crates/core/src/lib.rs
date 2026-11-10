@@ -32,6 +32,7 @@ pub mod device_code;
 
 // Utility modules ported from src/utils/
 pub mod auto_mode;
+pub mod child_diagnostics;
 pub mod crypto_utils;
 pub mod format_utils;
 pub mod secret_file;
@@ -1356,6 +1357,13 @@ pub mod config {
         /// Opt-in for now; only acts when a Coven daemon socket is present.
         #[serde(default, rename = "daemonLedger")]
         pub daemon_ledger: bool,
+        /// Top-level keys this version does not know, such as those a newer
+        /// version wrote. Every save rewrites the whole file, so they are kept
+        /// here and written back unchanged. They have no meaning to this
+        /// version, which is why they stay untyped JSON. Never put a key this
+        /// struct names here.
+        #[serde(flatten)]
+        pub unknown_keys: std::collections::BTreeMap<String, serde_json::Value>,
     }
 
     impl std::fmt::Debug for Settings {
@@ -2345,6 +2353,9 @@ pub mod config {
                 completion_toast: over.completion_toast.or(base.completion_toast),
                 bell_on_complete: over.bell_on_complete || base.bell_on_complete,
                 daemon_ledger: over.daemon_ledger || base.daemon_ledger,
+                // Unknown keys are only ever written back to the file they came
+                // from, so a repository's never join the user's own.
+                unknown_keys: base.unknown_keys,
             }
         }
     }
@@ -2647,6 +2658,51 @@ pub mod config {
                 merged.config.workspace_paths,
                 vec![PathBuf::from("/home/user/trusted-workspace")],
                 "only the user's own settings layers contribute workspace read roots"
+            );
+        }
+
+        #[test]
+        fn a_save_writes_back_top_level_keys_this_version_does_not_know() {
+            // A newer version's keys must survive a session on this one: every
+            // typed save rewrites the whole file.
+            let settings: Settings = serde_json::from_str(
+                r#"{
+                    "hasCompletedOnboarding": true,
+                    "laterFeature": {"mode": "on", "levels": [1, "two", null]},
+                    "laterSwitch": false
+                }"#,
+            )
+            .unwrap();
+
+            let written = serde_json::to_value(&settings).unwrap();
+            assert_eq!(
+                written["laterFeature"],
+                serde_json::json!({"mode": "on", "levels": [1, "two", null]})
+            );
+            assert_eq!(written["laterSwitch"], serde_json::json!(false));
+            assert_eq!(written["hasCompletedOnboarding"], serde_json::json!(true));
+
+            let again: Settings =
+                serde_json::from_str(&serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&again).unwrap(), written);
+        }
+
+        #[test]
+        fn unknown_keys_in_project_settings_never_join_the_users_own() {
+            let global: Settings =
+                serde_json::from_str(r#"{"keptFromHome": 1, "sharedName": "home"}"#).unwrap();
+            let project: Settings =
+                serde_json::from_str(r#"{"fromRepository": 2, "sharedName": "repository"}"#)
+                    .unwrap();
+
+            let merged = Settings::merge(global, Settings::sanitize_project_settings(project));
+            let written = serde_json::to_value(&merged).unwrap();
+
+            assert_eq!(written["keptFromHome"], serde_json::json!(1));
+            assert_eq!(written["sharedName"], serde_json::json!("home"));
+            assert!(
+                written.get("fromRepository").is_none(),
+                "a repository must not add keys to the user's settings file"
             );
         }
 

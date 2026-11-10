@@ -24,7 +24,6 @@ use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -32,7 +31,7 @@ use claurst_core::provider_id::ProviderId;
 use claurst_core::types::{ContentBlock, Message, MessageContent, Role, UsageInfo};
 use futures::Stream;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
@@ -43,6 +42,9 @@ use crate::provider_types::{
     ProviderCapabilities, ProviderRequest, ProviderResponse, ProviderStatus, StopReason,
     StreamEvent, SystemPromptStyle,
 };
+
+mod stderr;
+use stderr::StderrDrain;
 
 /// Env var overriding the `claude` binary location.
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
@@ -439,14 +441,13 @@ impl EnvelopeMapper {
 
 /// A spawned CLI turn: the child process, its buffered stdout, the first
 /// stdout line (already consumed during the init handshake), and the shared
-/// stderr accumulator, plus the owned stdin writer and stderr reader tasks.
+/// bounded stderr drain, plus the owned stdin writer.
 struct CliTurn {
     child: Child,
     stdin_writer: JoinSet<()>,
     stdout: BufReader<ChildStdout>,
     first_line: String,
-    stderr: Arc<Mutex<String>>,
-    stderr_tasks: JoinSet<()>,
+    stderr: StderrDrain,
 }
 
 /// Result of launching one CLI turn. `CliTurn` is boxed to keep the variant
@@ -456,16 +457,8 @@ enum SpawnOutcome {
     /// The process exited before emitting any stdout — a stale `--resume`
     /// session or a startup failure; stderr explains which.
     ExitedEarly {
-        stderr: Arc<Mutex<String>>,
-        stderr_tasks: JoinSet<()>,
+        stderr: String,
     },
-}
-
-/// Give the background stderr drain a beat to finish after the child exits,
-/// then take whatever it collected.
-async fn collect_stderr(stderr: &Arc<Mutex<String>>) -> String {
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    stderr.lock().trim().to_string()
 }
 
 pub struct ClaudeCliProvider {
@@ -580,17 +573,7 @@ impl ClaudeCliProvider {
             drop(stdin); // EOF tells the CLI no more input is coming.
         });
 
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let mut stderr_tasks = JoinSet::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let sink = Arc::clone(&stderr_buf);
-            stderr_tasks.spawn(async move {
-                let mut collected = String::new();
-                if stderr.read_to_string(&mut collected).await.is_ok() {
-                    *sink.lock() = collected;
-                }
-            });
-        }
+        let mut stderr = StderrDrain::new(child.stderr.take());
 
         let stdout = child.stdout.take().ok_or_else(|| ProviderError::Other {
             provider: self.id.clone(),
@@ -618,8 +601,7 @@ impl ClaudeCliProvider {
                 "claude CLI exited before emitting output"
             );
             return Ok(SpawnOutcome::ExitedEarly {
-                stderr: stderr_buf,
-                stderr_tasks,
+                stderr: stderr.finish().await,
             });
         }
 
@@ -628,8 +610,7 @@ impl ClaudeCliProvider {
             stdin_writer,
             stdout: reader,
             first_line,
-            stderr: stderr_buf,
-            stderr_tasks,
+            stderr,
         })))
     }
 
@@ -677,25 +658,19 @@ impl ClaudeCliProvider {
             .await?
         {
             SpawnOutcome::Turn(turn) => Ok(*turn),
-            SpawnOutcome::ExitedEarly {
-                stderr,
-                stderr_tasks: _stderr_tasks,
-            } => {
-                let detail = collect_stderr(&stderr).await;
-                Err(ProviderError::Other {
-                    provider: self.id.clone(),
-                    message: format!(
-                        "claude CLI exited without producing output{}",
-                        if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", detail)
-                        }
-                    ),
-                    status: None,
-                    body: None,
-                })
-            }
+            SpawnOutcome::ExitedEarly { stderr: detail } => Err(ProviderError::Other {
+                provider: self.id.clone(),
+                message: format!(
+                    "claude CLI exited without producing output{}",
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", detail)
+                    }
+                ),
+                status: None,
+                body: None,
+            }),
         }
     }
 }
@@ -788,8 +763,6 @@ impl LlmProvider for ClaudeCliProvider {
             // Retain ownership even before the stream is first polled; dropping
             // the stream aborts a writer still blocked on the child's stdin.
             let _stdin_writer = turn.stdin_writer;
-            // Retain the stderr reader even before the stream is polled.
-            let _stderr_tasks = turn.stderr_tasks;
             let mut mapper = EnvelopeMapper::new(&fallback_model);
             let mut line = std::mem::take(&mut turn.first_line);
             loop {
@@ -799,6 +772,11 @@ impl LlmProvider for ClaudeCliProvider {
                     if cached.as_deref() != Some(session_id) {
                         *cached = Some(session_id.to_string());
                     }
+                }
+                if outcome.done {
+                    // Complete the owned drain before publishing MessageStop:
+                    // callers may drop the stream as soon as they see it.
+                    let _ = turn.stderr.finish().await;
                 }
                 for event in outcome.events {
                     yield Ok(event);
@@ -812,7 +790,7 @@ impl LlmProvider for ClaudeCliProvider {
                 line.clear();
                 match turn.stdout.read_line(&mut line).await {
                     Ok(0) => {
-                        let stderr = collect_stderr(&turn.stderr).await;
+                        let stderr = turn.stderr.finish().await;
                         let detail = if stderr.is_empty() {
                             String::new()
                         } else {
@@ -827,9 +805,15 @@ impl LlmProvider for ClaudeCliProvider {
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        let stderr = turn.stderr.finish().await;
+                        let detail = if stderr.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", stderr)
+                        };
                         yield Err(ProviderError::StreamError {
                             provider: provider_id.clone(),
-                            message: format!("failed reading claude CLI output: {}", e),
+                            message: format!("failed reading claude CLI output: {}{}", e, detail),
                             partial_response: None,
                         });
                         return;
@@ -917,6 +901,23 @@ mod tests {
             thinking: None,
             provider_options: json!({}),
         }
+    }
+
+    #[tokio::test]
+    async fn missing_binary_reports_startup_failure() {
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(
+                std::env::temp_dir().join(format!("missing-claude-{}", uuid::Uuid::new_v4())),
+            ),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let error = match provider.create_message_stream(request).await {
+            Ok(_) => panic!("nonexistent binary unexpectedly started"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ProviderError::Other { message, .. } if message == INSTALL_HINT));
     }
 
     #[test]

@@ -27,18 +27,18 @@ tc_paste_burst() {
 
   # ---- 1. A line plus its Enter, delivered in one write, must submit -------
   tui_paste "/help"$'\r'
-  # The overlay is tall; poll for a late-rendered item so the assertion does
-  # not race the draw (same guard as the help-overlay case).
-  if wait_for "/session resume"; then
+  # The overlay's title and its first section show at every size; rows lower
+  # in the reference need scrolling at 80x24 (#423).
+  if wait_for "Shortcuts & commands"; then
     _pass "burst-delivered line submits (help overlay opened)"
     local s; s="$(tui_capture)"
-    assert_contains "$s" "Toggle help" "burst submit reached the slash-command path"
+    assert_contains "$s" "Keyboard Shortcuts" "burst submit reached the slash-command path"
   else
     _fail "burst-delivered line submits (help overlay never opened)" "$(tui_capture)"
   fi
 
   tui_keys Escape
-  wait_absent "Toggle help" 5
+  wait_absent "Shortcuts & commands" 5
 
   # ---- 2. A multi-line burst with no trailing Enter must NOT submit --------
   # Interior newlines belong in the text: coalescing them is the whole reason

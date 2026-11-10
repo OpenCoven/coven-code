@@ -16,8 +16,10 @@ use agent_client_protocol_schema as acp;
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(test)]
+use tokio::sync::mpsc;
+use tokio::sync::{oneshot, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
@@ -40,6 +42,17 @@ pub enum Inbound {
     },
 }
 
+/// Parsed work or a protocol error for connection-local admission.
+pub(crate) enum ReadEvent {
+    Message(Inbound),
+    Error {
+        id: acp::RequestId,
+        error: acp::Error,
+    },
+}
+
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 /// Bidirectional connection over newline-delimited JSON-RPC.
 ///
 /// Clone the returned `Arc` to share a sender. Drive exactly one reader with
@@ -49,6 +62,8 @@ pub struct Connection {
     pending: DashMap<String, oneshot::Sender<Result<Value, acp::Error>>>,
     next_outbound_id: AtomicI64,
     reader_closed: CancellationToken,
+    event_budget: Arc<Semaphore>,
+    outbound_slots: Semaphore,
 }
 
 // Retain a partially written frame until the next send or connection drop.
@@ -99,7 +114,13 @@ impl Connection {
             pending: DashMap::new(),
             next_outbound_id: AtomicI64::new(1),
             reader_closed: CancellationToken::new(),
+            event_budget: Arc::new(Semaphore::new(MAX_FRAME_BYTES)),
+            outbound_slots: Semaphore::new(64),
         })
+    }
+
+    pub(crate) fn event_budget(&self) -> Arc<Semaphore> {
+        self.event_budget.clone()
     }
 
     /// Send a successful JSON-RPC response to a previously received request.
@@ -158,6 +179,10 @@ impl Connection {
         if self.reader_closed.is_cancelled() {
             anyhow::bail!("connection closed before sending request '{}'", method);
         }
+        let _slot = self
+            .outbound_slots
+            .try_acquire()
+            .map_err(|_| anyhow::anyhow!("ACP outbound request capacity exceeded"))?;
         let params_value = serde_json::to_value(params)?;
         let raw_id = self.next_outbound_id.fetch_add(1, Ordering::Relaxed);
         let id_key = format!("n:{}", raw_id);
@@ -208,6 +233,9 @@ impl Connection {
     async fn write_line(self: &Arc<Self>, value: &Value) -> anyhow::Result<()> {
         let mut buf = serde_json::to_vec(value)?;
         buf.push(b'\n');
+        if buf.len() > MAX_FRAME_BYTES {
+            anyhow::bail!("ACP output frame exceeds 8 MiB limit");
+        }
         let mut w = self.writer.lock().await;
         // A canceled send that never wrote any bytes can be discarded safely.
         if w.pending
@@ -253,6 +281,7 @@ fn id_to_key(id: &acp::RequestId) -> String {
 /// Spawn the reader loop. Inbound requests and notifications are forwarded
 /// to `tx`. Responses are matched against `connection.pending` internally.
 /// The future completes when stdin reaches EOF.
+#[cfg(test)]
 pub fn run_reader<R>(
     connection: Arc<Connection>,
     reader: R,
@@ -260,6 +289,30 @@ pub fn run_reader<R>(
 ) -> impl std::future::Future<Output = anyhow::Result<()>>
 where
     R: tokio::io::AsyncRead + Unpin,
+{
+    run_reader_with_handler(connection.clone(), reader, move |event| {
+        let connection = connection.clone();
+        let tx = tx.clone();
+        async move {
+            match event {
+                ReadEvent::Message(message) => tx
+                    .send(message)
+                    .map_err(|_| anyhow::anyhow!("ACP dispatcher closed")),
+                ReadEvent::Error { id, error } => connection.send_error_response(id, error).await,
+            }
+        }
+    })
+}
+
+pub(crate) fn run_reader_with_handler<R, F, Fut>(
+    connection: Arc<Connection>,
+    reader: R,
+    mut deliver: F,
+) -> impl std::future::Future<Output = anyhow::Result<()>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: FnMut(ReadEvent) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
     // Create the guard before the first poll so dropping an unpolled reader
     // future also closes the response path.
@@ -271,7 +324,14 @@ where
 
         loop {
             line.clear();
-            let n = buffered.read_line(&mut line).await?;
+            let n = (&mut buffered)
+                .take((MAX_FRAME_BYTES + 1) as u64)
+                .read_line(&mut line)
+                .await?;
+            if line.len() > MAX_FRAME_BYTES {
+                anyhow::bail!("ACP input frame exceeds 8 MiB limit");
+            }
+            tokio::task::yield_now().await;
             if n == 0 {
                 debug!("ACP: stdin EOF, shutting down reader");
                 break;
@@ -287,9 +347,11 @@ where
                     // response with id=null. Best-effort here since we may not even
                     // know if it was a request or notification.
                     error!(error = %e, "ACP: parse error");
-                    let _ = connection
-                        .send_error_response(acp::RequestId::Null, acp::Error::parse_error())
-                        .await;
+                    deliver(ReadEvent::Error {
+                        id: acp::RequestId::Null,
+                        error: acp::Error::parse_error(),
+                    })
+                    .await?;
                     continue;
                 }
             };
@@ -325,9 +387,7 @@ where
                     .unwrap_or("")
                     .to_string();
                 let params = v.get("params").cloned();
-                if tx.send(Inbound::Request { id, method, params }).is_err() {
-                    break;
-                }
+                deliver(ReadEvent::Message(Inbound::Request { id, method, params })).await?;
             } else if has_method {
                 // Notification.
                 let method = v
@@ -336,9 +396,7 @@ where
                     .unwrap_or("")
                     .to_string();
                 let params = v.get("params").cloned();
-                if tx.send(Inbound::Notification { method, params }).is_err() {
-                    break;
-                }
+                deliver(ReadEvent::Message(Inbound::Notification { method, params })).await?;
             } else {
                 let json_type = match &v {
                     Value::Null => "null",
@@ -371,6 +429,27 @@ where
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncReadExt};
+
+    #[tokio::test]
+    async fn pending_outbound_requests_have_a_connection_limit_and_release_on_drop() {
+        let connection = Connection::new(tokio::io::sink());
+        let mut requests = Vec::new();
+        for _ in 0..64 {
+            let mut request = Box::pin(connection.send_request::<_, Value>("approval", ()));
+            assert!(futures::poll!(&mut request).is_pending());
+            requests.push(request);
+        }
+        assert_eq!(connection.pending.len(), 64);
+        let error = connection
+            .send_request::<_, Value>("excess", ())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("capacity exceeded"));
+        assert_eq!(connection.pending.len(), 64);
+        drop(requests);
+        assert!(connection.pending.is_empty());
+        assert_eq!(connection.outbound_slots.available_permits(), 64);
+    }
 
     #[tokio::test]
     async fn dropping_unpolled_reader_closes_requests() {
