@@ -20,6 +20,7 @@ This document covers all keyboard shortcuts in Coven Code, how to customize them
 6. [Special Input Behaviors](#special-input-behaviors)
    - [Shift+Enter for Newline](#shiftenter-for-newline)
    - [ESC During Streaming](#esc-during-streaming)
+   - [Selection When the Screen Moves](#selection-when-the-screen-moves)
    - [@file Injection with Typeahead](#file-injection-with-typeahead)
 7. [Non-English Keyboard Layout Support](#non-english-keyboard-layout-support)
 
@@ -34,7 +35,7 @@ These bindings are active in all contexts.
 | Key | Action | Description |
 |-----|--------|-------------|
 | `Ctrl+C` | interrupt | Interrupt the current operation (non-rebindable) |
-| `Ctrl+D` | exit | Exit Coven Code (non-rebindable) |
+| `Ctrl+D` | exit | Press twice within 2 seconds on an empty prompt to exit Coven Code (non-rebindable) |
 | `Ctrl+L` | redraw | Redraw the terminal screen |
 | `Ctrl+R` | historySearch | Open interactive history search |
 | `Ctrl+B` | createBranch | Create a new git branch |
@@ -75,6 +76,10 @@ These bindings are active when focus is in the chat input field.
 | `Ctrl+G` | goToLine | Jump to a specific line |
 | `Ctrl+.` | jumpToNextError | Jump to next error / issue |
 | `Ctrl+Shift+.` | jumpToPreviousError | Jump to previous error / issue |
+| `Alt+I` | toggleInspector | Next renderer only: open or close the inspector |
+| `Alt+L` | jumpToLive | Next renderer only: return a scrolled transcript to live output |
+| `Alt+G` | jumpToStart | Next renderer only: go to the start of the transcript |
+| `Ctrl+Z` | suspend | Next renderer only, Unix: stop the job and return to the shell; `fg` brings back the same screen and draft. A running turn is not cancelled, but its connection may drop while stopped. Tools in the same process group stop too. The default Bash tool runs in its own session and keeps running, and time spent stopped counts toward tool timeouts. Without a job-control shell, a notice appears and the session keeps running. |
 
 > `Ctrl+A` previously opened the model picker; it now moves the cursor to the line start (matching Emacs/readline). The model picker is now `Ctrl+Shift+A`. Old `keybindings.json` files are auto-migrated.
 
@@ -90,7 +95,24 @@ These bindings are active when Coven Code is displaying a yes/no confirmation pr
 | `Enter` | defaultAction | Accept the highlighted default option |
 | `Escape` | cancel | Cancel the prompt and deny the action |
 
+In the Next renderer (`COVEN_CODE_UI=next`), a tool permission request opens with **No, deny** highlighted, so `Enter` on a new request denies. Keys other than `Escape` are ignored until 400 ms pass with no key pressed. Each ignored key restarts that wait, so typing meant for the prompt or a held key cannot approve a request. `Escape` always denies immediately.
+
 ---
+
+### Inspector Context (Next renderer)
+
+Active while the Next renderer's inspector is open (`COVEN_CODE_UI=next`). It
+is layered over the chat context: keys it does not bind keep their chat
+meaning, so the draft stays editable and `Enter` still submits. Classic leaves
+the `Alt+I`, `Alt+L` and `Alt+G` chords unbound.
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `Escape` / `Alt+I` | closeInspector | Close the inspector and return to the transcript |
+| `Tab` | nextInspectorPage | Next page (Activity, Session, Work, Research, Memory, Views) |
+| `Shift+Tab` | previousInspectorPage | Previous page |
+| `Page Up` | scrollInspectorUp | Scroll the inspector up |
+| `Page Down` | scrollInspectorDown | Scroll the inspector down |
 
 ## Keybinding Contexts
 
@@ -101,6 +123,7 @@ Coven Code uses a context system so that the same key can have different effects
 | `global` | Always active regardless of focus |
 | `chat` | Active when the chat input field has focus |
 | `confirmation` | Active when a permission confirmation dialog is open |
+| `inspector` | Active while the Next inspector is open; layered over `chat` |
 | `modelPicker` | Active inside the model selection overlay |
 | `commandPalette` | Active inside the slash command palette overlay |
 | `search` | Active while the inline search bar is open |
@@ -215,7 +238,7 @@ The following keys have fixed behavior and cannot be rebound:
 | Key | Fixed behavior |
 |-----|---------------|
 | `Ctrl+C` | Interrupt current operation / send SIGINT to foreground process |
-| `Ctrl+D` | Exit Coven Code when input is empty; signal EOF when input has content |
+| `Ctrl+D` | Press twice within 2 seconds on an empty prompt to exit; does nothing while the prompt has content |
 | `Ctrl+M` | Identical to `Enter` at the terminal level (terminals emit `CR` for both) |
 
 These keys are handled at the terminal input layer before the keybinding system processes events. If any of them appear as a `chord` in `keybindings.json`, Coven Code:
@@ -303,7 +326,20 @@ Pressing `Escape` while the model is streaming a response interrupts the stream.
 
 This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` also signals any tool calls in progress to abort (via `AbortController`), while `Escape` only stops the stream and allows running tools to finish.
 
+In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the same way `Ctrl+C` does, and the status shows `cancelling` until the runtime has actually stopped it. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
+
 ---
+
+### Selection When the Screen Moves
+
+In the Next renderer (`COVEN_CODE_UI=next`), a mouse selection keeps the text you
+selected. If a resize, a scroll or new output moves other text under it, the mark
+goes away and the status line shows `selection kept`. Copying then gives the
+original text, not what moved under it. `Ctrl+Shift+C` copies it in a terminal
+that passes `Ctrl+Shift+C` on as its own key; other terminals send it as `Ctrl+C`
+or keep it for their own copy. `Ctrl+C` does not copy: it still cancels a running
+turn, or clears the draft and asks you to press it again to exit. Typing, pasting
+or making a new selection lets the selection go.
 
 ### @file Injection with Typeahead
 

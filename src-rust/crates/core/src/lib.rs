@@ -1304,6 +1304,14 @@ pub mod config {
         /// Whether to reduce motion in UI. Defaults to false.
         #[serde(default, rename = "reduceMotion")]
         pub reduce_motion: bool,
+        /// Presentation-only appearance for the Next renderer. Never affects
+        /// permissions, providers, identity or stored state.
+        #[serde(
+            default,
+            rename = "nextAppearance",
+            skip_serializing_if = "crate::appearance::NextAppearanceSettings::is_default"
+        )]
+        pub next_appearance: crate::appearance::NextAppearanceSettings,
         /// Whether to show terminal progress bars. Defaults to true.
         #[serde(default = "default_true", rename = "terminalProgressBar")]
         pub terminal_progress_bar: bool,
@@ -2313,6 +2321,10 @@ pub mod config {
                 notifications: over.notifications || base.notifications,
                 show_turn_duration: over.show_turn_duration || base.show_turn_duration,
                 reduce_motion: over.reduce_motion || base.reduce_motion,
+                next_appearance: crate::appearance::NextAppearanceSettings::merge(
+                    base.next_appearance,
+                    over.next_appearance,
+                ),
                 terminal_progress_bar: over.terminal_progress_bar || base.terminal_progress_bar,
                 show_cwd: over.show_cwd || base.show_cwd,
                 show_git_branch: over.show_git_branch || base.show_git_branch,
@@ -4078,6 +4090,37 @@ pub mod permissions {
     pub trait PermissionHandler: Send + Sync {
         fn check_permission(&self, request: &PermissionRequest) -> PermissionDecision;
         fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision;
+
+        /// Whether an approval covers a file only as it stood when the approval
+        /// was asked for, so a file that changes during the wait is left alone.
+        fn binds_approvals_to_content(&self) -> bool {
+            false
+        }
+    }
+
+    /// Decides exactly as `inner` does, and binds its approvals to file content.
+    pub struct ContentBoundApprovals {
+        inner: Arc<dyn PermissionHandler>,
+    }
+
+    impl ContentBoundApprovals {
+        pub fn new(inner: Arc<dyn PermissionHandler>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl PermissionHandler for ContentBoundApprovals {
+        fn check_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.inner.check_permission(request)
+        }
+
+        fn request_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.inner.request_permission(request)
+        }
+
+        fn binds_approvals_to_content(&self) -> bool {
+            true
+        }
     }
 
     /// Handler for non-interactive / headless modes.
@@ -5642,6 +5685,7 @@ pub use oauth::OAuthTokens;
 // ---------------------------------------------------------------------------
 pub mod accounts;
 pub mod analytics;
+pub mod appearance;
 pub mod bash_classifier;
 pub mod codex_oauth;
 pub mod context_collapse;

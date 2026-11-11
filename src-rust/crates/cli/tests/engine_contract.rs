@@ -604,6 +604,79 @@ fn contract_stream_json_turn_matches_golden_frames() {
     assert_golden("stream_json_turn.golden.jsonl", &golden);
 }
 
+// ---------------------------------------------------------------------------
+// Renderer selector: interactive-only (`COVEN_CODE_UI`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contract_machine_routes_ignore_renderer_selector() {
+    let baseline_scratch = Scratch::new();
+    let baseline_version = run_engine(baseline_scratch.engine().arg("--version"), "");
+    let baseline_print = run_engine(
+        baseline_scratch
+            .engine()
+            .args(["--print", "ping", "--model", FAKE_MODEL]),
+        "",
+    );
+    let baseline_stream = run_engine(
+        baseline_scratch.engine().args(stream_json_args()).args([
+            "--session-id",
+            CONTRACT_SESSION,
+            "--model",
+            FAKE_MODEL,
+        ]),
+        &user_frame("ping"),
+    );
+    let normalized = |run: &Run| -> Vec<serde_json::Value> {
+        run.stdout_frames().iter().map(normalize_frame).collect()
+    };
+
+    for value in ["next", "classic", "not-a-renderer"] {
+        let scratch = Scratch::new();
+        let version = run_engine(
+            scratch
+                .engine()
+                .env("COVEN_CODE_UI", value)
+                .arg("--version"),
+            "",
+        );
+        assert_eq!(version.code, baseline_version.code, "{version}");
+        assert_eq!(version.stdout, baseline_version.stdout, "{version}");
+
+        let print = run_engine(
+            scratch
+                .engine()
+                .env("COVEN_CODE_UI", value)
+                .args(["--print", "ping", "--model", FAKE_MODEL]),
+            "",
+        );
+        assert_eq!(print.code, baseline_print.code, "{print}");
+        assert_eq!(print.stdout, baseline_print.stdout, "{print}");
+
+        let stream = run_engine(
+            scratch
+                .engine()
+                .env("COVEN_CODE_UI", value)
+                .args(stream_json_args())
+                .args(["--session-id", CONTRACT_SESSION, "--model", FAKE_MODEL]),
+            &user_frame("ping"),
+        );
+        assert_eq!(stream.code, baseline_stream.code, "{stream}");
+        assert_eq!(
+            normalized(&stream),
+            normalized(&baseline_stream),
+            "{stream}"
+        );
+
+        for run in [&version, &print, &stream] {
+            assert!(
+                !run.stderr.contains("COVEN_CODE_UI"),
+                "machine routes must not read the renderer selector ({value})\n{run}"
+            );
+        }
+    }
+}
+
 #[test]
 fn contract_stream_json_exits_zero_on_eof_without_a_turn() {
     let scratch = Scratch::new();

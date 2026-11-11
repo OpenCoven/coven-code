@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Permission dialog kinds
@@ -63,16 +64,46 @@ pub struct PermissionRequest {
     pub kind: PermissionDialogKind,
     pub options: Vec<PermissionOption>,
     pub selected_option: usize,
+    /// Whether the request is [`guarded`](Self::guarded).
+    pub arming: bool,
+    /// When a guarded request was opened, or the last key it ignored
+    /// arrived. Keys other than Escape count only after
+    /// [`PERMISSION_ARM_DELAY`] of quiet, so typing meant for the composer,
+    /// or a held key, cannot decide it.
+    pub quiet_since: Instant,
 }
 
+/// How long a new permission request ignores decision keys.
+pub const PERMISSION_ARM_DELAY: Duration = Duration::from_millis(400);
+
 impl PermissionRequest {
+    /// A new request, with Classic's defaults: the first option focused
+    /// and keys accepted at once.
+    fn opened(self) -> Self {
+        self
+    }
+
+    /// Guard the request against stray keys (Next renderer, #411): focus
+    /// the deny option, so the default action is never destructive, and
+    /// ignore keys other than Escape until a quiet gap has passed.
+    pub fn guarded(mut self) -> Self {
+        self.selected_option = self
+            .options
+            .iter()
+            .position(|option| option.key == 'n')
+            .unwrap_or_else(|| self.options.len().saturating_sub(1));
+        self.arming = true;
+        self.quiet_since = Instant::now();
+        self
+    }
+
     /// Create a standard four-option dialog matching the TS dialog options:
     ///   `y` — Yes, allow once
     ///   `Y` — Yes, allow this session
     ///   `p` — Yes, always allow (persistent)
     ///   `n` — No, deny
     pub fn standard(tool_use_id: String, tool_name: String, description: String) -> Self {
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description: description.clone(),
@@ -80,8 +111,10 @@ impl PermissionRequest {
             input_preview: None,
             kind: PermissionDialogKind::Generic,
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options: Self::default_options(),
-        }
+        })
     }
 
     /// Build with a richer description derived from the full permission reason
@@ -98,7 +131,7 @@ impl PermissionRequest {
     ) -> Self {
         let (description, danger_explanation) = split_reason(reason);
 
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description,
@@ -106,8 +139,10 @@ impl PermissionRequest {
             input_preview,
             kind: PermissionDialogKind::Generic,
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options: Self::default_options(),
-        }
+        })
     }
 
     /// Build a Bash-specific dialog, computing the options set based on whether
@@ -125,7 +160,7 @@ impl PermissionRequest {
             suggested_prefix,
         };
 
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description: String::new(),
@@ -133,8 +168,10 @@ impl PermissionRequest {
             input_preview: Some(command),
             kind,
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options,
-        }
+        })
     }
 
     pub fn powershell(
@@ -143,7 +180,7 @@ impl PermissionRequest {
         reason: String,
         command: String,
     ) -> Self {
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description: String::new(),
@@ -151,8 +188,10 @@ impl PermissionRequest {
             input_preview: Some(command.clone()),
             kind: PermissionDialogKind::PowerShell { command },
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options: Self::default_options(),
-        }
+        })
     }
 
     /// Build a FileRead-specific dialog (3 options: once / session / deny).
@@ -166,7 +205,7 @@ impl PermissionRequest {
         let preview = path.clone();
         let kind = PermissionDialogKind::FileRead { path };
 
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description,
@@ -174,8 +213,10 @@ impl PermissionRequest {
             input_preview: Some(preview),
             kind,
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options: Self::file_read_options(),
-        }
+        })
     }
 
     /// Build a FileWrite-specific dialog (4 options: once / session / project / deny).
@@ -194,7 +235,7 @@ impl PermissionRequest {
         let preview = path.clone();
         let kind = PermissionDialogKind::FileWrite { path };
 
-        Self {
+        Self::opened(Self {
             tool_use_id,
             tool_name,
             description,
@@ -202,8 +243,10 @@ impl PermissionRequest {
             input_preview: Some(preview),
             kind,
             selected_option: 0,
+            arming: false,
+            quiet_since: Instant::now(),
             options: Self::file_write_options(),
-        }
+        })
     }
 
     // ------------------------------------------------------------------
@@ -666,7 +709,18 @@ pub fn render_permission_dialog(frame: &mut Frame, pr: &PermissionRequest, area:
 /// - 4-option dialog (Generic / FileWrite / Bash without prefix): digits 1–4 valid.
 /// - 5-option dialog (Bash with prefix): digits 1–5 valid.
 pub fn handle_permission_key(pr: &mut PermissionRequest, key: KeyEvent) -> bool {
+    handle_permission_key_at(pr, key, Instant::now())
+}
+
+/// [`handle_permission_key`] at an explicit time. Before the request is
+/// armed only Escape (deny) is accepted.
+pub fn handle_permission_key_at(pr: &mut PermissionRequest, key: KeyEvent, now: Instant) -> bool {
     let option_count = pr.options.len();
+    let armed = !pr.arming || now.saturating_duration_since(pr.quiet_since) >= PERMISSION_ARM_DELAY;
+    if !armed && key.code != KeyCode::Esc {
+        pr.quiet_since = now;
+        return false;
+    }
     match key.code {
         KeyCode::Char(c) => {
             if let Some(digit) = c.to_digit(10) {
@@ -1584,6 +1638,8 @@ mod tests {
     fn permission_key_digit_selects_and_confirms() {
         let mut pr =
             PermissionRequest::standard("id".to_string(), "Bash".to_string(), "desc".to_string());
+        // Old enough that decision keys count.
+        pr.quiet_since -= PERMISSION_ARM_DELAY;
         // Press '1' → selects option 0 (allow once) and confirms.
         let confirmed = handle_permission_key(&mut pr, key(KeyCode::Char('1')));
         assert!(confirmed);
@@ -1616,6 +1672,8 @@ mod tests {
             "git push".to_string(),
             Some("git ".to_string()),
         );
+        // Old enough that decision keys count.
+        pr.quiet_since -= PERMISSION_ARM_DELAY;
         assert_eq!(pr.options.len(), 5);
         // '5' should select the 5th option (deny) and confirm.
         let confirmed = handle_permission_key(&mut pr, key(KeyCode::Char('5')));
@@ -1627,6 +1685,8 @@ mod tests {
     fn permission_key_char_shortcut_confirms() {
         let mut pr =
             PermissionRequest::standard("id".to_string(), "Bash".to_string(), "desc".to_string());
+        // Old enough that decision keys count.
+        pr.quiet_since -= PERMISSION_ARM_DELAY;
         // Press 'n' → deny (index 3).
         let confirmed = handle_permission_key(&mut pr, key(KeyCode::Char('n')));
         assert!(confirmed);
@@ -1647,6 +1707,8 @@ mod tests {
     fn permission_key_up_down_navigation() {
         let mut pr =
             PermissionRequest::standard("id".to_string(), "Bash".to_string(), "desc".to_string());
+        // Old enough that decision keys count.
+        pr.quiet_since -= PERMISSION_ARM_DELAY;
         pr.selected_option = 1;
         // Down.
         handle_permission_key(&mut pr, key(KeyCode::Down));
