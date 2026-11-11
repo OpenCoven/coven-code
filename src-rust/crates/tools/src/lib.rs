@@ -55,9 +55,43 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+pub mod workspace_scope;
 pub mod worktree;
 
 // Re-exports for convenience.
+/// How files stood when approval to change them was asked for. Only metadata is
+/// kept: nothing may be read before the approval, and looking at a device or a
+/// huge file must cost nothing.
+#[derive(Debug, Default)]
+pub struct ReviewedFiles(Vec<(PathBuf, Option<FileStamp>)>);
+
+type FileStamp = (u64, std::time::SystemTime);
+
+async fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+impl ReviewedFiles {
+    pub fn extend(&mut self, other: ReviewedFiles) {
+        self.0.extend(other.0);
+    }
+
+    /// The refusal to give the model if a file no longer stands as reviewed.
+    pub async fn ensure_unchanged(&self) -> Result<(), String> {
+        for (path, reviewed) in &self.0 {
+            if file_stamp(path).await != *reviewed {
+                return Err(format!(
+                    "{} changed while waiting for approval, so nothing was written. \
+                     Read it again before retrying.",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub use apply_patch::ApplyPatchTool;
 pub use ask_user::AskUserQuestionTool;
 pub use bash::BashTool;
@@ -174,9 +208,27 @@ pub enum PermissionLevel {
 #[derive(Debug)]
 pub struct PendingPermissionRequest {
     pub tool_use_id: String,
+    /// The model's tool-use id for the call that asked, when known. Distinct
+    /// from `tool_use_id`, which keys this request and may be synthetic.
+    pub call_id: Option<String>,
     pub request: claurst_core::permissions::PermissionRequest,
     pub reason: String,
     pub decision_tx: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+}
+
+tokio::task_local! {
+    static CURRENT_TOOL_CALL: String;
+}
+
+/// Run `future` as the execution of the model tool call `call_id`, so a
+/// permission request it raises can be attributed to that call.
+pub async fn with_tool_call<F: std::future::Future>(call_id: String, future: F) -> F::Output {
+    CURRENT_TOOL_CALL.scope(call_id, future).await
+}
+
+/// The model tool call being executed by the current task, if any.
+pub fn current_tool_call() -> Option<String> {
+    CURRENT_TOOL_CALL.try_with(Clone::clone).ok()
 }
 
 #[derive(Default)]
@@ -354,7 +406,10 @@ impl ToolContext {
                 claurst_core::error::ClaudeError::PermissionDenied(error.to_string())
             })?;
         let interactive_reason = request.details.clone();
-        let decision = self.permission_handler.request_permission(&request);
+        let decision = workspace_scope::apply(
+            &request,
+            self.permission_handler.request_permission(&request),
+        );
         let result = match decision {
             PermissionDecision::Allow | PermissionDecision::AllowPermanently => Ok(()),
             PermissionDecision::Ask { reason } if self.non_interactive => {
@@ -379,6 +434,7 @@ impl ToolContext {
                         self.session_id,
                         self.current_turn.fetch_add(1, Ordering::Relaxed)
                     ),
+                    call_id: current_tool_call(),
                     request,
                     reason: interactive_reason.unwrap_or(reason),
                     decision_tx: Some(tx),
@@ -413,6 +469,22 @@ impl ToolContext {
         let request =
             self.build_permission_request(tool_name, description, None, is_read_only, None);
         self.request_permission_inner(request)
+    }
+
+    /// Note how `paths` stand before asking for approval to change them. Holds
+    /// nothing unless this session's approvals are bound to file content.
+    pub async fn files_under_review(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> ReviewedFiles {
+        let mut reviewed = ReviewedFiles::default();
+        if self.permission_handler.binds_approvals_to_content() {
+            for path in paths {
+                let stamp = file_stamp(&path).await;
+                reviewed.0.push((path, stamp));
+            }
+        }
+        reviewed
     }
 
     pub fn check_permission_for_path(
@@ -689,8 +761,13 @@ pub fn all_tool_names() -> &'static [&'static str] {
 
 /// Return all built-in tools (excluding AgentTool, which lives in cc-query).
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
-    vec![
-        Box::new(PtyBashTool),
+    let bash: Box<dyn Tool> = if workspace_scope::active() {
+        Box::new(BashTool)
+    } else {
+        Box::new(PtyBashTool)
+    };
+    let tools: Vec<Box<dyn Tool>> = vec![
+        bash,
         Box::new(FileReadTool),
         Box::new(FileEditTool),
         Box::new(FileWriteTool),
@@ -737,11 +814,23 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         // Computer Use is only available when compiled with the feature flag.
         #[cfg(feature = "computer-use")]
         Box::new(computer_use::ComputerUseTool),
-    ]
+    ];
+    tools
+        .into_iter()
+        .filter(|tool| !workspace_scope::active() || workspace_scope::permits_tool(tool.name()))
+        .collect()
 }
 
 /// Find a tool by name (case-sensitive).
 pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
+    if workspace_scope::active() {
+        if !workspace_scope::permits_tool(name) {
+            return None;
+        }
+        if name == "Bash" {
+            return Some(Box::new(BashTool));
+        }
+    }
     match name {
         claurst_core::constants::TOOL_NAME_BASH => Some(Box::new(PtyBashTool)),
         claurst_core::constants::TOOL_NAME_FILE_READ => Some(Box::new(FileReadTool)),
@@ -799,6 +888,23 @@ pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn each_concurrent_tool_call_sees_its_own_call_id() {
+        assert_eq!(super::current_tool_call(), None);
+        let probe = || async {
+            tokio::task::yield_now().await;
+            super::current_tool_call()
+        };
+        let (first, second) = futures::future::join(
+            super::with_tool_call("toolu_a".to_string(), probe()),
+            super::with_tool_call("toolu_b".to_string(), probe()),
+        )
+        .await;
+        assert_eq!(first.as_deref(), Some("toolu_a"));
+        assert_eq!(second.as_deref(), Some("toolu_b"));
+        assert_eq!(super::current_tool_call(), None);
+    }
+
     use super::*;
 
     struct AskPermissionHandler {

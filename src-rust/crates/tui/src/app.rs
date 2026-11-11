@@ -42,11 +42,8 @@ use claurst_core::types::{ContentBlock, Message, Role};
 use claurst_core::{sample_completion_verb, sample_spinner_verb, CommandContextSignal};
 use claurst_query::QueryEvent;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::backend::CrosstermBackend;
 use ratatui::style::Color;
-use ratatui::Terminal;
 use std::cell::{Cell, RefCell};
-use std::io::Stdout;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
@@ -608,7 +605,7 @@ pub struct App {
     // Core state
     pub config: Config,
     pub cost_tracker: Arc<CostTracker>,
-    pub messages: Vec<Message>,
+    pub messages: crate::next::tracked::Tracked<Vec<Message>>,
     /// Combined display list kept in sync with `messages`: real conversation turns
     /// plus injected system annotations. Used by the renderer so it can iterate
     /// a single sequence instead of merging two lists on every frame.
@@ -623,7 +620,7 @@ pub struct App {
     /// Transcript message selected by a pointer interaction, when any.
     pub selected_transcript_message: Option<usize>,
     pub is_streaming: bool,
-    pub streaming_text: String,
+    pub streaming_text: crate::next::tracked::Tracked<String>,
     pub streaming_thinking: String,
     pub status_message: Option<String>,
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
@@ -631,7 +628,7 @@ pub struct App {
     pub should_exit: bool,
 
     // Extended state
-    pub tool_use_blocks: Vec<ToolUseBlock>,
+    pub tool_use_blocks: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
     pub permission_request: Option<PermissionRequest>,
     pub frame_count: u64,
     pub token_count: u32,
@@ -667,6 +664,30 @@ pub struct App {
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub keybindings: KeybindingResolver,
+    /// Presentation preferences for the Next renderer; Classic ignores them.
+    pub next_presentation: crate::next::NextPresentation,
+    /// Renderer drawing this session. Next-only keys are unbound in Classic.
+    pub renderer: crate::application::UiRenderer,
+    /// Next shell navigation state (inspector, reading anchor).
+    pub next_shell: crate::next::ShellState,
+    /// A user request to cancel the running turn, until the runtime settles it.
+    pub cancellation: crate::application::TurnCancellation,
+    /// The engine session shown, when the loop has bound one.
+    pub session_id: Option<String>,
+    /// Who owns this session's execution, as far as a producer has shown.
+    pub ownership: crate::application::SessionOwnership,
+    /// Drafts and reading positions of sessions not currently shown.
+    pub scope_views: std::collections::HashMap<String, crate::application::ScopeView>,
+    /// A session the browser asked to resume; the loop performs it.
+    pub pending_resume: Option<String>,
+    /// The current view was saved by a resume request still in flight.
+    resume_saved_view: bool,
+    /// Permission decisions by tool use id (true = allowed).
+    pub permission_decisions:
+        crate::next::tracked::Tracked<std::collections::HashMap<String, bool>>,
+    /// Tool rows of a cancelled turn, kept as evidence until the next user
+    /// turn; the live list is cleared on cancel.
+    pub interrupted_tools: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
     // CLI control-key routing and the normal UI handler resolve each event once.
     resolved_keybinding: Option<(KeyEvent, bool, KeybindingResult)>,
 
@@ -940,6 +961,12 @@ pub struct App {
     /// Goal badge string shown in the footer, e.g. "active · 5m · 3 turns".
     /// None when no goal is active. Updated by the REPL after each turn.
     pub active_goal_badge: Option<String>,
+    /// Snapshot of the engine-local work stores for the Next Work page,
+    /// refreshed by the interactive loop. Display only; it grants nothing.
+    pub work_sources: crate::application::work::WorkSources,
+    /// Familiar memory read for the Next Memory page; cleared when the page
+    /// closes so private reads are not kept.
+    pub memory_snapshot: crate::application::memory::MemorySnapshot,
 
     // ---- Thinking block expansion state ----------------------------------
     /// Set of thinking block content hashes that are expanded.
@@ -1212,11 +1239,17 @@ impl App {
             }
         }
         let model_name = config.effective_model().to_string();
-        let user_keybindings = UserKeybindings::load(&Settings::config_dir());
+        // This load upgrades an older file and saves it. Classic drops the
+        // Next-only defaults, so the upgrade must keep a binding in every
+        // context when only they use its chord.
+        let user_keybindings = UserKeybindings::load_with_renderer_only(
+            &Settings::config_dir(),
+            crate::next::NEXT_ONLY_ACTIONS,
+        );
         let mut app = Self {
             config,
             cost_tracker,
-            messages: Vec::new(),
+            messages: Vec::new().into(),
             display_messages: Vec::new(),
             system_annotations: Vec::new(),
             input: String::new(),
@@ -1226,12 +1259,12 @@ impl App {
             scroll_offset: 0,
             selected_transcript_message: None,
             is_streaming: false,
-            streaming_text: String::new(),
+            streaming_text: String::new().into(),
             streaming_thinking: String::new(),
             status_message: None,
             spinner_verb: None,
             should_exit: false,
-            tool_use_blocks: Vec::new(),
+            tool_use_blocks: Vec::new().into(),
             permission_request: None,
             frame_count: 0,
             token_count: 0,
@@ -1249,6 +1282,17 @@ impl App {
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
+            next_presentation: crate::next::NextPresentation::default(),
+            renderer: crate::application::UiRenderer::default(),
+            next_shell: crate::next::ShellState::default(),
+            cancellation: crate::application::TurnCancellation::default(),
+            session_id: None,
+            ownership: crate::application::SessionOwnership::default(),
+            scope_views: std::collections::HashMap::new(),
+            pending_resume: None,
+            resume_saved_view: false,
+            permission_decisions: std::collections::HashMap::new().into(),
+            interrupted_tools: Vec::new().into(),
             resolved_keybinding: None,
             cursor_pos: 0,
             auto_scroll: true,
@@ -1384,6 +1428,8 @@ impl App {
             worktree_branch: None,
             agent_type_badge: None,
             active_goal_badge: None,
+            work_sources: Default::default(),
+            memory_snapshot: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
             last_selectable_area: Cell::new(ratatui::layout::Rect::default()),
@@ -1653,6 +1699,10 @@ impl App {
     }
 
     fn begin_user_turn_snapshot(&mut self) {
+        // A new turn replaces the previous turn's interruption evidence, and
+        // decisions are kept only while their tool row is still shown.
+        self.interrupted_tools.clear();
+        self.prune_permission_decisions();
         self.turn_metadata.push(TurnMetadata {
             submitted_at: Some(format_turn_time_label()),
             model_name: Some(self.model_name.clone()),
@@ -1714,7 +1764,7 @@ impl App {
         }
 
         let thinking = std::mem::take(&mut self.streaming_thinking);
-        let text = std::mem::take(&mut self.streaming_text);
+        let text = std::mem::take(&mut self.streaming_text).into_inner();
 
         let mut blocks = Vec::new();
         if !thinking.trim().is_empty() {
@@ -2292,6 +2342,8 @@ impl App {
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
                 self.tool_use_blocks.clear();
+                self.interrupted_tools.clear();
+                self.permission_decisions.clear();
                 self.turn_metadata.clear();
                 self.cost_usd = 0.0;
                 self.invalidate_transcript();
@@ -2565,8 +2617,20 @@ impl App {
     /// (overage / voice / memory), which render as overlays but let the user
     /// keep typing underneath.
     pub fn any_blocking_modal_open(&self) -> bool {
+        self.permission_request.is_some() || self.blocking_surface_open_besides_permission()
+    }
+
+    /// Like [`Self::any_modal_open`] but ignoring a pending permission
+    /// request, for renderers that draw the request themselves.
+    pub fn modal_open_besides_permission(&self) -> bool {
+        self.blocking_surface_open_besides_permission()
+            || self.overage_upsell.visible
+            || self.voice_mode_notice.visible
+            || self.memory_update_notification.visible
+    }
+
+    fn blocking_surface_open_besides_permission(&self) -> bool {
         self.response_reader.visible
-            || self.permission_request.is_some()
             || self.rate_limit_recovery.visible
             || self.rewind_flow.visible
             || self.tasks_overlay.visible
@@ -2856,7 +2920,11 @@ impl App {
     }
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
-        self.messages = messages;
+        self.messages = messages.into();
+        // Resume, rewind and clear replace the conversation; interruption
+        // evidence from the old one no longer describes what is shown.
+        self.interrupted_tools.clear();
+        self.prune_permission_decisions();
 
         let reader_message_gone = self.response_reader.message_index.is_some_and(|index| {
             self.messages
@@ -3153,6 +3221,256 @@ impl App {
             self.scroll_offset = 0;
         } else {
             self.new_messages_while_scrolled = self.new_messages_while_scrolled.saturating_add(1);
+        }
+    }
+
+    /// Hand a pending cancel request to the interactive loop exactly once.
+    /// The request then waits on the runtime until [`Self::settle_cancellation`].
+    pub fn take_cancellation_request(&mut self) -> bool {
+        if self.cancellation != crate::application::TurnCancellation::Requested {
+            return false;
+        }
+        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+        true
+    }
+
+    /// The loop submits a browser resume as `/session resume <id>`; that is
+    /// not something the user typed, so it does not stay in prompt history.
+    fn forget_synthetic_resume(&mut self) {
+        let synthetic = |entry: &String| entry.starts_with("/session resume ");
+        if self.prompt_input.history.last().is_some_and(synthetic) {
+            self.prompt_input.history.pop();
+            self.input_history = self.prompt_input.history.clone();
+        }
+    }
+
+    fn save_scope_view(&mut self) {
+        let Some(id) = self.session_id.clone() else {
+            return;
+        };
+        let view = crate::application::ScopeView {
+            draft: std::mem::take(&mut self.prompt_input.text),
+            pastes: std::mem::take(&mut self.prompt_input.paste_contents),
+            images: std::mem::take(&mut self.prompt_input.pending_images),
+            scroll_offset: self.scroll_offset,
+            auto_scroll: self.auto_scroll,
+        };
+        self.prompt_input.replace_text(String::new());
+        self.scope_views.insert(id, view);
+    }
+
+    fn restore_scope_view(&mut self, id: &str) {
+        let view = self
+            .scope_views
+            .remove(id)
+            .unwrap_or(crate::application::ScopeView {
+                auto_scroll: true,
+                ..Default::default()
+            });
+        self.set_prompt_text(view.draft);
+        // Paste ids only grow, so restored ids cannot collide with new ones.
+        self.prompt_input.paste_contents = view.pastes;
+        self.prompt_input.pending_images = view.images;
+        self.scroll_offset = view.scroll_offset;
+        self.auto_scroll = view.auto_scroll;
+        self.new_messages_while_scrolled = 0;
+    }
+
+    /// Resume `id` from the session browser. The current draft and reading
+    /// position are kept for this session; the loop performs the resume.
+    pub fn request_resume(&mut self, id: String) {
+        self.session_browser.close();
+        if self.session_id.as_deref() == Some(id.as_str()) {
+            self.status_message = Some("Already in this session.".to_string());
+            return;
+        }
+        // A cancelled turn is still running until the runtime settles it.
+        if self.is_streaming
+            || self.pending_resume.is_some()
+            || self.cancellation != crate::application::TurnCancellation::Idle
+        {
+            self.status_message =
+                Some("Finish or cancel the running turn before resuming.".to_string());
+            return;
+        }
+        self.save_scope_view();
+        self.resume_saved_view = true;
+        self.pending_resume = Some(id);
+    }
+
+    /// Load the session list the browser asked for, and deliver it when
+    /// ready. Every interactive loop calls this each tick.
+    pub fn poll_session_list(&mut self) {
+        // Drain background session-list results.
+        if let Some(ref mut rx) = self.session_list_rx {
+            match rx.try_recv() {
+                Ok(entries) => {
+                    self.session_browser.sessions = entries;
+                    self.session_browser.selected_idx = 0;
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Spawn async session-list load when requested.
+        if self.session_list_pending {
+            self.session_list_pending = false;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            self.session_list_rx = Some(rx);
+            tokio::spawn(async move {
+                let sessions = claurst_core::history::list_sessions().await;
+                let entries: Vec<crate::session_browser::SessionEntry> = sessions
+                    .into_iter()
+                    .map(|s| {
+                        let age = chrono::Utc::now().signed_duration_since(s.updated_at);
+                        let last_updated = if age.num_minutes() < 1 {
+                            "just now".to_string()
+                        } else if age.num_hours() < 1 {
+                            format!("{}m ago", age.num_minutes())
+                        } else if age.num_hours() < 24 {
+                            format!("{}h ago", age.num_hours())
+                        } else {
+                            format!("{}d ago", age.num_days())
+                        };
+                        crate::session_browser::SessionEntry {
+                            id: s.id,
+                            title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
+                            last_updated,
+                            message_count: s.messages.len(),
+                            cost_usd: s.total_cost,
+                        }
+                    })
+                    .collect();
+                let _ = tx.send(entries).await;
+            });
+        }
+    }
+
+    pub fn take_pending_resume(&mut self) -> Option<String> {
+        self.pending_resume.take()
+    }
+
+    /// The loop bound session `id`. Keep the outgoing session's draft and
+    /// position, drop views that belong to it, and restore `id`'s own draft
+    /// and position. A restored draft is shown, never sent.
+    pub fn enter_session_scope(&mut self, id: &str) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic keeps its existing resume behavior; only the bound id
+            // is recorded.
+            self.session_id = Some(id.to_string());
+            return;
+        }
+        if self.resume_saved_view {
+            self.forget_synthetic_resume();
+        }
+        if self.session_id.as_deref() != Some(id) {
+            if !self.resume_saved_view {
+                self.save_scope_view();
+            }
+            self.close_response_reader();
+            self.system_annotations.clear();
+            self.turn_metadata.clear();
+            self.selected_transcript_message = None;
+            self.tool_use_blocks.clear();
+            self.interrupted_tools.clear();
+            self.permission_decisions.clear();
+            self.streaming_text.clear();
+            self.streaming_thinking.clear();
+            self.selection_anchor = None;
+            self.selection_focus = None;
+            self.selection_text.borrow_mut().clear();
+            self.next_shell.inspector_scroll = 0;
+            self.next_shell.reset_transcript_for_session();
+            // Work read for the old session does not describe this one.
+            self.work_sources = Default::default();
+            self.session_id = Some(id.to_string());
+            self.restore_scope_view(id);
+        }
+        self.resume_saved_view = false;
+        self.pending_auto_submit = false;
+    }
+
+    /// The loop finished handling a command. If a browser resume did not
+    /// switch sessions, give the current session its draft back.
+    pub fn settle_pending_resume(&mut self) {
+        if self.resume_saved_view && self.pending_resume.is_none() {
+            self.forget_synthetic_resume();
+            self.resume_saved_view = false;
+            if let Some(id) = self.session_id.clone() {
+                self.restore_scope_view(&id);
+            }
+        }
+    }
+
+    /// Remember the user's decision for a tool call so presentation can
+    /// show authorization separately from the execution result.
+    pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
+        self.permission_decisions
+            .insert(tool_use_id.to_string(), allowed);
+    }
+
+    fn prune_permission_decisions(&mut self) {
+        let shown: std::collections::HashSet<&str> = self
+            .tool_use_blocks
+            .iter()
+            .chain(&self.interrupted_tools)
+            .map(|block| block.id.as_str())
+            .collect();
+        self.permission_decisions
+            .retain(|id, _| shown.contains(id.as_str()));
+    }
+
+    /// Clear the live tool rows of a turn being cancelled, keeping the ones
+    /// still running as evidence of what the cancel interrupted.
+    pub fn interrupt_tool_rows(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Classic {
+            // Classic clears its tool rows on cancel, as it always has.
+            self.tool_use_blocks.clear();
+            return;
+        }
+        let running = self
+            .tool_use_blocks
+            .drain(..)
+            .filter(|block| block.status == ToolStatus::Running);
+        self.interrupted_tools.extend(running);
+    }
+
+    /// Record a cancellation the loop performed without a key request
+    /// (remote control), so it is shown pending until the worker stops.
+    pub fn note_cancellation_sent(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    }
+
+    /// The loop calls this once no turn worker is running any more. A
+    /// pending cancellation becomes the confirmed outcome.
+    pub fn settle_cancellation(&mut self) {
+        if self.cancellation != crate::application::TurnCancellation::Idle {
+            self.status_message = Some("Cancelled.".to_string());
+        }
+        self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Fold the row correction the Next renderer measured while the reader
+    /// was scrolled away into `scroll_offset`, so later scroll steps move
+    /// from where the reader actually is.
+    /// Ask the loop to cancel the running turn through its token. Next only:
+    /// Classic keeps its existing cancel behavior unchanged.
+    fn request_turn_cancellation(&mut self) {
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.cancellation = crate::application::TurnCancellation::Requested;
+        }
+    }
+
+    pub fn settle_scroll_anchor(&mut self) {
+        let rows = self.next_shell.take_unsettled_rows();
+        if !self.auto_scroll {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add_signed(isize::try_from(rows).unwrap_or(0));
         }
     }
 
@@ -3854,8 +4172,18 @@ impl App {
         }
         let pending = self.keybindings.has_pending_chord();
         let context = self.current_key_context();
+        // The Next inspector layers its keys over the composer's.
+        let inspector_layer = self.renderer == crate::application::UiRenderer::Next
+            && self.next_shell.inspector.is_some()
+            && context == KeyContext::Chat
+            && self.prompt_input.suggestions.is_empty();
+        let contexts = if inspector_layer {
+            vec![KeyContext::Inspector, context]
+        } else {
+            vec![context]
+        };
         let result = match key_event_to_keystroke(&key) {
-            Some(stroke) => self.keybindings.process(stroke, &context),
+            Some(stroke) => self.keybindings.process_layered(stroke, &contexts),
             None => {
                 self.keybindings.cancel_chord();
                 KeybindingResult::NoMatch
@@ -4618,6 +4946,16 @@ impl App {
             match self.session_browser.mode {
                 SessionBrowserMode::Browse => match key.code {
                     KeyCode::Esc => self.session_browser.close(),
+                    // Next only (#412); Classic's browser is unchanged.
+                    KeyCode::Enter if self.renderer == crate::application::UiRenderer::Next => {
+                        if let Some(id) = self
+                            .session_browser
+                            .selected_session()
+                            .map(|entry| entry.id.clone())
+                        {
+                            self.request_resume(id);
+                        }
+                    }
                     KeyCode::Up => self.session_browser.select_prev(),
                     KeyCode::Down => self.session_browser.select_next(),
                     KeyCode::Char('r') => self.session_browser.start_rename(),
@@ -4626,8 +4964,13 @@ impl App {
                 SessionBrowserMode::Rename => match key.code {
                     KeyCode::Esc => self.session_browser.cancel(),
                     KeyCode::Enter => {
-                        if let Some((_id, name)) = self.session_browser.confirm_rename() {
-                            self.session_title = Some(name.clone());
+                        if let Some((id, name)) = self.session_browser.confirm_rename() {
+                            // Only the shown session's title is the header's.
+                            if self.renderer == crate::application::UiRenderer::Classic
+                                || self.session_id.as_deref() == Some(id.as_str())
+                            {
+                                self.session_title = Some(name.clone());
+                            }
                             self.status_message = Some(format!("Renamed to: {}", name));
                         }
                     }
@@ -4820,8 +5163,15 @@ impl App {
             return self.handle_global_search_key(key);
         }
 
-        // Notification dismiss
-        if key.code == KeyCode::Esc && !self.notifications.is_empty() {
+        // Notification dismiss. Next keeps a notice waiting while the
+        // inspector replaces the transcript; Esc then belongs to the inspector,
+        // so a notice the reader has not seen is not thrown away.
+        if key.code == KeyCode::Esc
+            && !self.notifications.is_empty()
+            && (self.renderer != crate::application::UiRenderer::Next
+                || crate::next::delegates_to_classic(self)
+                || self.next_shell.notice_shown())
+        {
             self.notifications.dismiss_current();
             return false;
         }
@@ -4932,16 +5282,25 @@ impl App {
 
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
         match binding {
+            // Next-only actions are unbound in Classic; the key falls through
+            // exactly as it did before they existed.
+            KeybindingResult::Action(action)
+                if self.renderer != crate::application::UiRenderer::Next
+                    && crate::next::NEXT_ONLY_ACTIONS.contains(&action.as_str()) =>
+            {
+                if had_pending_chord {
+                    return false;
+                }
+            }
             KeybindingResult::Action(action) => return self.handle_keybinding_action(&action),
             KeybindingResult::Pending => return false,
             KeybindingResult::NoMatch if had_pending_chord => return false,
             KeybindingResult::Unbound | KeybindingResult::NoMatch => {}
         }
 
-        // Clear any active text selection on key press (except Ctrl+C which copies it).
-        let is_copy =
-            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-        if !is_copy && self.selection_anchor.is_some() {
+        // Clear any active text selection on key press, except the key that
+        // copies it.
+        if !self.keeps_selection_for_copy(&key) && self.selection_anchor.is_some() {
             self.selection_anchor = None;
             self.selection_focus = None;
             *self.selection_text.borrow_mut() = String::new();
@@ -5089,8 +5448,9 @@ impl App {
                 self.spinner_verb = None;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
-                self.tool_use_blocks.clear();
+                self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
+                self.request_turn_cancellation();
                 self.complete_current_turn_snapshot(true);
             }
 
@@ -5121,8 +5481,9 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
+                    self.request_turn_cancellation();
                     self.complete_current_turn_snapshot(true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
@@ -5894,7 +6255,29 @@ impl App {
         self.exit_key_sequence_start = Some(key_char);
     }
 
+    /// Choose the renderer for this session. Next-only keys stay unbound in
+    /// any other renderer, including as the start of a user's chord.
+    pub fn select_renderer(&mut self, renderer: crate::application::UiRenderer) {
+        self.renderer = renderer;
+        if renderer != crate::application::UiRenderer::Next {
+            self.keybindings
+                .remove_default_actions(crate::next::NEXT_ONLY_ACTIONS);
+        }
+    }
+
     fn handle_keybinding_action(&mut self, action: &str) -> bool {
+        if crate::next::NEXT_ONLY_ACTIONS.contains(&action) {
+            if action == "jumpToLive" {
+                self.auto_scroll = true;
+                self.scroll_offset = 0;
+                self.new_messages_while_scrolled = 0;
+            }
+            if action == "jumpToStart" {
+                self.auto_scroll = false;
+            }
+            self.next_shell.apply_action(action);
+            return false;
+        }
         match action {
             "interrupt" => {
                 if self.is_streaming {
@@ -5902,8 +6285,9 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
+                    self.request_turn_cancellation();
                 } else {
                     // Handle exit confirmation: require two exit key presses within 2 seconds.
                     // Always clear the prompt input on Ctrl+C.
@@ -6505,6 +6889,19 @@ impl App {
         *self.selection_text.borrow_mut() = String::new();
     }
 
+    /// Whether this key reaches the copy branch with the selection still set.
+    /// That branch takes Ctrl with `c` or `C`, and a terminal can report
+    /// Ctrl+Shift+C either way, so Next keeps the selection for both. Classic
+    /// keeps it only for `c`, as it always has.
+    fn keeps_selection_for_copy(&self, key: &KeyEvent) -> bool {
+        key.modifiers.contains(KeyModifiers::CONTROL)
+            && match key.code {
+                KeyCode::Char('c') => true,
+                KeyCode::Char('C') => self.renderer == crate::application::UiRenderer::Next,
+                _ => false,
+            }
+    }
+
     /// Show context menu at the given position.
     fn show_context_menu(&mut self, x: u16, y: u16, kind: ContextMenuKind) {
         self.context_menu_state = Some(ContextMenuState {
@@ -6649,6 +7046,12 @@ impl App {
     pub fn handle_paste_data(&mut self, data: String) {
         use crate::image_paste::PastedImage;
         use crate::prompt_input::detect_pasted_path;
+
+        // Fast typing arrives as a paste burst, so it has to let go of a
+        // selection the way a typed key does.
+        if self.renderer == crate::application::UiRenderer::Next {
+            self.clear_selection();
+        }
 
         if let Some(path) = detect_pasted_path(&data) {
             let ext = path
@@ -7261,6 +7664,16 @@ impl App {
                     .collect::<Vec<_>>()
                     .join("\n"),
             };
+            // A cancelled call's closing result belongs to its interrupted
+            // row; it must not reappear as a second, failed card.
+            if let Some(row) = self
+                .interrupted_tools
+                .iter_mut()
+                .find(|row| row.id == tool_use_id)
+            {
+                row.output_preview = Some(Self::tool_result_preview(&result));
+                continue;
+            }
             let existing = self
                 .tool_use_blocks
                 .iter()
@@ -7314,8 +7727,32 @@ impl App {
         self.invalidate_transcript();
     }
 
-    /// Process a query event from the agentic loop.
+    /// Process a query event from the agentic loop and perform the external
+    /// effects it requests.
     pub fn handle_query_event(&mut self, event: QueryEvent) {
+        let effects = self.apply_query_event(event);
+        crate::application::perform_effects(&effects);
+    }
+
+    /// Apply a query event to presentation state.
+    ///
+    /// External effects are returned instead of performed so the interactive
+    /// loop, not the reducer step, owns them.
+    pub fn apply_query_event(
+        &mut self,
+        event: QueryEvent,
+    ) -> Vec<crate::application::PresentationEffect> {
+        let mut effects = Vec::new();
+        // A cancelled turn's backlog keeps arriving until the runtime settles.
+        // Its live output must not restart the turn on screen, or further
+        // interrupts would cancel again instead of reaching the exit sequence.
+        // The worker's durable messages and terminal events still apply.
+        if matches!(event, QueryEvent::Stream(_))
+            && self.renderer == crate::application::UiRenderer::Next
+            && self.cancellation != crate::application::TurnCancellation::Idle
+        {
+            return effects;
+        }
         // Auto-dismiss error modal when assistant responds
         match &event {
             QueryEvent::Stream(_) | QueryEvent::TurnComplete { .. } => {
@@ -7481,7 +7918,7 @@ impl App {
                         );
                     }
                     if self.bell_on_complete {
-                        ring_terminal_bell();
+                        effects.push(crate::application::PresentationEffect::RingBell);
                     }
                 }
             }
@@ -7540,6 +7977,7 @@ impl App {
 
         // Update token count from tracker.
         self.token_count = self.cost_tracker.total_tokens() as u32;
+        effects
     }
 
     // -------------------------------------------------------------------
@@ -7548,10 +7986,7 @@ impl App {
 
     /// Run the TUI event loop. Returns `Some(input)` when the user submits
     /// a message, or `None` when the user quits.
-    pub fn run(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<Option<String>> {
+    pub fn run(&mut self, terminal: &mut crate::AppTerminal) -> anyhow::Result<Option<String>> {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -7563,53 +7998,7 @@ impl App {
                 self.daemon_online = crate::coven_status::daemon_looks_online();
             }
 
-            // Drain background session-list results.
-            if let Some(ref mut rx) = self.session_list_rx {
-                match rx.try_recv() {
-                    Ok(entries) => {
-                        self.session_browser.sessions = entries;
-                        self.session_browser.selected_idx = 0;
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Spawn async session-list load when requested.
-            if self.session_list_pending {
-                self.session_list_pending = false;
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                self.session_list_rx = Some(rx);
-                tokio::spawn(async move {
-                    let sessions = claurst_core::history::list_sessions().await;
-                    let entries: Vec<crate::session_browser::SessionEntry> = sessions
-                        .into_iter()
-                        .map(|s| {
-                            let age = chrono::Utc::now().signed_duration_since(s.updated_at);
-                            let last_updated = if age.num_minutes() < 1 {
-                                "just now".to_string()
-                            } else if age.num_hours() < 1 {
-                                format!("{}m ago", age.num_minutes())
-                            } else if age.num_hours() < 24 {
-                                format!("{}h ago", age.num_hours())
-                            } else {
-                                format!("{}d ago", age.num_days())
-                            };
-                            crate::session_browser::SessionEntry {
-                                id: s.id,
-                                title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
-                                last_updated,
-                                message_count: s.messages.len(),
-                                cost_usd: s.total_cost,
-                            }
-                        })
-                        .collect();
-                    let _ = tx.send(entries).await;
-                });
-            }
+            self.poll_session_list();
 
             // Drain voice transcription events (non-blocking).
             // When the background recording/transcription task emits a
@@ -7926,6 +8315,63 @@ mod tests {
         let mut app = App::new(config, cost_tracker);
         app.install_command_catalog(test_command_catalog());
         app
+    }
+
+    #[test]
+    fn next_keeps_a_selection_for_either_form_of_ctrl_shift_c() {
+        let ctrl_shift = |c| {
+            KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )
+        };
+        let mut app = make_app();
+        app.renderer = crate::application::UiRenderer::Next;
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('c')));
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('C')));
+        assert!(
+            !app.keeps_selection_for_copy(&KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT))
+        );
+        // Classic is unchanged.
+        app.renderer = crate::application::UiRenderer::Classic;
+        assert!(app.keeps_selection_for_copy(&ctrl_shift('c')));
+        assert!(!app.keeps_selection_for_copy(&ctrl_shift('C')));
+    }
+
+    #[test]
+    fn turn_completion_bell_is_returned_as_an_effect_not_performed() {
+        use crate::application::PresentationEffect;
+        let complete = || QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".to_string(),
+            usage: None,
+        };
+
+        let mut app = make_app();
+        app.bell_on_complete = true;
+        app.completion_toast_min_secs = 0;
+        app.turn_start = Some(std::time::Instant::now());
+        assert_eq!(
+            app.apply_query_event(complete()),
+            vec![PresentationEffect::RingBell]
+        );
+
+        let mut quiet = make_app();
+        quiet.bell_on_complete = false;
+        quiet.completion_toast_min_secs = 0;
+        quiet.turn_start = Some(std::time::Instant::now());
+        assert!(quiet.apply_query_event(complete()).is_empty());
+
+        let mut cancelled = make_app();
+        cancelled.bell_on_complete = true;
+        cancelled.completion_toast_min_secs = 0;
+        assert!(cancelled
+            .apply_query_event(QueryEvent::TurnComplete {
+                turn: 1,
+                stop_reason: "aborted".to_string(),
+                usage: None,
+            })
+            .is_empty());
     }
 
     fn test_command_catalog() -> Vec<CommandPaletteEntry> {

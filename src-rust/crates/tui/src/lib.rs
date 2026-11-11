@@ -27,6 +27,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use quiet_backend::QuietBackend;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
@@ -73,6 +74,8 @@ fn should_push_keyboard_enhancement_for_process() -> bool {
 pub mod agents_view;
 /// Application state and main event loop.
 pub mod app;
+/// Typed presentation seam shared by the Classic and Next renderers.
+pub mod application;
 /// Model-initiated question dialog (AskUserQuestion tool).
 pub mod ask_user_dialog;
 /// Bridge connection state and status badge.
@@ -143,6 +146,8 @@ pub mod message_copy;
 pub mod messages;
 /// Model picker overlay (/model command).
 pub mod model_picker;
+/// Opt-in Next renderer (`COVEN_CODE_UI=next`).
+pub mod next;
 /// Notification / banner system.
 pub mod notifications;
 /// First-launch onboarding / welcome dialog.
@@ -157,6 +162,7 @@ pub mod overlays;
 pub mod plugin_views;
 /// Complete prompt input with vim mode, history, typeahead, and paste handling.
 pub mod prompt_input;
+pub mod quiet_backend;
 pub mod rate_limit_recovery;
 /// All ratatui rendering logic.
 pub mod render;
@@ -287,7 +293,7 @@ fn restore_terminal_cleanup() -> io::Result<()> {
 /// panic message.  Without this, any panic in rendering code leaves the
 /// terminal in raw mode with mouse capture enabled — the user sees garbage
 /// input until they run `reset`.
-pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTerminal> {
     // Chain on top of any existing hook (e.g. from a previous call or test harness).
     // Only restore the terminal when the panic originates on the main thread.
     // Tokio worker threads also trigger this process-wide hook (Tokio catches
@@ -351,24 +357,108 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 
     set_terminal_title("\u{2728} Coven");
-    let backend = CrosstermBackend::new(stdout);
+    // Only Next keeps unchanged frames off the wire; Classic's bytes are unchanged.
+    let quiet = renderer == application::UiRenderer::Next;
+    let backend = QuietBackend::new(CrosstermBackend::new(stdout), quiet);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
 }
 
 /// Restore the terminal to its original state.
-pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
     disable_raw_mode()?;
     // Restore the original title by clearing it (terminals fall back to default).
     let _ = execute!(terminal.backend_mut(), crossterm::terminal::SetTitle(""),);
     restore_terminal_cleanup()?;
+    // Never skip this as "already shown": the user keeps this cursor.
+    terminal.backend_mut().forget_terminal_state();
     terminal.show_cursor()?;
     Ok(())
 }
 
+/// The interactive terminal handed to the event loops.
+pub type AppTerminal = Terminal<QuietBackend<CrosstermBackend<Stdout>>>;
+
+/// The title most recently set, so it can be restored after a suspend.
+static LAST_TERMINAL_TITLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(unix)]
+fn last_terminal_title() -> Option<String> {
+    LAST_TERMINAL_TITLE.lock().ok()?.clone()
+}
+
 /// Set the terminal window title via OSC escape sequence.
 pub fn set_terminal_title(title: &str) {
+    if let Ok(mut last) = LAST_TERMINAL_TITLE.lock() {
+        *last = Some(title.to_string());
+    }
     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(title));
+}
+
+/// The topic text for the terminal title. The title is written raw inside an
+/// OSC sequence, so in Next every control character and bidirectional
+/// override is dropped and newlines become spaces: a prompt or session title
+/// can never end the sequence early and emit its own. Classic is unchanged.
+pub fn terminal_title_topic(renderer: application::UiRenderer, topic: &str) -> String {
+    match renderer {
+        application::UiRenderer::Classic => topic.to_string(),
+        application::UiRenderer::Next => topic
+            .chars()
+            .filter_map(|ch| match ch {
+                '\n' | '\r' | '\t' => Some(' '),
+                '\u{0}'..='\u{1f}'
+                | '\u{7f}'..='\u{9f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}' => None,
+                _ => Some(ch),
+            })
+            .collect(),
+    }
+}
+
+/// Give the terminal back to the shell, run `stop`, then take it back.
+/// Returns whether `stop` ran: it does not if the terminal could not be
+/// handed back, and the terminal is set up again either way.
+///
+/// The new terminal has no previous frame, so the next draw repaints it all.
+#[cfg(unix)]
+pub fn suspend_terminal(
+    terminal: &mut AppTerminal,
+    renderer: application::UiRenderer,
+    stop: impl FnOnce(),
+) -> io::Result<bool> {
+    let title = last_terminal_title();
+    // Keyboard flags have one stack per screen and setup pushed on the
+    // alternate one, but restore pops after leaving it. Pop here too, or that
+    // stack grows on every suspend and programs run from the shell inherit it.
+    if should_push_keyboard_enhancement_for_process() {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let stopped = stop_if_restored(restore_terminal(terminal), stop);
+    *terminal = setup_terminal(renderer)?;
+    terminal.clear()?;
+    if let Some(title) = title {
+        set_terminal_title(&title);
+    }
+    Ok(stopped)
+}
+
+/// Run `stop` only if the terminal was handed back to the shell. Restoring
+/// stops at its first error, and stopping then would leave the shell in raw
+/// mode, on the alternate screen or with mouse capture on. Returns whether
+/// it ran.
+#[cfg(unix)]
+fn stop_if_restored(restored: io::Result<()>, stop: impl FnOnce()) -> bool {
+    match restored {
+        Ok(()) => {
+            stop();
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not hand the terminal back; not suspending");
+            false
+        }
+    }
 }
 
 /// Update the terminal title to reflect the current session context.
@@ -741,7 +831,7 @@ mod tests {
     fn test_ctrl_c_cancels_streaming() {
         let mut app = make_app();
         app.is_streaming = true;
-        app.streaming_text = "partial".to_string();
+        app.streaming_text = "partial".to_string().into();
         app.handle_key_event(ctrl(KeyCode::Char('c')));
         assert!(!app.is_streaming);
         assert!(!app.should_exit);
@@ -1276,7 +1366,7 @@ mod tests {
         };
         let mut buf = Buffer::empty(area);
 
-        diff_viewer::render_diff_dialog(&mut state, area, &mut buf);
+        diff_viewer::render_diff_dialog(&state, area, &mut buf);
 
         let rendered = buf
             .content
@@ -1600,7 +1690,7 @@ mod tests {
     fn test_turn_complete_flushes_streaming_text() {
         let mut app = make_app();
         app.is_streaming = true;
-        app.streaming_text = "partial response".to_string();
+        app.streaming_text = "partial response".to_string().into();
         app.handle_query_event(claurst_query::QueryEvent::TurnComplete {
             turn: 1,
             stop_reason: "end_turn".to_string(),
@@ -1789,5 +1879,30 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("COVEN_CODE_VOICE", v);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_title_tests {
+    use super::*;
+
+    #[test]
+    fn the_last_title_is_remembered_for_a_resume() {
+        set_terminal_title("title before suspending");
+        assert_eq!(
+            last_terminal_title().as_deref(),
+            Some("title before suspending")
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_was_not_handed_back_is_not_stopped() {
+        let mut stopped = false;
+        let failed = Err(io::Error::other("raw mode stayed on"));
+        assert!(!stop_if_restored(failed, || stopped = true));
+        assert!(!stopped, "the shell would get a half-restored terminal");
+
+        assert!(stop_if_restored(Ok(()), || stopped = true));
+        assert!(stopped);
     }
 }

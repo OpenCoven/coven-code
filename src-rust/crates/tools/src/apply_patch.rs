@@ -296,6 +296,7 @@ impl Tool for ApplyPatchTool {
         // Approve every resolved target before reading any content. Dry runs
         // inspect the same files and must not bypass path-scoped permission rules.
         let mut paths = Vec::with_capacity(file_patches.len());
+        let mut reviewed = crate::ReviewedFiles::default();
         for fp in &file_patches {
             let path = ctx.resolve_path(&fp.path);
             if let Err(e) = ctx.check_hosted_repair_path(self.name(), &path) {
@@ -311,6 +312,7 @@ impl Tool for ApplyPatchTool {
                     ))
                 }
             };
+            reviewed.extend(ctx.files_under_review([path.clone()]).await);
             if let Err(e) = ctx.check_permission_for_path(
                 self.name(),
                 &format!(
@@ -324,6 +326,13 @@ impl Tool for ApplyPatchTool {
                 return ToolResult::error(e.to_string());
             }
             paths.push(path);
+        }
+        // Later panels leave time for an earlier file to change too, so this
+        // comes after every approval. A dry run writes nothing to protect.
+        if !params.dry_run {
+            if let Err(refusal) = reviewed.ensure_unchanged().await {
+                return ToolResult::error(refusal);
+            }
         }
 
         // ----------------------------------------------------------------
@@ -426,7 +435,7 @@ impl Tool for ApplyPatchTool {
         // ----------------------------------------------------------------
 
         for (path, original_bytes, new_content) in &to_write {
-            if let Err(e) = tokio::fs::write(path, new_content).await {
+            if let Err(e) = crate::workspace_scope::write(path, new_content).await {
                 return ToolResult::error(format!("Failed to write {}: {}", path.display(), e));
             }
             ctx.record_file_change(

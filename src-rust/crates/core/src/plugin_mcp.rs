@@ -235,7 +235,7 @@ impl Config {
             .iter()
             .map(|server| server.name.as_str())
             .collect();
-        let plugins_allowed = !(self.hosted_review_enabled() && !self.hosted_review.allow_plugins);
+        let plugins_allowed = !self.hosted_review_enabled() || self.hosted_review.allow_plugins;
         self.mcp_servers
             .iter()
             .chain(self.plugin_mcp_servers.iter().filter_map(move |entry| {
@@ -261,7 +261,7 @@ impl Config {
         let old = std::mem::take(&mut self.plugin_mcp_servers);
         let mut next = Vec::new();
         let mut retired = Vec::new();
-        let plugins_allowed = !(self.hosted_review_enabled() && !self.hosted_review.allow_plugins);
+        let plugins_allowed = !self.hosted_review_enabled() || self.hosted_review.allow_plugins;
         for mut candidate in candidates {
             if !plugins_allowed
                 || candidate.is_revoked()

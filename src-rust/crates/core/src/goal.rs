@@ -539,6 +539,23 @@ impl GoalStore {
         Self::open(&Self::default_path()).ok()
     }
 
+    /// Open an existing goal database for display: read-only, never created,
+    /// and without waiting behind a writer, so a caller on the UI thread is
+    /// not blocked. `Ok(None)` when the database does not exist.
+    pub fn open_read_only_nowait(db_path: &std::path::Path) -> Result<Option<Self>, GoalError> {
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|error| GoalError::Db(error.to_string()))?;
+        conn.busy_timeout(std::time::Duration::ZERO)
+            .map_err(|error| GoalError::Db(error.to_string()))?;
+        Ok(Some(GoalStore { conn }))
+    }
+
     fn canonical_path(&self) -> Result<PathBuf, GoalError> {
         let path = self
             .conn
@@ -1470,6 +1487,52 @@ mod tests {
 
     fn open_tmp() -> GoalStore {
         GoalStore::open(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn a_display_open_reads_an_existing_store_and_never_creates_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("goals.sqlite");
+        assert!(GoalStore::open_read_only_nowait(&path).unwrap().is_none());
+        assert!(
+            !path.exists() && !path.parent().unwrap().exists(),
+            "nothing created"
+        );
+
+        GoalStore::open(&path)
+            .unwrap()
+            .set_goal("sess1", "read me", None)
+            .unwrap();
+        let store = GoalStore::open_read_only_nowait(&path)
+            .unwrap()
+            .expect("an existing store opens");
+        let goal = store.try_get_goal("sess1").unwrap().expect("goal");
+        assert_eq!(goal.objective, "read me");
+        assert!(
+            store.set_goal("sess2", "write", None).is_err(),
+            "a display open cannot write"
+        );
+    }
+
+    #[test]
+    fn a_display_open_does_not_wait_behind_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals.sqlite");
+        GoalStore::open(&path)
+            .unwrap()
+            .set_goal("sess1", "busy", None)
+            .unwrap();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        let started = std::time::Instant::now();
+        let read = GoalStore::open_read_only_nowait(&path)
+            .and_then(|store| store.expect("exists").try_get_goal("sess1"));
+        assert!(read.is_err(), "a locked store reports an error");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "it did not wait"
+        );
+        writer.execute_batch("ROLLBACK;").unwrap();
     }
 
     #[test]

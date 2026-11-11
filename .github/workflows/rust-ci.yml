@@ -129,6 +129,12 @@ jobs:
         working-directory: src-rust
         run: cargo test --workspace --locked --quiet
 
+      # Allocation/work gates are serial because their counting allocator is
+      # process-global. Wall-clock observations stay opt-in and are not CI gates.
+      - name: Next transcript allocation regressions
+        working-directory: src-rust
+        run: cargo test -p claurst-tui --locked --test next_frame_perf -- --ignored --skip measure_active_frames --test-threads=1
+
       # Contract-freeze fixtures (coven/docs/ENGINE-CONTRACT.md surfaces,
       # slash-command registry, default keybindings, Classic TUI baselines).
       # Already covered by the workspace run above; repeated by name so a
@@ -162,6 +168,16 @@ jobs:
       - name: Test computer-use parsing without hardware access
         working-directory: src-rust
         run: cargo test --package claurst-tools --features computer-use --locked computer_use::tests
+
+      - name: Test native Chat workspace policy
+        working-directory: src-rust
+        run: |
+          scratch="$(mktemp -d)"
+          export COVEN_HOME="$scratch/coven"
+          export COVEN_CAVE_HOME="$scratch/cave"
+          export COVEN_CODE_HOME="$scratch/code"
+          cargo test --package claurst-tools --locked workspace_scope::tests
+          cargo test --package claurst --locked --test workspace_policy
 
   coven-contract:
     name: Coven engine contract
