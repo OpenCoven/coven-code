@@ -390,8 +390,9 @@ fn render_keybindings_page(frame: &mut Frame, state: &OnboardingDialogState, are
     // reflect the real binding rather than a hardcoded label that can drift.
     // Fixed keys (Tab mode cycle, F1/F2, permission y/Y/n) live outside that
     // system and stay static.
-    let user_kb = claurst_core::keybindings::UserKeybindings::load(
+    let user_kb = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
         &claurst_core::config::Settings::config_dir(),
+        crate::next::NEXT_ONLY_ACTIONS,
     );
     let submit_key = claurst_core::keybindings::display_binding_for(&user_kb, "submit")
         .unwrap_or_else(|| "Enter".to_string());

@@ -150,11 +150,14 @@ class ForwardOnly(unittest.TestCase):
                     CHECK['check_forward'](previous, [candidate])
 
     def test_cli_forward_only_skips_unwritten_stamps(self):
-        # The checkout is still stamped with the previous version, as it is in
-        # auto-release before bump-version.py runs.
-        with self.remote('v0.8.0', 'v0.8.0^{}'):
+        # Model unwritten stamps independently of the checkout's release version.
+        check_stamps = mock.Mock(side_effect=ValueError('version stamps not written'))
+        with self.remote('v0.8.0', 'v0.8.0^{}'), \
+                mock.patch.dict(CHECK['main'].__globals__, check_release=check_stamps):
             self.assertEqual(self.run_cli('--forward-only', 'v0.9.0'), 0)
+            check_stamps.assert_not_called()
             self.assertEqual(self.run_cli('v0.9.0'), 1)
+            check_stamps.assert_called_once_with(ROOT, 'v0.9.0', {'v0.8.0'})
             self.assertEqual(self.run_cli('--forward-only', 'v0.8.0'), 1)
 
     def test_cli_forward_only_remote_failure_rejects(self):

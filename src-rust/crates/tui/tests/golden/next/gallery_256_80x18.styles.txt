@@ -1,0 +1,34 @@
+abbbbbbccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+cccccccccceeeccccccceeebbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddd
+cccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+eebbbbbfffffffffdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+eebbbbbggggggddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+hbiiiiiiiiiiiiiiiiiiiddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+bbbbbbbbbbbbbddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+jjjjjjjjjjcccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+kkbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+lllllllllllllllddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+mmmmmmmmmmmmmmmddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+hbbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+nnnnnnnnnnnnnnnddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+bbbbbbbbbbbbbbbbdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+hbiiiiiiiidddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ooooooocccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddd
+ccccccccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddddd
+--- legend ---
+a fg=Indexed(99) bg=Reset mod=BOLD
+b fg=Indexed(231) bg=Reset mod=NONE
+c fg=Indexed(251) bg=Reset mod=NONE
+d fg=Reset bg=Reset mod=NONE
+e fg=Indexed(139) bg=Reset mod=NONE
+f fg=Indexed(222) bg=Indexed(234) mod=NONE
+g fg=Indexed(254) bg=Indexed(234) mod=NONE
+h fg=Indexed(183) bg=Reset mod=BOLD | UNDERLINED
+i fg=Indexed(231) bg=Indexed(235) mod=NONE
+j fg=Indexed(115) bg=Indexed(234) mod=NONE
+k fg=Indexed(240) bg=Reset mod=NONE
+l fg=Indexed(217) bg=Reset mod=NONE
+m fg=Indexed(115) bg=Reset mod=NONE
+n fg=Indexed(217) bg=Reset mod=BOLD
+o fg=Indexed(217) bg=Indexed(234) mod=BOLD

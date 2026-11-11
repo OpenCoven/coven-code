@@ -357,9 +357,12 @@ impl Tool for BashTool {
             build_wrapper_script(&params.command, &state, &ctx.working_dir)
         };
 
-        let mut child = match Command::new("bash")
-            .arg("-c")
-            .arg(&script)
+        let (program, args) = match crate::workspace_scope::shell("bash", &["-c".into(), script]) {
+            Ok(command) => command,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
+        let mut child = match Command::new(program)
+            .args(args)
             .current_dir(&ctx.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
