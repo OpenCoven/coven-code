@@ -10,7 +10,6 @@ use claurst_core::types::Message;
 use claurst_query::{QueryEvent, QueryOutcome};
 use claurst_tools::ToolContext;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::connection::Connection;
@@ -49,7 +48,12 @@ pub async fn handle(
 
     // Build per-session ToolContext.
     let permission_handler: Arc<dyn claurst_core::PermissionHandler> =
-        Arc::new(AcpPermissionHandler);
+        Arc::new(AcpPermissionHandler {
+            connection: connection.clone(),
+            session_id: session.session_id.clone(),
+            cancel: cancel.clone(),
+            next_permission_id: session.next_permission_id.clone(),
+        });
     let tool_ctx = ToolContext {
         working_dir: session.cwd.clone(),
         permission_mode: runtime.config.permission_mode.clone(),
@@ -64,21 +68,12 @@ pub async fn handle(
         config: runtime.config.clone(),
         managed_agent_config: runtime.config.managed_agents.clone(),
         completion_notifier: None,
-        pending_permissions: Some(session.pending_permissions.clone()),
+        pending_permissions: None,
         permission_manager: Some(runtime.permission_manager.clone()),
         user_question_tx: None,
     };
     let mut query_config = runtime.query_config.clone();
     query_config.working_directory = session.cwd.to_str().map(str::to_owned);
-
-    // Spawn the permission drainer for this turn.
-    let drainer_cancel = CancellationToken::new();
-    let drainer = crate::permission::spawn_drainer(
-        connection.clone(),
-        session.session_id.clone(),
-        session.pending_permissions.clone(),
-        drainer_cancel.clone(),
-    );
 
     // Event channel + forwarder.
     let (ev_tx, ev_rx) = mpsc::unbounded_channel::<QueryEvent>();
@@ -102,9 +97,6 @@ pub async fn handle(
     )
     .await;
 
-    // Tear down forwarder + drainer.
-    drainer_cancel.cancel();
-    let _ = drainer.await;
     // Forwarder finishes when ev_tx is dropped at end of run_query_loop.
     let _ = forwarder.await;
 
@@ -375,3 +367,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 }
+
+#[cfg(test)]
+#[path = "turn_permission_tests.rs"]
+mod turn_permission_tests;
