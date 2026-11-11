@@ -44,13 +44,16 @@ fn assert_private(error: &anyhow::Error, category: &str) {
         format!("{error:?}"),
     ] {
         for secret in [SECRET, TOKEN, "http://", "127.0.0.1"] {
-            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            assert!(
+                !rendered.contains(secret),
+                "rendered error contains private fixture data"
+            );
         }
-        assert!(rendered.contains("http-privacy-fixture"), "{rendered}");
         assert!(
-            rendered.contains(category),
-            "safe category missing: {rendered}"
+            rendered.contains("http-privacy-fixture"),
+            "missing fixture name"
         );
+        assert!(rendered.contains(category), "missing failure category");
     }
 }
 
@@ -258,9 +261,15 @@ async fn http_transport_errors_drop_body_and_sources_in_every_format() {
             .await
             .unwrap_err();
         for rendered in [error.to_string(), format!("{error:?}")] {
-            assert!(rendered.contains("500"), "{rendered}");
-            assert!(!rendered.contains(SECRET), "{rendered}");
-            assert!(!rendered.contains(TOKEN), "{rendered}");
+            assert!(rendered.contains("500"), "missing HTTP status");
+            assert!(
+                !rendered.contains(SECRET),
+                "rendered error contains fixture body"
+            );
+            assert!(
+                !rendered.contains(TOKEN),
+                "rendered error contains fixture credential"
+            );
         }
         assert!(std::error::Error::source(&error).is_none());
     }

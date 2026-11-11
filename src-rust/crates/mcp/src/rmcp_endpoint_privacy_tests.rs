@@ -25,11 +25,14 @@ fn assert_private(error: &anyhow::Error, stage: &str, category: &str) {
         format!("{error:#}"),
         format!("{error:?}"),
     ] {
-        assert!(rendered.contains("privacy-fixture"), "{rendered}");
-        assert!(rendered.contains(stage), "{rendered}");
-        assert!(rendered.contains(category), "{rendered}");
+        assert!(rendered.contains("privacy-fixture"), "missing fixture name");
+        assert!(rendered.contains(stage), "missing transport stage");
+        assert!(rendered.contains(category), "missing failure category");
         for secret in [SECRET, TOKEN, "127.0.0.1", "http://", "userinfo-secret"] {
-            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            assert!(
+                !rendered.contains(secret),
+                "rendered error contains private fixture data"
+            );
         }
     }
     assert_eq!(error.chain().count(), 1, "raw sources must not escape");
