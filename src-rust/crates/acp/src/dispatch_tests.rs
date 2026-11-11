@@ -1,7 +1,7 @@
 //! Real dispatcher loop ownership tests without runtime startup or providers.
 use super::*;
+use crate::test_support::server;
 use agent_client_protocol_schema as acp;
-use claurst_core::{Config, Settings};
 use connection::Inbound;
 use serde_json::json;
 use std::io::Write;
@@ -40,38 +40,6 @@ fn run<F: std::future::Future>(future: F) -> (F::Output, String) {
     let output = tracing::subscriber::with_default(subscriber, || runtime.block_on(future));
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     (output, text)
-}
-
-fn server(connection: Arc<Connection>) -> Arc<AgentServer> {
-    let settings = Settings::default();
-    let config = Config::default();
-    let permission_manager = Arc::new(StdMutex::new(
-        claurst_core::permissions::PermissionManager::new(
-            config.permission_mode.clone(),
-            &settings,
-        ),
-    ));
-    let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
-        api_key: "unused-fixture-key".into(),
-        api_base: "http://127.0.0.1:9".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    AgentServer::new(
-        connection,
-        Arc::new(AgentRuntime {
-            config,
-            settings,
-            api_client: Arc::new(client),
-            provider_registry: Arc::new(claurst_api::ProviderRegistry::new()),
-            tools: Arc::new(Vec::new()),
-            cost_tracker: claurst_core::CostTracker::new(),
-            query_config: claurst_query::QueryConfig::default(),
-            mcp_manager: None,
-            permission_manager,
-            working_dir: std::path::PathBuf::from("/unused-fixture"),
-        }),
-    )
 }
 
 fn request() -> Inbound {

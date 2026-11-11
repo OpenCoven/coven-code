@@ -133,3 +133,6 @@ async fn dispatch_messages(
 mod dispatch_tests;
 #[cfg(test)]
 mod reader_tests;
+
+#[cfg(test)]
+mod test_support;
