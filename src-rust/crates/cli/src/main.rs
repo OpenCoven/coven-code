@@ -3922,7 +3922,12 @@ async fn run_interactive(
                                     if app.renderer == claurst_tui::application::UiRenderer::Next {
                                         app.session_title = session.title.clone();
                                     }
-                                    let saved = save_session_with_warning(&session, &mut app.notifications, "rename").await;
+                                    let saved = save_session_with_warning(
+                                        &session,
+                                        &mut app.notifications,
+                                        "rename",
+                                    )
+                                    .await;
                                     let shown = claurst_tui::terminal_title_topic(renderer, &title);
                                     claurst_tui::update_terminal_title(Some(&shown));
                                     app.status_message = Some(if saved {

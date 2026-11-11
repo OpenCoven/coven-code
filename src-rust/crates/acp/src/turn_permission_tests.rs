@@ -259,7 +259,7 @@ async fn scenario(root: &Path, max_turns: u32) {
     let (output, writer) = tokio::io::duplex(65536);
     let (mut input, reader_input) = tokio::io::duplex(65536);
     let connection = Connection::new(writer);
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, mut inbound) = mpsc::unbounded_channel();
     let reader = tokio::spawn(crate::connection::run_reader(
         connection.clone(),
         reader_input,
@@ -334,7 +334,7 @@ async fn scenario(root: &Path, max_turns: u32) {
         return;
     }
     let old = prompt(&server, 1, "old");
-    let _unanswered = permission(&mut output, "first").await;
+    let unanswered = permission(&mut output, "first").await;
     server
         .dispatch(crate::connection::Inbound::Notification {
             method: "session/cancel".into(),
@@ -372,6 +372,31 @@ async fn scenario(root: &Path, max_turns: u32) {
         assert!(
             !next.is_finished(),
             "old generation resolved the new approval"
+        );
+        assert!(executed.lock().unwrap().is_empty());
+        assert_ne!(unanswered["id"], request["id"]);
+        assert_ne!(
+            unanswered["params"]["toolCall"]["toolCallId"],
+            request["params"]["toolCall"]["toolCallId"]
+        );
+        // A reader barrier proves the stale reply was processed before checking
+        // the next turn. No timing-based sleep or provider transport is needed.
+        let stale = json!({"jsonrpc":"2.0", "id":unanswered["id"], "result":{"outcome":{"outcome":"selected","optionId":"allow_always"}}});
+        let barrier = json!({"jsonrpc":"2.0", "method":"fixture/barrier"});
+        input
+            .write_all(format!("{stale}\n{barrier}\n").as_bytes())
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), inbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(received, crate::connection::Inbound::Notification { method, .. } if method == "fixture/barrier")
+        );
+        assert!(
+            !next.is_finished(),
+            "stale approval resolved the next turn's permission"
         );
         assert!(executed.lock().unwrap().is_empty());
         let reply = json!({"jsonrpc":"2.0", "id":request["id"], "result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
