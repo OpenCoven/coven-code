@@ -191,7 +191,7 @@ async fn dispatch(
     messages: MessagesArc,
     tracker: Arc<CostTracker>,
 ) -> claurst_query::QueryOutcome {
-    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (events, mut receiver) = tokio::sync::mpsc::channel(1);
     let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
     let model = context
         .config
@@ -211,6 +211,7 @@ async fn dispatch(
         },
         tracker,
         events,
+        generation: claurst_tui::application::SessionGeneration::default(),
         cancel: tokio_util::sync::CancellationToken::new(),
     }
     .spawn(messages);
@@ -224,7 +225,12 @@ async fn dispatch(
             panic!("query fixture timed out");
         }
     };
-    drain.await.unwrap();
+    // A finished turn has already delivered every event: the queue's only
+    // sender lived in the worker, so the consumer sees it closed promptly.
+    tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+        .await
+        .expect("event queue must close once the turn has finished")
+        .unwrap();
     outcome
 }
 

@@ -275,6 +275,10 @@ struct Cli {
     )]
     hosted_repair: bool,
 
+    /// Bind the headless engine to the Chat host's per-run workspace policy.
+    #[arg(long, hide = true)]
+    chat_workspace_policy_v1: Option<PathBuf>,
+
     /// Billing workload tag
     #[arg(long = "workload", value_name = "TAG")]
     workload: Option<String>,
@@ -434,16 +438,37 @@ fn abandon_interactive_turn(
     if let Some(cancel) = cancel {
         cancel.cancel();
     }
+    // This is the cancellation a key may have requested; it now waits on
+    // the worker, which the loop settles once the turn has stopped.
+    app.take_cancellation_request();
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use claurst_tools::workspace_scope;
+    use std::path::Path;
+    let raw_args: Vec<String> = std::env::args().collect();
+    match raw_args.get(1).map(String::as_str) {
+        Some(workspace_scope::KERNEL_PROBE) => {
+            return Ok(workspace_scope::kernel_probe(&raw_args[2..])?);
+        }
+        Some(workspace_scope::VERIFY_POLICY) => {
+            let [_, _, file] = raw_args.as_slice() else {
+                anyhow::bail!("Workspace sandbox verification requires exactly one policy file.");
+            };
+            let file = Path::new(file);
+            workspace_scope::WorkspaceScope::read(file, &std::env::current_dir()?)?
+                .verify(file)
+                .await?
+                .write_receipt(std::io::stdout().lock())?;
+            return Ok(());
+        }
+        _ => {}
+    }
     // Perform a best-effort, non-fatal relocation of the engine home from the
     // legacy ~/.coven-code/ to ~/.coven/code/ when running under the unified
     // coven CLI.  Must run before any Settings::load() or auth/config access.
     claurst_core::home_migration::migrate_if_needed();
-
-    let raw_args: Vec<String> = std::env::args().collect();
 
     // Fast-path: `coven-code upgrade [--version <v>] [--force]` — self-update.
     // This must run before the top-level --version handler so
@@ -596,6 +621,27 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     };
 
+    let scoped_workspace = cli.chat_workspace_policy_v1.as_deref();
+    let verified_scope = if let Some(file) = &scoped_workspace {
+        anyhow::ensure!(
+            is_headless
+                && cli.output_format == CliOutputFormat::StreamJson
+                && cli.context.is_none()
+                && !cli.hosted_review
+                && !cli.hosted_repair
+                && !cli.dangerously_skip_permissions
+                && cli.add_dir.is_empty(),
+            "Workspace access requires a dedicated Coven Code Chat stream."
+        );
+        Some(
+            workspace_scope::WorkspaceScope::read(file, &cwd)?
+                .verify(file)
+                .await?,
+        )
+    } else {
+        None
+    };
+
     debug!(cwd = %cwd.display(), "Starting Coven Code");
 
     // Load settings from disk (hierarchical: global < project)
@@ -655,6 +701,20 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.auto_commits {
         config.auto_commits = Some(true);
+    }
+    if scoped_workspace.is_some() {
+        // The scoped tools are selected independently of hosted review. Reuse
+        // its startup gates for plugins, MCP and automatic memory writes.
+        config.hosted_review.enabled = true;
+        config.hosted_review.allow_write_tools = true;
+        config.hosted_review.allow_mcp_servers = false;
+        config.hosted_review.allow_plugins = false;
+        config.hosted_review.allow_auto_memory_persistence = false;
+        config.hosted_review.allow_user_memory = true;
+        config.hooks.clear();
+        config.formatter.clear();
+        config.auto_commits = Some(false);
+        config.permission_mode = PermissionMode::Default;
     }
     config.project_dir = Some(cwd.clone());
     if let Some(p) = &cli.provider {
@@ -722,6 +782,16 @@ async fn main() -> anyhow::Result<()> {
         (String::new(), false)
     };
 
+    if let Some(scope) = verified_scope {
+        anyhow::ensure!(
+            active_provider != "anthropic" || !api_key.is_empty(),
+            "Workspace write access with Coven Code requires direct Anthropic credentials. Configure an API key or use an engine with verified subscription support."
+        );
+        scope.emit_admission(&cwd, std::io::stdout().lock())?;
+        scope.install()?;
+        config.additional_dirs = workspace_scope::additional_roots();
+    }
+
     let client_config = claurst_api::client::ClientConfig {
         api_key: api_key.clone(),
         api_base: config.resolve_anthropic_api_base(),
@@ -752,7 +822,12 @@ async fn main() -> anyhow::Result<()> {
         &settings,
     )));
 
-    let permission_handler: Arc<dyn claurst_core::PermissionHandler> = if is_headless {
+    let permission_handler: Arc<dyn claurst_core::PermissionHandler> = if scoped_workspace.is_some()
+    {
+        Arc::new(workspace_scope::ScopedPermissionHandler(
+            permission_manager.clone(),
+        ))
+    } else if is_headless {
         Arc::new(AutoPermissionHandler::with_manager(
             permission_manager.clone(),
         ))
@@ -938,13 +1013,15 @@ async fn main() -> anyhow::Result<()> {
     // Spawn the background cron scheduler (fires cron tasks at scheduled times).
     // Cancelled automatically when the process exits since we use a shared token.
     let cron_cancel = tokio_util::sync::CancellationToken::new();
-    claurst_query::start_cron_scheduler(
-        client.clone(),
-        tools.clone(),
-        tool_ctx.clone(),
-        query_config.clone(),
-        cron_cancel.clone(),
-    );
+    if scoped_workspace.is_none() {
+        claurst_query::start_cron_scheduler(
+            client.clone(),
+            tools.clone(),
+            tool_ctx.clone(),
+            query_config.clone(),
+            cron_cancel.clone(),
+        );
+    }
 
     // --print / headless mode
     if is_headless {
@@ -2032,16 +2109,14 @@ fn handle_bridge_permission_response(
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
     tool_use_id: &str,
     response: claurst_bridge::PermissionResponseKind,
-) {
-    if !dialog
+) -> Option<(String, bool)> {
+    if dialog
         .as_ref()
-        .is_some_and(|pr| pr.tool_use_id == tool_use_id)
+        .is_none_or(|pr| pr.tool_use_id != tool_use_id)
     {
-        return;
+        return None;
     }
-    let Some(mut pending) = pending_permissions.waiting.remove(tool_use_id) else {
-        return;
-    };
+    let mut pending = pending_permissions.waiting.remove(tool_use_id)?;
 
     use claurst_bridge::PermissionResponseKind;
     use claurst_core::permissions::PermissionDecision;
@@ -2052,10 +2127,13 @@ fn handle_bridge_permission_response(
         }
         PermissionResponseKind::Deny => PermissionDecision::Deny,
     };
+    let allowed = matches!(decision, PermissionDecision::Allow);
     if let Some(tx) = pending.decision_tx.take() {
         let _ = tx.send(decision);
     }
     *dialog = None;
+    // The decision belongs to the model call that asked, when known.
+    Some((pending.call_id.unwrap_or(pending.tool_use_id), allowed))
 }
 
 fn permission_request_from_core(
@@ -2295,11 +2373,11 @@ fn rollback_unattempted_turn(
         removed
     };
     remove_owned(messages);
-    let mut visible = std::mem::take(&mut app.messages);
+    let mut visible = std::mem::take(&mut app.messages).into_inner();
     if remove_owned(&mut visible) > 0 {
         app.replace_messages(visible);
     } else {
-        app.messages = visible;
+        app.messages = visible.into();
     }
     remove_owned(&mut session.messages);
     for checkpoint in &mut session.checkpoints {
@@ -2361,13 +2439,53 @@ async fn settle_abandoned_turn(
 
 type MessagesArc = Arc<tokio::sync::Mutex<Vec<claurst_core::types::Message>>>;
 
+/// How long quitting waits for a running turn to stop before saving what it
+/// already holds. A cancelled turn normally stops well within this; the bound
+/// is for a tool or approval that does not react to the token.
+const TURN_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Wait for a cancelled turn after the interactive loop has exited, and return
+/// the conversation it left behind. The queue goes first: nothing drains it any
+/// more, so the forwarder could otherwise wait on it and hold the worker open.
+async fn stop_turn_for_exit(
+    mut handle: tokio::task::JoinHandle<claurst_query::QueryOutcome>,
+    messages: &MessagesArc,
+    queue: tokio::sync::mpsc::Receiver<claurst_tui::application::ScopedQueryEvent>,
+    wait: std::time::Duration,
+) -> Vec<claurst_core::types::Message> {
+    drop(queue);
+    if tokio::time::timeout(wait, &mut handle).await.is_err() {
+        handle.abort();
+    }
+    messages.lock().await.clone()
+}
+
+/// Tag one turn's events with its session generation and deliver them to the
+/// bounded interactive queue in order. Waits for queue space rather than
+/// dropping; ends when the turn's sender is dropped or the loop is gone.
+async fn forward_scoped_events(
+    mut turn_rx: tokio::sync::mpsc::UnboundedReceiver<claurst_query::QueryEvent>,
+    events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
+    generation: claurst_tui::application::SessionGeneration,
+) {
+    while let Some(event) = turn_rx.recv().await {
+        let scoped = claurst_tui::application::ScopedQueryEvent { generation, event };
+        if events.send(scoped).await.is_err() {
+            break;
+        }
+    }
+}
+
 struct InteractiveQuery {
     client: Arc<claurst_api::AnthropicClient>,
     tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
     context: ToolContext,
     config: claurst_query::QueryConfig,
     tracker: Arc<CostTracker>,
-    events: tokio::sync::mpsc::UnboundedSender<claurst_query::QueryEvent>,
+    events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
+    /// Session generation this turn belongs to; every event it emits is
+    /// tagged with it so a replaced conversation never receives them.
+    generation: claurst_tui::application::SessionGeneration,
     cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -2383,18 +2501,23 @@ impl InteractiveQuery {
                 ));
             }
             let mut msgs = messages.lock().await.clone();
-            let outcome = claurst_query::run_query_loop(
+            // The query loop owns `turn_tx` and drops it when it returns, which
+            // ends the forwarder; joining both keeps the worker's lifetime
+            // covering delivery of every event it produced.
+            let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+            let forward = forward_scoped_events(turn_rx, self.events, self.generation);
+            let run = claurst_query::run_query_loop(
                 self.client.as_ref(),
                 &mut msgs,
                 self.tools.as_slice(),
                 &self.context,
                 &self.config,
                 self.tracker,
-                Some(self.events),
+                Some(turn_tx),
                 self.cancel,
                 None,
-            )
-            .await;
+            );
+            let (outcome, ()) = tokio::join!(run, forward);
             *messages.lock().await = msgs;
             outcome
         })
@@ -2579,6 +2702,214 @@ fn refresh_command_discovery(app: &mut claurst_tui::App, config: &Config, cwd: &
     ));
 }
 
+/// How often an open Memory page re-reads the Coven daemon.
+const MEMORY_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Shortest gap between two daemon memory reads, even across closing and
+/// reopening the page, so paging back and forth cannot pile up threads.
+const MEMORY_MIN_SPAWN_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The Memory page's daemon read in flight, if any, when the last one
+/// finished, and when the last one started (kept across closing the page).
+#[derive(Default)]
+struct MemoryPoll {
+    in_flight: Option<std::sync::mpsc::Receiver<claurst_tui::application::memory::MemorySnapshot>>,
+    last_read: Option<std::time::Instant>,
+    last_spawn: Option<std::time::Instant>,
+}
+
+/// Keep `app.memory_snapshot` for the Next Memory page (#415).
+///
+/// While the page is open the daemon is read off the UI thread, at most
+/// every [`MEMORY_REFRESH`]. When the page is closed the snapshot and any
+/// read in flight are dropped: private reads are not kept, and a late answer
+/// is discarded rather than shown later.
+fn refresh_memory_snapshot(
+    app: &mut claurst_tui::app::App,
+    page_open: bool,
+    poll: &mut MemoryPoll,
+    spawn_read: impl FnOnce() -> std::sync::mpsc::Receiver<
+        claurst_tui::application::memory::MemorySnapshot,
+    >,
+) {
+    use claurst_tui::application::memory::MemorySnapshot;
+    use std::sync::mpsc::TryRecvError;
+
+    if !page_open {
+        app.memory_snapshot = MemorySnapshot::NotRead;
+        // Dropping the receiver discards a late answer; the spawn time is
+        // kept so a quick reopen does not start another read at once.
+        poll.in_flight = None;
+        poll.last_read = None;
+        return;
+    }
+    if let Some(receiver) = &poll.in_flight {
+        let finished = match receiver.try_recv() {
+            Ok(snapshot) => Some(snapshot),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(MemorySnapshot::Failed(
+                "the memory read stopped without an answer".to_string(),
+            )),
+        };
+        if let Some(snapshot) = finished {
+            app.memory_snapshot = snapshot;
+            poll.in_flight = None;
+            poll.last_read = Some(std::time::Instant::now());
+        }
+        return;
+    }
+    let due = poll
+        .last_read
+        .is_none_or(|at| at.elapsed() >= MEMORY_REFRESH)
+        && poll
+            .last_spawn
+            .is_none_or(|at| at.elapsed() >= MEMORY_MIN_SPAWN_GAP);
+    if due {
+        poll.in_flight = Some(spawn_read());
+        poll.last_spawn = Some(std::time::Instant::now());
+    }
+}
+
+/// Start one blocking daemon memory read on its own thread.
+fn spawn_memory_read() -> std::sync::mpsc::Receiver<claurst_tui::application::memory::MemorySnapshot>
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Resolve the socket on this thread (it reads env vars); only the
+    // blocking reads run on the worker.
+    let client = claurst_core::coven_daemon::DaemonClient::new();
+    std::thread::spawn(move || {
+        let _ = sender.send(claurst_tui::application::memory::read_memory(client));
+    });
+    receiver
+}
+
+/// How often an open Work page re-reads the session goal from SQLite.
+const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Copy the engine-local work stores into `app.work_sources` for display.
+///
+/// The background registry and the model task list are in memory and are
+/// copied every call; each background task keeps only its last output line,
+/// which is all the Work page shows. The session goal is read from SQLite at
+/// most every [`WORK_GOAL_REFRESH`], so a goal changed within the session can
+/// show its previous state for up to that long. It is re-read at once when
+/// the session changes, so a goal from another session is never shown. A
+/// failed read keeps this session's last good goal (a locked store is
+/// expected while another process writes) and reports the error only when
+/// there is nothing to keep.
+fn refresh_work_sources(
+    app: &mut claurst_tui::app::App,
+    session_id: &str,
+    last_goal_read: &mut Option<(std::time::Instant, String)>,
+    mut read_goal: impl FnMut(&str) -> Option<Result<claurst_core::goal::Goal, String>>,
+) {
+    app.work_sources.background = claurst_core::tasks::global_registry()
+        .list()
+        .into_iter()
+        .map(|mut task| {
+            let keep_from = task.output.len().saturating_sub(1);
+            task.output.drain(..keep_from);
+            task
+        })
+        .collect();
+    app.work_sources.model_tasks = claurst_tools::TASK_STORE
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    let (due, same_session) = match last_goal_read {
+        Some((at, id)) => (
+            id != session_id || at.elapsed() >= WORK_GOAL_REFRESH,
+            id == session_id,
+        ),
+        None => (true, false),
+    };
+    if due {
+        let read = read_goal(session_id);
+        let keep_previous = same_session
+            && matches!(read, Some(Err(_)))
+            && matches!(app.work_sources.goal, Some(Ok(_)));
+        if !keep_previous {
+            app.work_sources.goal = read;
+        }
+        *last_goal_read = Some((std::time::Instant::now(), session_id.to_string()));
+    }
+}
+
+/// The current session's goal for display, `None` when goals are disabled
+/// or the session has none.
+fn read_session_goal(session_id: &str) -> Option<Result<claurst_core::goal::Goal, String>> {
+    if !claurst_core::goals_enabled() {
+        return None;
+    }
+    let path = claurst_core::GoalStore::default_path();
+    match claurst_core::GoalStore::open_read_only_nowait(&path) {
+        Ok(None) => None,
+        Ok(Some(store)) => match store.try_get_goal(session_id) {
+            Ok(goal) => goal.map(Ok),
+            Err(error) => Some(Err(error.to_string())),
+        },
+        Err(error) => Some(Err(error.to_string())),
+    }
+}
+
+/// Hand the terminal back to the shell and stop until the shell resumes us.
+///
+/// SIGTSTP rather than SIGSTOP: the OS discards it when no job-control shell
+/// could resume this job, so it can never leave a session stopped for good.
+/// It goes to the process group, so tools in this group stop too. The default
+/// Bash tool leads its own session and keeps running, and time spent stopped
+/// counts toward tool timeouts.
+#[cfg(unix)]
+fn suspend_job(
+    terminal: &mut claurst_tui::AppTerminal,
+    app: &mut claurst_tui::App,
+    renderer: claurst_tui::application::UiRenderer,
+) -> anyhow::Result<()> {
+    // A real stop lasts at least as long as someone typing `fg`.
+    const SHORTEST_STOP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let mut stopped_for = std::time::Duration::ZERO;
+    let handed_back = claurst_tui::suspend_terminal(terminal, renderer, || {
+        let started = std::time::Instant::now();
+        if let Err(error) = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(0),
+            nix::sys::signal::Signal::SIGTSTP,
+        ) {
+            tracing::warn!(%error, "could not stop the job");
+        }
+        stopped_for = started.elapsed();
+    })?;
+    if !handed_back {
+        app.push_notification(
+            claurst_tui::notifications::NotificationKind::Warning,
+            "Could not give the terminal back to the shell, so Coven Code did not stop."
+                .to_string(),
+            Some(5),
+        );
+    } else if stopped_for < SHORTEST_STOP {
+        app.push_notification(
+            claurst_tui::notifications::NotificationKind::Info,
+            "Nothing to return to: no job-control shell started this session.".to_string(),
+            Some(5),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn suspend_job(
+    _terminal: &mut claurst_tui::AppTerminal,
+    app: &mut claurst_tui::App,
+    _renderer: claurst_tui::application::UiRenderer,
+) -> anyhow::Result<()> {
+    app.push_notification(
+        claurst_tui::notifications::NotificationKind::Info,
+        "Suspend is not available on this platform.".to_string(),
+        Some(3),
+    );
+    Ok(())
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -2687,10 +3018,37 @@ async fn run_interactive(
         ))
     });
 
+    // Renderer selection is interactive-only: report an unsupported value
+    // before the terminal takes over stderr.
+    let renderer_selection = claurst_tui::application::select_renderer(
+        std::env::var(claurst_tui::application::UI_SELECTOR_ENV)
+            .ok()
+            .as_deref(),
+    );
+    if let Some(warning) = &renderer_selection.warning {
+        eprintln!("warning: {warning}");
+    }
+    let renderer = renderer_selection.renderer;
+    // Next ties an approval to the file as it stood when asked. Classic keeps its
+    // existing approvals.
+    let mut tool_ctx = tool_ctx;
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        tool_ctx.permission_handler =
+            Arc::new(claurst_core::permissions::ContentBoundApprovals::new(
+                tool_ctx.permission_handler.clone(),
+            ));
+    }
+
     // Set up terminal
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    // The stderr warning is covered by the alternate screen; repeat it where
+    // the user can read it.
+    if let Some(warning) = renderer_selection.warning {
+        app.notifications
+            .push(claurst_tui::NotificationKind::Warning, warning, Some(15));
+    }
     refresh_command_discovery(&mut app, &live_config, &tool_ctx.working_dir);
     if let Some(warning) = resume_warning {
         app.status_message = Some(warning);
@@ -2720,21 +3078,44 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
+    // Classic drops the Next-only defaults, so upgrading an older file must
+    // keep a binding in every context when only they use its chord.
+    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
+        &Settings::config_dir(),
+        claurst_tui::next::NEXT_ONLY_ACTIONS,
+    );
+    app.select_renderer(renderer);
+    app.next_presentation =
+        claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
+            std::env::var(name).ok()
+        });
+    // Next shows the chord that works now; say once which bindings changed.
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
+            app.notifications
+                .push(claurst_tui::NotificationKind::Info, notice, Some(10));
+        }
+    }
 
     // Register this session in the Coven daemon ledger (best-effort, opt-in).
     // The id is captured here so that a mid-run /resume (which rebinds session.id)
     // does not leave this registration uncompleted — the exit hook uses this local
     // rather than session.id, which may have changed to a different session by then.
+    let (ledger_tx, mut ledger_rx) = tokio::sync::oneshot::channel::<bool>();
     let ledger_session_id: Option<String> = if settings.daemon_ledger {
         let id = session.id.clone();
         let root = tool_ctx.working_dir.clone();
         let title = session.title.clone().unwrap_or_default();
         let id_for_task = id.clone();
         tokio::task::spawn_blocking(move || {
-            claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title);
+            let accepted =
+                claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title)
+                    .is_ok();
+            let _ = ledger_tx.send(accepted);
         });
         Some(id)
     } else {
+        drop(ledger_tx);
         None
     };
 
@@ -2757,6 +3138,16 @@ async fn run_interactive(
         app.attach_mcp_manager(manager);
     }
     app.replace_messages(initial_messages.clone());
+    app.enter_session_scope(&session.id);
+    if app.renderer == claurst_tui::application::UiRenderer::Next {
+        app.session_title = session.title.clone();
+    }
+    app.ownership = match &ledger_session_id {
+        Some(id) => claurst_tui::application::SessionOwnership::LedgerPending {
+            session_id: id.clone(),
+        },
+        None => claurst_tui::application::SessionOwnership::EngineLocal,
+    };
     if let Some(log) = &diagnostic_log {
         app.push_system_message(
             format!("Diagnostics: {}", log.path().display()),
@@ -2964,7 +3355,10 @@ async fn run_interactive(
 
     // Current cancel token (replaced each turn)
     let mut cancel: Option<CancellationToken> = None;
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<claurst_tui::application::ScopedQueryEvent>(
+        claurst_tui::application::QUERY_EVENT_QUEUE_CAPACITY,
+    );
+    let mut session_scope = claurst_tui::application::SessionScope::default();
     // Background bash tasks with notify_on_complete send their terminal-state
     // info here, where the main loop fans-out to a TUI toast + optional bell.
     let (bg_completion_tx, mut bg_completion_rx) =
@@ -3015,6 +3409,8 @@ async fn run_interactive(
         })
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
+    let mut work_goal_read: Option<(std::time::Instant, String)> = None;
+    let mut memory_poll = MemoryPoll::default();
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(error) = log.take_error() {
@@ -3029,18 +3425,83 @@ async fn run_interactive(
         }
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_companion_pose();
+        // The session browser's list loads in the background (Next only;
+        // Classic's browser is unchanged).
+        if app.renderer == claurst_tui::application::UiRenderer::Next {
+            app.poll_session_list();
+        }
         app.notifications.tick();
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
             continue;
         }
 
+        // Snapshot the engine-local work stores while the Next Work page is
+        // open, so the frame below never shows an older session's goal.
+        if app.next_shell.inspector == Some(claurst_tui::next::InspectorPage::Work) {
+            refresh_work_sources(
+                &mut app,
+                &tool_ctx.session_id,
+                &mut work_goal_read,
+                read_session_goal,
+            );
+        }
+
+        // Read familiar memory only while the Next Memory page is open; drop
+        // it as soon as the page closes. Classic never reads it.
+        let memory_page_open = renderer == claurst_tui::application::UiRenderer::Next
+            && app.next_shell.inspector == Some(claurst_tui::next::InspectorPage::Memory);
+        refresh_memory_snapshot(
+            &mut app,
+            memory_page_open,
+            &mut memory_poll,
+            spawn_memory_read,
+        );
+
+        if app.next_shell.take_suspend_request() {
+            suspend_job(&mut terminal, &mut app, renderer)?;
+        }
+
         // Draw the UI
-        terminal.draw(|f| render_app(f, &app))?;
+        terminal.draw(|f| match renderer {
+            claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
+            claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
+        })?;
+        app.settle_scroll_anchor();
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
         // synthesize an Enter event to dequeue and submit it.
+        if let claurst_tui::application::SessionOwnership::LedgerPending { session_id } =
+            &app.ownership
+        {
+            let outcome = match ledger_rx.try_recv() {
+                Ok(accepted) => Some(accepted),
+                // The registration task ended without answering.
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some(false),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            };
+            if let Some(accepted) = outcome {
+                let session_id = session_id.clone();
+                app.ownership = if accepted {
+                    claurst_tui::application::SessionOwnership::LedgerRegistered { session_id }
+                } else {
+                    claurst_tui::application::SessionOwnership::LedgerFailed { session_id }
+                };
+            }
+        }
+        // A session chosen in the browser resumes through `/session resume`, exactly
+        // as if typed, once no turn is running. If that did not switch
+        // sessions, the current one gets its draft back.
+        if !app.pending_auto_submit {
+            app.settle_pending_resume();
+        }
+        if current_query.is_none() && !app.is_streaming && !app.pending_auto_submit {
+            if let Some(id) = app.take_pending_resume() {
+                app.set_prompt_text(format!("/session resume {id}"));
+                app.pending_auto_submit = true;
+            }
+        }
         let synthetic_event: Option<Event> = if app.pending_auto_submit && !app.is_streaming {
             app.pending_auto_submit = false;
             Some(Event::Key(crossterm::event::KeyEvent::new(
@@ -3316,6 +3777,7 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
+                                    session_scope.advance();
                                     messages.clear();
                                     app.replace_messages(Vec::new());
                                     session.messages.clear();
@@ -3323,6 +3785,7 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    session_scope.advance();
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     messages = new_msgs.clone();
                                     app.replace_messages(new_msgs);
@@ -3356,7 +3819,9 @@ async fn run_interactive(
                                         Some("Select what to import from ~/.claude.".to_string());
                                 }
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
+                                    session_scope.advance();
                                     session = resumed_session;
+                                    app.enter_session_scope(&session.id);
                                     messages = session.messages.clone();
                                     app.replace_messages(messages.clone());
                                     cmd_ctx.config.model = Some(session.model.clone());
@@ -3371,6 +3836,9 @@ async fn run_interactive(
                                         Arc::new(std::sync::atomic::AtomicUsize::new(0));
                                     cmd_ctx.session_id = session.id.clone();
                                     cmd_ctx.session_title = session.title.clone();
+                                    if app.renderer == claurst_tui::application::UiRenderer::Next {
+            app.session_title = session.title.clone();
+        }
                                     if let Some(saved_dir) = session.working_dir.as_ref() {
                                         let saved_path = std::path::PathBuf::from(saved_dir);
                                         if saved_path.exists() {
@@ -3387,7 +3855,11 @@ async fn run_interactive(
                                         tool_ctx.file_history.clone(),
                                         tool_ctx.current_turn.clone(),
                                     );
-                                    claurst_tui::update_terminal_title(session.title.as_deref());
+                                    let title = session
+                                        .title
+                                        .as_deref()
+                                        .map(|title| claurst_tui::terminal_title_topic(renderer, title));
+                                    claurst_tui::update_terminal_title(title.as_deref());
                                     app.status_message =
                                         Some(format!("Resumed session {}.", &session.id[..8]));
                                 }
@@ -3395,8 +3867,17 @@ async fn run_interactive(
                                     session.title = Some(title.clone());
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
-                                    let saved = save_session_with_warning(&session, &mut app.notifications, "rename").await;
-                                    claurst_tui::update_terminal_title(Some(&title));
+                                    if app.renderer == claurst_tui::application::UiRenderer::Next {
+                                        app.session_title = session.title.clone();
+                                    }
+                                    let saved = save_session_with_warning(
+                                        &session,
+                                        &mut app.notifications,
+                                        "rename",
+                                    )
+                                    .await;
+                                    let shown = claurst_tui::terminal_title_topic(renderer, &title);
+                                    claurst_tui::update_terminal_title(Some(&shown));
                                     app.status_message = Some(if saved {
                                         format!("Session renamed to \"{}\".", title)
                                     } else {
@@ -3563,7 +4044,7 @@ async fn run_interactive(
                                             eprintln!("\nLogin failed: {}", e);
                                         }
                                     }
-                                    terminal = claurst_tui::setup_terminal()?;
+                                    terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::StartLoginForProvider {
                                     provider,
@@ -3628,7 +4109,7 @@ async fn run_interactive(
                                             }
                                         }
                                     }
-                                    terminal = claurst_tui::setup_terminal()?;
+                                    terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::Error(e)) => {
                                     app.status_message = Some(format!("Error: {}", e));
@@ -3904,11 +4385,13 @@ async fn run_interactive(
 
                         }
                         // Update terminal title from session title or first message
-                        if session.title.is_some() {
-                            claurst_tui::update_terminal_title(session.title.as_deref());
+                        if let Some(title) = session.title.as_deref() {
+                            let title = claurst_tui::terminal_title_topic(renderer, title);
+                            claurst_tui::update_terminal_title(Some(&title));
                         } else {
                             // Use a truncated version of the first user message
                             let topic: String = input.chars().take(60).collect();
+                            let topic = claurst_tui::terminal_title_topic(renderer, &topic);
                             claurst_tui::update_terminal_title(Some(&topic));
                         }
 
@@ -3981,7 +4464,8 @@ async fn run_interactive(
 
                         let handle = InteractiveQuery {
                             client: client_clone, tools: tools_arc_clone, context: ctx_clone,
-                            config: qcfg, tracker, events: tx, cancel: ct,
+                            config: qcfg, tracker, events: tx,
+                            generation: session_scope.current(), cancel: ct,
                         }.spawn(msgs_arc_clone);
 
                         // Store the Arc so we can read messages after task completes
@@ -4029,6 +4513,12 @@ async fn run_interactive(
                                     }
                                     _ => claurst_core::permissions::PermissionDecision::Allow,
                                 };
+                                // Shown beside the tool's execution state; an
+                                // allowed call is not a successful one.
+                                app.record_permission_decision(
+                                    pending.call_id.as_deref().unwrap_or(&tool_use_id),
+                                    selected_key != Some('n'),
+                                );
 
                                 if let Some(manager) = tool_ctx.permission_manager.as_ref() {
                                     if let Ok(mut manager) = manager.lock() {
@@ -4114,6 +4604,8 @@ async fn run_interactive(
                         }
                     }
                     if !app.is_streaming && app.messages.len() < messages.len() {
+                        // An in-App rewind replaced the visible conversation.
+                        session_scope.advance();
                         messages = app.messages.clone();
                         session.messages = messages.clone();
                         session.updated_at = chrono::Utc::now();
@@ -4181,7 +4673,16 @@ async fn run_interactive(
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
                         let tool_use_id = pending.tool_use_id.clone();
-                        app.permission_request = Some(permission_request_from_core(&pending));
+                        let request = permission_request_from_core(&pending);
+                        // Next guards approvals against stray keys (#411);
+                        // Classic keeps its existing dialog behavior.
+                        app.permission_request = Some(
+                            if app.renderer == claurst_tui::application::UiRenderer::Next {
+                                request.guarded()
+                            } else {
+                                request
+                            },
+                        );
                         pending_permissions
                             .lock()
                             .waiting
@@ -4198,10 +4699,11 @@ async fn run_interactive(
         }
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
-        while let Ok(evt) = event_rx.try_recv() {
+        while let Ok(scoped) = event_rx.try_recv() {
+            let evt = &scoped.event;
             // Forward to bridge before consuming (clone only what we need).
             if let Some(ref runtime) = bridge_runtime {
-                let outbound: Option<BridgeOutbound> = match &evt {
+                let outbound: Option<BridgeOutbound> = match evt {
                     QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                         delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                         index,
@@ -4247,7 +4749,7 @@ async fn run_interactive(
             // Also forward to the BridgeSessionInfo relay channel (best-effort).
             // This drives the post_bridge_event relay task spawned on Connected.
             if bridge_session_info.is_some() {
-                let relay_payload: Option<String> = match &evt {
+                let relay_payload: Option<String> = match evt {
                     QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
                         delta: claurst_api::streaming::ContentDelta::TextDelta { text },
                         ..
@@ -4292,7 +4794,10 @@ async fn run_interactive(
                     let _ = relay_ev_tx.try_send(payload);
                 }
             }
-            app.handle_query_event(evt);
+            // Machine consumers above see every event; presentation only
+            // admits events from the current session generation.
+            let effects = session_scope.apply(&mut app, scoped);
+            claurst_tui::application::perform_effects(&effects);
         }
 
         // Drain background-task completion events: surface a toast and
@@ -4471,6 +4976,12 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+                        if current_query.is_some()
+                            && app.renderer == claurst_tui::application::UiRenderer::Next
+                        {
+                            app.note_cancellation_sent();
+                            app.interrupt_tool_rows();
+                        }
                         app.is_streaming = false;
                         app.status_message = Some("Cancelled by remote control.".to_string());
                     }
@@ -4478,12 +4989,15 @@ async fn run_interactive(
                         tool_use_id,
                         response,
                     }) => {
-                        handle_bridge_permission_response(
+                        let decided = handle_bridge_permission_response(
                             &mut app.permission_request,
                             &mut pending_permissions.lock(),
                             &tool_use_id,
                             response,
                         );
+                        if let Some((call_id, allowed)) = decided {
+                            app.record_permission_decision(&call_id, allowed);
+                        }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {
                         session.title = Some(title.clone());
@@ -4597,6 +5111,7 @@ async fn run_interactive(
                 config: qcfg,
                 tracker,
                 events: tx,
+                generation: session_scope.current(),
                 cancel: ct,
             }
             .spawn(msgs_arc_clone);
@@ -4965,12 +5480,19 @@ async fn run_interactive(
                         config: qcfg,
                         tracker,
                         events: tx,
+                        generation: session_scope.current(),
                         cancel: ct,
                     }
                     .spawn(msgs_arc_clone);
                     current_query = Some((handle, msgs_arc));
                 }
             }
+        }
+
+        // Escape and the interrupt key record a cancel request in the App;
+        // perform it through the turn's token so the runtime actually stops.
+        if app.take_cancellation_request() && current_query.is_some() {
+            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
         }
 
         // Check if query task is done; sync messages from the task
@@ -5167,6 +5689,7 @@ async fn run_interactive(
                                 config: qcfg,
                                 tracker,
                                 events: tx,
+                                generation: session_scope.current(),
                                 cancel: ct,
                             }
                             .spawn(msgs_arc_clone);
@@ -5193,6 +5716,11 @@ async fn run_interactive(
                     goal_turn = None;
                 }
             }
+        }
+
+        // A cancel is confirmed only once no worker is left running.
+        if current_query.is_none() {
+            app.settle_cancellation();
         }
 
         if !app.is_streaming && current_query.is_none() {
@@ -5284,6 +5812,28 @@ async fn run_interactive(
     // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
     // Still join the worker if restoration fails, then report that error below.
     let terminal_result = restore_terminal(&mut terminal);
+    // Quitting mid-turn stops the worker and keeps what it delivered. Next only:
+    // Classic keeps its existing exit.
+    if app.renderer == claurst_tui::application::UiRenderer::Next {
+        if let Some((handle, msgs_arc)) = current_query.take() {
+            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
+            messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
+            session.messages = messages.clone();
+            session.updated_at = chrono::Utc::now();
+            session.model =
+                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+            session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+            rollback_unattempted_turn(
+                goal_turn.as_ref(),
+                false,
+                &mut messages,
+                &mut app,
+                &mut session,
+                &mut cmd_ctx.messages,
+            );
+            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+        }
+    }
     if let Some(mut runtime) = bridge_runtime.take() {
         runtime.supplementary_tasks.shutdown().await;
         if let Err(error) = (&mut runtime.primary_task).await {
@@ -5969,6 +6519,101 @@ fn remote_connection_notification(session_url: &str) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn scoped_forwarder_delivers_every_event_in_order_under_backpressure() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut receiver) = tokio::sync::mpsc::channel(1);
+        let mut scope = claurst_tui::application::SessionScope::default();
+        let generation = scope.advance();
+        for n in 0..200 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status(format!("event {n}")))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let forward = tokio::spawn(forward_scoped_events(turn_rx, events, generation));
+        let mut received = Vec::new();
+        while let Some(scoped) = receiver.recv().await {
+            assert_eq!(scoped.generation, generation);
+            match scoped.event {
+                claurst_query::QueryEvent::Status(text) => received.push(text),
+                other => panic!("unexpected event {other:?}"),
+            }
+            // Slow consumer: the queue stays full while the forwarder waits.
+            tokio::task::yield_now().await;
+        }
+        forward.await.unwrap();
+        let expected: Vec<String> = (0..200).map(|n| format!("event {n}")).collect();
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
+    async fn scoped_forwarder_stops_when_the_interactive_loop_is_gone() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        turn_tx
+            .send(claurst_query::QueryEvent::Status("orphan".into()))
+            .unwrap();
+        // The sender stays alive: the forwarder must end on the closed queue,
+        // not wait for the turn to finish.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forward_scoped_events(turn_rx, events, Default::default()),
+        )
+        .await
+        .expect("forwarder must stop once the interactive queue is closed");
+        drop(turn_tx);
+    }
+
+    #[tokio::test]
+    async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, queue) = tokio::sync::mpsc::channel(1);
+        for _ in 0..3 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status("backlog".into()))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let worker_messages = messages.clone();
+        let handle = tokio::spawn(async move {
+            forward_scoped_events(turn_rx, events, Default::default()).await;
+            *worker_messages.lock().await =
+                vec![claurst_core::types::Message::user("kept".to_string())];
+            claurst_query::QueryOutcome::Cancelled
+        });
+        // Let the forwarder fill the queue and block on it.
+        tokio::task::yield_now().await;
+
+        let wait = std::time::Duration::from_secs(30);
+        let kept = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_turn_for_exit(handle, &messages, queue, wait),
+        )
+        .await
+        .expect("a closed queue must free the worker, not run out the wait");
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quitting_does_not_wait_forever_for_a_turn_that_ignores_cancellation() {
+        let prompt = vec![claurst_core::types::Message::user("prompt".to_string())];
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(prompt));
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(std::future::pending::<claurst_query::QueryOutcome>());
+
+        let kept = stop_turn_for_exit(
+            handle,
+            &messages,
+            queue,
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(kept.len(), 1, "the prompt is still saved");
+    }
+
     #[test]
     fn remote_notification_two_byte_boundary() {
         let prefix = "a".repeat(59);
@@ -6027,6 +6672,7 @@ mod tests {
         (
             claurst_tools::PendingPermissionRequest {
                 tool_use_id: id.into(),
+                call_id: None,
                 request: claurst_core::permissions::PermissionRequest {
                     tool_name: "Write".into(),
                     description: "Write a file".into(),
@@ -6064,6 +6710,28 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(expected));
             assert!(dialog.is_none());
             assert!(store.waiting.is_empty());
+        }
+    }
+
+    #[test]
+    fn bridge_permission_decisions_belong_to_the_model_call_that_asked() {
+        use claurst_bridge::PermissionResponseKind as Response;
+
+        for (call_id, response, expected) in [
+            (Some("toolu_model"), Response::Allow, ("toolu_model", true)),
+            (Some("toolu_model"), Response::Deny, ("toolu_model", false)),
+            (None, Response::AllowSession, ("perm-1", true)),
+        ] {
+            let (mut pending, _rx) = bridge_permission_fixture("perm-1");
+            pending.call_id = call_id.map(str::to_string);
+            let mut dialog = Some(permission_request_from_core(&pending));
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.waiting.insert("perm-1".into(), pending);
+
+            let decided =
+                handle_bridge_permission_response(&mut dialog, &mut store, "perm-1", response);
+
+            assert_eq!(decided, Some((expected.0.to_string(), expected.1)));
         }
     }
 
@@ -6884,6 +7552,237 @@ mod tests {
             assert!(ctx.goal_turn.captured().is_none());
             assert_eq!(store.try_get_goal("session").unwrap().unwrap(), later);
         }
+    }
+
+    fn work_goal(session_id: &str) -> claurst_core::goal::Goal {
+        claurst_core::goal::Goal {
+            id: format!("goal-{session_id}"),
+            session_id: session_id.to_string(),
+            objective: format!("objective of {session_id}"),
+            status: claurst_core::goal::GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_secs: 0,
+            turns_used: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn an_open_memory_page_reads_off_thread_once_per_refresh() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        assert!(poll.in_flight.is_some(), "a read started");
+        assert_eq!(app.memory_snapshot, MemorySnapshot::NotRead);
+        // Still in flight: no second read is started.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("second read"));
+        sender.send(MemorySnapshot::Offline).unwrap();
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("second read"));
+        assert_eq!(app.memory_snapshot, MemorySnapshot::Offline);
+        // Fresh: no new read until the refresh interval passes.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("too soon"));
+        poll.last_read = Some(std::time::Instant::now() - MEMORY_REFRESH * 2);
+        poll.last_spawn = Some(std::time::Instant::now() - MEMORY_REFRESH * 2);
+        let (_again, again_rx) = std::sync::mpsc::channel();
+        let mut again_rx = Some(again_rx);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
+        assert!(poll.in_flight.is_some(), "re-read after the interval");
+    }
+
+    #[test]
+    fn closing_the_memory_page_drops_the_snapshot_and_a_late_answer() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        app.memory_snapshot = MemorySnapshot::UpdateRequired;
+        refresh_memory_snapshot(&mut app, false, &mut poll, || panic!("closed"));
+        assert_eq!(app.memory_snapshot, MemorySnapshot::NotRead);
+        assert!(poll.in_flight.is_none() && poll.last_read.is_none());
+        assert!(poll.last_spawn.is_some(), "spawn time survives the close");
+        assert!(
+            sender.send(MemorySnapshot::Offline).is_err(),
+            "late answer has nowhere to land"
+        );
+    }
+
+    #[test]
+    fn a_memory_read_that_dies_is_reported_not_left_reading() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (sender, receiver) = std::sync::mpsc::channel::<MemorySnapshot>();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        drop(sender);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("retry storm"));
+        assert!(matches!(app.memory_snapshot, MemorySnapshot::Failed(_)));
+        // The failure counts as a read: no immediate respawn.
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("retry storm"));
+        assert!(poll.in_flight.is_none());
+    }
+
+    #[test]
+    fn reopening_the_memory_page_quickly_does_not_start_a_new_read_at_once() {
+        use claurst_tui::application::memory::MemorySnapshot;
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut poll = MemoryPoll::default();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut receiver = Some(receiver);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || receiver.take().unwrap());
+        // Tab past the page and straight back.
+        refresh_memory_snapshot(&mut app, false, &mut poll, || panic!("closed"));
+        refresh_memory_snapshot(&mut app, true, &mut poll, || panic!("spawned on reopen"));
+        assert_eq!(
+            app.memory_snapshot,
+            MemorySnapshot::NotRead,
+            "no old snapshot"
+        );
+        // After the minimum gap a reopened page reads again.
+        poll.last_spawn = Some(std::time::Instant::now() - MEMORY_MIN_SPAWN_GAP * 2);
+        let (_again, again_rx) = std::sync::mpsc::channel();
+        let mut again_rx = Some(again_rx);
+        refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
+        assert!(poll.in_flight.is_some());
+    }
+
+    #[test]
+    fn the_work_snapshot_rereads_the_goal_at_once_on_a_session_switch_and_throttles_otherwise() {
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut last = None;
+        let mut reads = Vec::new();
+        {
+            let mut reader = |id: &str| {
+                reads.push(id.to_string());
+                (id == "session-a").then(|| Ok(work_goal(id)))
+            };
+            refresh_work_sources(&mut app, "session-a", &mut last, &mut reader);
+            refresh_work_sources(&mut app, "session-a", &mut last, &mut reader);
+            assert_eq!(
+                app.work_sources
+                    .goal
+                    .as_ref()
+                    .map(|goal| goal.as_ref().unwrap().id.clone()),
+                Some("goal-session-a".to_string())
+            );
+            refresh_work_sources(&mut app, "session-b", &mut last, &mut reader);
+        }
+        assert_eq!(
+            reads,
+            ["session-a", "session-b"],
+            "throttled within a session"
+        );
+        assert!(
+            app.work_sources.goal.is_none(),
+            "session-a's goal is not shown in session-b"
+        );
+    }
+
+    #[test]
+    fn a_failed_goal_read_keeps_this_sessions_last_goal_but_not_another_sessions() {
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut last = None;
+        refresh_work_sources(&mut app, "session-a", &mut last, |id| {
+            Some(Ok(work_goal(id)))
+        });
+        let expired = std::time::Instant::now() - WORK_GOAL_REFRESH * 2;
+        last = Some((expired, "session-a".to_string()));
+        refresh_work_sources(&mut app, "session-a", &mut last, |_| {
+            Some(Err("database is locked".to_string()))
+        });
+        assert!(
+            matches!(&app.work_sources.goal, Some(Ok(goal)) if goal.id == "goal-session-a"),
+            "a locked store keeps the last goal"
+        );
+        refresh_work_sources(&mut app, "session-b", &mut last, |_| {
+            Some(Err("database is locked".to_string()))
+        });
+        assert!(
+            matches!(&app.work_sources.goal, Some(Err(_))),
+            "session-a's goal is not kept for session-b"
+        );
+    }
+
+    #[test]
+    fn the_work_snapshot_keeps_only_the_last_background_output_line() {
+        let registry = claurst_core::tasks::global_registry();
+        let task = claurst_core::tasks::BackgroundTask::new("chatty");
+        let id = task.id.clone();
+        registry.register(task);
+        for n in 0..5 {
+            registry.append_output(&id, &format!("line {n}"));
+        }
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        refresh_work_sources(&mut app, "session-a", &mut None, |_| None);
+        registry.complete(&id);
+        let snapshot = app
+            .work_sources
+            .background
+            .iter()
+            .find(|task| task.id == id)
+            .expect("snapshot");
+        assert_eq!(snapshot.output, ["line 4"]);
+    }
+
+    #[test]
+    fn the_work_snapshot_copies_the_in_memory_stores() {
+        let id = format!("work-snapshot-{}", std::process::id());
+        let now = chrono::Utc::now();
+        claurst_tools::TASK_STORE.insert(
+            id.clone(),
+            claurst_tools::Task {
+                id: id.clone(),
+                subject: "snapshot me".to_string(),
+                description: String::new(),
+                status: claurst_tools::TaskStatus::Pending,
+                owner: None,
+                blocks: Vec::new(),
+                blocked_by: Vec::new(),
+                metadata: None,
+                output: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        refresh_work_sources(&mut app, "session-a", &mut None, |_| None);
+        claurst_tools::TASK_STORE.remove(&id);
+        assert!(app
+            .work_sources
+            .model_tasks
+            .iter()
+            .any(|task| task.id == id));
     }
 }
 

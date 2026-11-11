@@ -156,7 +156,12 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
     // Resolve the session: --resume loads an existing transcript and keeps
     // its id; otherwise start fresh under the pre-assigned id
     // (--session-id, already threaded into tool_ctx.session_id by main).
-    let resume_id = if resume_id.as_deref() == Some("__last__") {
+    let scoped = claurst_tools::workspace_scope::active();
+    let resume_id = if scoped {
+        // Chat owns continuity and sends its replay in the single user frame.
+        // A native session must not change the admitted working directory.
+        None
+    } else if resume_id.as_deref() == Some("__last__") {
         claurst_core::history::list_sessions()
             .await
             .first()
@@ -216,7 +221,7 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
             Ok(InputFrame::User(text)) if !text.trim().is_empty() => text,
             Ok(InputFrame::User(_)) => continue,
             Ok(InputFrame::AssistantPrefill(text)) => {
-                if !text.is_empty() {
+                if !scoped && !text.is_empty() {
                     messages.push(Message::assistant(text));
                 }
                 continue;
@@ -251,6 +256,10 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
         }
         if let Err(e) = claurst_core::history::save_session(&session).await {
             eprintln!("Warning: failed to persist session {session_id}: {e}");
+        }
+        if scoped {
+            // Any temporary folder approval belongs to this reply only.
+            break;
         }
     }
 

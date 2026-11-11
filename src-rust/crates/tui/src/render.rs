@@ -583,8 +583,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     }
 
     if app.diff_viewer.visible {
-        let mut state = app.diff_viewer.clone();
-        render_diff_dialog(&mut state, size, frame.buffer_mut());
+        render_diff_dialog(&app.diff_viewer, size, frame.buffer_mut());
     }
 
     if app.global_search.visible {
@@ -833,7 +832,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 /// Snapshot the rendered text of every row inside the selectable area into
 /// `app.last_row_text` so that subsequent double/triple-clicks can locate
 /// word and paragraph boundaries (issue #149 follow-up).
-fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
+pub(crate) fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
     let selectable_area = app.last_selectable_area.get();
     if selectable_area.width == 0 || selectable_area.height == 0 {
         app.last_row_text.borrow_mut().clear();
@@ -868,7 +867,7 @@ fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
 
 /// Post-render pass: invert colours on selected cells and extract the
 /// selection text into `app.selection_text`.
-fn apply_selection_highlight(frame: &mut Frame, app: &App) {
+pub(crate) fn apply_selection_highlight(frame: &mut Frame, app: &App) {
     let (anchor, focus) = match (app.selection_anchor, app.selection_focus) {
         (Some(a), Some(f)) => (a, f),
         _ => return,
@@ -3763,7 +3762,7 @@ mod welcome_tests {
         assert!(should_render_status_row(&app));
         app.streaming_thinking = "let me think".to_string();
         assert_eq!(streaming_status_label(&app), "Reasoning");
-        app.streaming_text = "let me think".to_string();
+        app.streaming_text = "let me think".to_string().into();
         // Text is more user-visible than reasoning, so it wins the race.
         assert_eq!(streaming_status_label(&app), "Generating");
     }
@@ -3790,7 +3789,7 @@ mod welcome_tests {
         // "thinking" / "thinking…" are placeholders — they should NOT win
         // over more informative state.
         app.status_message = Some("thinking".to_string());
-        app.streaming_text = "hello".to_string();
+        app.streaming_text = "hello".to_string().into();
         assert_eq!(streaming_status_label(&app), "Generating");
     }
 

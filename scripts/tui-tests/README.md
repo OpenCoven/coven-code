@@ -26,8 +26,25 @@ COVEN_BIN=/usr/local/bin/coven-code scripts/tui-tests/run.sh
 scripts/tui-tests/run.sh 03 05
 ```
 
-Exit code is `0` only if every assertion passed, `1` otherwise — suitable for
-a release gate or CI step.
+Exit code is `0` only when at least one assertion passed and no assertion or
+case execution failed. A nonzero case return, a case reporting no assertions
+or skips, or a skipped-only run exits `1`. Case-file load errors and unmatched
+filters exit `2`; a partially loaded case catalog is never executed.
+
+Partial local runs can still pass executed headless checks while explicitly
+reporting interactive skips. They are not full terminal acceptance. CI sets
+`REQUIRE_TMUX=1` so a missing terminal dependency cannot silently skip that gate.
+
+## Harness regression checks
+
+```bash
+python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
+```
+
+These tests exercise the actual runner and assertion library with synthetic
+case inputs and an inert tmux executable. They need no engine, tmux server,
+credentials or network, and do not establish real-binary terminal acceptance.
+CI runs them before building and exercising the real engine.
 
 ## CI
 
@@ -66,7 +83,7 @@ Override via environment variables:
 | `TUI_WIDTH` / `TUI_HEIGHT` | `120` / `40` | tmux pane size (the TUI is layout-sensitive) |
 | `TUI_WAIT_TIMEOUT` | `20` | Seconds to wait for an expected string |
 | `TUI_SESSION` | `coven-tui-test` | tmux session name |
-| `TUI_SOCKET` | `coven-tui-test` | Dedicated tmux server socket (`-L`) so the harness never touches your own tmux sessions |
+| `TUI_SOCKET` | `coven-tui-test-<pid>` | tmux server socket (`-L`), one per run, so the harness never touches your own tmux sessions and runs in parallel never touch each other |
 | `TUI_LOG_DIR` | _(unset)_ | If set, the full pane capture for each failing case is written here (CI uploads these as artifacts) |
 | `REQUIRE_TMUX` | `0` | If `1`, a missing `tmux` is a hard error instead of skipping the interactive cases (set in CI) |
 
@@ -113,3 +130,37 @@ headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 - After spawning a session, the inner shell needs a moment before it accepts
   input. `tui_start` proves readiness with a marker echo before launching the
   binary; replicate that pattern if you script sessions by hand.
+
+## Performance baseline
+
+```bash
+(cd src-rust && cargo build --release --locked)
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --runs 20 --keys 20 --size 40x12 --size 80x24 --size 120x40 --json perf.json
+```
+
+Spawns the binary directly on a pseudo-terminal (no tmux polling) with a
+disposable home, a synthetic `USER`, no credentials and no model call. It
+reports cold usable frame, input-to-paint and resize-to-paint percentiles,
+idle RSS and idle PTY writes per second, and exits nonzero if any sample
+timed out. Times are observed at the PTY boundary and include scheduling;
+compare builds only with the same binary profile, host and load. It is a
+baseline instrument, not #417's in-process render instrumentation.
+
+```bash
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --ui next --history-lines 100000 --stream --size 80x24 --size 120x40
+```
+
+`--ui next` selects the Next renderer. `--history-lines N` resumes a synthetic
+session of N transcript lines. A resume must prove it loaded, so a failed one
+cannot pass as a fast empty session: Next must show seeded text, and Classic
+must print the CLI's load confirmation. `--stream` adds a turn against a fake
+`claude` written to the disposable home, then reports input-to-paint during
+the turn and the gap between paints. That gap is a boundary proxy for active
+render cost; its floor is the event loop's 16 ms poll, and a slower fake
+producer would widen it. The fake is set from launch, so every figure from a
+`--stream` run, cold start and idle ones included, comes from a session with a
+provider: compare it only with other `--stream` runs. Classic cannot show the
+live end of a transcript past 65,535 rows (#441), so `--stream` with 100,000
+lines exits nonzero on Classic.
