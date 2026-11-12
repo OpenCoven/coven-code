@@ -8,7 +8,9 @@
 // clients, so auth stays inside the CLI that owns it.
 //
 // Delegation model: the CLI runs its own agent loop (tools, permissions,
-// context) in the current working directory. This provider forwards the
+// context) in the current working directory. When Coven starts the
+// engine it supplies the permission policy for that loop
+// (`claude_cli_policy.rs`). This provider forwards the
 // user's prompt (with any pasted images as standard Anthropic image blocks),
 // streams Claude's text back, and renders the CLI's tool activity as
 // one-line notices. It never emits `ToolUse` blocks, so the
@@ -524,9 +526,21 @@ impl ClaudeCliProvider {
         images: &[ContentBlock],
         resume: Option<&str>,
     ) -> Result<SpawnOutcome, ProviderError> {
+        // Coven's permission policy, when Coven started this engine. Without
+        // it the CLI would run in its headless default mode under whatever
+        // the operator's and the workspace's own settings files allow.
+        let policy_args = super::claude_cli_policy::args_from_environment().map_err(|message| {
+            ProviderError::Other {
+                provider: self.id.clone(),
+                message,
+                status: None,
+                body: None,
+            }
+        })?;
         let mut command = Command::new(self.binary_or_default());
         command
             .args(build_args(model, resume))
+            .args(policy_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
