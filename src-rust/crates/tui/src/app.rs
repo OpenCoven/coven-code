@@ -612,6 +612,11 @@ pub struct App {
     pub display_messages: Vec<DisplayMessage>,
     /// Synthetic system annotations interleaved between real messages at render time.
     pub system_annotations: Vec<SystemAnnotation>,
+    /// Reachable session diagnostics in renderers that omit system annotations.
+    pub diagnostic_log_path: Option<std::path::PathBuf>,
+    /// Bounded process-local diagnostics, separate from messages and session JSON.
+    pub diagnostic_buffer: Option<String>,
+    external_openers: Vec<claurst_core::child_diagnostics::ExternalOpener>,
     pub input: String,
     pub prompt_input: PromptInputState,
     pub input_history: Vec<String>,
@@ -964,6 +969,12 @@ pub struct App {
     /// Snapshot of the engine-local work stores for the Next Work page,
     /// refreshed by the interactive loop. Display only; it grants nothing.
     pub work_sources: crate::application::work::WorkSources,
+    /// Typed live retrieval facts keyed by assistant-message position and call
+    /// id. Result carriers are not inserted into the human-turn transcript.
+    pub(crate) research_retrievals: std::collections::HashMap<
+        usize,
+        std::collections::HashMap<String, claurst_tools::web_fetch::Retrieval>,
+    >,
     /// Familiar memory read for the Next Memory page; cleared when the page
     /// closes so private reads are not kept.
     pub memory_snapshot: crate::application::memory::MemorySnapshot,
@@ -988,7 +999,7 @@ pub struct App {
     /// Total message lines from the last render (used for virtual row mapping).
     pub total_message_lines: Cell<usize>,
     /// Scroll offset from the last render frame (used for selection validation).
-    pub last_render_scroll_offset: Cell<u16>,
+    pub last_render_scroll_offset: Cell<usize>,
 
     // ---- Text selection state --------------------------------------------
     /// Selection drag anchor (col, row) — set on mouse-down.
@@ -1252,6 +1263,9 @@ impl App {
             messages: Vec::new().into(),
             display_messages: Vec::new(),
             system_annotations: Vec::new(),
+            diagnostic_log_path: None,
+            diagnostic_buffer: None,
+            external_openers: Vec::new(),
             input: String::new(),
             prompt_input: PromptInputState::new(),
             input_history: Vec::new(),
@@ -1429,6 +1443,7 @@ impl App {
             agent_type_badge: None,
             active_goal_badge: None,
             work_sources: Default::default(),
+            research_retrievals: Default::default(),
             memory_snapshot: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
@@ -2166,6 +2181,14 @@ impl App {
             None => (args_trimmed, ""),
         };
         match (cmd, sub, sub_rest) {
+            ("status", "logs", "") => {
+                let text = self
+                    .diagnostic_buffer
+                    .as_deref()
+                    .unwrap_or("No diagnostics available.");
+                self.response_reader.open_local(text, self.scroll_offset);
+                return true;
+            }
             ("session" | "remote", "resume", "") => return self.intercept_slash_command("resume"),
             ("usage", "cost", "") => return self.intercept_slash_command("cost"),
             ("usage", "context", "") => return self.intercept_slash_command("context"),
@@ -2336,6 +2359,7 @@ impl App {
             "clear" => {
                 self.close_response_reader();
                 self.messages.clear();
+                self.research_retrievals.clear();
                 self.selected_transcript_message = None;
                 self.system_annotations.clear();
                 self.display_messages.clear();
@@ -2494,8 +2518,17 @@ impl App {
         self.close_secondary_views();
         self.dismiss_error_notifications();
         let keybindings_path = Settings::config_dir().join("keybindings.json");
-        if let Err(error) = open_file_externally(&keybindings_path) {
-            eprintln!("Failed to open keybindings file: {error}");
+        self.external_openers.retain(|opener| !opener.is_finished());
+        match open_file_externally(&keybindings_path) {
+            Ok(opener) => self.external_openers.push(opener),
+            Err(error) => {
+                tracing::warn!(target: "claurst_core::child_diagnostics", kind = ?error.kind(), "Failed to start external opener");
+                self.push_notification(
+                    NotificationKind::Error,
+                    format!("Failed to open keybindings file: {error}"),
+                    None,
+                );
+            }
         }
         true
     }
@@ -2921,6 +2954,7 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages.into();
+        self.research_retrievals.clear();
         // Resume, rewind and clear replace the conversation; interruption
         // evidence from the old one no longer describes what is shown.
         self.interrupted_tools.clear();
@@ -2984,10 +3018,12 @@ impl App {
     }
 
     fn response_reader_text(&self) -> Option<String> {
-        self.response_reader
-            .message_index
-            .and_then(|index| self.messages.get(index))
-            .map(response_reader_text)
+        self.response_reader.local_text.clone().or_else(|| {
+            self.response_reader
+                .message_index
+                .and_then(|index| self.messages.get(index))
+                .map(response_reader_text)
+        })
     }
 
     fn response_reader_match(&self, start: usize) -> Option<usize> {
@@ -2999,7 +3035,7 @@ impl App {
         let area = self.last_selectable_area.get();
         let content_width = area.width.saturating_sub(6);
         let text = self.response_reader_text()?;
-        let lines = crate::messages::render_markdown(&text, content_width);
+        let lines = self.response_reader.render_lines(&text, content_width);
         let line_matches = |line: &ratatui::text::Line<'_>| {
             line.spans
                 .iter()
@@ -3061,7 +3097,11 @@ impl App {
         let content_width = area.width.saturating_sub(6);
         let line_count = self
             .response_reader_text()
-            .map(|text| crate::messages::render_markdown(&text, content_width).len())
+            .map(|text| {
+                self.response_reader
+                    .render_lines(&text, content_width)
+                    .len()
+            })
             .unwrap_or(0);
 
         match key.code {
@@ -3387,6 +3427,7 @@ impl App {
             self.next_shell.reset_transcript_for_session();
             // Work read for the old session does not describe this one.
             self.work_sources = Default::default();
+            self.research_retrievals.clear();
             self.session_id = Some(id.to_string());
             self.restore_scope_view(id);
         }
@@ -5115,6 +5156,30 @@ impl App {
         }
 
         if self.mcp_view.visible {
+            if self.mcp_view.active_pane == crate::mcp_view::McpViewPane::ErrorDetail {
+                match &binding {
+                    KeybindingResult::Action(action)
+                        if matches!(action.as_str(), "prev" | "next" | "pageUp" | "pageDown") =>
+                    {
+                        // Select's existing configurable navigation owns the
+                        // focused diagnostic; raw keys must not bypass it.
+                        let page = isize::try_from(self.mcp_view.error_viewport_rows.get())
+                            .unwrap_or(isize::MAX);
+                        let rows = match action.as_str() {
+                            "prev" => -1,
+                            "next" => 1,
+                            "pageUp" => -page,
+                            "pageDown" => page,
+                            _ => 0,
+                        };
+                        self.mcp_view.scroll_error(rows);
+                        return false;
+                    }
+                    KeybindingResult::Pending | KeybindingResult::Unbound => return false,
+                    KeybindingResult::NoMatch if had_pending_chord => return false,
+                    _ => {}
+                }
+            }
             return self.handle_mcp_view_key(key);
         }
 
@@ -5151,7 +5216,7 @@ impl App {
 
         // Help overlay intercepts keys next
         if self.help_overlay.visible {
-            return self.handle_help_overlay_key(key);
+            return self.handle_help_overlay_key(key, binding, had_pending_chord);
         }
 
         // New history-search overlay
@@ -5877,9 +5942,21 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.mcp_view.close(),
             KeyCode::Tab | KeyCode::Left | KeyCode::Right => self.mcp_view.switch_pane(),
-            KeyCode::Up => self.mcp_view.select_prev(),
-            KeyCode::Down => self.mcp_view.select_next(),
-            KeyCode::Backspace => self.mcp_view.pop_search_char(),
+            KeyCode::Up
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.select_prev()
+            }
+            KeyCode::Down
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.select_next()
+            }
+            KeyCode::Backspace
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.pop_search_char()
+            }
             KeyCode::Char('e') => self.mcp_view.toggle_error_detail(),
             KeyCode::Char('a')
                 if self.mcp_view.active_pane == crate::mcp_view::McpViewPane::ServerList =>
@@ -5901,7 +5978,11 @@ impl App {
             }
             KeyCode::Char(c)
                 if key.modifiers.is_empty()
-                    && self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ServerList =>
+                    && matches!(
+                        self.mcp_view.active_pane,
+                        crate::mcp_view::McpViewPane::ToolList
+                            | crate::mcp_view::McpViewPane::ToolDetail
+                    ) =>
             {
                 self.mcp_view.push_search_char(c);
             }
@@ -6078,7 +6159,30 @@ impl App {
         }
     }
 
-    fn handle_help_overlay_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_help_overlay_key(
+        &mut self,
+        key: KeyEvent,
+        binding: KeybindingResult,
+        had_pending_chord: bool,
+    ) -> bool {
+        match binding {
+            KeybindingResult::Action(action) => {
+                match action.as_str() {
+                    "close" | "openHelp" => self.help_overlay.close(),
+                    "scrollUp" => self.help_overlay.scroll_up(),
+                    "scrollDown" => self.help_overlay.scroll_down(),
+                    "pageUp" => self.help_overlay.page_up(),
+                    "pageDown" => self.help_overlay.page_down(),
+                    "goStart" => self.help_overlay.scroll_to_top(),
+                    "goEnd" => self.help_overlay.scroll_to_bottom(),
+                    _ => {}
+                }
+                return false;
+            }
+            KeybindingResult::Pending | KeybindingResult::Unbound => return false,
+            KeybindingResult::NoMatch if had_pending_chord => return false,
+            KeybindingResult::NoMatch => {}
+        }
         match key.code {
             KeyCode::Esc | KeyCode::F(1) => {
                 self.help_overlay.close();
@@ -6089,13 +6193,6 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
                 self.help_overlay.close();
-            }
-            KeyCode::Up => {
-                self.help_overlay.scroll_up();
-            }
-            KeyCode::Down => {
-                let max = 50u16; // generous upper bound; renderer will clamp
-                self.help_overlay.scroll_down(max);
             }
             KeyCode::Backspace => {
                 self.help_overlay.pop_filter_char();
@@ -6174,6 +6271,7 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
+                        self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
                         self.push_notification(
@@ -7653,6 +7751,37 @@ impl App {
             else {
                 continue;
             };
+            let fetch_owner = self
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, message)| message.role == Role::Assistant)
+                .find_map(|(index, message)| {
+                    message
+                        .get_tool_use_blocks()
+                        .iter()
+                        .find_map(|block| match block {
+                            ContentBlock::ToolUse { id, name, .. } if id == &tool_use_id => {
+                                Some((index, name == claurst_core::constants::TOOL_NAME_WEB_FETCH))
+                            }
+                            _ => None,
+                        })
+                });
+            if let Some((index, true)) = fetch_owner {
+                let records = self.research_retrievals.entry(index).or_default();
+                if !is_error.unwrap_or(false) {
+                    if let Some(record) =
+                        claurst_tools::web_fetch::Retrieval::from_content(&content)
+                    {
+                        records.insert(tool_use_id.clone(), record);
+                    } else {
+                        records.remove(&tool_use_id);
+                    }
+                } else {
+                    records.remove(&tool_use_id);
+                }
+            }
             let result = match content {
                 claurst_core::types::ToolResultContent::Text(text) => text,
                 claurst_core::types::ToolResultContent::Blocks(blocks) => blocks
@@ -7763,7 +7892,9 @@ impl App {
 
         match event {
             QueryEvent::Stream(stream_evt) => {
-                self.close_response_reader();
+                if self.response_reader.local_text.is_none() {
+                    self.close_response_reader();
+                }
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
@@ -8227,26 +8358,29 @@ impl App {
 }
 
 // Helper function to open a file in the user's external editor
-fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
+fn open_file_externally(
+    path: &std::path::Path,
+) -> std::io::Result<claurst_core::child_diagnostics::ExternalOpener> {
+    use claurst_core::child_diagnostics::ExternalOpener;
     // Try to open with the system's default application
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("/usr/bin/open")
-            .arg(path)
-            .spawn()?;
-        Ok(())
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg(path);
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open").arg(path).spawn()?;
-        Ok(())
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(path);
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = std::process::Command::new(
+        let mut command = tokio::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
@@ -8258,16 +8392,17 @@ fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        command.spawn()?;
-        Ok(())
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         // Fallback for other systems: try common editors in order
         for editor in &["nano", "vi", "vim", "emacs"] {
-            match std::process::Command::new(editor).arg(path).spawn() {
-                Ok(_) => return Ok(()),
+            let mut command = tokio::process::Command::new(editor);
+            command.arg(path);
+            match ExternalOpener::spawn(command) {
+                Ok(opener) => return Ok(opener),
                 Err(_) => continue,
             }
         }
@@ -8305,6 +8440,27 @@ fn windows_system_root() -> std::ffi::OsString {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_reader_is_ephemeral_and_does_not_change_conversation() {
+        let mut app = make_app();
+        app.push_message(claurst_core::types::Message::user("ordinary transcript"));
+        let before = serde_json::to_string(&*app.messages).unwrap();
+        app.diagnostic_buffer = Some("Diagnostics (memory only)\nprivate-marker".into());
+        assert!(app.intercept_slash_command_with_args("status", "logs"));
+        assert!(app.response_reader.visible && app.response_reader.message_index.is_none());
+        assert!(app
+            .response_reader_text()
+            .unwrap()
+            .contains("private-marker"));
+        assert_eq!(serde_json::to_string(&*app.messages).unwrap(), before);
+        app.apply_query_event(QueryEvent::Stream(
+            claurst_api::AnthropicStreamEvent::MessageStop,
+        ));
+        assert!(app.response_reader.visible && app.response_reader.local_text.is_some());
+        app.close_response_reader();
+        assert!(app.response_reader.local_text.is_none());
+    }
+
     use super::test_env::EnvGuard;
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};

@@ -438,6 +438,8 @@ struct ToolKey {
     decisions: tracked::Stamp,
     cancellation: TurnCancellation,
     project: Option<std::path::PathBuf>,
+    diagnostic_path: Option<std::path::PathBuf>,
+    memory_diagnostics: bool,
     live: bool,
 }
 
@@ -477,6 +479,8 @@ impl ToolRows {
             decisions: app.permission_decisions.stamp(),
             cancellation: app.cancellation,
             project: app.config.project_dir.clone(),
+            diagnostic_path: app.diagnostic_log_path.clone(),
+            memory_diagnostics: app.diagnostic_buffer.is_some(),
             live: !app.streaming_text.is_empty(),
         };
         let changed = self.key.as_ref() != Some(&key);
@@ -506,6 +510,24 @@ impl ToolRows {
                 self.rows.push(primitives::transcript_label(
                     &app.next_presentation.appearance,
                     "coven",
+                ));
+            }
+            let diagnostic_hint = app
+                .diagnostic_log_path
+                .as_ref()
+                .map(|path| format!("Diagnostics: {}", terminal_safe(&path.to_string_lossy())))
+                .or_else(|| {
+                    app.diagnostic_buffer
+                        .as_ref()
+                        .map(|_| "Diagnostics: memory only · /status logs".to_owned())
+                });
+            if let Some(hint) = diagnostic_hint {
+                self.rows.extend(wrap_line(
+                    Line::from(Span::styled(
+                        hint,
+                        app.next_presentation.appearance.style(Role::TextMuted),
+                    )),
+                    width,
                 ));
             }
             self.layout = Some(layout);
@@ -1771,7 +1793,7 @@ fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
         .iter()
         .map(|tool| tool.id.clone())
         .collect();
-    let view = ResearchView::from_messages(&app.messages, &interrupted);
+    let view = ResearchView::from_app(app, &interrupted);
     let mut lines = Vec::new();
     if view.items.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1817,12 +1839,82 @@ fn research_page(appearance: &Appearance, app: &App) -> Vec<Line<'static>> {
         if let Some(code) = item.http_status {
             lines.push(field(appearance, "HTTP", code.to_string()));
         }
-        lines.push(field(
-            appearance,
-            "Retrieved",
-            "unknown time, final URL and content hash (#433)".to_string(),
-        ));
-        if item.origin == SourceOrigin::Fetch && item.outcome == SourceOutcome::Returned {
+        if let Some(retrieval) = &item.retrieval {
+            use claurst_tools::web_fetch::Extraction;
+            lines.push(field(
+                appearance,
+                "Evidence",
+                "engine-reported retrieval".to_string(),
+            ));
+            lines.push(field(
+                appearance,
+                "Retrieved",
+                retrieval.retrieved_at.clone(),
+            ));
+            lines.push(field(appearance, "Final URL", retrieval.final_url.clone()));
+            lines.push(field(appearance, "SHA-256", retrieval.body_sha256.clone()));
+            lines.push(field(
+                appearance,
+                "Body bytes",
+                retrieval.body_bytes.to_string(),
+            ));
+            lines.push(field(
+                appearance,
+                "Media type",
+                retrieval
+                    .content_type
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ));
+            let method = match retrieval.extraction {
+                Extraction::PlainText => "plain text",
+                Extraction::HtmlToText => "HTML to text",
+                Extraction::ClaudeHaiku => "Claude Haiku (model-extracted, not verbatim)",
+            };
+            let cache = if retrieval.extraction_cached {
+                "cached extraction; fresh HTTP body"
+            } else {
+                "fresh extraction"
+            };
+            lines.push(field(appearance, "Text", format!("{method}; {cache}")));
+            if retrieval.text_truncated {
+                lines.push(field(
+                    appearance,
+                    "Truncated",
+                    format!(
+                        "yes; {} original UTF-8 bytes",
+                        retrieval.original_text_bytes
+                    ),
+                ));
+            }
+            if retrieval.utf8_replacements {
+                lines.push(field(
+                    appearance,
+                    "Decoding",
+                    "invalid UTF-8 replacement characters".to_string(),
+                ));
+            }
+            if retrieval.url_credentials_redacted || retrieval.url_fragments_omitted {
+                lines.push(field(
+                    appearance,
+                    "URL record",
+                    format!(
+                        "credentials redacted: {}; fragments omitted: {}",
+                        retrieval.url_credentials_redacted, retrieval.url_fragments_omitted
+                    ),
+                ));
+            }
+        } else {
+            lines.push(field(
+                appearance,
+                "Retrieved",
+                "unknown time, final URL and content hash (#433)".to_string(),
+            ));
+        }
+        if item.origin == SourceOrigin::Fetch
+            && item.outcome == SourceOutcome::Returned
+            && item.retrieval.is_none()
+        {
             lines.push(field(
                 appearance,
                 "Text",

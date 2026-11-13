@@ -62,6 +62,12 @@ impl SessionRegistry {
         self.inner.get(id).map(|r| r.value().clone())
     }
 
+    pub(crate) fn cancel_all(&self) {
+        for session in self.inner.iter() {
+            session.cancel_token.lock().cancel();
+        }
+    }
+
     pub fn remove(&self, id: &acp::SessionId) -> Option<Arc<SessionState>> {
         self.inner.remove(id).map(|(_, v)| v)
     }

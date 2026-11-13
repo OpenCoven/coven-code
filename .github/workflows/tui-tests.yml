@@ -24,12 +24,25 @@ concurrency:
   group: tui-tests-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   tui-tests:
-    name: Interactive terminal suite
+    name: Interactive terminal suite (${{ matrix.size }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - size: 80x24
+            width: 80
+            height: 24
+          - size: 120x40
+            width: 120
+            height: 40
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -77,6 +90,8 @@ jobs:
           # Fail loudly if tmux is missing instead of silently skipping the
           # interactive cases, and persist pane captures for any failure.
           REQUIRE_TMUX: '1'
+          TUI_WIDTH: ${{ matrix.width }}
+          TUI_HEIGHT: ${{ matrix.height }}
           TUI_LOG_DIR: ${{ runner.temp }}/tui-failures
         run: bash scripts/tui-tests/run.sh
 
@@ -84,7 +99,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: tui-failure-captures
+          name: tui-failure-captures-${{ matrix.size }}
           path: ${{ runner.temp }}/tui-failures
           if-no-files-found: ignore
           retention-days: 14

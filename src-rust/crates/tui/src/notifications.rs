@@ -151,6 +151,11 @@ pub fn render_notification_banner(frame: &mut Frame, queue: &NotificationQueue, 
     if toast_width < 20 {
         return;
     }
+    // With no rows, the one-row floor below would place the toast outside
+    // the frame, where `Clear` panics (#424).
+    if area.height == 0 {
+        return;
+    }
     // Adapt toast height based on available space, minimum 1 row for the message
     let toast_height = 3u16.min(area.height.saturating_sub(1).max(1));
     let toast_area = Rect {
@@ -335,6 +340,25 @@ pub fn render_notification_banner(frame: &mut Frame, queue: &NotificationQueue, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toast_skips_a_frame_with_no_rows() {
+        // #424: at 120x0 the one-row floor placed the toast outside the
+        // frame and `Clear` panicked on the first Ctrl+C.
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut q = NotificationQueue::new();
+        q.push(
+            NotificationKind::Info,
+            "Press Ctrl+C again to exit".to_string(),
+            Some(2),
+        );
+        for (width, height) in [(120, 0), (80, 0), (120, 1), (120, 3)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| render_notification_banner(frame, &q, frame.area()))
+                .expect("draw");
+        }
+    }
 
     #[test]
     fn push_and_current() {

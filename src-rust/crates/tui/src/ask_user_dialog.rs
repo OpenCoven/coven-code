@@ -204,6 +204,11 @@ pub fn render_ask_user_dialog(state: &AskUserDialogState, area: Rect, buf: &mut 
     let height = (5 + question_lines + options_lines + 3).min(area.height.saturating_sub(2));
     let width = 58u16.min(area.width.saturating_sub(4));
     let modal_area = centered_rect(width, height, area);
+    // The border and title need room; an empty area would also underflow the
+    // right and bottom edges below (#424).
+    if modal_area.width < 4 || modal_area.height < 4 {
+        return;
+    }
 
     // ---- background ----
     for y in modal_area.top()..modal_area.bottom() {

@@ -1,10 +1,6 @@
 # Patched rmcp transport ownership
 
-`rmcp-1.7.0/` contains the exact 132 files from the crates.io rmcp 1.7.0
-archive, except for the cancellation fix below. The published normalized
-`Cargo.toml`, original manifest, lockfile, README, and VCS metadata are preserved.
-The package is excluded from workspace membership and selected by the workspace
-`[patch.crates-io]` entry. Its version and dependency requirements are unchanged.
+`rmcp-1.7.0/` contains the exact 132 files from the crates.io rmcp 1.7.0 archive, except for the cancellation and HTTP diagnostic privacy fixes below. The published normalized `Cargo.toml`, original manifest, lockfile, README, and VCS metadata are preserved. The package is excluded from workspace membership and selected by the workspace `[patch.crates-io]` entry. Its version and dependency requirements are unchanged.
 
 Archive SHA-256:
 `0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e`.
@@ -14,16 +10,9 @@ The package omits the repository license file, so `rmcp-1.7.0/LICENSE` is copied
 from that exact revision, preserving upstream's licensing transition notice.
 The local Cargo installation marker `.cargo-ok` is not included.
 
-The only upstream source changes are in `src/transport/worker.rs`,
-`WorkerContext::recv_from_handler` and `WorkerContext::send_to_handler`: select
-the existing cancellation token alongside each handler channel wait. On
-cancellation, return the existing `WorkerQuitReason::Cancelled` value. This
-allows `WorkerTransport::close` to join its worker while initialization waits for
-the first protocol message or the initialized notification, including when the
-client rejects the initialize response. It also releases a worker blocked sending
-to a full handler queue after its owner stops receiving. Normal channel capacity
-and backpressure are unchanged. No message, auth, session, retry, or reconnect
-protocol is replaced or fabricated.
+The ownership changes are in `src/transport/worker.rs`, `WorkerContext::recv_from_handler` and `WorkerContext::send_to_handler`: select the existing cancellation token alongside each handler channel wait. On cancellation, return the existing `WorkerQuitReason::Cancelled` value. This allows `WorkerTransport::close` to join its worker while initialization waits for the first protocol message or the initialized notification, including when the client rejects the initialize response. It also releases a worker blocked sending to a full handler queue after its owner stops receiving. Normal channel capacity and backpressure are unchanged. No message, auth, session, retry, or reconnect protocol is replaced or fabricated.
+
+The diagnostic privacy change is in `src/transport/common/reqwest/streamable_http_client.rs`. At the reqwest-to-rmcp error boundary, classify failures using reqwest's typed status and category, then discard the opaque error and its source chain before constructing the transport diagnostic. Unparsed non-success response bodies and JSON parse error details are omitted from errors and warnings. Parsed JSON-RPC errors remain protocol results, authentication challenges retain their typed metadata, and malformed successful JSON retains the existing Accepted behavior. Request URLs, bearer tokens, custom headers, session IDs, response decoding, retry control and owned shutdown paths are unchanged. Coven's `rmcp_http_privacy_tests` exercises actual ordinary and shutdown-owned initialization failures plus request/auth/session bytes and protocol/auth/session controls. Native installed-CLI captures provide separate display evidence.
 
 Coven's separate HTTP client adapter still cancels blocked HTTP I/O. The tests
 `plugin_http_withdrawal_before_first_protocol_message_joins_worker` and
@@ -34,7 +23,4 @@ header/SSE/body fixtures, require actual cleanup completion. The deterministic
 handler queue; `plugin_http_drained_receive_joins_worker` preserves the drained
 positive control.
 
-Remove this patch and vendor directory when a released upstream version provides
-cancellation-aware handler reception and delivery (or an equivalent joinable close) and all
-of those regression tests pass against it. A version bump alone is insufficient:
-rmcp 3.5.1 retains the affected wait and private sender ownership.
+Remove these patches and the vendor directory when a released upstream version provides cancellation-aware handler reception and delivery (or an equivalent joinable close), equivalent diagnostic privacy, and all of those regression tests pass against it. A version bump alone is insufficient: rmcp 3.5.1 retains the affected wait and private sender ownership.

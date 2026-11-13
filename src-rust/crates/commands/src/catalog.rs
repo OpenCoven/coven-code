@@ -968,17 +968,26 @@ pub(crate) fn builtin_catalog_template() -> Vec<CommandSpec> {
         CommandSpec::active(
             "status",
             "Show Coven and project status",
-            "/status [doctor]",
+            "/status [doctor|logs]",
             CovenAdvanced,
             &["status", "diagnostics", "doctor"],
         )
-        .with_children(vec![child(
-            "status",
-            "doctor",
-            "Run diagnostic checks",
-            CovenAdvanced,
-            &["doctor", "diagnostics"],
-        )]),
+        .with_children(vec![
+            child(
+                "status",
+                "doctor",
+                "Run diagnostic checks",
+                CovenAdvanced,
+                &["doctor", "diagnostics"],
+            ),
+            child(
+                "status",
+                "logs",
+                "Read recent diagnostics in the interactive terminal",
+                CovenAdvanced,
+                &["logs", "diagnostics", "privacy"],
+            ),
+        ]),
         CommandSpec::active(
             "tasks",
             "Manage background tasks",

@@ -221,34 +221,7 @@ pub async fn transcribe(wav_bytes: Vec<u8>, api_key: &str) -> anyhow::Result<Str
     let url = std::env::var("WHISPER_ENDPOINT_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1/audio/transcriptions".to_string());
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-
-    let file_part = reqwest::multipart::Part::bytes(wav_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")?;
-
-    let form = reqwest::multipart::Form::new()
-        .text("model", "whisper-1")
-        .part("file", file_part);
-
-    let response = client
-        .post(&url)
-        .bearer_auth(api_key)
-        .multipart(form)
-        .send()
-        .await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Whisper API returned {}: {}", status, body));
-    }
-
-    let json: serde_json::Value = response.json().await?;
-    let text = json["text"].as_str().unwrap_or("").trim().to_string();
-    Ok(text)
+    claurst_core::voice::transcribe_wav(wav_bytes, api_key, None, "whisper-1", Some(&url)).await
 }
 
 // ---------------------------------------------------------------------------
