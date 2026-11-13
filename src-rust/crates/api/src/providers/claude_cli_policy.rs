@@ -50,9 +50,13 @@ pub(crate) fn args_from_environment() -> Result<Vec<String>, String> {
 /// apply in full is an error: starting the CLI without it would quietly put
 /// the operator's own settings back in charge.
 fn policy_args(value: Option<&str>) -> Result<Vec<String>, String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(value) = value else {
         return Ok(Vec::new());
     };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(unusable("it is empty"));
+    }
     // The version is read first, so a newer policy is reported as newer
     // rather than as a list of fields this engine does not know.
     let raw: serde_json::Value =
@@ -145,7 +149,6 @@ mod tests {
     #[test]
     fn no_policy_leaves_the_cli_launch_as_it_was() {
         assert_eq!(policy_args(None).unwrap(), Vec::<String>::new());
-        assert_eq!(policy_args(Some("  ")).unwrap(), Vec::<String>::new());
     }
 
     #[test]
@@ -203,6 +206,8 @@ mod tests {
             policy.to_string()
         };
         for (policy, reason) in [
+            ("".to_owned(), "it is empty"),
+            (" \t\n".to_owned(), "it is empty"),
             ("not json".to_owned(), "can't be applied"),
             ("{}".to_owned(), "no version"),
             (r#"{"version":1}"#.to_owned(), "missing field"),
