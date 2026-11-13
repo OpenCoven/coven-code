@@ -3699,6 +3699,10 @@ pub mod permissions {
                     // Rule requires a path but none was provided → no match
                     return false;
                 };
+                // Deny rules keep plain glob matching so they never cover less.
+                if matches!(self.action, PermissionAction::Allow) && is_command_tool(tool_name) {
+                    return allow_rule_covers_command(tool_name, pattern, p);
+                }
                 let pat = match glob::Pattern::new(pattern) {
                     Ok(pat) => pat,
                     Err(_) => return false,
@@ -3708,6 +3712,91 @@ pub mod permissions {
                 }
             }
             true
+        }
+    }
+
+    const POWERSHELL_TOOL_NAME: &str = "PowerShell";
+    const REPL_TOOL_NAME: &str = "REPL";
+
+    /// Tools whose rule "path" is a command or code to run rather than a file.
+    pub fn is_command_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            crate::constants::TOOL_NAME_BASH | POWERSHELL_TOOL_NAME | REPL_TOOL_NAME
+        )
+    }
+
+    fn allow_rule_covers_command(tool_name: &str, pattern: &str, command: &str) -> bool {
+        if pattern == glob::Pattern::escape(command) {
+            return true;
+        }
+        // "Always allow" used to save the approved command with `*` glued on,
+        // so that shape means the command it was saved for. Any other wildcard
+        // is a plain glob over the whole text, limited to one plain command.
+        if let Some(saved) = pattern.strip_suffix('*') {
+            if !saved.is_empty() && !saved.ends_with(char::is_whitespace) {
+                return saved == command;
+            }
+        }
+        wildcard_may_cover(tool_name, command)
+            && glob::Pattern::new(pattern).is_ok_and(|glob| glob.matches(command))
+    }
+
+    /// A wildcard vouches for one command's arguments, not for anything else
+    /// the text could make the shell do.
+    fn wildcard_may_cover(tool_name: &str, command: &str) -> bool {
+        match tool_name {
+            REPL_TOOL_NAME => false,
+            POWERSHELL_TOOL_NAME => !windows_command_has_shell_control(command),
+            _ => !bash_command_has_shell_control(command),
+        }
+    }
+
+    /// Whether a `Bash` tool command might do more than run one plain command.
+    ///
+    /// This is an allowlist, because no list of dangerous syntax can be proven
+    /// complete: outside quotes only plain argument characters pass, which
+    /// also rules out comments, variables, escapes and every kind of grouping.
+    /// A false `true` costs one approval prompt; a false `false` runs a command
+    /// nobody approved.
+    pub fn bash_command_has_shell_control(command: &str) -> bool {
+        if cfg!(windows) {
+            // The tool runs `cmd /C` there, which reads quotes differently.
+            return windows_command_has_shell_control(command);
+        }
+        let mut quote = None;
+        for c in command.chars() {
+            match (quote, c) {
+                (_, '\n' | '\r') => return true,
+                (None, '\'' | '"') => quote = Some(c),
+                (None, c) if c.is_ascii_alphanumeric() || " \t_-./:=,+@%~^*?[]".contains(c) => {}
+                (None, _) => return true,
+                (Some('"'), '$' | '`' | '\\') => return true,
+                (Some(open), c) if c == open => quote = None,
+                (Some(_), _) => {}
+            }
+        }
+        quote.is_some()
+    }
+
+    /// The same allowlist for `cmd /C` and PowerShell. Neither shares bash's
+    /// quoting or escaping, so no quote is trusted, and `%`, `^` and `$` are
+    /// out because they expand or escape there.
+    fn windows_command_has_shell_control(command: &str) -> bool {
+        !command
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " \t_-./\\:=,+@~*?[]".contains(c))
+    }
+
+    /// The saved pattern for an "always allow" on `path`. A command is saved
+    /// exactly; a file path also covers names that start with it. Either way
+    /// the approved text itself is never read as a glob.
+    pub fn persistent_allow_pattern(tool_name: &str, path: &str) -> String {
+        let literal = glob::Pattern::escape(path);
+        if is_command_tool(tool_name) {
+            literal
+        } else {
+            format!("{literal}*")
         }
     }
 
@@ -4009,11 +4098,12 @@ pub mod permissions {
             });
         }
 
-        /// Allow `tool_name` on `path` (glob) for the rest of this session.
+        /// Allow `tool_name` on exactly `path` for the rest of this session.
+        /// `path` is what was approved, so it is never read as a glob.
         pub fn add_session_allow_path(&mut self, tool_name: &str, path: &str) {
             self.session_rules.push(PermissionRule {
                 tool_name: Some(tool_name.to_string()),
-                path_pattern: Some(path.to_string()),
+                path_pattern: Some(glob::Pattern::escape(path)),
                 action: PermissionAction::Allow,
                 scope: PermissionScope::Session,
             });
@@ -4040,7 +4130,8 @@ pub mod permissions {
             Ok(())
         }
 
-        /// Allow `tool_name` persistently on `path` and save settings.
+        /// Allow `tool_name` persistently on `path` and save settings. See
+        /// [`persistent_allow_pattern`] for what the saved rule covers.
         pub fn add_persistent_allow_path(
             &mut self,
             tool_name: &str,
@@ -4049,7 +4140,7 @@ pub mod permissions {
         ) -> crate::error::Result<()> {
             let rule = PermissionRule {
                 tool_name: Some(tool_name.to_string()),
-                path_pattern: Some(path.to_string()),
+                path_pattern: Some(persistent_allow_pattern(tool_name, path)),
                 action: PermissionAction::Allow,
                 scope: PermissionScope::Persistent,
             };
@@ -4514,6 +4605,289 @@ pub mod permissions {
                 PermissionDecision::Ask { .. } => {}
                 other => panic!("Expected Ask, got {:?}", other),
             }
+        }
+
+        fn is_ask(decision: PermissionDecision) -> bool {
+            matches!(decision, PermissionDecision::Ask { .. })
+        }
+
+        fn allow_rule(tool: &str, pattern: &str) -> PermissionRule {
+            PermissionRule {
+                tool_name: Some(tool.to_string()),
+                path_pattern: Some(pattern.to_string()),
+                action: PermissionAction::Allow,
+                scope: PermissionScope::Persistent,
+            }
+        }
+
+        #[test]
+        fn session_command_allow_is_not_read_as_a_glob() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_session_allow_path("Bash", "echo *");
+            assert_eq!(
+                m.evaluate("Bash", "run", Some("echo *"), None, &[]),
+                PermissionDecision::Allow
+            );
+            for other in ["echo hi", "echo hi; touch x", "echo hi && touch x"] {
+                assert!(
+                    is_ask(m.evaluate("Bash", "run", Some(other), None, &[])),
+                    "{other:?} was not approved"
+                );
+            }
+        }
+
+        #[test]
+        fn exact_compound_command_allow_covers_only_itself() {
+            let command = "git add . && git commit -m x";
+            let mut m = mgr(PermissionMode::Default);
+            m.add_session_allow_path("Bash", command);
+            assert_eq!(
+                m.evaluate("Bash", "run", Some(command), None, &[]),
+                PermissionDecision::Allow
+            );
+            let longer = format!("{command}; touch x");
+            assert!(is_ask(m.evaluate("Bash", "run", Some(&longer), None, &[])));
+        }
+
+        #[test]
+        fn saved_wildcard_allow_covers_one_simple_command() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("Bash", "echo plain *"));
+            for covered in ["echo plain two", "echo plain 'a; b'"] {
+                assert_eq!(
+                    m.evaluate("Bash", "run", Some(covered), None, &[]),
+                    PermissionDecision::Allow,
+                    "{covered:?}"
+                );
+            }
+            for chained in [
+                "echo plain; touch x",
+                "echo plain && touch x",
+                "echo plain || touch x",
+                "echo plain | touch x",
+                "echo plain & touch x",
+                "echo plain\ntouch x",
+                "echo plain\rtouch x",
+                "echo plain $(touch x)",
+                "echo plain \"$(touch x)\"",
+                "echo plain `touch x`",
+                "echo plain > x",
+                "echo plain < x",
+                "echo plain <(touch x)",
+                "echo plain 'unterminated; touch x",
+            ] {
+                assert!(
+                    is_ask(m.evaluate("Bash", "run", Some(chained), None, &[])),
+                    "{chained:?} needs its own approval"
+                );
+            }
+        }
+
+        #[test]
+        fn saved_powershell_wildcard_allow_does_not_trust_bash_quoting() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("PowerShell", "Get-Item *"));
+            assert_eq!(
+                m.evaluate("PowerShell", "run", Some("Get-Item ./a"), None, &[]),
+                PermissionDecision::Allow
+            );
+            for chained in [
+                r"Get-Item \; Remove-Item x",
+                "Get-Item ';' ; Remove-Item x",
+                "Get-Item (Remove-Item x)",
+                "Get-Item \"$(Remove-Item x)\"",
+                "Get-Item `n",
+                "Get-Item | Remove-Item",
+            ] {
+                assert!(
+                    is_ask(m.evaluate("PowerShell", "run", Some(chained), None, &[])),
+                    "{chained:?} needs its own approval"
+                );
+            }
+        }
+
+        #[test]
+        fn deny_wildcard_still_covers_chained_commands() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(PermissionRule {
+                tool_name: Some("Bash".to_string()),
+                path_pattern: Some("rm *".to_string()),
+                action: PermissionAction::Deny,
+                scope: PermissionScope::Persistent,
+            });
+            assert_eq!(
+                m.evaluate("Bash", "run", Some("rm x; touch y"), None, &[]),
+                PermissionDecision::Deny
+            );
+        }
+
+        #[test]
+        fn path_wildcard_allow_ignores_shell_characters_in_names() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("Write", "/tmp/*"));
+            assert_eq!(
+                m.evaluate("Write", "write", Some("/tmp/a;b&c"), None, &[]),
+                PermissionDecision::Allow
+            );
+        }
+
+        #[test]
+        fn session_path_allow_is_not_read_as_a_glob() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_session_allow_path("Write", "/tmp/a*");
+            assert_eq!(
+                m.evaluate("Write", "write", Some("/tmp/a*"), None, &[]),
+                PermissionDecision::Allow
+            );
+            assert!(is_ask(m.evaluate(
+                "Write",
+                "write",
+                Some("/tmp/ab"),
+                None,
+                &[]
+            )));
+        }
+
+        #[test]
+        fn always_allow_saves_commands_exactly_and_keeps_path_prefixes() {
+            assert_eq!(persistent_allow_pattern("Bash", "echo plain"), "echo plain");
+            assert_eq!(persistent_allow_pattern("Bash", "echo *"), "echo [*]");
+            assert_eq!(persistent_allow_pattern("PowerShell", "ls"), "ls");
+            assert_eq!(persistent_allow_pattern("Write", "/tmp/a"), "/tmp/a*");
+            assert_eq!(persistent_allow_pattern("Write", "/tmp/a*"), "/tmp/a[*]*");
+        }
+
+        #[test]
+        fn wildcard_allow_refuses_syntax_it_cannot_prove_is_one_command() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("Bash", "echo *"));
+            for plain in [
+                "echo a_b-c.d/e:f=g,h+i@j%k~l^m*n?[o]",
+                "echo 'a; b $(c) `d` \\ #'",
+                "echo \"a; b # c\"",
+            ] {
+                assert_eq!(
+                    m.evaluate("Bash", "run", Some(plain), None, &[]),
+                    PermissionDecision::Allow,
+                    "{plain:?}"
+                );
+            }
+            for hostile in [
+                "echo plain # '\ntouch x # '",
+                "echo plain $'\\'' ; touch x ; echo \\'",
+                "echo plain $\\\n(touch x)",
+                "echo plain \\\ntouch x",
+                r"echo plain ${x:=a\[\$\(touch\ x\)\]} $[x]",
+                r"echo plain ${!x}",
+                r"echo plain ${x@P}",
+                "echo plain $x",
+                "echo plain \"$x\"",
+                "echo plain \"a\\\"b\"",
+                "echo plain {a,b}",
+                "echo plain (x)",
+                "echo plain 'a\nb'",
+                "echo plain \"a\nb\"",
+                "echo plain caf\u{e9}",
+                "echo plain \u{0}",
+            ] {
+                assert!(
+                    is_ask(m.evaluate("Bash", "run", Some(hostile), None, &[])),
+                    "{hostile:?} needs its own approval"
+                );
+            }
+        }
+
+        #[test]
+        fn windows_reading_does_not_trust_quotes_or_expansion() {
+            for hostile in [
+                "echo plain 'x & calc'",
+                "echo plain \"x\" & calc",
+                "echo plain %PATH%",
+                "echo plain !x!",
+                "echo plain ^& calc",
+                "echo plain | calc",
+            ] {
+                assert!(
+                    windows_command_has_shell_control(hostile),
+                    "{hostile:?} needs its own approval"
+                );
+            }
+            assert!(!windows_command_has_shell_control(
+                "dir C:\\temp\\a-b_c.txt"
+            ));
+        }
+
+        #[test]
+        fn old_saved_always_allow_covers_only_the_command_it_was_saved_for() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("Bash", "rm -rf build*"));
+            m.add_rule(allow_rule("Bash", "echo **"));
+            for covered in ["rm -rf build", "echo *"] {
+                assert_eq!(
+                    m.evaluate("Bash", "run", Some(covered), None, &[]),
+                    PermissionDecision::Allow,
+                    "{covered:?}"
+                );
+            }
+            for wider in ["rm -rf build ~/", "rm -rf buildx", "echo hi"] {
+                assert!(
+                    is_ask(m.evaluate("Bash", "run", Some(wider), None, &[])),
+                    "{wider:?} was never approved"
+                );
+            }
+        }
+
+        #[test]
+        fn a_wildcard_standing_as_its_own_word_still_works() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_rule(allow_rule("Bash", "git *"));
+            assert_eq!(
+                m.evaluate("Bash", "run", Some("git status -s"), None, &[]),
+                PermissionDecision::Allow
+            );
+            let mut any = mgr(PermissionMode::Default);
+            any.add_rule(allow_rule("Bash", "*"));
+            assert_eq!(
+                any.evaluate("Bash", "run", Some("ls -l"), None, &[]),
+                PermissionDecision::Allow
+            );
+            assert!(is_ask(any.evaluate(
+                "Bash",
+                "run",
+                Some("ls -l; touch x"),
+                None,
+                &[]
+            )));
+        }
+
+        #[test]
+        fn code_approvals_are_exact_and_no_wildcard_covers_code() {
+            let mut m = mgr(PermissionMode::Default);
+            m.add_session_allow_path("REPL", "print(1)");
+            assert_eq!(
+                m.evaluate("REPL", "run", Some("print(1)"), None, &[]),
+                PermissionDecision::Allow
+            );
+            assert!(is_ask(m.evaluate(
+                "REPL",
+                "run",
+                Some("print(1)\nimport os"),
+                None,
+                &[]
+            )));
+            for (pattern, code) in [
+                ("print(1)*", "print(1)\nimport os"),
+                ("*", "print(2)"),
+                ("print(*", "print(2)"),
+            ] {
+                let mut m = mgr(PermissionMode::Default);
+                m.add_rule(allow_rule("REPL", pattern));
+                assert!(
+                    is_ask(m.evaluate("REPL", "run", Some(code), None, &[])),
+                    "{pattern:?} covers {code:?}"
+                );
+            }
+            assert_eq!(persistent_allow_pattern("REPL", "print(1)"), "print(1)");
         }
 
         #[test]

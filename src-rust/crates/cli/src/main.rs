@@ -4592,10 +4592,9 @@ async fn run_interactive(
                                                     claurst_core::config::Settings::load_sync(
                                                     ).unwrap_or_default();
                                                 if let Some(path) = selected_path.as_deref() {
-                                                    let pattern = format!("{}*", path);
                                                     let _ = manager.add_persistent_allow_path(
                                                         &pending.request.tool_name,
-                                                        &pattern,
+                                                        path,
                                                         &mut settings,
                                                     );
                                                 } else {

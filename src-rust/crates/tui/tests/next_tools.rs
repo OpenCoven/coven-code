@@ -352,6 +352,41 @@ fn the_activity_inspector_shows_sanitized_arguments_output_and_provenance() {
 }
 
 #[test]
+fn a_command_approval_says_it_covers_only_that_exact_command() {
+    let mut app = next_app();
+    app.permission_request = Some(bash_request());
+    let text = text_of(&draw(&app, 180, 50));
+    assert!(
+        text.contains("this exact command for the rest of this session"),
+        "session scope:\n{text}"
+    );
+    assert!(
+        text.contains("saves this exact command to settings"),
+        "persistent scope:\n{text}"
+    );
+    assert!(
+        !text.contains("this tool or path"),
+        "no wider claim:\n{text}"
+    );
+}
+
+#[test]
+fn a_file_approval_keeps_its_path_scope_wording() {
+    let mut app = next_app();
+    app.permission_request = Some(PermissionRequest::file_write(
+        "toolu-write".to_string(),
+        "Write".to_string(),
+        "Update the notes".to_string(),
+        "/tmp/notes.md".to_string(),
+    ));
+    let text = text_of(&draw(&app, 180, 50));
+    assert!(
+        text.contains("this tool or path for the rest of this session"),
+        "session scope:\n{text}"
+    );
+}
+
+#[test]
 fn next_draws_its_own_approval_with_owner_scope_and_consequences() {
     let mut app = next_app();
     app.set_prompt_text("unsent draft".to_string());
