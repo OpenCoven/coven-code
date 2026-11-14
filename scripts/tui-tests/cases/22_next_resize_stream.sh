@@ -88,7 +88,9 @@ tc_next_resize_stream() {
     # The last drawn row is the composer: a sent draft would leave it empty.
     assert_contains "$(tail -n 1 <<<"${screen:-<blank pane at $got>}")" "kept draft" \
       "the draft is as typed, still in the composer"
-    assert_contains "${screen:-<blank pane at $got>}" "flood line" "the answer is on screen"
+    # The answer ends with the held lines, which outnumber the rows left for
+    # the transcript.
+    assert_contains "${screen:-<blank pane at $got>}" "held line" "the end of the answer is on screen"
     assert_absent "$screen" "panicked" "nothing panicked"
 
     # The last row of the frame is the composer at the size the terminal has now.
@@ -101,10 +103,10 @@ tc_next_resize_stream() {
       sleep 0.1; waited=$((waited + 1))
     done
     assert_eq "$(_resize_saved_count "$scratch/home")" "$count" "every delta reached the saved turn"
-    # The sizes took over 6 s, at a held line every 0.2 s.
+    # The stream was held through the sizes, over 6 s, at a line every 0.2 s.
     local held; held="$(_resize_saved_count "$scratch/home" 'held line')"
-    if [ "$held" -ge 20 ]; then _pass "text kept arriving while the sizes changed ($held held lines)"
-    else _fail "text kept arriving while the sizes changed" "$held held lines saved"; fi
+    if [ "$held" -ge 20 ]; then _pass "text kept arriving while the stream was held ($held held lines)"
+    else _fail "text kept arriving while the stream was held" "$held held lines saved"; fi
   fi
   tui_stop
 
