@@ -436,11 +436,20 @@ struct ToolKey {
     active: tracked::Stamp,
     interrupted: tracked::Stamp,
     decisions: tracked::Stamp,
+    queued_approvals: tracked::Stamp,
     cancellation: TurnCancellation,
     project: Option<std::path::PathBuf>,
     diagnostic_path: Option<std::path::PathBuf>,
     memory_diagnostics: bool,
     live: bool,
+    /// Seconds the unfinished tools have been working, as the rows show them
+    /// (none under a second, then rounded), summed; a row awaiting approval
+    /// counts too, though it shows none. While no event touches
+    /// the rows each count only grows, so the sum changes whenever a row's
+    /// time would; an event that resets one changes a stamp above.
+    running_seconds: u64,
+    /// The call a pending approval names; its row then waits on the user.
+    approval: Option<(String, Option<String>)>,
 }
 
 #[derive(Debug, Default)]
@@ -477,11 +486,26 @@ impl ToolRows {
             active: app.tool_use_blocks.stamp(),
             interrupted: app.interrupted_tools.stamp(),
             decisions: app.permission_decisions.stamp(),
+            queued_approvals: app.queued_approvals.stamp(),
             cancellation: app.cancellation,
             project: app.config.project_dir.clone(),
             diagnostic_path: app.diagnostic_log_path.clone(),
             memory_diagnostics: app.diagnostic_buffer.is_some(),
             live: !app.streaming_text.is_empty(),
+            running_seconds: app
+                .tool_use_blocks
+                .iter()
+                .filter(|block| block.run.finished.is_none())
+                .filter_map(|block| block.run.started_at)
+                .map(|at| match at.elapsed() {
+                    elapsed if elapsed < crate::application::view::SHORTEST_ELAPSED => 0,
+                    elapsed => (elapsed + std::time::Duration::from_millis(500)).as_secs(),
+                })
+                .sum(),
+            approval: app
+                .permission_request
+                .as_ref()
+                .map(|request| (request.tool_use_id.clone(), request.call_id.clone())),
         };
         let changed = self.key.as_ref() != Some(&key);
         if changed {
@@ -655,6 +679,142 @@ impl ShellState {
         };
         self.anchor.set(anchor);
         (max_scroll - offset.min(max_scroll), anchor.unseen)
+    }
+}
+
+/// What quitting mid-turn will report, taken before the turn is stopped. Tools
+/// run inside this process, so the turn ends with it: nothing is left working
+/// on their behalf. The stop can still deliver results, so
+/// [`TurnExitReport::lines`] reads the conversation as it was saved.
+#[derive(Debug, Clone, Default)]
+pub struct TurnExitReport {
+    /// False when the work being stopped is auto-compaction, not a turn:
+    /// there is nothing to report.
+    turn: bool,
+    /// Tool call id and the line naming it, with how it was last shown, for
+    /// each tool with no reported result: its outcome is unknown. None is
+    /// said not to have started. The rows trail the worker by up to a frame,
+    /// a call cut off before it began saves the same result as one cut off
+    /// mid-run, and a tool may ask for approval after a first step of its
+    /// work.
+    open: Vec<(String, String)>,
+    /// Tools that finished; a resumed session knows of them only if their
+    /// results were saved.
+    finished: Vec<(String, String)>,
+}
+
+impl TurnExitReport {
+    pub fn capture(app: &App) -> Self {
+        if app.auto_compact_running {
+            return Self::default();
+        }
+        let view = TranscriptView::project_without_text(app);
+        // Rows outlive their turn, and an earlier turn's results may have been
+        // compacted away; only this turn's finished tools can be missing.
+        let turn = app.current_user_turn_index();
+        let this_turn: std::collections::HashSet<&str> = app
+            .tool_use_blocks
+            .iter()
+            .filter(|block| block.turn_index == turn)
+            .map(|block| block.id.as_str())
+            .collect();
+        let mut report = Self {
+            turn: true,
+            ..Self::default()
+        };
+        for tool in &view.tools {
+            let named = match &tool.target {
+                Some(target) => format!("{} {target}", tool.name),
+                None => tool.name.clone(),
+            };
+            match tool.state {
+                ToolActivityState::Running | ToolActivityState::CancelRequested => report
+                    .open
+                    .push((tool.id.clone(), format!("No result from {named}"))),
+                // An open prompt takes every key, so quitting waits for the
+                // answer; this holds for any other way a turn ends mid-prompt.
+                ToolActivityState::AwaitingApproval => report.open.push((
+                    tool.id.clone(),
+                    format!("No result from {named} (last shown awaiting approval)"),
+                )),
+                ToolActivityState::Queued => report.open.push((
+                    tool.id.clone(),
+                    format!("No result from {named} (last shown waiting for its turn)"),
+                )),
+                ToolActivityState::Done | ToolActivityState::Error
+                    if this_turn.contains(tool.id.as_str()) =>
+                {
+                    report.finished.push((
+                        tool.id.clone(),
+                        format!("Finished, but not in the saved session: {named}"),
+                    ))
+                }
+                ToolActivityState::Done | ToolActivityState::Error => {}
+                ToolActivityState::Cancelled => {}
+            }
+        }
+        report
+    }
+
+    /// Whether a turn was being stopped, rather than auto-compaction.
+    pub fn is_turn(&self) -> bool {
+        self.turn
+    }
+
+    /// The report, read against the conversation as saved. A tool still at
+    /// work is left out once its result is saved, but not for the result
+    /// cancellation records for a call it cut off: that says the call
+    /// stopped, not what it did. A finished tool is left out once any result
+    /// for it is saved.
+    pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
+        use claurst_core::types::{ContentBlock, ToolResultContent};
+        if !self.turn {
+            return Vec::new();
+        }
+        let mut answered = std::collections::HashSet::new();
+        let mut saved_results = std::collections::HashSet::new();
+        for block in saved.iter().flat_map(|message| message.content_blocks()) {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            {
+                let cancelled = is_error == Some(true)
+                    && matches!(&content, ToolResultContent::Text(text)
+                        if text == claurst_query::TOOL_CANCELLED_RESULT);
+                if !cancelled {
+                    answered.insert(tool_use_id.clone());
+                }
+                saved_results.insert(tool_use_id);
+            }
+        }
+        let open: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(id, _)| !answered.contains(id))
+            .map(|(_, line)| line.clone())
+            .collect();
+        let mut report = vec![
+            "Quit during a turn. It stopped here: this session runs inside coven-code, so \
+             nothing carries it on."
+                .to_string(),
+        ];
+        if !open.is_empty() {
+            report.extend(open);
+            report.push(
+                "What these did is unknown, and anything they started in the background may \
+                 still be running."
+                    .to_string(),
+            );
+        }
+        report.extend(
+            self.finished
+                .iter()
+                .filter(|(id, _)| !saved_results.contains(id))
+                .map(|(_, line)| line.clone()),
+        );
+        report
     }
 }
 
@@ -1069,6 +1229,8 @@ fn text_line(appearance: &Appearance, content: &str) -> Line<'static> {
 /// Completion is not verification: a finished tool is neutral evidence.
 fn tool_status(state: ToolActivityState) -> (Status, &'static str) {
     match state {
+        ToolActivityState::AwaitingApproval => (Status::Pending, "awaiting approval"),
+        ToolActivityState::Queued => (Status::Pending, "waiting for its turn"),
         ToolActivityState::Running => (Status::Pending, "running"),
         ToolActivityState::Done => (Status::Evidence, "done"),
         ToolActivityState::Error => (Status::Blocked, "error"),
@@ -1077,7 +1239,7 @@ fn tool_status(state: ToolActivityState) -> (Status, &'static str) {
     }
 }
 
-/// One tool row: operation, safe target and state. A permission decision
+/// One tool row: operation, safe target, state and elapsed time. A permission decision
 /// is shown next to the execution state, never in place of it: an allowed
 /// call is still running until the tool reports its result.
 fn tool_line(appearance: &Appearance, tool: &ToolActivity, expanded: bool) -> Line<'static> {
@@ -1090,6 +1252,15 @@ fn tool_line(appearance: &Appearance, tool: &ToolActivity, expanded: bool) -> Li
         (Some(false), _) => (Status::Blocked, "denied".to_string()),
         (Some(true), ToolActivityState::Running) => (status, format!("allowed, {word}")),
         _ => (status, word.to_string()),
+    };
+    let word = match (tool.elapsed, tool.allowed) {
+        (Some(elapsed), allowed) if allowed != Some(false) => {
+            format!(
+                "{word} {}",
+                crate::app::format_elapsed_ms(elapsed.as_millis())
+            )
+        }
+        _ => word,
     };
     primitives::tool_row(appearance, &label, status, &word, expanded)
 }

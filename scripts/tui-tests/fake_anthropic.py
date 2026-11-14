@@ -5,7 +5,8 @@ Binds to 127.0.0.1 only. The first reply to a prompt asks the engine to run a
 real tool call: "tool: NAME JSON" for that tool and input, "run: COMMAND" for
 Bash with that command, or otherwise a Bash `touch` of a marker named by the
 prompt's last word. The reply to its tool result reports what the engine sent
-back, so a journey can see the outcome on screen. "flood: N" instead sends N
+back, so a journey can see the outcome on screen. "tools: JSON" calls several
+tools in one response, from a list of [name, input]. "flood: N" instead sends N
 text deltas in one burst, to put the interactive event path under pressure.
 Every request's messages are appended to the log for later checks.
 
@@ -20,6 +21,7 @@ DENIED_TEXT = "TOOL_RESULT_ERROR"
 ALLOWED_TEXT = "TOOL_RESULT_OK"
 COMMAND_PREFIX = "run: "  # the rest of the prompt is the command, verbatim
 TOOL_PREFIX = "tool: "  # then a tool name and its JSON input
+TOOLS_PREFIX = "tools: "  # then a JSON list of [name, input] called in one response
 FLOOD_PREFIX = "flood: "  # then how many text deltas to send in one burst
 FLOOD_TEXT = "flood line\n"
 
@@ -82,20 +84,30 @@ def flood_turn(count):
     )
 
 
-def tool_turn(tool_id, name, tool_input):
+def tool_block(index, tool_id, name, tool_input):
     return (
-        message_start()
-        + sse("content_block_start", {
-            "type": "content_block_start", "index": 0,
+        sse("content_block_start", {
+            "type": "content_block_start", "index": index,
             "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}},
         })
         + sse("content_block_delta", {
-            "type": "content_block_delta", "index": 0,
+            "type": "content_block_delta", "index": index,
             "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input)},
         })
-        + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-        + message_end("tool_use")
+        + sse("content_block_stop", {"type": "content_block_stop", "index": index})
     )
+
+
+def tool_turn(tool_id, name, tool_input):
+    return message_start() + tool_block(0, tool_id, name, tool_input) + message_end("tool_use")
+
+
+def tools_turn(tool_id, calls):
+    blocks = b"".join(
+        tool_block(index, f"{tool_id}_{index}", name, tool_input)
+        for index, (name, tool_input) in enumerate(calls)
+    )
+    return message_start() + blocks + message_end("tool_use")
 
 
 def last_tool_result(message):
@@ -127,6 +139,8 @@ def reply_for(messages, marker_dir, turn):
     tool_id = f"toolu_fake_{turn}"
     if text.startswith(FLOOD_PREFIX):
         return flood_turn(int(text[len(FLOOD_PREFIX):]))
+    if text.startswith(TOOLS_PREFIX):
+        return tools_turn(tool_id, json.loads(text[len(TOOLS_PREFIX):]))
     if text.startswith(TOOL_PREFIX):
         name, _, tool_input = text[len(TOOL_PREFIX):].partition(" ")
         return tool_turn(tool_id, name, json.loads(tool_input))

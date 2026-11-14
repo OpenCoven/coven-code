@@ -144,6 +144,7 @@ fn hostile_app(variant: Variant) -> App {
         status: ToolStatus::Running,
         output_preview: Some(HOSTILE.to_string()),
         input_json: json!({ "command": HOSTILE }).to_string(),
+        run: Default::default(),
     }]
     .into();
     if variant == Variant::Approval {

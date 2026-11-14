@@ -39,6 +39,7 @@ fn matches_fresh(current: &App, width: u16, height: u16) {
     fresh.tool_use_blocks = current.tool_use_blocks.clone().into();
     fresh.interrupted_tools = current.interrupted_tools.clone().into();
     fresh.permission_decisions = current.permission_decisions.clone().into();
+    fresh.permission_request = current.permission_request.clone();
     fresh.is_streaming = current.is_streaming;
     fresh.cancellation = current.cancellation;
     fresh.next_presentation = current.next_presentation.clone();
@@ -99,6 +100,7 @@ fn tool_rows_and_running_count_follow_direct_edits_decisions_and_cancellation() 
         status: ToolStatus::Running,
         output_preview: None,
         input_json: "{\"path\":\"/synthetic/project/file\"}".into(),
+        run: Default::default(),
     });
     matches_fresh(&app, 80, 24);
     app.tool_use_blocks[0].input_json = "{\"path\":\"/synthetic/project/EDIT\"}".into();
