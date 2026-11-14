@@ -797,7 +797,10 @@ fn quitting_mid_turn_says_what_is_not_known() {
     assert!(report.contains("Quit during a turn"), "{report}");
     assert!(report.contains("nothing carries it on"), "{report}");
     assert!(report.contains("No result from Bash make"), "{report}");
-    assert!(report.contains("Not started: Edit /b.rs"), "{report}");
+    assert!(
+        report.contains("Waiting for its turn: Edit /b.rs"),
+        "{report}"
+    );
     assert!(
         !report.contains("No result from Read"),
         "that one reported: {report}"
@@ -1055,7 +1058,7 @@ fn interrupting_a_turn_keeps_its_rows_in_the_order_they_started() {
 }
 
 #[test]
-fn the_exit_report_says_which_tools_never_started_and_which_results_were_not_saved() {
+fn the_exit_report_says_which_tools_waited_and_which_results_were_not_saved() {
     let mut app = next_app();
     // An earlier turn's row stays shown after compaction drops its result.
     app.push_message(Message::user("look first".to_string()));
@@ -1081,11 +1084,14 @@ fn the_exit_report_says_which_tools_never_started_and_which_results_were_not_sav
 
     // The worker was stopped before it saved the response's results.
     let lines = report.lines(&app.messages).join("\n");
-    assert!(lines.contains("Not started: Edit /b.rs"), "{lines}");
+    assert!(
+        lines.contains("Waiting for its turn: Edit /b.rs"),
+        "{lines}"
+    );
     assert!(!lines.contains("No result from Edit /b.rs"), "{lines}");
     assert!(
-        !lines.contains("is unknown"),
-        "nothing ran without a result: {lines}"
+        lines.contains("is unknown"),
+        "the screen trails the worker: {lines}"
     );
     assert!(
         lines.contains("Finished, but not in the saved session: Edit /a.rs"),
@@ -1107,7 +1113,10 @@ fn the_exit_report_says_which_tools_never_started_and_which_results_were_not_sav
     ]));
     let lines = report.lines(&saved).join("\n");
     assert!(!lines.contains("Edit /a.rs"), "{lines}");
-    assert!(lines.contains("Not started: Edit /b.rs"), "{lines}");
+    assert!(
+        lines.contains("Waiting for its turn: Edit /b.rs"),
+        "{lines}"
+    );
 }
 
 #[test]
@@ -1195,7 +1204,9 @@ fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_beg
             "{lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line.contains("Not started")),
+            !lines
+                .iter()
+                .any(|line| line.contains("Waiting for its turn")),
             "{lines:?}"
         );
     }
@@ -1228,25 +1239,62 @@ fn a_tool_times_its_work_from_its_latest_approval() {
 }
 
 #[test]
-fn a_tool_whose_hooks_are_still_running_is_reported_as_not_started() {
+fn the_exit_report_never_says_a_tool_did_not_start() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
     let mut app = next_app();
-    app.push_message(Message::user("check then build".to_string()));
-    tool_start(&mut app, "first", "Bash", r#"{"command":"make"}"#);
-    // A later call's PreToolUse hook runs; no tool's own work has begun.
-    tool_start(&mut app, "second", "Bash", r#"{"command":"make test"}"#);
-    let lines = claurst_tui::next::TurnExitReport::capture(&app)
-        .lines(&app.messages)
-        .join("\n");
-    assert!(lines.contains("Not started: Bash make\n"), "{lines}");
-    assert!(lines.contains("Not started: Bash make test"), "{lines}");
-    assert!(!lines.contains("is unknown"), "nothing began: {lines}");
+    app.push_message(Message::user("check, build, then edit".to_string()));
+    // Its response's PreToolUse hooks still run: no start seen yet.
+    tool_start(&mut app, "check", "Bash", r#"{"command":"make check"}"#);
+    tool_start(&mut app, "build", "Bash", r#"{"command":"make"}"#);
+    tool_running(&mut app, "build");
+    tool_start(&mut app, "edit", "Edit", r#"{"file_path":"/b.rs"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolQueued {
+            tool_id: "edit".to_string(),
+        },
+    );
+    let report = claurst_tui::next::TurnExitReport::capture(&app);
 
-    tool_running(&mut app, "first");
-    let lines = claurst_tui::next::TurnExitReport::capture(&app)
-        .lines(&app.messages)
-        .join("\n");
-    assert!(lines.contains("No result from Bash make\n"), "{lines}");
-    assert!(lines.contains("Not started: Bash make test"), "{lines}");
+    // The rows trail the worker, and a call cut off before it began saves
+    // the same result as one cut off mid-run: each stays unknown.
+    let cancelled = |id: &str| ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content: ToolResultContent::Text(claurst_query::TOOL_CANCELLED_RESULT.to_string()),
+        is_error: Some(true),
+    };
+    let mut saved = app.messages.to_vec();
+    saved.push(Message::user_blocks(vec![
+        cancelled("check"),
+        cancelled("build"),
+        cancelled("edit"),
+    ]));
+    let lines = report.lines(&saved);
+    let unknown = lines.iter().position(|line| line.contains("is unknown"));
+    for named in [
+        "No result from Bash make check",
+        "No result from Bash make",
+        "Waiting for its turn: Edit /b.rs",
+    ] {
+        let at = lines.iter().position(|line| line == named);
+        assert!(
+            matches!((at, unknown), (Some(a), Some(u)) if a < u),
+            "{named}: {lines:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.starts_with("Not started")),
+        "{lines:?}"
+    );
+
+    // A real result saved for the writer means there is nothing to report.
+    saved.push(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "edit".to_string(),
+        content: ToolResultContent::Text("edited".to_string()),
+        is_error: None,
+    }]));
+    let lines = report.lines(&saved).join("\n");
+    assert!(!lines.contains("/b.rs"), "{lines}");
 }
 
 #[test]

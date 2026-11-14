@@ -688,14 +688,12 @@ impl ShellState {
 /// [`TurnExitReport::lines`] reads the conversation as it was saved.
 #[derive(Debug, Clone, Default)]
 pub struct TurnExitReport {
-    /// Tool call id and the line naming it, for each tool still at work or
-    /// asking for approval: with no reported result, its outcome is unknown.
-    /// A tool may ask after a first step of its work, so asking is no sign
-    /// that nothing ran.
+    /// Tool call id and the line naming it, as last seen, for each tool with
+    /// no reported result: its outcome is unknown. None is said not to have
+    /// started. The rows trail the worker by up to a frame, a call cut off
+    /// before it began saves the same result as one cut off mid-run, and a
+    /// tool may ask for approval after a first step of its work.
     open: Vec<(String, String)>,
-    /// Tools whose work had not begun: writers waiting for their turn, and
-    /// tools whose response's `PreToolUse` hooks were still running.
-    not_started: Vec<String>,
     /// Tools that finished; a resumed session knows of them only if their
     /// results were saved.
     finished: Vec<(String, String)>,
@@ -713,15 +711,6 @@ impl TurnExitReport {
             .filter(|block| block.turn_index == turn)
             .map(|block| block.id.as_str())
             .collect();
-        // A tool's own work begins with its start time; until then its
-        // response's hooks run, or it waits for its turn.
-        let not_begun: std::collections::HashSet<&str> = app
-            .tool_use_blocks
-            .iter()
-            .chain(app.interrupted_tools.iter())
-            .filter(|block| block.run.started_at.is_none() && block.run.finished.is_none())
-            .map(|block| block.id.as_str())
-            .collect();
         let mut report = Self::default();
         for tool in &view.tools {
             if tool.allowed == Some(false) {
@@ -732,11 +721,6 @@ impl TurnExitReport {
                 None => tool.name.clone(),
             };
             match tool.state {
-                ToolActivityState::Running | ToolActivityState::CancelRequested
-                    if not_begun.contains(tool.id.as_str()) =>
-                {
-                    report.not_started.push(format!("Not started: {named}"))
-                }
                 ToolActivityState::Running | ToolActivityState::CancelRequested => report
                     .open
                     .push((tool.id.clone(), format!("No result from {named}"))),
@@ -745,9 +729,9 @@ impl TurnExitReport {
                 ToolActivityState::AwaitingApproval => report
                     .open
                     .push((tool.id.clone(), format!("Waiting for approval: {named}"))),
-                ToolActivityState::Queued => {
-                    report.not_started.push(format!("Not started: {named}"))
-                }
+                ToolActivityState::Queued => report
+                    .open
+                    .push((tool.id.clone(), format!("Waiting for its turn: {named}"))),
                 ToolActivityState::Done | ToolActivityState::Error
                     if this_turn.contains(tool.id.as_str()) =>
                 {
@@ -807,7 +791,6 @@ impl TurnExitReport {
                     .to_string(),
             );
         }
-        report.extend(self.not_started.iter().cloned());
         report.extend(
             self.finished
                 .iter()
