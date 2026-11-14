@@ -735,7 +735,7 @@ impl TurnExitReport {
                 // answer; this holds for any other way a turn ends mid-prompt.
                 ToolActivityState::AwaitingApproval => report.open.push((
                     tool.id.clone(),
-                    format!("No result from {named} (last shown waiting for approval)"),
+                    format!("No result from {named} (last shown awaiting approval)"),
                 )),
                 ToolActivityState::Queued => report.open.push((
                     tool.id.clone(),
@@ -761,6 +761,11 @@ impl TurnExitReport {
     /// cancellation records for a call it cut off: that says the call
     /// stopped, not what it did. A finished tool is left out once any result
     /// for it is saved.
+    /// Whether a turn was being stopped, rather than auto-compaction.
+    pub fn is_turn(&self) -> bool {
+        self.turn
+    }
+
     pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
         use claurst_core::types::{ContentBlock, ToolResultContent};
         if !self.turn {

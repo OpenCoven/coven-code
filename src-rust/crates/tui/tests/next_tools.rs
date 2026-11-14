@@ -1195,7 +1195,7 @@ fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_beg
         ));
         let lines = claurst_tui::next::TurnExitReport::capture(&app).lines(&app.messages);
         let approval = lines.iter().position(|line| {
-            line == "No result from Bash make install (last shown waiting for approval)"
+            line == "No result from Bash make install (last shown awaiting approval)"
         });
         let unknown = lines.iter().position(|line| line.contains("is unknown"));
         assert!(
@@ -1269,6 +1269,11 @@ fn the_exit_report_never_says_a_tool_did_not_start() {
         cancelled("edit"),
     ]));
     let lines = report.lines(&saved);
+    assert_eq!(
+        lines.len(),
+        5,
+        "the stop, three tools, the warning: {lines:?}"
+    );
     let unknown = lines.iter().position(|line| line.contains("is unknown"));
     for named in [
         "No result from Bash make check",
@@ -1366,6 +1371,7 @@ fn quitting_during_auto_compaction_reports_no_turn() {
     // its summary, without the finished turn's results.
     app.auto_compact_running = true;
     let report = claurst_tui::next::TurnExitReport::capture(&app);
+    assert!(!report.is_turn());
     assert!(report.lines(&[]).is_empty(), "{:?}", report.lines(&[]));
 }
 
@@ -1381,4 +1387,36 @@ fn a_denied_tool_is_named_like_any_other_when_its_result_is_missing() {
         .lines(&app.messages)
         .join("\n");
     assert!(lines.contains("No result from Bash make clean"), "{lines}");
+}
+
+#[test]
+fn a_denied_tool_that_ended_is_named_only_while_its_result_is_unsaved() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
+    let mut app = next_app();
+    app.push_message(Message::user("clean".to_string()));
+    tool_start(&mut app, "clean", "Bash", r#"{"command":"make clean"}"#);
+    tool_running(&mut app, "clean");
+    app.record_permission_decision("clean", false);
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "clean".to_string(),
+            is_error: true,
+        },
+    );
+    let report = claurst_tui::next::TurnExitReport::capture(&app);
+    let lines = report.lines(&app.messages).join("\n");
+    assert!(
+        lines.contains("Finished, but not in the saved session: Bash make clean"),
+        "{lines}"
+    );
+
+    let mut saved = app.messages.to_vec();
+    saved.push(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "clean".to_string(),
+        content: ToolResultContent::Text("Permission denied".to_string()),
+        is_error: Some(true),
+    }]));
+    let lines = report.lines(&saved).join("\n");
+    assert!(!lines.contains("make clean"), "{lines}");
 }

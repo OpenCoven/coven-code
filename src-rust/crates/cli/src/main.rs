@@ -5953,9 +5953,12 @@ async fn run_interactive(
                 println!("{line}");
             }
             // The in-app warning is gone once the terminal is restored, and an
-            // earlier save on disk would lack this turn.
-            if !saved {
+            // earlier save on disk would lack this turn. Stopping compaction
+            // leaves the copy saved when the last turn ended complete.
+            if !saved && exit_report.is_turn() {
                 eprintln!("Session not saved; any earlier saved copy lacks this turn.");
+            } else if !saved {
+                eprintln!("Session not saved.");
             } else if !session.messages.is_empty() {
                 let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
                 println!(
