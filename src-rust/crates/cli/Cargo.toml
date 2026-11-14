@@ -43,6 +43,7 @@ parking_lot = { workspace = true }
 dirs = { workspace = true }
 nix = { workspace = true }
 base64 = "0.22"
+image = { workspace = true }
 open = "5"
 urlencoding = "2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
