@@ -7,9 +7,10 @@ Bash with that command, or otherwise a Bash `touch` of a marker named by the
 prompt's last word. The reply to its tool result reports what the engine sent
 back, so a journey can see the outcome on screen. "flood: N" instead sends N
 text deltas in one burst, to put the interactive event path under pressure;
-"flood: N hold" sends them and then keeps the stream open, with a ping every
-few seconds, until a file named `release` appears in MARKER_DIR, so a journey
-can act while the turn is open; a `release` file already there means no hold.
+"flood: N hold" sends them and then keeps the stream open, adding "held line"
+every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
+can act while text is still arriving; a `release` file already there means no
+hold.
 Any other word after the count is an error.
 Every request's messages are appended to the log for later checks.
 
@@ -30,9 +31,10 @@ FLOOD_TEXT = "flood line\n"
 HOLD_WORD = "hold"  # after the count: keep the stream open until released
 RELEASE_MARKER = "release"
 HOLD_LIMIT_SECONDS = 300
-# The client retries a stream that sends nothing for 45 s; pings count as
-# activity, so a held stream stays the same request.
-HOLD_PING_SECONDS = 5
+# While held, a delta every so often: text still arrives during the hold, and
+# the client, which retries a stream that sends nothing for 45 s, keeps it.
+HOLD_DELTA_SECONDS = 0.2
+HELD_TEXT = "held line\n"
 
 
 def sse(event, data):
@@ -213,18 +215,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.respond(200, "text/event-stream", reply)
 
     def respond_held(self, reply):
-        # Chunked, since the pings sent while it is held have no known length.
+        # Chunked, since the deltas sent while it is held have no known length.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         self.write_chunk(reply.head)
         now = time.monotonic()
-        deadline, next_ping = now + HOLD_LIMIT_SECONDS, now + HOLD_PING_SECONDS
+        deadline, next_delta = now + HOLD_LIMIT_SECONDS, now + HOLD_DELTA_SECONDS
         while not os.path.exists(reply.release) and time.monotonic() < deadline:
-            if time.monotonic() >= next_ping:
-                self.write_chunk(sse("ping", {"type": "ping"}))
-                next_ping += HOLD_PING_SECONDS
+            if time.monotonic() >= next_delta:
+                self.write_chunk(sse("content_block_delta", {
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": HELD_TEXT},
+                }))
+                next_delta += HOLD_DELTA_SECONDS
             time.sleep(0.05)
         self.write_chunk(reply.tail)
         self.wfile.write(b"0\r\n\r\n")

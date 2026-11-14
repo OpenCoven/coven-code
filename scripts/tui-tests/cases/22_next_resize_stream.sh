@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# Resizing while a turn streams (#417). A burst of text deltas arrives and the
-# stream stays open while the terminal changes size, including sizes too small
-# to draw anything.
+# Resizing while a turn streams (#417). A burst of text deltas arrives, and more
+# keep arriving while the terminal changes size, including sizes too small to
+# draw anything.
 # Nothing may be lost, the draft stays as typed and the terminal comes back whole.
 
 register_case tc_next_resize_stream
 
-_resize_saved_count() { # home
-  find "$1" -type f -path '*/sessions/*.json' -exec grep -o 'flood line' {} + 2>/dev/null \
+_resize_saved_count() { # home [text]
+  find "$1" -type f -path '*/sessions/*.json' -exec grep -o "${2:-flood line}" {} + 2>/dev/null \
     | wc -l | tr -d ' '
 }
 
@@ -45,7 +45,7 @@ tc_next_resize_stream() {
     _fail "the fake provider started" "no port file in $scratch after 5s"
   elif tui_start; then
     # The fake sends every delta, then keeps the stream open until released,
-    # so each resize below lands while the turn is still running.
+    # adding a line every 0.2 s, so each resize below lands while text arrives.
     local count=150000 running size want got reached="" missing="" screen rows
     running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
     tui_type "flood: $count hold"; sleep 0.3; tui_keys Enter
@@ -101,6 +101,10 @@ tc_next_resize_stream() {
       sleep 0.1; waited=$((waited + 1))
     done
     assert_eq "$(_resize_saved_count "$scratch/home")" "$count" "every delta reached the saved turn"
+    # The sizes took over 6 s, at a held line every 0.2 s.
+    local held; held="$(_resize_saved_count "$scratch/home" 'held line')"
+    if [ "$held" -ge 20 ]; then _pass "text kept arriving while the sizes changed ($held held lines)"
+    else _fail "text kept arriving while the sizes changed" "$held held lines saved"; fi
   fi
   tui_stop
 
