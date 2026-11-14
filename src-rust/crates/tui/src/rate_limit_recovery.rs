@@ -178,7 +178,9 @@ pub fn render_rate_limit_recovery(
 
     let anchored_in_welcome_box = footer_area.width > 0 && footer_area.y < 12;
     let modal_area = if is_welcome_screen || anchored_in_welcome_box || footer_area.width == 0 {
-        let modal_width = (area.width * 3 / 4).max(50).min(area.width);
+        let modal_width = ((u32::from(area.width) * 3 / 4) as u16)
+            .max(50)
+            .min(area.width);
         let modal_height = (area.height / 2).max(14).min(area.height.saturating_sub(2));
         Rect {
             x: area.x + (area.width.saturating_sub(modal_width)) / 2,
