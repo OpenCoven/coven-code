@@ -110,25 +110,71 @@ fn last_user_text(request: &ProviderRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Image blocks from the latest user message, forwarded to the CLI alongside
-/// the text prompt. Images from earlier turns are not re-sent: on a resumed
-/// session the CLI already has them, and on a flattened restart they are gone
-/// with the rest of the non-text content.
-fn last_user_images(request: &ProviderRequest) -> Vec<ContentBlock> {
-    request
+/// Preserve the latest turn's text/image order. A resumed CLI already owns
+/// earlier images; a restart retains the existing text-only history fallback.
+fn current_turn_content(request: &ProviderRequest, include_history: bool) -> Vec<ContentBlock> {
+    let Some(index) = request
         .messages
         .iter()
-        .rev()
-        .find(|message| matches!(message.role, Role::User))
-        .map(|message| match &message.content {
-            MessageContent::Blocks(blocks) => blocks
+        .rposition(|message| matches!(message.role, Role::User))
+    else {
+        return vec![ContentBlock::Text {
+            text: String::new(),
+        }];
+    };
+    let current = &request.messages[index];
+    let blocks = match &current.content {
+        MessageContent::Blocks(blocks)
+            if blocks
                 .iter()
-                .filter(|block| matches!(block, ContentBlock::Image { .. }))
-                .cloned()
-                .collect(),
-            MessageContent::Text(_) => Vec::new(),
-        })
-        .unwrap_or_default()
+                .any(|block| matches!(block, ContentBlock::Image { .. })) =>
+        {
+            blocks
+        }
+        _ => {
+            return vec![ContentBlock::Text {
+                text: if include_history {
+                    flattened_transcript(request)
+                } else {
+                    last_user_text(request)
+                },
+            }]
+        }
+    };
+    let mut content = Vec::new();
+    if include_history {
+        let earlier = request.messages[..index]
+            .iter()
+            .filter_map(|message| {
+                let text = message_text(message);
+                if text.is_empty() {
+                    return None;
+                }
+                let role = match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                Some(format!("{role}: {text}"))
+            })
+            .collect::<Vec<_>>();
+        if !earlier.is_empty() {
+            content.push(ContentBlock::Text { text: format!(
+                "<conversation-so-far>\nThe session was restarted; this is the conversation before the current message.\n{}\n</conversation-so-far>\n\n",
+                earlier.join("\n")) });
+        }
+    }
+    content.extend(
+        blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { .. } | ContentBlock::Image { .. }
+                )
+            })
+            .cloned(),
+    );
+    content
 }
 
 /// Flatten the whole transcript into one prompt for sessions that cannot be
@@ -209,23 +255,11 @@ fn build_args(
     args
 }
 
-/// The single stream-json stdin line carrying the user prompt. Image blocks
-/// ride along in the same Anthropic wire shape the API takes, placed before
-/// the text to match the direct `anthropic.rs` path.
-fn stdin_line(prompt: &str, images: &[ContentBlock]) -> String {
-    let mut content: Vec<Value> = images
-        .iter()
-        .filter_map(|block| serde_json::to_value(block).ok())
-        .collect();
-    if !prompt.is_empty() || content.is_empty() {
-        content.push(json!({"type": "text", "text": prompt}));
-    }
+/// The single stream-json stdin line carrying ordered current-turn blocks.
+fn stdin_line(content: &[ContentBlock]) -> String {
     let envelope = json!({
         "type": "user",
-        "message": {
-            "role": "user",
-            "content": content,
-        },
+        "message": { "role": "user", "content": content },
     });
     format!("{}\n", envelope)
 }
@@ -530,8 +564,7 @@ impl ClaudeCliProvider {
     async fn spawn_turn(
         &self,
         model: &str,
-        prompt: &str,
-        images: &[ContentBlock],
+        content: &[ContentBlock],
         resume: Option<&str>,
         permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
@@ -582,7 +615,7 @@ impl ClaudeCliProvider {
             status: None,
             body: None,
         })?;
-        let payload = stdin_line(prompt, images);
+        let payload = stdin_line(content);
         let mut stdin_writer = JoinSet::new();
         stdin_writer.spawn(async move {
             if let Err(e) = stdin.write_all(payload.as_bytes()).await {
@@ -646,14 +679,12 @@ impl ClaudeCliProvider {
             None
         };
 
-        let images = last_user_images(request);
         let permission = request.permission_mode.as_ref();
         if let Some(session_id) = resume_session {
             match self
                 .spawn_turn(
                     &request.model,
-                    &last_user_text(request),
-                    &images,
+                    &current_turn_content(request, false),
                     Some(&session_id),
                     permission,
                 )
@@ -668,13 +699,9 @@ impl ClaudeCliProvider {
             }
         }
 
-        let prompt = if has_assistant_turns {
-            flattened_transcript(request)
-        } else {
-            last_user_text(request)
-        };
+        let content = current_turn_content(request, has_assistant_turns);
         match self
-            .spawn_turn(&request.model, &prompt, &images, None, permission)
+            .spawn_turn(&request.model, &content, None, permission)
             .await?
         {
             SpawnOutcome::Turn(turn) => Ok(*turn),
@@ -998,7 +1025,9 @@ mod tests {
 
     #[test]
     fn stdin_line_is_a_stream_json_user_envelope() {
-        let line = stdin_line("hello", &[]);
+        let line = stdin_line(&[ContentBlock::Text {
+            text: "hello".into(),
+        }]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         assert_eq!(parsed["type"], "user");
         assert_eq!(parsed["message"]["content"][0]["text"], "hello");
@@ -1017,8 +1046,13 @@ mod tests {
     }
 
     #[test]
-    fn stdin_line_places_image_blocks_before_the_text() {
-        let line = stdin_line("what is this?", &[png_block("aGk=")]);
+    fn stdin_line_keeps_the_supplied_image_then_text_order() {
+        let line = stdin_line(&[
+            png_block("aGk="),
+            ContentBlock::Text {
+                text: "what is this?".into(),
+            },
+        ]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         let content = parsed["message"]["content"]
             .as_array()
@@ -1034,7 +1068,7 @@ mod tests {
 
     #[test]
     fn stdin_line_omits_the_text_block_for_image_only_prompts() {
-        let line = stdin_line("", &[png_block("aGk=")]);
+        let line = stdin_line(&[png_block("aGk=")]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         let content = parsed["message"]["content"]
             .as_array()
@@ -1044,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn last_user_images_reads_only_the_latest_user_message() {
+    fn current_turn_content_reads_only_the_latest_user_message() {
         let request = request_with(vec![
             Message::user_blocks(vec![
                 png_block("b2xk"),
@@ -1066,15 +1100,62 @@ mod tests {
                 },
             ]),
         ]);
-        let images = last_user_images(&request);
-        assert_eq!(images.len(), 1);
+        let images = current_turn_content(&request, false);
+        assert_eq!(images.len(), 2);
         assert!(matches!(
             &images[0],
             ContentBlock::Image { source } if source.data.as_deref() == Some("bmV3")
         ));
 
         let text_only = request_with(vec![Message::user("no images")]);
-        assert!(last_user_images(&text_only).is_empty());
+        assert!(
+            matches!(current_turn_content(&text_only, false).as_slice(), [ContentBlock::Text { text }] if text == "no images")
+        );
+    }
+
+    #[test]
+    fn mixed_content_keeps_order_on_resume_and_restart() {
+        let latest = vec![
+            ContentBlock::Text {
+                text: "caption A".into(),
+            },
+            png_block("first"),
+            ContentBlock::Text {
+                text: "caption B".into(),
+            },
+            png_block("second"),
+        ];
+        let request = request_with(vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::user_blocks(latest.clone()),
+        ]);
+        let expected = serde_json::to_value(&latest).unwrap();
+        let resumed: Value =
+            serde_json::from_str(&stdin_line(&current_turn_content(&request, false))).unwrap();
+        assert_eq!(resumed["message"]["content"], expected);
+        let restarted: Value =
+            serde_json::from_str(&stdin_line(&current_turn_content(&request, true))).unwrap();
+        let blocks = restarted["message"]["content"].as_array().unwrap();
+        assert_eq!(serde_json::to_value(&blocks[1..]).unwrap(), expected);
+        let prefix = blocks[0]["text"].as_str().unwrap();
+        assert!(prefix.contains("user: old question"));
+        assert!(prefix.contains("assistant: old answer"));
+        assert!(!prefix.contains("caption A"));
+        assert!(prefix.ends_with("</conversation-so-far>\n\n"));
+    }
+
+    #[test]
+    fn image_only_restart_keeps_history_before_the_current_image() {
+        let request = request_with(vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::user_blocks(vec![png_block("current")]),
+        ]);
+        let content = current_turn_content(&request, true);
+        assert!(
+            matches!(content.as_slice(), [ContentBlock::Text { text }, ContentBlock::Image { source }] if text.contains("old answer") && source.data.as_deref() == Some("current"))
+        );
     }
 
     #[test]

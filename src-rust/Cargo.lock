@@ -706,6 +706,7 @@ dependencies = [
  "coven-runtime-spec",
  "crossterm 0.29.0",
  "dirs",
+ "image",
  "nix 0.29.0",
  "open",
  "parking_lot",
