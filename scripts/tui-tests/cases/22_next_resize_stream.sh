@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# Resizing while a turn streams (#417). A burst of text deltas keeps the turn busy
-# while the terminal changes size, including sizes too small to draw anything.
+# Resizing while a turn streams (#417). A burst of text deltas arrives and the
+# stream stays open while the terminal changes size, including sizes too small
+# to draw anything.
 # Nothing may be lost, the draft stays as typed and the terminal comes back whole.
 
 register_case tc_next_resize_stream
@@ -37,79 +38,61 @@ tc_next_resize_stream() {
   done
   TUI_LAUNCH_PREFIX+=" $(printf '%q ' \
     "HOME=$scratch/home" "COVEN_HOME=$scratch/home/.coven" COVEN_CODE_UI=next \
-    ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$(cat "$scratch/port")")"
+    ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$(cat "$scratch/port" 2>/dev/null)")"
   TUI_BOOT_STRING=preview
 
-  if tui_start; then
-    local count=150000 running sizes_while_working=0 size
+  if [ ! -s "$scratch/port" ]; then
+    _fail "the fake provider started" "no port file in $scratch after 5s"
+  elif tui_start; then
+    # The fake sends every delta, then keeps the stream open until released,
+    # so each resize below lands while the turn is still running.
+    local count=150000 running size want got reached="" missing="" screen rows
     running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
-    tui_type "flood: $count"; sleep 0.3; tui_keys Enter
+    tui_type "flood: $count hold"; sleep 0.3; tui_keys Enter
     if wait_for "flood line" 20; then _pass "the turn is streaming"
     else _fail "the turn is streaming" "$(tui_capture)"; fi
 
     tui_type "kept draft"
-    # tmux can drop a resize on a loaded host, so each size is confirmed and
-    # reapplied; the extremes must really have been reached.
-    local reached="" want got tries
     for size in "80 24" "40 10" "200 50" "20 5" "120 40" "1 1" "2 2" "160 30" "10 3" "80 24" "120 40"; do
-      want="${size% *}x${size#* }" tries=0
+      want="${size% *}x${size#* }"
       _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
       got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
-      while [ "$got" != "$want" ] && [ "$tries" -lt 3 ]; do
-        sleep 0.1; tries=$((tries + 1))
-        _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
-        got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
-      done
-      [ "$got" = "$want" ] && reached+=" $want"
+      if [ "$got" = "$want" ]; then reached+=" $want"
+      else info "tmux left the window at $got instead of $want"; fi
       sleep 0.25
-      if tui_capture | grep -q "working"; then sizes_while_working=$((sizes_while_working + 1)); fi
     done
-    case " $reached " in
-      *" 200x50 "*) _pass "the largest size was applied" ;;
-      *) _fail "the largest size was applied" "applied:$reached" ;;
-    esac
-    case " $reached " in
-      *" 1x1 "* | *" 2x2 "*) _pass "the smallest sizes were applied" ;;
-      *) _fail "the smallest sizes were applied" "applied:$reached" ;;
-    esac
-    # The smallest sizes have no room for the word, so not every look can see it.
-    if [ "$sizes_while_working" -ge 3 ]; then
-      _pass "sizes changed while the turn was running ($sizes_while_working seen working)"
-    else
-      _fail "sizes changed while the turn was running ($sizes_while_working seen working)" "$(tui_capture)"
-    fi
+    for want in 200x50 20x5 1x1 2x2 10x3 120x40; do
+      case " $reached " in *" $want "*) ;; *) missing+=" $want" ;; esac
+    done
+    if [ -z "$missing" ]; then _pass "every extreme size was applied"
+    else _fail "every extreme size was applied" "not applied:$missing (applied:$reached)"; fi
 
     assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" "$running" \
       "the process survives every size"
-    # tmux itself sometimes leaves the window at an earlier size when the host
-    # is loaded. Reapply the last size so the checks below judge the app, and
-    # say so if tmux never takes it.
-    local applied tries=0
-    applied="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
-    while [ "$applied" != "120x40" ] && [ "$tries" -lt 5 ]; do
-      _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40; sleep 0.25; tries=$((tries + 1))
-      applied="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
-    done
-    if [ "$tries" -gt 0 ]; then
-      info "tmux needed $tries more resize(s) to reach 120x40 (now $applied)"
-    fi
-    assert_eq "$applied" "120x40" "tmux applied the final size"
-    if wait_absent "working" 240; then _pass "the turn finishes"
+    # A session is saved when its turn ends, so nothing saved yet means every
+    # size reached the app while the turn was open.
+    assert_eq "$(_resize_saved_count "$scratch/home")" "0" "the turn is still open after the last size"
+    # Laying out the whole transcript again at a new width can leave the pane
+    # blank for a while in a debug build; wait for a drawn frame.
+    if wait_for "working" 120; then _pass "the open turn is drawn at the final size"
+    else _fail "the open turn is drawn at the final size" "$(tui_capture)"; fi
+
+    : >"$scratch/markers/release"
+    if wait_for "ready" 240 && wait_for "kept draft" 30; then _pass "the turn finishes"
     else _fail "the turn finishes" "$(tui_capture)"; fi
-    local screen; screen="$(tui_capture)"
-    assert_contains "$screen" "kept draft" "the draft is as typed"
-    assert_contains "$screen" "flood line" "the answer is on screen"
+    screen="$(tui_capture)"
+    got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
+    assert_contains "${screen:-<blank pane at $got>}" "kept draft" "the draft is as typed"
+    assert_contains "${screen:-<blank pane at $got>}" "flood line" "the answer is on screen"
     assert_absent "$screen" "panicked" "nothing panicked"
 
     # The last row of the frame is the composer at the size the terminal has now.
-    local rows; rows="$(grep -c '' <<<"$screen")"
+    rows="$(grep -c '' <<<"$screen")"
     assert_eq "$rows" "40" "the frame fills the final height"
 
-    # Quitting saves the turn; the count proves no delta was dropped.
-    tui_keys C-u; sleep 0.2; tui_keys C-c; sleep 0.3; tui_keys C-c
-    waited=0
-    while [ "$waited" -lt 100 ] && \
-      [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
+    # The turn is saved when it ends; the count proves no delta was dropped.
+    local waited=0
+    while [ "$waited" -lt 300 ] && [ "$(_resize_saved_count "$scratch/home")" -lt "$count" ]; do
       sleep 0.1; waited=$((waited + 1))
     done
     assert_eq "$(_resize_saved_count "$scratch/home")" "$count" "every delta reached the saved turn"
