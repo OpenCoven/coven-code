@@ -228,7 +228,7 @@ jobs:
   windows-foreground:
     name: Windows foreground command cleanup
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:

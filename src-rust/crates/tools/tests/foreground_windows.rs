@@ -1,11 +1,11 @@
-//! #373 on Windows: both foreground Bash tools run `cmd /C` with no owner for
-//! the process tree yet. A cancelled call must at least stop the `cmd.exe` it
-//! started, as a timed-out call already does.
+//! #373 on Windows: the foreground shell tools run `cmd /C` or `powershell`
+//! with no owner for the process tree yet. A cancelled call must at least stop
+//! the shell it started, as a timed-out call already does.
 #![cfg(windows)]
 
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
-use claurst_tools::{BashTool, PtyBashTool, Tool, ToolContext};
+use claurst_tools::{BashTool, PowerShellTool, PtyBashTool, Tool, ToolContext};
 use std::path::Path;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
@@ -14,6 +14,10 @@ use std::time::Duration;
 /// a second in `ping`. The file stops growing once that `cmd.exe` is gone. The
 /// echoed word has no digits, since `echo 1>>file` redirects handle 1.
 const TICKER: &str = "for /L %i in (1,1,60) do @(echo tick>>ticks.txt & ping -n 2 127.0.0.1 >nul)";
+
+/// The same loop run by `powershell.exe` itself, with no child process.
+const PS_TICKER: &str =
+    "for ($i = 0; $i -lt 60; $i++) { Add-Content -Path ticks.txt -Value tick; Start-Sleep -Seconds 1 }";
 
 fn context(directory: &Path) -> ToolContext {
     ToolContext {
@@ -38,11 +42,27 @@ fn context(directory: &Path) -> ToolContext {
     }
 }
 
-fn tool(pty: bool) -> Box<dyn Tool> {
-    if pty {
-        Box::new(PtyBashTool)
-    } else {
-        Box::new(BashTool)
+#[derive(Clone, Copy, Debug)]
+enum Shell {
+    Bash,
+    PtyBash,
+    PowerShell,
+}
+
+impl Shell {
+    fn tool(self) -> Box<dyn Tool> {
+        match self {
+            Shell::Bash => Box::new(BashTool),
+            Shell::PtyBash => Box::new(PtyBashTool),
+            Shell::PowerShell => Box::new(PowerShellTool),
+        }
+    }
+
+    fn ticker(self) -> &'static str {
+        match self {
+            Shell::PowerShell => PS_TICKER,
+            Shell::Bash | Shell::PtyBash => TICKER,
+        }
     }
 }
 
@@ -79,13 +99,14 @@ async fn ticks_after_stop(directory: &Path) -> (usize, usize) {
     (settled, ticks(directory))
 }
 
-async fn check_cancel(pty: bool) {
+async fn check_cancel(shell: Shell) {
     let directory = tempfile::tempdir().unwrap();
     let ctx = context(directory.path());
     let call = tokio::spawn(async move {
-        tool(pty)
+        shell
+            .tool()
             .execute(
-                serde_json::json!({ "command": TICKER, "timeout": 120000 }),
+                serde_json::json!({ "command": shell.ticker(), "timeout": 120000 }),
                 &ctx,
             )
             .await
@@ -97,16 +118,17 @@ async fn check_cancel(pty: bool) {
     let (settled, later) = ticks_after_stop(directory.path()).await;
     assert_eq!(
         settled, later,
-        "cmd.exe kept running after the call was cancelled (pty={pty})"
+        "the shell kept running after the call was cancelled ({shell:?})"
     );
 }
 
-async fn check_timeout(pty: bool) {
+async fn check_timeout(shell: Shell) {
     let directory = tempfile::tempdir().unwrap();
     let ctx = context(directory.path());
-    let result = tool(pty)
+    let result = shell
+        .tool()
         .execute(
-            serde_json::json!({ "command": TICKER, "timeout": 2500 }),
+            serde_json::json!({ "command": shell.ticker(), "timeout": 2500 }),
             &ctx,
         )
         .await;
@@ -119,14 +141,15 @@ async fn check_timeout(pty: bool) {
     let (settled, later) = ticks_after_stop(directory.path()).await;
     assert_eq!(
         settled, later,
-        "cmd.exe kept running after the call timed out (pty={pty})"
+        "the shell kept running after the call timed out ({shell:?})"
     );
 }
 
-async fn check_completion(pty: bool) {
+async fn check_completion(shell: Shell) {
     let directory = tempfile::tempdir().unwrap();
     let ctx = context(directory.path());
-    let result = tool(pty)
+    let result = shell
+        .tool()
         .execute(
             serde_json::json!({ "command": "echo finished& echo warned 1>&2" }),
             &ctx,
@@ -142,30 +165,40 @@ async fn check_completion(pty: bool) {
 
 #[tokio::test]
 async fn cancelled_pty_fallback_stops_its_cmd() {
-    check_cancel(true).await;
+    check_cancel(Shell::PtyBash).await;
 }
 
 #[tokio::test]
 async fn cancelled_bash_fallback_stops_its_cmd() {
-    check_cancel(false).await;
+    check_cancel(Shell::Bash).await;
 }
 
 #[tokio::test]
 async fn timed_out_pty_fallback_stops_its_cmd() {
-    check_timeout(true).await;
+    check_timeout(Shell::PtyBash).await;
 }
 
 #[tokio::test]
 async fn timed_out_bash_fallback_stops_its_cmd() {
-    check_timeout(false).await;
+    check_timeout(Shell::Bash).await;
 }
 
 #[tokio::test]
 async fn pty_fallback_returns_output_of_a_finished_command() {
-    check_completion(true).await;
+    check_completion(Shell::PtyBash).await;
 }
 
 #[tokio::test]
 async fn bash_fallback_returns_output_of_a_finished_command() {
-    check_completion(false).await;
+    check_completion(Shell::Bash).await;
+}
+
+#[tokio::test]
+async fn cancelled_powershell_stops_its_process() {
+    check_cancel(Shell::PowerShell).await;
+}
+
+#[tokio::test]
+async fn timed_out_powershell_stops_its_process() {
+    check_timeout(Shell::PowerShell).await;
 }
