@@ -10,12 +10,16 @@
 // The policy says which rules and settings files apply. It does not name a
 // permission mode: each turn's own mode reaches the CLI through `build_args`,
 // so exactly one `--permission-mode` is ever passed.
+//
+// It names two settings files. The CLI applies allow rules in plan mode too,
+// so a read-only turn gets the file without Coven's allow list and every
+// other turn gets the full one.
 
 use serde::Deserialize;
 use std::path::Path;
 
-/// Set by Coven to a JSON object: `version`, `settingsFile`, `settingSources`,
-/// `addDirs` and `mcpConfigFile`.
+/// Set by Coven to a JSON object: `version`, `settingsFile`,
+/// `readOnlySettingsFile`, `settingSources`, `addDirs` and `mcpConfigFile`.
 pub const CLAUDE_POLICY_ENV: &str = "COVEN_CLAUDE_POLICY";
 
 const SUPPORTED_VERSION: u32 = 1;
@@ -30,6 +34,8 @@ struct ClaudePolicy {
     _version: u32,
     /// Claude Code settings that sit above every settings file.
     settings_file: String,
+    /// The same, without the allow rules, for a read-only turn.
+    read_only_settings_file: String,
     /// The settings files the CLI still reads: a comma-separated subset of
     /// `user`, `project` and `local`, or nothing.
     setting_sources: String,
@@ -40,11 +46,12 @@ struct ClaudePolicy {
     mcp_config_file: Option<String>,
 }
 
-/// The policy in this process's environment, as CLI arguments.
-pub(crate) fn args_from_environment() -> Result<Vec<String>, String> {
+/// The policy in this process's environment, as CLI arguments for one turn.
+/// `read_only` says whether that turn reaches the CLI in plan mode.
+pub(crate) fn args_from_environment(read_only: bool) -> Result<Vec<String>, String> {
     match std::env::var(CLAUDE_POLICY_ENV) {
-        Ok(value) => policy_args(Some(&value)),
-        Err(std::env::VarError::NotPresent) => policy_args(None),
+        Ok(value) => policy_args(Some(&value), read_only),
+        Err(std::env::VarError::NotPresent) => policy_args(None, read_only),
         Err(std::env::VarError::NotUnicode(_)) => Err(unusable("it is not UTF-8")),
     }
 }
@@ -52,7 +59,7 @@ pub(crate) fn args_from_environment() -> Result<Vec<String>, String> {
 /// The CLI arguments for the policy in `value`. A policy this engine cannot
 /// apply in full is an error: starting the CLI without it would quietly put
 /// the operator's own settings back in charge.
-fn policy_args(value: Option<&str>) -> Result<Vec<String>, String> {
+fn policy_args(value: Option<&str>, read_only: bool) -> Result<Vec<String>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -75,10 +82,12 @@ fn policy_args(value: Option<&str>) -> Result<Vec<String>, String> {
     }
     let policy: ClaudePolicy =
         serde_json::from_value(raw).map_err(|error| unusable(&error.to_string()))?;
-    if !Path::new(&policy.settings_file).is_absolute()
-        || !Path::new(&policy.settings_file).is_file()
-    {
-        return Err(unusable("its settings file does not exist"));
+    // Both are checked whichever this turn uses, so a policy with a missing
+    // file fails on the first turn and not on the first read-only one.
+    for file in [&policy.settings_file, &policy.read_only_settings_file] {
+        if !Path::new(file).is_absolute() || !Path::new(file).is_file() {
+            return Err(unusable("one of its settings files does not exist"));
+        }
     }
     if !policy
         .setting_sources
@@ -108,7 +117,11 @@ fn policy_args(value: Option<&str>) -> Result<Vec<String>, String> {
         "--setting-sources".to_string(),
         policy.setting_sources,
         "--settings".to_string(),
-        policy.settings_file,
+        if read_only {
+            policy.read_only_settings_file
+        } else {
+            policy.settings_file
+        },
     ]);
     Ok(args)
 }
@@ -133,67 +146,102 @@ mod tests {
         }
     }
 
-    fn settings_file() -> (Scratch, String) {
+    /// The full settings file and its read-only form.
+    fn settings_files() -> (Scratch, String, String) {
         let dir =
             std::env::temp_dir().join(format!("coven-claude-policy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let file = dir.join("claude-settings.json");
-        std::fs::write(&file, "{}").unwrap();
-        let path = file.to_str().unwrap().to_owned();
-        (Scratch(dir), path)
+        let path = |name: &str| {
+            let file = dir.join(name);
+            std::fs::write(&file, "{}").unwrap();
+            file.to_str().unwrap().to_owned()
+        };
+        let (settings, read_only) = (
+            path("claude-settings.json"),
+            path("claude-settings-read-only.json"),
+        );
+        (Scratch(dir), settings, read_only)
     }
 
     #[test]
     fn no_policy_leaves_the_cli_launch_as_it_was() {
-        assert_eq!(policy_args(None).unwrap(), Vec::<String>::new());
+        for read_only in [false, true] {
+            assert_eq!(policy_args(None, read_only).unwrap(), Vec::<String>::new());
+        }
     }
 
     #[test]
     fn a_full_policy_becomes_cli_arguments_ending_in_single_value_flags() {
-        let (_dir, settings) = settings_file();
+        let (_dir, settings, read_only_settings) = settings_files();
         let policy = json!({
             "version": 1,
             "settingsFile": settings,
+            "readOnlySettingsFile": read_only_settings,
             "settingSources": "project",
             "addDirs": ["/granted/one", "/granted/two"],
             "mcpConfigFile": "/operator/.claude.json",
         });
-        assert_eq!(
-            policy_args(Some(&policy.to_string())).unwrap(),
-            [
-                "--add-dir",
-                "/granted/one",
-                "--add-dir",
-                "/granted/two",
-                "--mcp-config",
-                "/operator/.claude.json",
-                "--setting-sources",
-                "project",
-                "--settings",
-                settings.as_str(),
-            ]
-        );
+        // A read-only turn differs in the settings file and nothing else.
+        for (read_only, file) in [(false, &settings), (true, &read_only_settings)] {
+            let args = policy_args(Some(&policy.to_string()), read_only).unwrap();
+            assert_eq!(
+                args,
+                [
+                    "--add-dir",
+                    "/granted/one",
+                    "--add-dir",
+                    "/granted/two",
+                    "--mcp-config",
+                    "/operator/.claude.json",
+                    "--setting-sources",
+                    "project",
+                    "--settings",
+                    file.as_str(),
+                ]
+            );
+            // The turn's own mode is the only one the CLI is given.
+            assert!(!args.iter().any(|arg| arg == "--permission-mode"));
+        }
     }
 
     #[test]
     fn optional_parts_may_be_null_or_absent() {
-        let (_dir, settings) = settings_file();
+        let (_dir, settings, read_only_settings) = settings_files();
         let expected = ["--setting-sources", "", "--settings", settings.as_str()];
         let explicit = json!({
-            "version": 1, "settingsFile": settings, "settingSources": "",
+            "version": 1, "settingsFile": settings,
+            "readOnlySettingsFile": read_only_settings, "settingSources": "",
             "addDirs": [], "mcpConfigFile": null,
         });
-        assert_eq!(policy_args(Some(&explicit.to_string())).unwrap(), expected);
-        let minimal = json!({"version": 1, "settingsFile": settings, "settingSources": ""});
-        assert_eq!(policy_args(Some(&minimal.to_string())).unwrap(), expected);
+        assert_eq!(
+            policy_args(Some(&explicit.to_string()), false).unwrap(),
+            expected
+        );
+        let minimal = json!({
+            "version": 1, "settingsFile": settings,
+            "readOnlySettingsFile": read_only_settings, "settingSources": "",
+        });
+        assert_eq!(
+            policy_args(Some(&minimal.to_string()), false).unwrap(),
+            expected
+        );
     }
 
     #[test]
     fn a_policy_that_cannot_be_applied_in_full_is_refused() {
-        let (_dir, settings) = settings_file();
+        let (_dir, settings, read_only_settings) = settings_files();
         let valid = json!({
-            "version": 1, "settingsFile": settings, "settingSources": "project",
+            "version": 1, "settingsFile": settings,
+            "readOnlySettingsFile": read_only_settings, "settingSources": "project",
         });
+        let without_read_only = {
+            let mut policy = valid.clone();
+            policy
+                .as_object_mut()
+                .unwrap()
+                .remove("readOnlySettingsFile");
+            policy.to_string()
+        };
         let with = |key: &str, value: serde_json::Value| {
             let mut policy = valid.clone();
             policy[key] = value;
@@ -215,6 +263,13 @@ mod tests {
                 with("settingsFile", json!("relative.json")),
                 "does not exist",
             ),
+            // A policy without the read-only file would leave a read-only
+            // turn with the allow list, so it is refused on every turn.
+            (without_read_only, "missing field `readOnlySettingsFile`"),
+            (
+                with("readOnlySettingsFile", json!("/absent/read-only.json")),
+                "does not exist",
+            ),
             (
                 with("settingSources", json!("project --flag")),
                 "setting sources",
@@ -233,9 +288,11 @@ mod tests {
             (with("addDirs", json!([""])), "directory"),
             (with("mcpConfigFile", json!("-x")), "MCP config"),
         ] {
-            let error = policy_args(Some(&policy)).unwrap_err();
-            assert!(error.contains(reason), "{policy}: {error}");
-            assert!(error.contains(CLAUDE_POLICY_ENV), "{error}");
+            for read_only in [false, true] {
+                let error = policy_args(Some(&policy), read_only).unwrap_err();
+                assert!(error.contains(reason), "{policy}: {error}");
+                assert!(error.contains(CLAUDE_POLICY_ENV), "{error}");
+            }
         }
     }
 }

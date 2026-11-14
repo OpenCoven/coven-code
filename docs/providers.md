@@ -43,7 +43,9 @@ Claude settings files allow. When Coven starts the engine for a headless run it
 sets `COVEN_CLAUDE_POLICY`, a JSON object naming Coven's settings file, the
 settings files the CLI may still read, extra directories and the user's MCP
 config. The engine adds those to every CLI launch. The object does not name a
-permission mode, so the turn's own stays the only one. If the engine cannot
+permission mode, so the turn's own stays the only one. It names two settings
+files: a read-only (`plan`) turn gets the one without Coven's allow rules,
+because the CLI applies allow rules in plan mode too. If the engine cannot
 apply the object in full (an unknown field counts), the turn fails with a
 message to update Coven and the engine together; the CLI is not started
 without the policy.
