@@ -128,7 +128,8 @@ async fn check_timeout(shell: Shell) {
     let result = shell
         .tool()
         .execute(
-            serde_json::json!({ "command": shell.ticker(), "timeout": 2500 }),
+            // Long enough for a cold powershell.exe to start and tick.
+            serde_json::json!({ "command": shell.ticker(), "timeout": 6000 }),
             &ctx,
         )
         .await;
