@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# Zero and tiny terminal sizes (#424): Classic starts at 0x0, 0x40 and 120x0,
-# survives resizes to 120x0 (with the first Ctrl+C's toast), 0x40, 0x0, 1x1
-# and 20x6, draws a full frame again at 120x40, exits 0, and restores the
-# terminal. tmux cannot make a zero-sized window, so zero_size_pty.py drives a
-# raw PTY instead.
+# Zero and tiny terminal sizes (#424): direct 0x0, 0x40, 120x0, 1x1 and
+# 20x6 startup, zero/tiny resize and Ctrl+C routes, plus an actual Error
+# modal from a local fake Claude failure resized to 20x1 and 120x1. Recovery
+# requires a current composer with typed canary. Check every persistent
+# termios field and final mouse/paste/screen/cursor/keyboard mode state.
+# tmux cannot make a zero-sized window, so use a raw PTY.
 
 register_case tc_classic_zero_size
 
