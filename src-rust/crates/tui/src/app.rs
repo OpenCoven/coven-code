@@ -726,6 +726,9 @@ pub struct App {
     /// Permission decisions by tool use id (true = allowed).
     pub permission_decisions:
         crate::next::tracked::Tracked<std::collections::HashMap<String, bool>>,
+    /// Calls whose approval requests wait behind the prompt on screen, by
+    /// model call id (or request id when the call is unknown).
+    pub queued_approvals: crate::next::tracked::Tracked<Vec<String>>,
     /// Tool rows of a cancelled turn, kept as evidence until the next user
     /// turn; the live list is cleared on cancel.
     pub interrupted_tools: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
@@ -1342,6 +1345,7 @@ impl App {
             pending_resume: None,
             resume_saved_view: false,
             permission_decisions: std::collections::HashMap::new().into(),
+            queued_approvals: Vec::new().into(),
             interrupted_tools: Vec::new().into(),
             resolved_keybinding: None,
             cursor_pos: 0,
@@ -3488,11 +3492,24 @@ impl App {
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
         self.permission_decisions
             .insert(tool_use_id.to_string(), allowed);
-        // Time spent waiting on the user is not time the tool spent working.
-        // Tools ask at different points, some before any work and some after
-        // a first step, so a row times from its latest approval.
+        self.restart_tool_time(tool_use_id);
+    }
+
+    /// Restarts a tool's work time when its wait on the user ends. Time spent
+    /// waiting on the user is not time the tool spent working. Tools ask at
+    /// different points, some before any work and some after a first step,
+    /// so a row times from its latest approval.
+    pub fn restart_tool_time(&mut self, tool_use_id: &str) {
         if let Some(run) = self.tool_run_mut(tool_use_id) {
             run.started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Records which calls' approval requests wait behind the prompt on
+    /// screen; their rows await approval too.
+    pub fn set_queued_approvals(&mut self, calls: Vec<String>) {
+        if *self.queued_approvals != calls {
+            *self.queued_approvals = calls;
         }
     }
 

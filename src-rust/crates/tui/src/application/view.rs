@@ -281,7 +281,7 @@ impl TranscriptView {
                 let awaiting_approval = app.permission_request.as_ref().is_some_and(|request| {
                     request.call_id.as_deref() == Some(block.id.as_str())
                         || request.tool_use_id == block.id
-                });
+                }) || app.queued_approvals.contains(&block.id);
                 let state = match (&block.status, block.run.finished) {
                     (ToolStatus::Done, _) | (ToolStatus::Running, Some((_, false))) => {
                         ToolActivityState::Done

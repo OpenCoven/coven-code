@@ -89,6 +89,16 @@ fn tool_start(app: &mut App, id: &str, name: &str, input: &str) {
     );
 }
 
+/// The tool's own work begins, after its response's hooks.
+fn tool_running(app: &mut App, id: &str) {
+    apply(
+        app,
+        QueryEvent::ToolRunning {
+            tool_id: id.to_string(),
+        },
+    );
+}
+
 fn row_of<'a>(text: &'a str, name: &str) -> &'a str {
     text.lines()
         .find(|line| line.contains(name))
@@ -765,6 +775,7 @@ fn quitting_mid_turn_says_what_is_not_known() {
         "Bash",
         "{\"command\":\"make \\u001b]0;x\\u0007all\"}",
     );
+    tool_running(&mut app, "open");
     tool_start(&mut app, "waits", "Edit", r#"{"file_path":"/b.rs"}"#);
     apply(
         &mut app,
@@ -840,6 +851,7 @@ fn a_tool_that_finished_stays_finished_when_the_turn_is_interrupted() {
     app.push_message(Message::user("edit then wait".to_string()));
     tool_start(&mut app, "edit", "Edit", r#"{"file_path":"/b.rs"}"#);
     tool_start(&mut app, "wait", "Bash", r#"{"command":"sleep 30"}"#);
+    tool_running(&mut app, "wait");
     apply(
         &mut app,
         QueryEvent::ToolFinished {
@@ -915,6 +927,8 @@ fn the_exit_report_leaves_out_a_tool_whose_result_arrived() {
     app.push_message(Message::user("run it".to_string()));
     tool_start(&mut app, "done-late", "Bash", r#"{"command":"sleep 1"}"#);
     tool_start(&mut app, "still", "Bash", r#"{"command":"sleep 30"}"#);
+    tool_running(&mut app, "done-late");
+    tool_running(&mut app, "still");
     // The worker saved the first result while the loop was stopping; the row
     // never saw its end.
     app.push_message(Message::user_blocks(vec![ContentBlock::ToolResult {
@@ -936,6 +950,7 @@ fn the_exit_report_still_names_a_tool_that_was_cancelled_mid_run() {
     let mut app = next_app();
     app.push_message(Message::user("run it".to_string()));
     tool_start(&mut app, "cut-off", "Bash", r#"{"command":"sleep 30"}"#);
+    tool_running(&mut app, "cut-off");
     // Stopping the turn records the cancellation as the call's result. That
     // says the call was cut off, not what it did, so the outcome stays unknown.
     app.push_message(Message::user_blocks(vec![ContentBlock::ToolResult {
@@ -1208,6 +1223,67 @@ fn a_tool_times_its_work_from_its_latest_approval() {
     let text = text_of(&draw(&app, 100, 30));
     assert!(
         row_of(&text, "make deploy").trim_end().ends_with("running"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_tool_whose_hooks_are_still_running_is_reported_as_not_started() {
+    let mut app = next_app();
+    app.push_message(Message::user("check then build".to_string()));
+    tool_start(&mut app, "first", "Bash", r#"{"command":"make"}"#);
+    // A later call's PreToolUse hook runs; no tool's own work has begun.
+    tool_start(&mut app, "second", "Bash", r#"{"command":"make test"}"#);
+    let lines = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(lines.contains("Not started: Bash make\n"), "{lines}");
+    assert!(lines.contains("Not started: Bash make test"), "{lines}");
+    assert!(!lines.contains("is unknown"), "nothing began: {lines}");
+
+    tool_running(&mut app, "first");
+    let lines = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(lines.contains("No result from Bash make\n"), "{lines}");
+    assert!(lines.contains("Not started: Bash make test"), "{lines}");
+}
+
+#[test]
+fn a_request_waiting_behind_another_prompt_awaits_approval_too() {
+    let mut app = next_app();
+    app.push_message(Message::user("fetch two".to_string()));
+    for id in ["one", "two"] {
+        tool_start(
+            &mut app,
+            id,
+            "WebFetch",
+            &format!(r#"{{"url":"https://{id}.example"}}"#),
+        );
+        tool_running(&mut app, id);
+    }
+    app.tool_use_blocks[1].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(65));
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "two.example").contains("1m 5s"), "{text}");
+
+    // Its request waits in the queue behind another tool's prompt; only the
+    // queue changes, and the frame drawn before must not be reused.
+    app.set_queued_approvals(vec!["two".to_string()]);
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    assert_eq!(
+        view.tools[1].state,
+        claurst_tui::application::view::ToolActivityState::AwaitingApproval
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    let row = row_of(&text, "two.example");
+    assert!(row.contains("awaiting approval"), "{text}");
+    assert!(!row.contains("1m 5s"), "its wait is not its work: {text}");
+
+    app.set_queued_approvals(Vec::new());
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "two.example").contains("running 1m 5s"),
         "{text}"
     );
 }

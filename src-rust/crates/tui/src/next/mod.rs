@@ -436,6 +436,7 @@ struct ToolKey {
     active: tracked::Stamp,
     interrupted: tracked::Stamp,
     decisions: tracked::Stamp,
+    queued_approvals: tracked::Stamp,
     cancellation: TurnCancellation,
     project: Option<std::path::PathBuf>,
     diagnostic_path: Option<std::path::PathBuf>,
@@ -485,6 +486,7 @@ impl ToolRows {
             active: app.tool_use_blocks.stamp(),
             interrupted: app.interrupted_tools.stamp(),
             decisions: app.permission_decisions.stamp(),
+            queued_approvals: app.queued_approvals.stamp(),
             cancellation: app.cancellation,
             project: app.config.project_dir.clone(),
             diagnostic_path: app.diagnostic_log_path.clone(),
@@ -691,8 +693,8 @@ pub struct TurnExitReport {
     /// A tool may ask after a first step of its work, so asking is no sign
     /// that nothing ran.
     open: Vec<(String, String)>,
-    /// Tools that were waiting for their turn to write: none of their work
-    /// began.
+    /// Tools whose work had not begun: writers waiting for their turn, and
+    /// tools whose response's `PreToolUse` hooks were still running.
     not_started: Vec<String>,
     /// Tools that finished; a resumed session knows of them only if their
     /// results were saved.
@@ -711,6 +713,15 @@ impl TurnExitReport {
             .filter(|block| block.turn_index == turn)
             .map(|block| block.id.as_str())
             .collect();
+        // A tool's own work begins with its start time; until then its
+        // response's hooks run, or it waits for its turn.
+        let not_begun: std::collections::HashSet<&str> = app
+            .tool_use_blocks
+            .iter()
+            .chain(app.interrupted_tools.iter())
+            .filter(|block| block.run.started_at.is_none() && block.run.finished.is_none())
+            .map(|block| block.id.as_str())
+            .collect();
         let mut report = Self::default();
         for tool in &view.tools {
             if tool.allowed == Some(false) {
@@ -721,6 +732,11 @@ impl TurnExitReport {
                 None => tool.name.clone(),
             };
             match tool.state {
+                ToolActivityState::Running | ToolActivityState::CancelRequested
+                    if not_begun.contains(tool.id.as_str()) =>
+                {
+                    report.not_started.push(format!("Not started: {named}"))
+                }
                 ToolActivityState::Running | ToolActivityState::CancelRequested => report
                     .open
                     .push((tool.id.clone(), format!("No result from {named}"))),

@@ -2109,25 +2109,35 @@ async fn run_headless(
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
-/// Settles a queued approval request that an answer to an earlier prompt now
-/// decides. Returns the model call it belongs to and whether it was allowed.
+/// The model call an approval request belongs to, or the request's own id
+/// when the call is unknown.
+fn permission_call_id(pending: &claurst_tools::PendingPermissionRequest) -> &str {
+    pending.call_id.as_deref().unwrap_or(&pending.tool_use_id)
+}
+
+/// The calls whose approval requests wait in the queue, behind the prompt on
+/// screen.
+fn queued_approval_calls(store: &claurst_tools::PendingPermissionStore) -> Vec<String> {
+    store
+        .queue
+        .iter()
+        .map(|pending| permission_call_id(pending).to_string())
+        .collect()
+}
+
+/// Settles a queued approval request that a rule now decides, often one an
+/// answer to an earlier prompt just made. Its row's wait on the user ends,
+/// but no answer is recorded beside it: a rule decided, as for requests a
+/// rule settles before they are queued.
 fn settle_queued_permission(
+    app: &mut claurst_tui::app::App,
     mut pending: claurst_tools::PendingPermissionRequest,
     decision: claurst_core::permissions::PermissionDecision,
-) -> (String, bool) {
-    use claurst_core::permissions::PermissionDecision;
-    let call_id = pending
-        .call_id
-        .clone()
-        .unwrap_or_else(|| pending.tool_use_id.clone());
-    let allowed = matches!(
-        decision,
-        PermissionDecision::Allow | PermissionDecision::AllowPermanently
-    );
+) {
+    app.restart_tool_time(permission_call_id(&pending));
     if let Some(tx) = pending.decision_tx.take() {
         let _ = tx.send(decision);
     }
-    (call_id, allowed)
 }
 
 fn handle_bridge_permission_response(
@@ -4794,14 +4804,11 @@ async fn run_interactive(
                             .insert(tool_use_id, pending);
                         break;
                     }
-                    Some(decision) => {
-                        // Its wait on the user ends here too.
-                        let (call_id, allowed) = settle_queued_permission(pending, decision);
-                        app.record_permission_decision(&call_id, allowed);
-                    }
+                    Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
         }
+        app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
         while let Ok(scoped) = event_rx.try_recv() {
@@ -6925,22 +6932,49 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_request_decided_by_an_earlier_answer_names_its_model_call() {
+    fn a_queued_request_a_rule_decides_ends_its_rows_wait_without_an_answer() {
         use claurst_core::permissions::PermissionDecision as Decision;
 
-        for (call_id, decision, expected) in [
-            (Some("toolu_model"), Decision::Allow, ("toolu_model", true)),
-            (Some("toolu_model"), Decision::Deny, ("toolu_model", false)),
-            (None, Decision::AllowPermanently, ("perm-1", true)),
-            (None, Decision::DenyPermanently, ("perm-1", false)),
+        for (call_id, decision, row) in [
+            (Some("toolu_model"), Decision::Allow, "toolu_model"),
+            (Some("toolu_model"), Decision::Deny, "toolu_model"),
+            (None, Decision::AllowPermanently, "perm-1"),
+            (None, Decision::DenyPermanently, "perm-1"),
         ] {
+            let mut app = claurst_tui::app::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            for event in [
+                claurst_query::QueryEvent::ToolStart {
+                    tool_name: "WebFetch".to_string(),
+                    tool_id: row.to_string(),
+                    input_json: "{}".to_string(),
+                },
+                claurst_query::QueryEvent::ToolRunning {
+                    tool_id: row.to_string(),
+                },
+            ] {
+                app.handle_query_event(event);
+            }
+            let waited = std::time::Duration::from_secs(60);
+            app.tool_use_blocks[0].run.started_at = Some(std::time::Instant::now() - waited);
             let (mut pending, mut rx) = bridge_permission_fixture("perm-1");
             pending.call_id = call_id.map(str::to_string);
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.queue.push_back(pending);
+            assert_eq!(queued_approval_calls(&store), [row]);
 
-            let settled = settle_queued_permission(pending, decision.clone());
+            settle_queued_permission(&mut app, store.queue.pop_front().unwrap(), decision.clone());
 
-            assert_eq!(settled, (expected.0.to_string(), expected.1));
             assert_eq!(rx.try_recv(), Ok(decision));
+            let started = app.tool_use_blocks[0].run.started_at.unwrap();
+            assert!(started.elapsed() < waited, "its wait is not its work");
+            assert!(
+                app.permission_decisions.is_empty(),
+                "a rule decided, not an answer"
+            );
+            assert!(queued_approval_calls(&store).is_empty());
         }
     }
 
