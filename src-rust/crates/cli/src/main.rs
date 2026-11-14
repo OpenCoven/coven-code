@@ -2915,6 +2915,39 @@ fn suspend_job(
     Ok(())
 }
 
+/// `/config appearance` under Next. Everything but `save` stays in memory.
+async fn run_next_appearance_command(
+    app: &mut claurst_tui::App,
+    args: &str,
+    working_dir: &std::path::Path,
+) {
+    use claurst_tui::next::appearance::{
+        parse_appearance_command, run_appearance_command, AppearanceCommand,
+    };
+    let reply = match parse_appearance_command(args) {
+        Err(reason) => reason,
+        Ok(command) => {
+            let save_failure = (command == AppearanceCommand::Save
+                && !app.next_shell.appearance_edits.is_empty())
+            .then(|| Settings::save_appearance_edits(&app.next_shell.appearance_edits).err())
+            .flatten()
+            .map(|error| format!("{error:#}"));
+            let saved = Settings::load_hierarchical(working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            run_appearance_command(
+                app,
+                command,
+                &saved,
+                save_failure,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+                crossterm::terminal::size().unwrap_or((80, 24)),
+            )
+        }
+    };
+    app.push_message(claurst_core::types::Message::assistant(reply));
+}
+
 // Allowed: this is the main interactive-mode bootstrap. Its inputs are all
 // distinct, separately-constructed services (config, settings, HTTP client,
 // tool registry, tool execution context, query loop knobs, etc.) and
@@ -3083,17 +3116,19 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    // Classic drops the Next-only defaults, so upgrading an older file must
-    // keep a binding in every context when only they use its chord.
-    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
-        &Settings::config_dir(),
-        claurst_tui::next::NEXT_ONLY_ACTIONS,
-    );
+    // The bindings App::new loaded and resolves keys with.
+    let user_keybindings = app.user_keybindings.clone();
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
             std::env::var(name).ok()
         });
+    if renderer == claurst_tui::application::UiRenderer::Next {
+        app.next_shell.apply_layout(
+            settings.next_appearance.layout,
+            crossterm::terminal::size().unwrap_or((80, 24)),
+        );
+    }
     // Next shows the chord that works now; say once which bindings changed.
     if renderer == claurst_tui::application::UiRenderer::Next {
         for notice in claurst_tui::next::key_conflict_notices(&user_keybindings) {
@@ -3422,6 +3457,7 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut settings_screen_was_open = false;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -3478,6 +3514,21 @@ async fn run_interactive(
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
+        // `/settings` writes reduceMotion; Next draws the new value when it closes.
+        if renderer == claurst_tui::application::UiRenderer::Next
+            && settings_screen_was_open
+            && !app.settings_screen.visible
+        {
+            let saved = Settings::load_hierarchical(&tool_ctx.working_dir).await;
+            let keybindings = app.user_keybindings.clone();
+            claurst_tui::next::appearance::apply_presentation(
+                &mut app,
+                &saved,
+                &keybindings,
+                |name| std::env::var(name).ok(),
+            );
+        }
+        settings_screen_was_open = app.settings_screen.visible;
 
         // Opt-in trace timing separates widget/layout work from completed draw
         // (including backend diff and terminal writes). No content is recorded.
@@ -3701,6 +3752,15 @@ async fn run_interactive(
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
                                 app.status_message = Some(error);
                                 continue;
+                            }
+                            if renderer == claurst_tui::application::UiRenderer::Next {
+                                if let Some(args) =
+                                    claurst_tui::next::appearance::appearance_args(&cmd_name, &cmd_args)
+                                {
+                                    run_next_appearance_command(&mut app, args, &tool_ctx.working_dir)
+                                        .await;
+                                    continue;
+                                }
                             }
                             let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
                                 .or_else(|| app.canonical_command_path(&cmd_name, &cmd_args));
@@ -4678,8 +4738,12 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal resize - will be handled on next draw
+                // The next draw lays out for the new size; Next's layout
+                // setting decides first whether the inspector fits.
+                Event::Resize(width, height)
+                    if app.renderer == claurst_tui::application::UiRenderer::Next =>
+                {
+                    app.next_shell.follow_layout((width, height));
                 }
                 _ => {}
             }
