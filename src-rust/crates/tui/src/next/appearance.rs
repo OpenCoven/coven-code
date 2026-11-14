@@ -80,14 +80,8 @@ impl ShellState {
         true
     }
 
-    /// Whether the user opened, closed or turned the inspector since the
-    /// layout setting last placed it, so the setting leaves it to them.
-    pub fn user_holds_inspector(&self) -> bool {
-        self.inspector_taken
-    }
-
     /// Whether an inspector the user opened or turned is showing.
-    pub fn users_inspector_showing(&self) -> bool {
+    fn users_inspector_showing(&self) -> bool {
         self.inspector_taken && self.inspector.is_some()
     }
 
@@ -286,8 +280,7 @@ pub fn run_appearance_command(
     // Naming a layout applies it. Reverting or resetting one applies the
     // result only while the layout still holds the inspector, so an
     // inspector the user took stays where they put it.
-    let follow =
-        layout_named || (layout_after != layout_before && !app.next_shell.user_holds_inspector());
+    let follow = layout_named || (layout_after != layout_before && !app.next_shell.inspector_taken);
     if follow && !app.next_shell.apply_layout(layout_after, terminal) {
         if app.next_shell.users_inspector_showing() {
             return format!(
