@@ -223,6 +223,8 @@ impl Tool for PowerShellTool {
         let timeout_ms = params.timeout.min(600_000);
         let timeout_dur = Duration::from_millis(timeout_ms);
 
+        // A cancelled call drops this future; stop the shell with it. Its own
+        // children are not reached (#373).
         let mut child = match Command::new(exe)
             .args(&args)
             .arg(&params.command)
@@ -230,6 +232,7 @@ impl Tool for PowerShellTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,
