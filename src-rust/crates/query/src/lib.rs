@@ -2418,6 +2418,7 @@ async fn run_query_loop_inner(
                             config.effort_level,
                             effective_thinking_budget,
                         ),
+                        permission_mode: Some(tool_ctx.config.permission_mode.clone()),
                     };
 
                     // Use create_message_stream so the TUI receives real-time

@@ -27,6 +27,7 @@ use std::process::Stdio;
 
 use async_stream::stream;
 use async_trait::async_trait;
+use claurst_core::config::PermissionMode;
 use claurst_core::provider_id::ProviderId;
 use claurst_core::types::{ContentBlock, Message, MessageContent, Role, UsageInfo};
 use futures::Stream;
@@ -172,7 +173,21 @@ fn flattened_transcript(request: &ProviderRequest) -> String {
 
 /// Argv after the binary, mirroring the coven-runtimes adapter manifest
 /// contract for Claude Code.
-fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
+///
+/// The CLI runs its own tools, so the turn's permission mode must reach it as
+/// the CLI's own `--permission-mode`; without one, the CLI's settings decide
+/// and can widen a read-only turn. A request that names no mode runs as `plan`.
+fn build_args(
+    model: &str,
+    resume: Option<&str>,
+    permission: Option<&PermissionMode>,
+) -> Vec<String> {
+    let permission_mode = match permission {
+        Some(PermissionMode::BypassPermissions) => "bypassPermissions",
+        Some(PermissionMode::AcceptEdits) => "acceptEdits",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::Plan) | None => "plan",
+    };
     let mut args = vec![
         "-p".to_string(),
         "--input-format".to_string(),
@@ -180,6 +195,8 @@ fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        permission_mode.to_string(),
     ];
     if !model.is_empty() {
         args.push("--model".to_string());
@@ -516,10 +533,11 @@ impl ClaudeCliProvider {
         prompt: &str,
         images: &[ContentBlock],
         resume: Option<&str>,
+        permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
         let mut command = Command::new(self.binary_or_default());
         command
-            .args(build_args(model, resume))
+            .args(build_args(model, resume, permission))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -629,6 +647,7 @@ impl ClaudeCliProvider {
         };
 
         let images = last_user_images(request);
+        let permission = request.permission_mode.as_ref();
         if let Some(session_id) = resume_session {
             match self
                 .spawn_turn(
@@ -636,6 +655,7 @@ impl ClaudeCliProvider {
                     &last_user_text(request),
                     &images,
                     Some(&session_id),
+                    permission,
                 )
                 .await?
             {
@@ -654,7 +674,7 @@ impl ClaudeCliProvider {
             last_user_text(request)
         };
         match self
-            .spawn_turn(&request.model, &prompt, &images, None)
+            .spawn_turn(&request.model, &prompt, &images, None, permission)
             .await?
         {
             SpawnOutcome::Turn(turn) => Ok(*turn),
@@ -900,6 +920,7 @@ mod tests {
             stop_sequences: Vec::new(),
             thinking: None,
             provider_options: json!({}),
+            permission_mode: None,
         }
     }
 
@@ -922,7 +943,7 @@ mod tests {
 
     #[test]
     fn build_args_matches_adapter_manifest_contract() {
-        let args = build_args("claude-opus-4-8", None);
+        let args = build_args("claude-opus-4-8", None, Some(&PermissionMode::Plan));
         assert_eq!(
             args,
             vec![
@@ -932,13 +953,47 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--permission-mode",
+                "plan",
                 "--model",
                 "claude-opus-4-8",
             ]
         );
 
-        let resumed = build_args("claude-opus-4-8", Some("sess-1"));
+        let resumed = build_args(
+            "claude-opus-4-8",
+            Some("sess-1"),
+            Some(&PermissionMode::Plan),
+        );
         assert!(resumed.ends_with(&["--resume".to_string(), "sess-1".to_string()]));
+    }
+
+    fn permission_modes(args: &[String]) -> Vec<&str> {
+        args.windows(2)
+            .filter(|pair| pair[0] == "--permission-mode")
+            .map(|pair| pair[1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn build_args_passes_the_turn_mode_as_the_cli_mode() {
+        for (mode, cli_mode) in [
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Default, "default"),
+        ] {
+            for resume in [None, Some("sess-1")] {
+                let args = build_args("claude-opus-4-8", resume, Some(&mode));
+                assert_eq!(permission_modes(&args), [cli_mode], "{mode:?}: {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_args_runs_a_request_without_a_mode_read_only() {
+        let args = build_args("claude-opus-4-8", None, None);
+        assert_eq!(permission_modes(&args), ["plan"], "{args:?}");
     }
 
     #[test]

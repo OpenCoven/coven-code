@@ -751,7 +751,7 @@ Cron tools manage scheduled agent triggers.
 
 ### CronCreateTool
 
-**Permission level:** Write
+**Permission level:** Execute. A scheduled prompt runs tools later, so scheduling one needs the permission a command needs: plan mode refuses it, and so does a headless run that isn't in bypass mode. Scheduled prompts fire only in interactive sessions, never inside a headless run.
 
 Create a new scheduled trigger. The trigger fires at the specified cron schedule and executes the configured agent or command.
 

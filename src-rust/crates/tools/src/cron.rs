@@ -298,8 +298,10 @@ impl Tool for CronCreateTool {
          Use durable=true to persist across sessions."
     }
 
+    /// A scheduled prompt runs tools later, so scheduling one needs the
+    /// permission running a command needs now.
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::None
+        PermissionLevel::Execute
     }
 
     fn input_schema(&self) -> Value {
@@ -327,7 +329,7 @@ impl Tool for CronCreateTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let params: CronCreateInput = match serde_json::from_value(input) {
             Ok(p) => p,
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
@@ -338,6 +340,15 @@ impl Tool for CronCreateTool {
                 "Invalid cron expression '{}'. Expected 5 fields: M H DoM Mon DoW.",
                 params.cron
             ));
+        }
+
+        if let Err(e) = ctx.check_permission_with_details(
+            self.name(),
+            &format!("Schedule a prompt to run {}", cron_to_human(&params.cron)),
+            &params.prompt,
+            false,
+        ) {
+            return ToolResult::error(e.to_string());
         }
 
         // Ensure persistent tasks are loaded from disk before we check the count.
@@ -428,7 +439,7 @@ impl Tool for CronDeleteTool {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::None
+        PermissionLevel::Write
     }
 
     fn input_schema(&self) -> Value {
@@ -444,11 +455,19 @@ impl Tool for CronDeleteTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let params: CronDeleteInput = match serde_json::from_value(input) {
             Ok(p) => p,
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
+
+        if let Err(e) = ctx.check_permission(
+            self.name(),
+            &format!("Cancel scheduled task '{}'", params.id),
+            false,
+        ) {
+            return ToolResult::error(e.to_string());
+        }
 
         // Load disk state first so we don't accidentally drop persisted tasks.
         if let Err(error) = ensure_store_loaded().await {

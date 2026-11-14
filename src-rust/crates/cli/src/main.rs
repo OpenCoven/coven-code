@@ -1019,20 +1019,9 @@ async fn main() -> anyhow::Result<()> {
     apply_headless_review_query_defaults(&mut query_config, github_context.as_ref());
     let tools = filter_tools_for_hosted_review(tools, &config);
 
-    // Spawn the background cron scheduler (fires cron tasks at scheduled times).
-    // Cancelled automatically when the process exits since we use a shared token.
-    let cron_cancel = tokio_util::sync::CancellationToken::new();
-    if scoped_workspace.is_none() {
-        claurst_query::start_cron_scheduler(
-            client.clone(),
-            tools.clone(),
-            tool_ctx.clone(),
-            query_config.clone(),
-            cron_cancel.clone(),
-        );
-    }
-
-    // --print / headless mode
+    // --print / headless mode. No scheduled prompt runs here: a headless run is
+    // one turn under that turn's permission, and nothing a scheduled prompt did
+    // would reach the output stream.
     if is_headless {
         // Long-lived stream-json mode: the Coven runtime stream protocol.
         // Turns arrive as stdin JSON frames; the process exits on stdin EOF.
@@ -1055,7 +1044,6 @@ async fn main() -> anyhow::Result<()> {
                 resume_id: cli.resume.clone(),
             })
             .await;
-            cron_cancel.cancel();
             return run;
         }
 
@@ -1092,8 +1080,6 @@ async fn main() -> anyhow::Result<()> {
             cost_tracker,
         )
         .await;
-
-        cron_cancel.cancel();
 
         // If --output was requested, write the coven-github result envelope and,
         // for a real GitHub run, honor the exit-code contract
@@ -1164,6 +1150,16 @@ async fn main() -> anyhow::Result<()> {
         // Keyless Claude runs through the local `claude` CLI runtime.
         || claurst_api::providers::claude_cli::resolve_claude_binary().is_some()
         || config.provider.as_deref().is_some_and(|p| p != "anthropic");
+
+    // Interactive sessions fire scheduled prompts in the background.
+    let cron_cancel = tokio_util::sync::CancellationToken::new();
+    claurst_query::start_cron_scheduler(
+        client.clone(),
+        tools.clone(),
+        tool_ctx.clone(),
+        query_config.clone(),
+        cron_cancel.clone(),
+    );
     let result = run_interactive(
         config,
         settings,
