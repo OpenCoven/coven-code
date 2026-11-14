@@ -669,6 +669,9 @@ pub struct App {
     pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub keybindings: KeybindingResolver,
+    /// The user's bindings as loaded at launch, which `keybindings` resolves.
+    /// Hints are drawn from these so they name the keys that work.
+    pub user_keybindings: UserKeybindings,
     /// Presentation preferences for the Next renderer; Classic ignores them.
     pub next_presentation: crate::next::NextPresentation,
     /// Renderer drawing this session. Next-only keys are unbound in Classic.
@@ -1296,6 +1299,7 @@ impl App {
             accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             keybindings: KeybindingResolver::new(&user_keybindings),
+            user_keybindings,
             next_presentation: crate::next::NextPresentation::default(),
             renderer: crate::application::UiRenderer::default(),
             next_shell: crate::next::ShellState::default(),

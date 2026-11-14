@@ -224,6 +224,9 @@ pub struct ShellState {
     /// composer keeps every other key, so the draft is never stranded.
     pub inspector: Option<InspectorPage>,
     pub inspector_scroll: usize,
+    /// The layout setting that still places the inspector as the terminal
+    /// resizes. Cleared once the user opens, closes or turns it.
+    layout_places: Option<claurst_core::appearance::LayoutChoice>,
     /// Largest useful `inspector_scroll` for the last drawn page.
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
@@ -566,15 +569,18 @@ impl ShellState {
                     None => Some(InspectorPage::Activity),
                 };
                 self.inspector_scroll = 0;
+                self.layout_places = None;
             }
             "closeInspector" => {
                 self.inspector = None;
                 self.inspector_scroll = 0;
+                self.layout_places = None;
             }
             "nextInspectorPage" | "previousInspectorPage" => {
                 if let Some(page) = self.inspector {
                     self.inspector = Some(page.step(action == "nextInspectorPage"));
                     self.inspector_scroll = 0;
+                    self.layout_places = None;
                 }
             }
             "scrollInspectorUp" => {

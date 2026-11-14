@@ -272,3 +272,40 @@ fn saving_reports_failure_and_what_a_folder_still_overrides() {
     app.next_shell.appearance_edits = clean;
     assert_eq!(run(&mut app, &on_disk, "save", SPLIT), "Saved.");
 }
+
+#[test]
+fn the_layout_follows_a_resize_until_the_user_takes_the_inspector() {
+    use claurst_core::appearance::LayoutChoice;
+    let mut shell = app();
+    assert!(shell.next_shell.apply_layout(LayoutChoice::Work, (120, 32)));
+    assert_eq!(shell.next_shell.inspector, Some(InspectorPage::Work));
+    // One column or one row short of the split, the transcript comes back.
+    shell.next_shell.follow_layout((119, 32));
+    assert_eq!(shell.next_shell.inspector, None);
+    shell.next_shell.follow_layout((120, 31));
+    assert_eq!(shell.next_shell.inspector, None);
+    shell.next_shell.follow_layout((120, 32));
+    assert_eq!(shell.next_shell.inspector, Some(InspectorPage::Work));
+
+    // A launch too small for the layout opens it once there is room.
+    let mut small = app();
+    assert!(!small.next_shell.apply_layout(LayoutChoice::Inspect, NARROW));
+    assert_eq!(small.next_shell.inspector, None);
+    small.next_shell.follow_layout(SPLIT);
+    assert_eq!(small.next_shell.inspector, Some(InspectorPage::Activity));
+
+    // Focus never opens it.
+    let mut focus = app();
+    focus.next_shell.apply_layout(LayoutChoice::Focus, SPLIT);
+    focus.next_shell.follow_layout(SPLIT);
+    assert_eq!(focus.next_shell.inspector, None);
+
+    // Once the user closes, opens or turns it, a resize leaves it alone.
+    shell.next_shell.apply_action("closeInspector");
+    shell.next_shell.follow_layout(SPLIT);
+    assert_eq!(shell.next_shell.inspector, None);
+    small.next_shell.apply_action("nextInspectorPage");
+    let turned = small.next_shell.inspector;
+    small.next_shell.follow_layout(NARROW);
+    assert_eq!(small.next_shell.inspector, turned);
+}

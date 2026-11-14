@@ -2933,8 +2933,7 @@ async fn run_next_appearance_command(
             .flatten()
             .map(|error| format!("{error:#}"));
             let saved = Settings::load_hierarchical(working_dir).await;
-            let keybindings =
-                claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
+            let keybindings = app.user_keybindings.clone();
             run_appearance_command(
                 app,
                 command,
@@ -3117,12 +3116,8 @@ async fn run_interactive(
     app.auto_compact_threshold = compact_threshold_pct.clamp(0.0, 100.0).ceil() as u8;
     app.completion_toast_enabled = settings.completion_toast_enabled();
     app.bell_on_complete = settings.bell_on_complete;
-    // Classic drops the Next-only defaults, so upgrading an older file must
-    // keep a binding in every context when only they use its chord.
-    let user_keybindings = claurst_core::keybindings::UserKeybindings::load_with_renderer_only(
-        &Settings::config_dir(),
-        claurst_tui::next::NEXT_ONLY_ACTIONS,
-    );
+    // The bindings App::new loaded and resolves keys with.
+    let user_keybindings = app.user_keybindings.clone();
     app.select_renderer(renderer);
     app.next_presentation =
         claurst_tui::next::NextPresentation::from_settings(&settings, &user_keybindings, |name| {
@@ -3525,8 +3520,7 @@ async fn run_interactive(
             && !app.settings_screen.visible
         {
             let saved = Settings::load_hierarchical(&tool_ctx.working_dir).await;
-            let keybindings =
-                claurst_core::keybindings::UserKeybindings::load(&Settings::config_dir());
+            let keybindings = app.user_keybindings.clone();
             claurst_tui::next::appearance::apply_presentation(
                 &mut app,
                 &saved,
@@ -4744,8 +4738,12 @@ async fn run_interactive(
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
-                Event::Resize(_, _) => {
-                    // Terminal resize - will be handled on next draw
+                Event::Resize(width, height) => {
+                    // The next draw lays out for the new size; Next's layout
+                    // setting decides first whether the inspector fits.
+                    if app.renderer == claurst_tui::application::UiRenderer::Next {
+                        app.next_shell.follow_layout((width, height));
+                    }
                 }
                 _ => {}
             }

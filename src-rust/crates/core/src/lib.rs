@@ -1824,8 +1824,9 @@ pub mod config {
         f()
     }
 
-    // Existing settings are staged beside the resolved target. Missing targets
-    // retain direct creation, including through dangling symlinks.
+    /// Write `edits` into the settings file at `path`, keeping every other key.
+    /// A file the settings loader would refuse is left alone: saving into it
+    /// would report success for choices that are never read back.
     fn write_appearance_edits(
         path: &std::path::Path,
         edits: &crate::appearance::AppearanceEdits,
@@ -1843,6 +1844,8 @@ pub mod config {
         let object = root
             .as_object_mut()
             .with_context(|| format!("{} does not hold a settings object", path.display()))?;
+        serde_json::from_value::<Settings>(serde_json::Value::Object(object.clone()))
+            .with_context(|| format!("{} cannot be read as settings", path.display()))?;
         let mut layer: crate::appearance::NextAppearanceSettings =
             match object.get("nextAppearance") {
                 Some(value) => serde_json::from_value(value.clone())?,
@@ -1882,6 +1885,8 @@ pub mod config {
         Ok(())
     }
 
+    // Existing settings are staged beside the resolved target. Missing targets
+    // retain direct creation, including through dangling symlinks.
     fn prepare_settings_save(
         path: &std::path::Path,
         content: &[u8],
@@ -2594,6 +2599,23 @@ pub mod config {
                 );
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
             }
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_the_settings_loader_rejects() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            // Valid JSON, but a value of the wrong type: loading falls back to
+            // defaults, so saving into it would only hide that.
+            let content = r#"{"hasCompletedOnboarding":"yes","kept":1}"#;
+            assert!(serde_json::from_str::<Settings>(content).is_err());
+            std::fs::write(&path, content).unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+
+            let error = write_appearance_edits(&path, &edits).unwrap_err();
+            assert!(format!("{error:#}").contains("settings.json"), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
         }
 
         #[test]

@@ -34,6 +34,16 @@ _look_quit() {
   tui_stop
 }
 
+# tmux can leave a window at an earlier size on a loaded host; reapply until it takes.
+_look_resize() { # width, height
+  local tries=0
+  _tmux resize-window -t "$TUI_SESSION" -x "$1" -y "$2"
+  while [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')" != "$1x$2" ] \
+    && [ "$tries" -lt 5 ]; do
+    sleep 0.25; _tmux resize-window -t "$TUI_SESSION" -x "$1" -y "$2"; tries=$((tries + 1))
+  done
+}
+
 _look_wait_moving() {
   local waited=0
   while [ "$waited" -lt 80 ]; do
@@ -82,8 +92,16 @@ tc_appearance() {
     assert_contains "$(tui_capture)" "reduceMotion" "next: the listing includes reduced motion"
     _look_run "/config appearance density compact" "Previewing density = compact" \
       "next: a value previews"
+    # Keys are read once, at launch. A keybindings file written since does not
+    # change what the keys do, so the hints must not advertise it either.
+    printf '%s\n' '{"schema_version": 1, "bindings": [{"context": "Chat", "action": "openHelp", "chord": "ctrl+j"}]}' \
+      >"$scratch/home/.coven-code/keybindings.json"
     _look_run "/config appearance hints true" "Previewing hints = true" "next: hints preview"
     assert_contains "$(tui_capture)" "Enter send" "next: the hint row appears at once"
+    if tui_capture | grep -qiE 'ctrl\+j help'; then
+      _fail "next: the hints show the keys this session uses" "$(tui_capture)"
+    else _pass "next: the hints show the keys this session uses"; fi
+    rm -f "$scratch/home/.coven-code/keybindings.json"
     if cmp -s "$file" "$scratch/before.json"; then _pass "next: a preview writes nothing"
     else _fail "next: a preview writes nothing" "$(cat "$file")"; fi
     _look_run "/config appearance density roomy" "comfortable, compact" \
@@ -107,9 +125,17 @@ tc_appearance() {
     printf '{ broken' >"$file"
     _look_run "/config appearance save" "Not saved" "next: an unreadable file refuses the save"
     assert_eq "$(cat "$file")" '{ broken' "next: the unreadable file is left as it was"
+    # Valid JSON that is not valid settings: loading would ignore the file, so a
+    # save into it is refused too.
+    printf '%s' '{"hasCompletedOnboarding":"yes"}' >"$file"
+    _look_run "/config appearance save" "Not saved" "next: a file that is not settings refuses the save"
+    assert_eq "$(cat "$file")" '{"hasCompletedOnboarding":"yes"}' "next: that file is left as it was"
     cp "$scratch/good.json" "$file"
     _look_run "/config appearance revert" "Preview dropped" "next: a preview can be dropped"
-    if wait_absent "canonical tasks" 2; then _pass "next: reverting keeps the session running"
+    if wait_absent "Activity" 3; then _pass "next: reverting closes the inspector the preview opened"
+    else _fail "next: reverting closes the inspector the preview opened" "$(tui_capture)"; fi
+    if tui_session_alive && tui_capture | grep -q "preview"; then
+      _pass "next: reverting keeps the session running"
     else _fail "next: reverting keeps the session running" "$(tui_capture)"; fi
   fi
   _look_quit
@@ -145,6 +171,13 @@ tc_appearance() {
   if _look_launch next preview "$scratch"; then
     if wait_for "canonical tasks" 5; then _pass "next: the work layout opens the Work page"
     else _fail "next: the work layout opens the Work page" "$(tui_capture)"; fi
+    # Below 120x32 the page would cover the transcript, which nobody asked to hide.
+    _look_resize 100 30
+    if wait_absent "canonical tasks" 5; then _pass "next: a smaller terminal gives the transcript back"
+    else _fail "next: a smaller terminal gives the transcript back" "$(tui_capture)"; fi
+    _look_resize 120 40
+    if wait_for "canonical tasks" 5; then _pass "next: the layout returns when there is room"
+    else _fail "next: the layout returns when there is room" "$(tui_capture)"; fi
   fi
   _look_quit
   if TUI_WIDTH=100 _look_launch next preview "$scratch"; then

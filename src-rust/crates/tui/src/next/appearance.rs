@@ -58,6 +58,7 @@ impl ShellState {
     /// starts with its transcript hidden; the inspector key still opens it at
     /// any size.
     pub fn apply_layout(&mut self, choice: LayoutChoice, terminal: (u16, u16)) -> bool {
+        self.layout_places = Some(choice);
         let area = Rect::new(0, 0, terminal.0, terminal.1);
         let page = match choice {
             LayoutChoice::Focus => None,
@@ -68,6 +69,24 @@ impl ShellState {
         self.inspector = page;
         self.inspector_scroll = 0;
         true
+    }
+
+    /// Keep the inspector where the layout setting put it as the terminal
+    /// resizes: beside the transcript while there is room for both, and out
+    /// of the way when there is not. Once the user opens, closes or turns the
+    /// inspector, a resize leaves it alone.
+    pub fn follow_layout(&mut self, terminal: (u16, u16)) {
+        let page = match self.layout_places {
+            None | Some(LayoutChoice::Focus) => return,
+            Some(LayoutChoice::Work) => InspectorPage::Work,
+            Some(LayoutChoice::Inspect) => InspectorPage::Activity,
+        };
+        let area = Rect::new(0, 0, terminal.0, terminal.1);
+        let page = (layout::SizeClass::of(area) == layout::SizeClass::Split).then_some(page);
+        if self.inspector != page {
+            self.inspector = page;
+            self.inspector_scroll = 0;
+        }
     }
 }
 
