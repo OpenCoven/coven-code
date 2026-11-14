@@ -246,13 +246,25 @@ async fn web_fetch_provenance_survives_durable_dispatch_and_context_budgeting() 
             _ => false,
         }));
     // This is the actual history API used after an interactive query returns,
-    // not a serialization of the separate durable event above.
+    // not a serialization of the separate durable event above. It resolves the
+    // config home on each call, so the home must not change in between, and
+    // the session belongs in a home of its own.
     let mut session = claurst_core::history::ConversationSession::new("scripted".into());
     session.messages = working_messages;
-    claurst_core::history::save_session(&session).await.unwrap();
-    let resumed = claurst_core::history::load_session(&session.id)
-        .await
-        .unwrap();
+    let resumed = {
+        let _env_lock = CONFIG_HOME_ENV_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("COVEN_CODE_HOME");
+        std::env::set_var("COVEN_CODE_HOME", home.path());
+        let saved = claurst_core::history::save_session(&session).await;
+        let resumed = claurst_core::history::load_session(&session.id).await;
+        match previous_home {
+            Some(previous) => std::env::set_var("COVEN_CODE_HOME", previous),
+            None => std::env::remove_var("COVEN_CODE_HOME"),
+        }
+        saved.unwrap();
+        resumed.unwrap()
+    };
     let restored = resumed
         .messages
         .iter()

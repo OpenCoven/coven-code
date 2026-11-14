@@ -351,12 +351,10 @@ pub fn mark_goal_complete(session_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Mutex};
+    use std::path::PathBuf;
 
     use super::*;
     use claurst_core::{GoalError, GoalStore};
-
-    static DEFAULT_GOAL_STORE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn goal_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("goals.sqlite")
@@ -524,7 +522,7 @@ mod tests {
 
     #[test]
     fn default_wrapper_reports_concurrent_pause_at_runaway_boundary() {
-        let _env_lock = DEFAULT_GOAL_STORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", dir.path());
@@ -570,7 +568,7 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_pause_a_replacement_at_runaway_boundary() {
-        let _env_lock = DEFAULT_GOAL_STORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", dir.path());
@@ -612,7 +610,7 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_record_progress_on_a_replacement() {
-        let _env_lock = DEFAULT_GOAL_STORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", dir.path());
@@ -658,7 +656,7 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_budget_limit_a_replacement() {
-        let _env_lock = DEFAULT_GOAL_STORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", dir.path());
@@ -736,7 +734,7 @@ mod tests {
 
     #[test]
     fn default_wrappers_terminal_goals_stop_without_recording_progress() {
-        let _env_lock = DEFAULT_GOAL_STORE_ENV_LOCK.lock().unwrap();
+        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", dir.path());

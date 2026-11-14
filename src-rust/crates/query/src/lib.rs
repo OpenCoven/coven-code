@@ -125,6 +125,11 @@ tokio::task_local! {
     static TEST_STREAM_STALL_TIMEOUT: std::time::Duration;
 }
 
+/// Held by every test in this crate that points `COVEN_CODE_HOME` elsewhere or
+/// resolves the config home, since tests share one process environment.
+#[cfg(test)]
+static CONFIG_HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // Goal checks bound the next observable request/work boundary. They cannot
 // atomically interrupt work already started in another process or a tool.
 async fn wait_for_goal_revocation(
