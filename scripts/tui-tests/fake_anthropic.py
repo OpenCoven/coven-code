@@ -7,8 +7,10 @@ Bash with that command, or otherwise a Bash `touch` of a marker named by the
 prompt's last word. The reply to its tool result reports what the engine sent
 back, so a journey can see the outcome on screen. "flood: N" instead sends N
 text deltas in one burst, to put the interactive event path under pressure;
-"flood: N hold" sends them and then keeps the stream open until a file named
-`release` appears in MARKER_DIR, so a journey can act while the turn is open.
+"flood: N hold" sends them and then keeps the stream open, with a ping every
+few seconds, until a file named `release` appears in MARKER_DIR, so a journey
+can act while the turn is open; a `release` file already there means no hold.
+Any other word after the count is an error.
 Every request's messages are appended to the log for later checks.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
@@ -28,6 +30,9 @@ FLOOD_TEXT = "flood line\n"
 HOLD_WORD = "hold"  # after the count: keep the stream open until released
 RELEASE_MARKER = "release"
 HOLD_LIMIT_SECONDS = 300
+# The client retries a stream that sends nothing for 45 s; pings count as
+# activity, so a held stream stays the same request.
+HOLD_PING_SECONDS = 5
 
 
 def sse(event, data):
@@ -153,6 +158,8 @@ def reply_for(messages, marker_dir, turn):
         if words[1:] == [HOLD_WORD]:
             return Held(flood_head(count), flood_tail(),
                         os.path.join(marker_dir, RELEASE_MARKER))
+        if words[1:]:
+            raise ValueError(f"unknown flood option: {' '.join(words[1:])}")
         return flood_turn(count)
     if text.startswith(TOOL_PREFIX):
         name, _, tool_input = text[len(TOOL_PREFIX):].partition(" ")
@@ -206,16 +213,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.respond(200, "text/event-stream", reply)
 
     def respond_held(self, reply):
+        # Chunked, since the pings sent while it is held have no known length.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Content-Length", str(len(reply.head) + len(reply.tail)))
+        self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        self.wfile.write(reply.head)
-        self.wfile.flush()
-        deadline = time.monotonic() + HOLD_LIMIT_SECONDS
+        self.write_chunk(reply.head)
+        now = time.monotonic()
+        deadline, next_ping = now + HOLD_LIMIT_SECONDS, now + HOLD_PING_SECONDS
         while not os.path.exists(reply.release) and time.monotonic() < deadline:
+            if time.monotonic() >= next_ping:
+                self.write_chunk(sse("ping", {"type": "ping"}))
+                next_ping += HOLD_PING_SECONDS
             time.sleep(0.05)
-        self.wfile.write(reply.tail)
+        self.write_chunk(reply.tail)
+        self.wfile.write(b"0\r\n\r\n")
+
+    def write_chunk(self, data):
+        self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
 
 
 def main():

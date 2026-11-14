@@ -53,19 +53,22 @@ tc_next_resize_stream() {
     else _fail "the turn is streaming" "$(tui_capture)"; fi
 
     tui_type "kept draft"
+    # tmux holds a pane resize for 250 ms and merges the ones that arrive
+    # meanwhile, so each size is kept past that before the next.
     for size in "80 24" "40 10" "200 50" "20 5" "120 40" "1 1" "2 2" "160 30" "10 3" "80 24" "120 40"; do
       want="${size% *}x${size#* }"
       _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
       got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
       if [ "$got" = "$want" ]; then reached+=" $want"
       else info "tmux left the window at $got instead of $want"; fi
-      sleep 0.25
+      sleep 0.6
     done
     for want in 200x50 20x5 1x1 2x2 10x3 120x40; do
       case " $reached " in *" $want "*) ;; *) missing+=" $want" ;; esac
     done
-    if [ -z "$missing" ]; then _pass "every extreme size was applied"
-    else _fail "every extreme size was applied" "not applied:$missing (applied:$reached)"; fi
+    if [ -z "$missing" ]; then _pass "tmux applied every extreme size, each past its resize delay"
+    else _fail "tmux applied every extreme size, each past its resize delay" \
+      "not applied:$missing (applied:$reached)"; fi
 
     assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" "$running" \
       "the process survives every size"
@@ -82,7 +85,9 @@ tc_next_resize_stream() {
     else _fail "the turn finishes" "$(tui_capture)"; fi
     screen="$(tui_capture)"
     got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
-    assert_contains "${screen:-<blank pane at $got>}" "kept draft" "the draft is as typed"
+    # The last drawn row is the composer: a sent draft would leave it empty.
+    assert_contains "$(tail -n 1 <<<"${screen:-<blank pane at $got>}")" "kept draft" \
+      "the draft is as typed, still in the composer"
     assert_contains "${screen:-<blank pane at $got>}" "flood line" "the answer is on screen"
     assert_absent "$screen" "panicked" "nothing panicked"
 
@@ -91,7 +96,7 @@ tc_next_resize_stream() {
     assert_eq "$rows" "40" "the frame fills the final height"
 
     # The turn is saved when it ends; the count proves no delta was dropped.
-    local waited=0
+    waited=0
     while [ "$waited" -lt 300 ] && [ "$(_resize_saved_count "$scratch/home")" -lt "$count" ]; do
       sleep 0.1; waited=$((waited + 1))
     done
