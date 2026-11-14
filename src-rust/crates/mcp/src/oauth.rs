@@ -804,7 +804,7 @@ pub async fn get_valid_mcp_access_token(
 pub fn pkce_verifier() -> String {
     use base64::Engine as _;
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("getrandom failed");
+    getrandom::fill(&mut bytes).expect("getrandom failed");
     // base64url-encode → 43 chars (256 bits of entropy, no padding)
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -812,7 +812,7 @@ pub fn pkce_verifier() -> String {
 fn random_urlsafe_token() -> anyhow::Result<String> {
     use base64::Engine as _;
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("Failed to generate OAuth state: {}", error))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }

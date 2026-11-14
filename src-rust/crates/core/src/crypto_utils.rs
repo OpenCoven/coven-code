@@ -37,7 +37,7 @@ pub fn generate_uuid() -> String {
 /// Generate a cryptographically random work secret (32 bytes, base64url-encoded).
 pub fn generate_work_secret() -> String {
     let mut bytes = [0u8; 32];
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         // Fallback: use time-based entropy
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
