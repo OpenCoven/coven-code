@@ -33,7 +33,7 @@ Every tool in Coven Code implements the Rust `Tool` trait in `src-rust/crates/to
 - **Identity** — the tool name the model uses to call it
 - **Description** — instructions shown to the model
 - **Input schema** — a JSON Schema object validating the input the model must provide
-- **Permission level** — `None`, `ReadOnly`, `Write`, `Execute`, `Dangerous`, or `Forbidden`
+- **Permission level** — `None`, `ReadOnly`, `Network`, `Write`, `Execute`, `Dangerous`, or `Forbidden`
 - **Execution** — `execute()` performs the operation after permission resolution
 - **Tool definition** — `to_definition()` serializes the name, description, and schema for providers
 
@@ -59,7 +59,7 @@ Each tool is assigned a conceptual permission level based on what it can do:
 |-------|-------------|---------|
 | **None** | No external effects; purely passive | `SleepTool` |
 | **ReadOnly** | Reads data; no writes or execution | `FileReadTool`, `GlobTool` |
-| **Network** | Makes an outbound network request; asks for approval unless a rule or the permission mode allows it | `WebFetchTool` |
+| **Network** | Makes an outbound network request; handled like writes and execution: asks in `default` and `acceptEdits`, denied in `plan` and in headless runs unless a rule allows it, allowed in `bypassPermissions` | `WebFetchTool` |
 | **Write** | Creates or modifies data | `FileWriteTool`, `FileEditTool`, `ConfigTool` |
 | **Execute** | Runs code or spawns processes | `BashTool`, `TaskCreateTool`, `SendMessageTool` |
 | **Dangerous** | Broad system access; high blast radius | `ComputerUseTool` |
@@ -369,7 +369,9 @@ Search available tools by name or keyword to retrieve their full parameter schem
 
 **Permission level:** Network
 
-Fetch a public `http` or `https` URL and return its content as text. HTML is converted to plain text; other content types are returned as text as received. A few HTML pages that plain conversion handles badly are extracted by a model instead, and the result says so. Text output is capped at 100,000 bytes, cut at a character boundary.
+Fetch a public `http` or `https` URL and return its content as text. HTML (`text/html` or `application/xhtml+xml`) is converted to plain text; any other response is decoded as UTF-8 text, with invalid bytes replaced. Binary formats such as PDF are not parsed. Text output is capped at 100,000 bytes, cut at a character boundary, with a note giving the full size.
+
+When converted HTML has fewer than 100 words, or the page has no `<article>`, `<main>` or `<body>` element, the first 20,000 bytes of its HTML are sent to a small Claude model with the configured Anthropic credentials, and the result is labelled as model-extracted. If that call is unavailable or fails, the plain conversion is used.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -378,10 +380,10 @@ Fetch a public `http` or `https` URL and return its content as text. HTML is con
 
 Fetch rules:
 
-- Only public destinations are fetched. Every address the host name resolves to must be public; loopback, private, link-local and similar addresses are refused. Each redirect is checked the same way, up to 10.
+- Only public destinations are fetched. Every address the host name resolves to must be public; loopback, private, link-local and similar addresses are refused. Each redirect is checked the same way, and at most 9 redirects are followed.
 - Proxy settings from the environment are not used.
-- The response body is limited to 2 MiB, and a fetch times out after 30 seconds.
-- Each fetch records the requested and final URL (with credentials removed and fragments dropped), HTTP status, content type, retrieval time, the body's SHA-256 and how the text was extracted. The Next Research page reads this record.
+- A response body over 2 MiB fails the fetch, and a fetch times out after 30 seconds.
+- Each successful fetch records the requested and final URL (with credentials removed and fragments dropped), HTTP status, content type, retrieval time, the body's SHA-256 and how the text was extracted. The Next Research page reads this record.
 - A stored extraction is reused only when a new fetch returns the same body hash and content type.
 
 ---

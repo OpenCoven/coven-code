@@ -16,21 +16,24 @@ an editor but potentially an OpenCoven orchestration layer.
 ## Evidence on current main
 
 - Admission ([`admission.rs`](../src-rust/crates/acp/src/admission.rs), from
-  #461): queued and running messages share 32 permits. A request that arrives
+  #461): queued and running requests share 32 permits. A request that arrives
   with none free gets JSON-RPC error `-32000` ("ACP request capacity
-  exceeded"). Error replies go through a 64-entry lane; if that lane fills,
+  exceeded"). Capacity and parse-error replies go through a 64-entry lane; if
+  that lane fills, or one of those replies is blocked for more than 2 seconds,
   the connection is retired rather than blocking the reader or allocating more
   work.
-- Control notifications such as `session/cancel` are handled in the reader and
-  never wait for a permit. Responses to the agent's own requests, including
-  permission replies, are routed in the reader before admission
-  ([`connection.rs`](../src-rust/crates/acp/src/connection.rs)), and pending
-  outbound requests are capped at 64.
+- Notifications never take a permit. `session/cancel`, the only one acted on,
+  is handled in the reader; others are logged and ignored. Responses to the
+  agent's own requests, including permission replies, are routed in the reader
+  before admission ([`connection.rs`](../src-rust/crates/acp/src/connection.rs)),
+  and pending outbound requests are capped at 64.
 - At EOF, admitted work drains for up to 2 seconds; anything still running is
   then cancelled.
 - Permission requests are bound to the turn that asked for them (#404).
-  Unknown selections, cancellation and transport errors still map to Deny.
-  Forwarding tasks are owned (#343).
+  #343 made the old forwarding tasks owned; #404 then removed the shared queue
+  and drainer, so each permission request is a direct round trip owned by its
+  turn. Unknown selections, cancellation and transport errors still map to
+  Deny.
 - The partial-frame writer (#344) and reader-error propagation (#376) are
   merged.
 - `session/new` canonicalizes and validates cwd before storing it (#348), and
