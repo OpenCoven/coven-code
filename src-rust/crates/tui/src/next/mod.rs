@@ -756,16 +756,16 @@ impl TurnExitReport {
         report
     }
 
-    /// The report, read against the conversation as saved. A tool still at
-    /// work is left out once its result is saved, but not for the result
-    /// cancellation records for a call it cut off: that says the call
-    /// stopped, not what it did. A finished tool is left out once any result
-    /// for it is saved.
     /// Whether a turn was being stopped, rather than auto-compaction.
     pub fn is_turn(&self) -> bool {
         self.turn
     }
 
+    /// The report, read against the conversation as saved. A tool still at
+    /// work is left out once its result is saved, but not for the result
+    /// cancellation records for a call it cut off: that says the call
+    /// stopped, not what it did. A finished tool is left out once any result
+    /// for it is saved.
     pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
         use claurst_core::types::{ContentBlock, ToolResultContent};
         if !self.turn {
