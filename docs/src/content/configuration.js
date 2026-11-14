@@ -42,6 +42,8 @@ export function render() {
 
     <p>Most day-to-day options live inside the <code>config</code> object. Provider credentials live in the <code>providers</code> map.</p>
 
+    <p>When Coven Code saves the engine-global file, it preserves the JSON values of unknown top-level keys, including keys added by a newer version. This does not guarantee preservation of unknown keys inside <code>config</code> or other nested objects. Unknown keys from project settings are ignored and never copied into the global file.</p>
+
     <h2>Common <code>config</code> Options</h2>
 
     <h3>Model and Tokens</h3>

@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
+use std::cell::Cell;
 use unicode_width::UnicodeWidthStr;
 
 use crate::command_palette::CommandPaletteEntry;
@@ -288,10 +289,16 @@ pub fn modal_search_line(
 pub struct HelpOverlay {
     pub visible: bool,
     pub scroll_offset: u16,
-    /// Live search filter — only commands matching this substring are shown.
+    /// Live search filter — only shortcuts and commands matching this
+    /// substring are shown.
     pub filter: String,
     /// Dynamically populated entries from the command registry.
     pub commands: Vec<HelpEntry>,
+    /// The furthest scroll offset and the visible row count from the last
+    /// frame. The renderer knows how many rows the content wraps to; the
+    /// key handler scrolls within them.
+    pub max_scroll: Cell<u16>,
+    pub page_rows: Cell<u16>,
 }
 
 /// A single command entry shown in the help overlay.
@@ -341,13 +348,35 @@ impl HelpOverlay {
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.scroll_by(-1);
     }
 
-    pub fn scroll_down(&mut self, max: u16) {
-        if self.scroll_offset + 1 < max {
-            self.scroll_offset += 1;
-        }
+    pub fn scroll_down(&mut self) {
+        self.scroll_by(1);
+    }
+
+    pub fn page_up(&mut self) {
+        self.scroll_by(-i32::from(self.page_rows.get().max(1)));
+    }
+
+    pub fn page_down(&mut self) {
+        self.scroll_by(i32::from(self.page_rows.get().max(1)));
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = self.max_scroll.get();
+    }
+
+    /// Move within the rows the last frame laid out. An offset left past the
+    /// end by a resize or a narrower filter is pulled back first.
+    fn scroll_by(&mut self, rows: i32) {
+        let max = i32::from(self.max_scroll.get());
+        let current = i32::from(self.scroll_offset).min(max);
+        self.scroll_offset = (current + rows).clamp(0, max) as u16;
     }
 
     pub fn push_filter_char(&mut self, c: char) {
@@ -361,16 +390,211 @@ impl HelpOverlay {
     }
 }
 
+/// Keyboard shortcuts listed in the help overlay, by category.
+const HELP_SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Navigation",
+        &[
+            ("PageUp / PgDn", "Scroll messages"),
+            ("j / k", "Scroll one line"),
+            ("Home / End", "Top / bottom"),
+        ],
+    ),
+    (
+        "Input",
+        &[
+            ("Enter", "Submit message"),
+            ("Up / Down", "Input history"),
+            ("Ctrl+R", "Search history"),
+            ("Esc", "Cancel / close"),
+        ],
+    ),
+    (
+        "App",
+        &[
+            ("F1 / ?", "Toggle help"),
+            ("Alt+H", "Toggle help"),
+            ("F2", "Switch familiar"),
+            ("Ctrl+B", "Create / switch branch"),
+            ("Tab", "Cycle mode: build / plan / explore"),
+            ("Ctrl+Shift+A", "Model picker"),
+            ("Ctrl+K", "Command palette"),
+            ("Ctrl+C", "Cancel / quit"),
+            ("Ctrl+D", "Quit (empty input)"),
+            ("Ctrl+L", "Clear screen"),
+            ("t", "Expand/collapse thinking"),
+        ],
+    ),
+];
+
+/// Below this body width the two help columns are too narrow for their rows,
+/// so shortcuts and commands share one scrolling column.
+const HELP_TWO_COLUMN_MIN_WIDTH: u16 = 96;
+
+fn help_heading(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {text}"),
+        Style::default()
+            .fg(COVEN_CODE_ACCENT)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// One help row: `lead` (a key or command name, already padded) and then
+/// `description`, wrapped to `width` columns. Continuation lines start under
+/// the description, so a wrapped row never runs back under its key.
+fn help_row(lead: Vec<Span<'static>>, description: &str, width: u16) -> Vec<Line<'static>> {
+    let description_style = Style::default().fg(COVEN_CODE_MUTED);
+    let lead_width: usize = lead.iter().map(Span::width).sum();
+    let width = usize::from(width);
+    if description.is_empty() {
+        return vec![Line::from(lead)];
+    }
+    // When the lead leaves too little room, the description goes on its own
+    // lines, indented under the lead instead.
+    let (indent, first_on_lead) = if width.saturating_sub(lead_width) >= 12 {
+        (lead_width, true)
+    } else {
+        (4.min(width.saturating_sub(1)), false)
+    };
+    let chunks = crate::dialogs::word_wrap(description, width.saturating_sub(indent).max(1));
+    let mut lines = Vec::with_capacity(chunks.len() + 1);
+    let mut chunks = chunks.into_iter();
+    if first_on_lead {
+        let mut first = lead;
+        if let Some(chunk) = chunks.next() {
+            first.push(Span::styled(chunk, description_style));
+        }
+        lines.push(Line::from(first));
+    } else {
+        lines.push(Line::from(lead));
+    }
+    lines.extend(chunks.map(|chunk| {
+        Line::from(vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(chunk, description_style),
+        ])
+    }));
+    lines
+}
+
+/// Shortcut section lines at `width`, keeping only rows that match `filter`.
+fn help_shortcut_lines(filter: &str, width: u16) -> Vec<Line<'static>> {
+    let key_width = HELP_SHORTCUTS
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .map(|(key, _)| key.width())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut lines = vec![help_heading("Keyboard Shortcuts"), Line::from("")];
+    let mut any = false;
+    for (category, rows) in HELP_SHORTCUTS {
+        let matching: Vec<&(&str, &str)> = rows
+            .iter()
+            .filter(|(key, desc)| {
+                filter.is_empty()
+                    || key.to_lowercase().contains(filter)
+                    || desc.to_lowercase().contains(filter)
+            })
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        if any {
+            lines.push(Line::from(""));
+        }
+        any = true;
+        lines.push(help_heading(category));
+        for (key, desc) in matching {
+            let lead = vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{key:<key_width$}"),
+                    Style::default()
+                        .fg(COVEN_CODE_TEXT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            lines.extend(help_row(lead, desc, width));
+        }
+    }
+    if !any {
+        lines.push(Line::from(Span::styled(
+            " No matching shortcuts",
+            Style::default().fg(COVEN_CODE_MUTED),
+        )));
+    }
+    lines
+}
+
+/// Slash command section lines at `width`, keeping only entries that match
+/// `filter`.
+fn help_command_lines(commands: &[HelpEntry], filter: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![help_heading("Slash Commands"), Line::from("")];
+    let mut current_category = "";
+    let mut any = false;
+    for entry in commands.iter().filter(|e| {
+        filter.is_empty()
+            || e.name.to_lowercase().contains(filter)
+            || e.aliases.to_lowercase().contains(filter)
+            || e.description.to_lowercase().contains(filter)
+    }) {
+        if entry.category.as_str() != current_category {
+            current_category = entry.category.as_str();
+            if any {
+                lines.push(Line::from(""));
+            }
+            lines.push(help_heading(&entry.category));
+        }
+        any = true;
+        let name = format!("/{:<14}", entry.name);
+        // Aliases give way first when the row is narrow, so the name stays
+        // whole and the description keeps its own column.
+        let alias_room = usize::from(width).saturating_sub(2 + name.width() + 2);
+        let mut lead = vec![
+            Span::raw("  "),
+            Span::styled(
+                name,
+                Style::default()
+                    .fg(COVEN_CODE_TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !entry.aliases.is_empty() && alias_room > 0 {
+            lead.push(Span::styled(
+                crate::render::truncate_end(&format!(" ({})", entry.aliases), alias_room),
+                Style::default().fg(COVEN_CODE_MUTED),
+            ));
+        }
+        lead.push(Span::raw("  "));
+        lines.extend(help_row(lead, &entry.description, width));
+    }
+    if !any {
+        lines.push(Line::from(Span::styled(
+            " No matching commands",
+            Style::default().fg(COVEN_CODE_MUTED),
+        )));
+    }
+    lines
+}
+
 /// Render the help overlay into the frame.
+///
+/// The overlay takes the whole frame: nothing behind it shows in the margin
+/// around the dialog. Wide enough, shortcuts and commands sit side by side
+/// and the commands scroll; otherwise both share one scrolling column. Rows
+/// wrap under their own description, and the scroll range is counted in
+/// wrapped rows so the end of the list is always reachable (#423).
 pub fn render_help_overlay(frame: &mut Frame, overlay: &HelpOverlay, area: Rect) {
     use claurst_core::constants::APP_VERSION;
     use ratatui::layout::{Constraint, Direction, Layout};
-    use ratatui::widgets::Wrap;
 
     if !overlay.visible {
         return;
     }
 
+    frame.render_widget(Clear, area);
     let layout = begin_modal_frame(frame, area, 100, 36, 3, 1);
     render_modal_title_frame(frame, layout.header_area, "Shortcuts & commands", "esc");
     let search_line = modal_search_line(
@@ -384,10 +608,14 @@ pub fn render_help_overlay(frame: &mut Frame, overlay: &HelpOverlay, area: Rect)
     }
 
     let content_area = layout.body_area;
-    if content_area.height == 0 {
+    if content_area.height == 0 || content_area.width == 0 {
+        overlay.max_scroll.set(0);
+        overlay.page_rows.set(0);
         return;
     }
 
+    let filter = overlay.filter.to_lowercase();
+    let body_style = Style::default().bg(COVEN_CODE_PANEL_BG);
     let col_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -396,176 +624,55 @@ pub fn render_help_overlay(frame: &mut Frame, overlay: &HelpOverlay, area: Rect)
             Constraint::Min(1),
         ])
         .split(content_area);
+    let left_lines = help_shortcut_lines(&filter, col_chunks[0].width);
+    let two_columns = content_area.width >= HELP_TWO_COLUMN_MIN_WIDTH
+        && left_lines.len() <= usize::from(content_area.height);
 
-    // ─── Left column: keyboard shortcuts by category ───────────────────────
-    let mut left_lines: Vec<Line<'static>> = Vec::new();
+    let (scrolling_lines, scrolling_area) = if two_columns {
+        frame.render_widget(Paragraph::new(left_lines).style(body_style), col_chunks[0]);
+        let divider_lines: Vec<Line<'static>> = (0..content_area.height)
+            .map(|_| {
+                Line::from(Span::styled(
+                    "\u{2502}",
+                    Style::default().fg(COVEN_CODE_MUTED),
+                ))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(divider_lines), col_chunks[1]);
+        (
+            help_command_lines(&overlay.commands, &filter, col_chunks[2].width),
+            col_chunks[2],
+        )
+    } else {
+        let mut lines = help_shortcut_lines(&filter, content_area.width);
+        lines.push(Line::from(""));
+        lines.extend(help_command_lines(
+            &overlay.commands,
+            &filter,
+            content_area.width,
+        ));
+        (lines, content_area)
+    };
 
-    left_lines.push(Line::from(Span::styled(
-        " Keyboard Shortcuts",
-        Style::default()
-            .fg(COVEN_CODE_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    left_lines.push(Line::from(""));
-
-    // Navigation category
-    left_lines.push(Line::from(Span::styled(
-        " Navigation",
-        Style::default()
-            .fg(COVEN_CODE_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for (key, desc) in &[
-        ("PageUp / PgDn", "Scroll messages"),
-        ("j / k", "Scroll one line"),
-        ("Home / End", "Top / bottom"),
-    ] {
-        left_lines.push(kb_line(key, desc));
-    }
-    left_lines.push(Line::from(""));
-
-    // Input category
-    left_lines.push(Line::from(Span::styled(
-        " Input",
-        Style::default()
-            .fg(COVEN_CODE_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for (key, desc) in &[
-        ("Enter", "Submit message"),
-        ("Up / Down", "Input history"),
-        ("Ctrl+R", "Search history"),
-        ("Esc", "Cancel / close"),
-    ] {
-        left_lines.push(kb_line(key, desc));
-    }
-    left_lines.push(Line::from(""));
-
-    // App category
-    left_lines.push(Line::from(Span::styled(
-        " App",
-        Style::default()
-            .fg(COVEN_CODE_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for (key, desc) in &[
-        ("F1 / ?", "Toggle help"),
-        ("Alt+H", "Toggle help"),
-        ("F2", "Switch familiar"),
-        ("Ctrl+B", "Create / switch branch"),
-        ("Tab", "Cycle mode: build / plan / explore"),
-        ("Ctrl+Shift+A", "Model picker"),
-        ("Ctrl+K", "Command palette"),
-        ("Ctrl+C", "Cancel / quit"),
-        ("Ctrl+D", "Quit (empty input)"),
-        ("Ctrl+L", "Clear screen"),
-        ("t", "Expand/collapse thinking"),
-    ] {
-        left_lines.push(kb_line(key, desc));
-    }
-
-    frame.render_widget(
-        Paragraph::new(left_lines)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().bg(COVEN_CODE_PANEL_BG)),
-        col_chunks[0],
-    );
-
-    // ─── Center divider ────────────────────────────────────────────────────
-    let divider_lines: Vec<Line<'static>> = (0..content_area.height)
-        .map(|_| {
-            Line::from(Span::styled(
-                "\u{2502}",
-                Style::default().fg(COVEN_CODE_MUTED),
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(divider_lines), col_chunks[1]);
-
-    // ─── Right column: slash commands by category ──────────────────────────
-    let filter_lc = overlay.filter.to_lowercase();
-    let filtered: Vec<&HelpEntry> = overlay
-        .commands
-        .iter()
-        .filter(|e| {
-            filter_lc.is_empty()
-                || e.name.to_lowercase().contains(filter_lc.as_str())
-                || e.aliases.to_lowercase().contains(filter_lc.as_str())
-                || e.description.to_lowercase().contains(filter_lc.as_str())
-        })
-        .collect();
-
-    let mut right_lines: Vec<Line<'static>> = Vec::new();
-
-    right_lines.push(Line::from(Span::styled(
-        " Slash Commands",
-        Style::default()
-            .fg(COVEN_CODE_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    right_lines.push(Line::from(""));
-
-    let mut current_cat = "";
-    for entry in &filtered {
-        if entry.category.as_str() != current_cat {
-            current_cat = entry.category.as_str();
-            if right_lines.len() > 2 {
-                right_lines.push(Line::from(""));
-            }
-            right_lines.push(Line::from(Span::styled(
-                format!(" {}", entry.category),
-                Style::default()
-                    .fg(COVEN_CODE_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        }
-        let aliases_text = if entry.aliases.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", entry.aliases)
-        };
-        right_lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("/{:<14}", entry.name),
-                Style::default()
-                    .fg(COVEN_CODE_TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(aliases_text, Style::default().fg(COVEN_CODE_MUTED)),
-            Span::raw("  "),
-            Span::styled(
-                entry.description.clone(),
-                Style::default().fg(COVEN_CODE_MUTED),
-            ),
-        ]));
-    }
-
-    if filtered.is_empty() {
-        right_lines.push(Line::from(Span::styled(
-            " No matching commands",
-            Style::default().fg(COVEN_CODE_MUTED),
-        )));
-    }
-
-    let right_total = right_lines.len() as u16;
-    let right_visible = col_chunks[2].height;
-    let max_scroll = right_total.saturating_sub(right_visible);
+    let total = u16::try_from(scrolling_lines.len()).unwrap_or(u16::MAX);
+    let max_scroll = total.saturating_sub(scrolling_area.height);
+    overlay.max_scroll.set(max_scroll);
+    overlay.page_rows.set(scrolling_area.height);
     let scroll = overlay.scroll_offset.min(max_scroll);
-
     frame.render_widget(
-        Paragraph::new(right_lines)
-            .wrap(Wrap { trim: false })
+        Paragraph::new(scrolling_lines)
             .scroll((scroll, 0))
-            .style(Style::default().bg(COVEN_CODE_PANEL_BG)),
-        col_chunks[2],
+            .style(body_style),
+        scrolling_area,
     );
 
+    let scroll_hint = if two_columns {
+        "↑↓ PgUp/PgDn scroll commands"
+    } else {
+        "↑↓ PgUp/PgDn scroll"
+    };
     let version_line = Line::from(vec![Span::styled(
-        format!(
-            " v{}  ·  type to filter  ·  ↑↓ scroll commands  ·  esc close",
-            APP_VERSION
-        ),
+        format!(" v{APP_VERSION}  ·  type to filter  ·  {scroll_hint}  ·  esc close"),
         Style::default()
             .fg(COVEN_CODE_MUTED)
             .add_modifier(Modifier::ITALIC),
@@ -1544,23 +1651,6 @@ fn render_rewind_confirm(frame: &mut Frame, message_idx: usize, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helper
-// ---------------------------------------------------------------------------
-
-fn kb_line<'a>(key: &str, desc: &str) -> Line<'a> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("{:<20}", key),
-            Style::default()
-                .fg(COVEN_CODE_TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(desc.to_string(), Style::default().fg(COVEN_CODE_MUTED)),
-    ])
-}
-
-// ---------------------------------------------------------------------------
 // Global Search Dialog (T2-7)
 // ---------------------------------------------------------------------------
 
@@ -1719,6 +1809,11 @@ pub fn render_global_search(
         width: w,
         height: h,
     };
+    // The border, query row and separator need four rows; on a smaller
+    // terminal they would land outside the frame (#424).
+    if dialog.width < 4 || dialog.height < 4 {
+        return;
+    }
 
     Clear.render(dialog, buf);
     Block::default()

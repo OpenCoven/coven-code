@@ -128,7 +128,7 @@ cd '{cwd}'
 set +e
 {user_cmd}
 __CC_EXIT_CODE=$?
-echo '{sentinel}'
+printf '\n%s\n' '{sentinel}'
 pwd
 env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true
 exit $__CC_EXIT_CODE
@@ -551,7 +551,15 @@ impl Tool for PtyBashTool {
                         .rposition(|l| l.trim() == SHELL_STATE_SENTINEL);
 
                     let (user_lines, state_lines) = match sentinel_pos {
-                        Some(pos) => (&all_lines[..pos], &all_lines[pos + 1..]),
+                        Some(pos) => {
+                            let mut user_lines = &all_lines[..pos];
+                            // The delimiter adds one newline even when the
+                            // command did not. Do not expose that separator.
+                            if user_lines.last().is_some_and(|line| line.is_empty()) {
+                                user_lines = &user_lines[..user_lines.len() - 1];
+                            }
+                            (user_lines, &all_lines[pos + 1..])
+                        }
                         None => (all_lines.as_slice(), &[][..]),
                     };
 

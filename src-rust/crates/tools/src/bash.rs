@@ -21,6 +21,36 @@ const SHELL_STATE_SENTINEL: &str = "__CC_SHELL_STATE__";
 
 pub struct BashTool;
 
+/// Own the group established at spawn, including while the tool future is
+/// dropped. Never discover a group from the caller or from a later PID probe.
+#[cfg(unix)]
+struct ForegroundGroup {
+    group: Option<nix::unistd::Pid>,
+}
+
+#[cfg(unix)]
+impl ForegroundGroup {
+    fn terminate(&mut self) -> Result<(), nix::errno::Errno> {
+        match self.group.take() {
+            Some(group) => match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL)
+            {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+                Err(error) => Err(error),
+            },
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForegroundGroup {
+    fn drop(&mut self) {
+        if let Err(error) = self.terminate() {
+            tracing::warn!(%error, "Could not terminate owned foreground process group");
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BashInput {
     command: String,
@@ -134,7 +164,7 @@ cd '{cwd}'
 set +e
 {user_cmd}
 __CC_EXIT_CODE=$?
-echo '{sentinel}'
+printf '\n%s\n' '{sentinel}'
 pwd
 env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true
 exit $__CC_EXIT_CODE
@@ -361,17 +391,43 @@ impl Tool for BashTool {
             Ok(command) => command,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let mut child = match Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .current_dir(&ctx.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        // A scoped shell must inherit the Chat supervisor's process group.
+        #[cfg(unix)]
+        let owns_group = !crate::workspace_scope::active();
+        #[cfg(unix)]
+        if owns_group {
+            command.process_group(0);
+        }
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+        };
+
+        #[cfg(unix)]
+        let mut process_group = if owns_group {
+            match child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .filter(|pid| *pid >= 2)
+            {
+                Some(pid) => ForegroundGroup {
+                    group: Some(nix::unistd::Pid::from_raw(pid)),
+                },
+                None => {
+                    let _ = child.kill().await;
+                    return ToolResult::error("Could not establish foreground process ownership");
+                }
+            }
+        } else {
+            ForegroundGroup { group: None }
         };
 
         let stdout_handle = child.stdout.take();
@@ -393,6 +449,13 @@ impl Tool for BashTool {
 
         match result {
             Ok((stdout_lines, stderr_lines, status)) => {
+                // An acknowledged ordinary exit retains existing shell-state
+                // and explicit-background behavior. Cancellation/timeout own
+                // the entire still-running foreground group.
+                #[cfg(unix)]
+                if status.is_ok() {
+                    process_group.group = None;
+                }
                 let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
 
                 // Split stdout into user-visible output and the state block.
@@ -401,7 +464,15 @@ impl Tool for BashTool {
                     .rposition(|l| l.trim() == SHELL_STATE_SENTINEL);
 
                 let (user_lines, state_lines) = match sentinel_pos {
-                    Some(pos) => (&stdout_lines[..pos], &stdout_lines[pos + 1..]),
+                    Some(pos) => {
+                        let mut user_lines = &stdout_lines[..pos];
+                        // Remove only the empty line introduced by the
+                        // snapshot delimiter, retaining user blank lines.
+                        if user_lines.last().is_some_and(|line| line.is_empty()) {
+                            user_lines = &user_lines[..user_lines.len() - 1];
+                        }
+                        (user_lines, &stdout_lines[pos + 1..])
+                    }
                     None => (stdout_lines.as_slice(), &[][..]),
                 };
 
@@ -458,7 +529,13 @@ impl Tool for BashTool {
                 }
             }
             Err(_) => {
+                #[cfg(unix)]
+                let group_error = process_group.terminate().err();
                 let _ = child.kill().await;
+                #[cfg(unix)]
+                if let Some(error) = group_error {
+                    return ToolResult::error(format!("Command timed out after {timeout_ms}ms; owned process-group termination failed: {error}"));
+                }
                 ToolResult::error(format!("Command timed out after {}ms", timeout_ms))
             }
         }

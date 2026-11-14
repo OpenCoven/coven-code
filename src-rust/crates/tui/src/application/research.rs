@@ -6,13 +6,14 @@
 //! exists is the transcript: each `WebSearch` or `WebFetch` tool call and its
 //! result. [`ResearchView`] pairs them by tool-use id and shows only what the
 //! transcript actually records. Search hits are parsed from free-form tool
-//! text and are labeled unverified; retrieval time, final URL, status on
-//! success and content hash are not recorded by the tools (#433), so they are
-//! never shown as known. Source text is untrusted data: it is made terminal
-//! safe, has its newlines removed, and is never interpreted.
+//! text and are labeled unverified. Fetch facts come only from the engine's
+//! structured retrieval record; text-only historical results remain unknown.
+//! Source text is untrusted data: it is made terminal safe, has its newlines
+//! removed, and is never interpreted as a retrieval record or authorization.
 
 use super::view::terminal_safe;
 use claurst_core::types::{ContentBlock, Message, MessageContent, Role, ToolResultContent};
+use claurst_tools::web_fetch::{Extraction, Retrieval};
 use std::borrow::Cow;
 
 /// Which tool produced a source row.
@@ -55,6 +56,24 @@ pub struct SearchHit {
     pub url: String,
 }
 
+/// Display-safe facts reported by this engine's HTTP retrieval, not a
+/// canonical research citation or an independently verified source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalDetails {
+    pub final_url: String,
+    pub retrieved_at: String,
+    pub content_type: Option<String>,
+    pub body_sha256: String,
+    pub body_bytes: usize,
+    pub utf8_replacements: bool,
+    pub extraction: Extraction,
+    pub extraction_cached: bool,
+    pub text_truncated: bool,
+    pub original_text_bytes: usize,
+    pub url_credentials_redacted: bool,
+    pub url_fragments_omitted: bool,
+}
+
 /// One search or fetch call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceItem {
@@ -64,8 +83,10 @@ pub struct SourceItem {
     /// The search query, or the display form of the requested URL.
     pub request: String,
     pub outcome: SourceOutcome,
-    /// The HTTP status a failed fetch reported, when its error text has one.
+    /// A successful retrieval's recorded status, or a failed fetch's status
+    /// parsed from its error text. Other historical results remain unknown.
     pub http_status: Option<u16>,
+    pub retrieval: Option<RetrievalDetails>,
     /// Hits parsed from search output; empty for fetches.
     pub hits: Vec<SearchHit>,
 }
@@ -80,18 +101,43 @@ impl ResearchView {
     /// Build rows from the transcript. `interrupted` holds the tool-use ids
     /// the interactive loop marked interrupted.
     pub fn from_messages(messages: &[Message], interrupted: &[String]) -> Self {
-        // One pass over the results, so a long transcript stays linear.
+        Self::from_messages_and_live(messages, interrupted, &Default::default())
+    }
+
+    /// Live result facts are presentation state, separate from human turns.
+    /// Session replacement clears them; resumed results come from history.
+    pub fn from_app(app: &crate::App, interrupted: &[String]) -> Self {
+        Self::from_messages_and_live(&app.messages, interrupted, &app.research_retrievals)
+    }
+
+    fn from_messages_and_live(
+        messages: &[Message],
+        interrupted: &[String],
+        live: &std::collections::HashMap<usize, std::collections::HashMap<String, Retrieval>>,
+    ) -> Self {
+        // Pair a result with its nearest preceding assistant call, so reused
+        // provider call ids cannot give an earlier call a later retrieval.
+        let mut owners = std::collections::HashMap::new();
         let mut results = std::collections::HashMap::new();
-        for block in messages.iter().flat_map(blocks_of) {
-            if let ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } = block
-            {
-                results
-                    .entry(tool_use_id.as_str())
-                    .or_insert((content, is_error.unwrap_or(false)));
+        for (index, message) in messages.iter().enumerate() {
+            for block in blocks_of(message) {
+                match block {
+                    ContentBlock::ToolUse { id, .. } if message.role == Role::Assistant => {
+                        owners.insert(id.as_str(), index);
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } if message.role == Role::User => {
+                        if let Some(owner) = owners.get(tool_use_id.as_str()) {
+                            results
+                                .entry((*owner, tool_use_id.as_str()))
+                                .or_insert((content, is_error.unwrap_or(false)));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         let last = messages.len().saturating_sub(1);
@@ -120,8 +166,23 @@ impl ResearchView {
                 _ => continue,
             };
             let mut http_status = None;
+            let result = results.get(&(index, id.as_str()));
+            let parsed = match result {
+                Some((content, false)) if origin == SourceOrigin::Fetch => {
+                    Retrieval::from_content(content)
+                }
+                _ => None,
+            };
+            let record = parsed.as_ref().or_else(|| {
+                if result.is_none() {
+                    live.get(&index)
+                        .and_then(|records| records.get(id.as_str()))
+                } else {
+                    None
+                }
+            });
             let mut hits = Vec::new();
-            let outcome = match results.get(id.as_str()) {
+            let outcome = match result {
                 Some((content, true)) => {
                     let text = result_text(content);
                     http_status = text
@@ -140,18 +201,37 @@ impl ResearchView {
                     }
                     SourceOutcome::Returned
                 }
+                None if record.is_some() => SourceOutcome::Returned,
                 None if interrupted.iter().any(|stopped| stopped == id) => {
                     SourceOutcome::Interrupted
                 }
                 None if index < last => SourceOutcome::NoResult,
                 None => SourceOutcome::Pending,
             };
+            let retrieval = record.map(|record| {
+                http_status = Some(record.http_status);
+                RetrievalDetails {
+                    final_url: display_url(&record.final_url),
+                    retrieved_at: one_line(&record.retrieved_at),
+                    content_type: record.content_type.as_deref().map(one_line),
+                    body_sha256: record.body_sha256.clone(),
+                    body_bytes: record.body_bytes,
+                    utf8_replacements: record.utf8_replacements,
+                    extraction: record.extraction.clone(),
+                    extraction_cached: record.extraction_cached,
+                    text_truncated: record.text_truncated,
+                    original_text_bytes: record.original_text_bytes,
+                    url_credentials_redacted: record.url_credentials_redacted,
+                    url_fragments_omitted: record.url_fragments_omitted,
+                }
+            });
             items.push(SourceItem {
                 origin,
                 reference: one_line(id),
                 request,
                 outcome,
                 http_status,
+                retrieval,
                 hits,
             });
         }
@@ -931,4 +1011,6 @@ mod tests {
             .collect();
         assert_eq!(titles, ["A", "A again"]);
     }
+
+    include!("research/provenance_tests.rs");
 }

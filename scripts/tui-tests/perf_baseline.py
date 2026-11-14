@@ -36,6 +36,7 @@ import argparse
 import fcntl
 import json
 import os
+from pathlib import Path
 import pty
 import re
 import select
@@ -71,7 +72,7 @@ def set_size(fd, cols, rows):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def session_env(home, ui, claude_bin=None):
+def session_env(home, ui, claude_bin=None, render_timing=False):
     """Environment for one engine: built from nothing, so no credential leaks in."""
     env = {
         "PATH": os.defpath,
@@ -81,6 +82,9 @@ def session_env(home, ui, claude_bin=None):
         "TERM": "xterm-256color",
         "LANG": "en_US.UTF-8",
     }
+    if render_timing:
+        env["RUST_LOG"] = "warn,coven_code::render_timing=trace"
+        env["COVEN_CODE_DISABLE_MODELS_FETCH"] = "1"
     if ui == "next":
         env["COVEN_CODE_UI"] = "next"
     if claude_bin:
@@ -164,14 +168,18 @@ def paint_gaps_ms(times, merge_ms=FRAME_MERGE_MS):
 
 class Session:
     def __init__(self, binary, cols, rows, home, project, ui="classic", resume=None,
-                 claude_bin=None):
+                 claude_bin=None, render_timing=False):
+        self.render_timing = render_timing
+        self.timing_dir = Path(home) / ".coven-code" / "logs"
         self.master, slave = pty.openpty()
         set_size(slave, cols, rows)
         argv = [binary] + (["--resume", resume] if resume else [])
+        if render_timing:
+            argv.append("--diagnostics")
         self.started = time.perf_counter()
         self.proc = subprocess.Popen(
             argv, stdin=slave, stdout=slave, stderr=slave, cwd=project,
-            env=session_env(home, ui, claude_bin), start_new_session=True, close_fds=True,
+            env=session_env(home, ui, claude_bin, render_timing), start_new_session=True, close_fds=True,
         )
         os.close(slave)
         self.answered = {}
@@ -195,6 +203,36 @@ class Session:
                 if reply:
                     os.write(self.master, reply * n)
         return data, now
+
+    def timing_checkpoint(self):
+        return {path: path.stat().st_size for path in self.timing_dir.glob("session-*.log")}
+
+    def wait_completed_frame(self, checkpoint, timeout, input_chars=None, size=None, active=None):
+        """Upper bound: observe the log written after the complete backend draw.
+
+        Match new numeric input length and dimensions, not reused probe letters
+        or a first output chunk. No clock alignment across processes is needed.
+        """
+        pattern = re.compile(rb"TUI frame timing renderer=(Classic|Next) cols=(\d+) rows=(\d+) active=(true|false) render_ns=(\d+) draw_ns=(\d+) input_chars=(\d+)")
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            for path in self.timing_dir.glob("session-*.log"):
+                data = path.read_bytes()[checkpoint.get(path, 0):]
+                for _, cols, rows, running, _, _, length in pattern.findall(data):
+                    if input_chars is not None and int(length) != input_chars:
+                        continue
+                    if size is not None and (int(cols), int(rows)) != size:
+                        continue
+                    if active is not None and (running == b"true") != active:
+                        continue
+                    # Drain the actual PTY as well; a full pipe must not turn
+                    # this observer into a benchmark of its own backpressure.
+                    self.read(0)
+                    return time.perf_counter()
+            if self.proc.poll() is not None:
+                return None
+            self.read(0.001)
+        return None
 
     def wait_for(self, needles, timeout):
         buf = b""
@@ -296,9 +334,11 @@ def measure_stream(s, keys):
     inputs, failures = [], []
     for k in range(keys):
         key = STREAM_KEYS[k % len(STREAM_KEYS):k % len(STREAM_KEYS) + 1]
+        checkpoint = s.timing_checkpoint() if s.render_timing else None
         sent = time.perf_counter()
         os.write(s.master, key)
-        at = s.wait_for([key], 2)
+        at = (s.wait_completed_frame(checkpoint, 2, input_chars=k + 1, active=True)
+              if s.render_timing else s.wait_for([key], 2))
         if at is None:
             failures.append(f"key {key!r} not painted in 2s during a turn")
         else:
@@ -307,9 +347,25 @@ def measure_stream(s, keys):
     return gaps, inputs, failures
 
 
-def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stream=False):
+def read_render_timings(home, ui, cols, rows, active):
+    """Read opted-in local measurements; refuse missing or truncated evidence."""
+    from pathlib import Path
+    paths = list((Path(home) / ".coven-code" / "logs").glob("session-*.log"))
+    text = "".join(path.read_text() for path in paths)
+    if "Earlier diagnostics discarded" in text or "Diagnostic event omitted" in text:
+        return [], ["render timing diagnostics were truncated"]
+    pattern = re.compile(r"TUI frame timing renderer=(Classic|Next) cols=(\d+) rows=(\d+) active=(true|false) render_ns=(\d+) draw_ns=(\d+)")
+    samples = []
+    for renderer, width, height, running, render_ns, draw_ns in pattern.findall(text):
+        if renderer.lower() == ui and (int(width), int(height)) == (cols, rows) and (running == "true") == active:
+            samples.append({"render_ms": int(render_ns) / 1_000_000, "draw_ms": int(draw_ns) / 1_000_000})
+    return samples, [] if samples else ["no matching in-process render measurements"]
+
+
+def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stream=False, render_timing=False):
     cold, inputs, resizes, rss, idle, failures, answered = [], [], [], [], [], [], {}
     stream_gaps, stream_inputs = [], []
+    render_samples, draw_samples = [], []
     for i in range(runs):
         with tempfile.TemporaryDirectory(prefix="coven-perf-") as root:
             home = os.path.join(root, "home")
@@ -319,11 +375,21 @@ def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stre
             with open(os.path.join(home, ".coven-code", "settings.json"), "w",
                       encoding="utf-8") as f:
                 f.write('{"hasCompletedOnboarding": true}')
+            if render_timing:
+                # Exclude background update metadata requests from matched
+                # cold-start and active-frame measurements.
+                for cache in (Path(home) / "Library/Caches", Path(home) / ".cache"):
+                    directory = cache / "coven-code"
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / "update_check.txt").write_text("")
             resume = seed_session(home, project, history_lines) if history_lines else None
             fake = write_fake_claude(root) if stream else None
-            s = Session(binary, cols, rows, home, project, ui, resume, fake)
+            s = Session(binary, cols, rows, home, project, ui, resume, fake, render_timing)
             try:
                 at = s.wait_for(ready_needles(ui, bool(resume)), 20)
+                if at is not None and render_timing:
+                    remaining = max(0, 20 - (time.perf_counter() - s.started))
+                    at = s.wait_completed_frame({}, remaining, input_chars=0, size=(cols, rows))
                 if at is None:
                     failures.append(f"run {i}: no usable frame within 20s")
                     continue
@@ -333,19 +399,23 @@ def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stre
                 idle.append(s.idle_writes_per_second())
                 for k in range(keys):
                     key = KEYS[k % len(KEYS):k % len(KEYS) + 1]
+                    checkpoint = s.timing_checkpoint() if render_timing else None
                     sent = time.perf_counter()
                     os.write(s.master, key)
-                    at = s.wait_for([key], 2)
+                    at = (s.wait_completed_frame(checkpoint, 2, input_chars=k + 1)
+                          if render_timing else s.wait_for([key], 2))
                     if at is None:
                         failures.append(f"run {i}: key {key!r} not painted in 2s")
                     else:
                         inputs.append((at - sent) * 1000)
                     s.drain(0.08)
                 for dc, dr in ((cols + 10, rows + 4), (cols, rows)):
-                    set_size(s.master, dc, dr)
+                    checkpoint = s.timing_checkpoint() if render_timing else None
                     sent = time.perf_counter()
+                    set_size(s.master, dc, dr)
                     os.killpg(s.proc.pid, signal.SIGWINCH)
-                    at = s.wait_visible(2)
+                    at = (s.wait_completed_frame(checkpoint, 2, size=(dc, dr))
+                          if render_timing else s.wait_visible(2))
                     if at is None:
                         failures.append(f"run {i}: no repaint after resize")
                     else:
@@ -360,6 +430,11 @@ def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stre
                     answered[q] = answered.get(q, 0) + n
             finally:
                 s.close()
+            if render_timing:
+                measured, problems = read_render_timings(home, ui, cols, rows, active=stream)
+                failures += [f"run {i}: {problem}" for problem in problems]
+                render_samples.extend(row["render_ms"] for row in measured)
+                draw_samples.extend(row["draw_ms"] for row in measured)
     rss = [r for r in rss if r is not None]
     during_turn = {
         "stream_input_to_paint": summarize(stream_inputs),
@@ -369,6 +444,7 @@ def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stre
         "cells": f"{cols}x{rows}",
         "ui": ui,
         "history_lines": history_lines,
+        "latency_observation": ("completed backend draw observed through opt-in diagnostic log; latency includes observation overhead" if render_timing else "first matching PTY text; first visible resize chunk"),
         "runs": runs,
         "cold_usable_frame": summarize(cold),
         "input_to_paint": summarize(inputs),
@@ -381,6 +457,11 @@ def run_size(binary, cols, rows, runs, keys, ui="classic", history_lines=0, stre
         "idle_writes_per_second_p50": (
             round(statistics.median(idle), 1) if idle else None),
         **during_turn,
+        **({"in_process_render": summarize(render_samples), "completed_draw": summarize(draw_samples),
+            "raw_samples": {"cold_usable_frame_ms": cold, "input_to_paint_ms": inputs,
+                            "resize_to_paint_ms": resizes, "stream_input_to_paint_ms": stream_inputs,
+                            "render_ms": render_samples, "draw_ms": draw_samples, "idle_rss_kib": rss}}
+           if render_timing else {}),
         "queries_answered": {repr(k): v for k, v in answered.items()},
         "failures": failures,
     }
@@ -396,6 +477,7 @@ def main():
     ap.add_argument("--ui", choices=["classic", "next"], default="classic")
     ap.add_argument("--history-lines", type=int, default=0)
     ap.add_argument("--stream", action="store_true")
+    ap.add_argument("--render-timing", action="store_true", help="Opt in to bounded private logs and in-process render/draw measurements")
     args = ap.parse_args()
     sizes = args.size or ["80x24", "120x40"]
     binary = os.path.abspath(args.bin)
@@ -403,7 +485,7 @@ def main():
     for size in sizes:
         cols, rows = (int(v) for v in size.split("x"))
         results.append(run_size(binary, cols, rows, args.runs, args.keys,
-                                args.ui, args.history_lines, args.stream))
+                                args.ui, args.history_lines, args.stream, args.render_timing))
     report = {"binary": binary, "results": results}
     text = json.dumps(report, indent=2)
     print(text)

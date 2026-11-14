@@ -58,6 +58,8 @@ and verify the effective behavior before relying on a global preference.
 Most day-to-day options live inside the `config` object. Provider credentials
 live in the `providers` map.
 
+When Coven Code saves the engine-global file, it preserves the JSON values of unknown top-level keys, including keys added by a newer version. This does not guarantee preservation of unknown keys inside `config` or other nested objects. Unknown keys from project settings are ignored and never copied into the global file.
+
 ---
 
 ## The `config` Object

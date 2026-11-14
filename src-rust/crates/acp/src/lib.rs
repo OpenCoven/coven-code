@@ -36,6 +36,7 @@
 //! This will be resolved as part of the planned unified MCP routing work
 //! (see `src-rust/plan/migration-todo.md`).
 
+mod admission;
 mod connection;
 mod permission;
 mod prompt;
@@ -45,9 +46,13 @@ mod sessions;
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use futures::{stream::FuturesUnordered, StreamExt};
+#[cfg(test)]
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::info;
+#[cfg(test)]
+use tracing::warn;
 
 pub use connection::Connection;
 pub use runtime::AgentRuntime;
@@ -66,32 +71,42 @@ pub async fn run_acp_server() -> anyhow::Result<()> {
 
     let runtime = AgentRuntime::build(working_dir).await?;
     let runtime = Arc::new(runtime);
-    let connection = Connection::new(tokio::io::stdout());
-    let server = AgentServer::new(connection, runtime);
-
-    run_connection(server, tokio::io::stdin()).await
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::FileTypeExt;
+        // Tokio's generic stdio uses uncancellable blocking tasks. An editor's
+        // full output pipe or open, idle input pipe would outlive our shutdown
+        // deadline. Register actual pipes with the reactor instead.
+        let output = std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?);
+        let connection = if output.metadata()?.file_type().is_fifo() {
+            Connection::new(tokio::net::unix::pipe::Sender::from_file(output)?)
+        } else {
+            Connection::new(tokio::io::stdout())
+        };
+        let server = AgentServer::new(connection, runtime);
+        let input = std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
+        if input.metadata()?.file_type().is_fifo() {
+            run_connection(server, tokio::net::unix::pipe::Receiver::from_file(input)?).await
+        } else {
+            run_connection(server, tokio::io::stdin()).await
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let connection = Connection::new(tokio::io::stdout());
+        let server = AgentServer::new(connection, runtime);
+        run_connection(server, tokio::io::stdin()).await
+    }
 }
 
 async fn run_connection<R>(server: Arc<AgentServer>, reader: R) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let reader_fut = connection::run_reader(server.connection.clone(), reader, tx);
-
-    // Track in-flight dispatch tasks so they can finish writing their
-    // responses before the runtime shuts down. The dispatch future only
-    // returns once the reader has dropped `tx` (closing `rx`) AND every
-    // spawned handler has resolved.
-    let dispatch_fut = dispatch_messages(server, rx);
-
-    let (reader_res, _) = tokio::join!(reader_fut, dispatch_fut);
-    if let Err(e) = &reader_res {
-        error!(?e, "ACP: reader loop failed");
-    }
-
-    info!("ACP: server shutdown");
-    reader_res.map_err(|error| error.context("ACP reader loop failed"))
+    admission::run(server, reader)
+        .await
+        .map_err(|error| error.context("ACP reader loop failed"))
 }
 
 fn install_stderr_tracing() {
@@ -105,6 +120,7 @@ fn install_stderr_tracing() {
         .try_init();
 }
 
+#[cfg(test)]
 async fn dispatch_messages(
     server: Arc<AgentServer>,
     mut rx: mpsc::UnboundedReceiver<connection::Inbound>,
@@ -133,3 +149,6 @@ async fn dispatch_messages(
 mod dispatch_tests;
 #[cfg(test)]
 mod reader_tests;
+
+#[cfg(test)]
+mod test_support;

@@ -72,6 +72,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/05_input_editing.sh` | Prompt input | typed text echoes into the buffer, `Ctrl+U` clears it |
 | `cases/06_quit.sh` | Shutdown | `Ctrl+C` twice exits cleanly back to the shell |
 | `cases/07_paste_burst.sh` | Paste burst | a line delivered in one write still submits; interior newlines coalesce without submitting |
+| `cases/23_classic_zero_size.sh` | Zero and tiny sizes | Classic starts at 0x0, 0x40 and 120x0 and survives 120x0 with the exit toast, 0x40, 0x0, 1x1 and 20x6, then draws a full frame at 120x40, exits 0 and restores the terminal; tmux cannot make a zero-sized window, so `zero_size_pty.py` drives a raw PTY and needs `python3` |
 
 ## Configuration
 
@@ -161,6 +162,19 @@ the turn and the gap between paints. That gap is a boundary proxy for active
 render cost; its floor is the event loop's 16 ms poll, and a slower fake
 producer would widen it. The fake is set from launch, so every figure from a
 `--stream` run, cold start and idle ones included, comes from a session with a
-provider: compare it only with other `--stream` runs. Classic cannot show the
-live end of a transcript past 65,535 rows (#441), so `--stream` with 100,000
-lines exits nonzero on Classic.
+provider: compare it only with other `--stream` runs. The long-history fixture must prove live tail visibility; older Classic builds fail this check past 65,535 rows (#441).
+
+
+### Actual render and completed draw timing
+
+Add `--render-timing` to opt in to private diagnostic files for each synthetic benchmark session. The engine records renderer, terminal dimensions, active state, input character count, scroll offset and follow state, and numeric render/draw durations. It records no prompt text. The widget/layout measurement surrounds the renderer call; the complete draw measurement also includes Ratatui diffing and backend writes. These are actual in-process durations, separate from paint gaps.
+
+In this mode, key latency waits for a completed draw with the new input length, and resize latency waits for a completed draw at the requested dimensions. Both match records written after the operation began. Repeated probe letters and the first output chunk cannot satisfy them. Observing the local diagnostic file adds overhead, so these latencies are upper bounds that include observation cost; they do not require clock alignment between Python and Rust. Cold timing requires both the usable PTY text and a completed draw. Existing runs without this flag retain their PTY boundary probes.
+
+Timing logs use the same explicitly opted-in, bounded private diagnostics policy as `--diagnostics`. Missing or truncated logs fail the run. The JSON report includes raw numeric samples for audit and percentile recalculation; temporary homes and their diagnostic files are retired after each run. Compare Classic and Next with identical instrumentation, provider setup, binary profile, hardware, terminal dimensions and workload, and record quiet-host variance. A debug smoke measurement is not reference-machine release qualification.
+
+```bash
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --render-timing --stream --ui next --history-lines 100000 \
+  --runs 20 --keys 20 --size 80x24 --size 120x40 --json measured-next.json
+```

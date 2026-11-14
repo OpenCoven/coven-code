@@ -1,5 +1,6 @@
 //! Private, bounded diagnostics for interactive terminals.
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -7,20 +8,24 @@ use std::sync::Arc;
 use tracing_subscriber::fmt::MakeWriter;
 
 pub const MAX_BYTES: usize = 1024 * 1024;
+const MEMORY_BYTES: usize = 64 * 1024;
 const KEEP_COMPLETED: usize = 10;
 const HEADER: &[u8] = b"Coven Code diagnostic log v1\n";
 const ROLLED: &[u8] = b"Earlier diagnostics discarded at the 1 MiB limit.\n";
 const OVERSIZED: &[u8] = b"Diagnostic event omitted: exceeds the file size limit.\n";
 
 struct State {
-    file: File,
+    file: Option<File>,
     bytes: usize,
+    tail: VecDeque<u8>,
+    omitted: u64,
+    changed: bool,
     failed: bool,
     error: Option<String>,
 }
 
 struct Inner {
-    path: PathBuf,
+    path: Option<PathBuf>,
     state: Mutex<State>,
 }
 
@@ -30,6 +35,24 @@ pub struct DiagnosticLog {
 }
 
 impl DiagnosticLog {
+    /// Process-local diagnostics without creating a directory or file.
+    pub fn memory() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                path: None,
+                state: Mutex::new(State {
+                    file: None,
+                    bytes: 0,
+                    tail: VecDeque::new(),
+                    omitted: 0,
+                    changed: true,
+                    failed: false,
+                    error: None,
+                }),
+            }),
+        }
+    }
+
     pub fn open(directory: &Path) -> io::Result<Self> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -73,10 +96,13 @@ impl DiagnosticLog {
         }
         Ok(Self {
             inner: Arc::new(Inner {
-                path,
+                path: Some(path),
                 state: Mutex::new(State {
-                    file,
+                    file: Some(file),
                     bytes: HEADER.len(),
+                    tail: VecDeque::new(),
+                    omitted: 0,
+                    changed: true,
                     failed: false,
                     error: None,
                 }),
@@ -84,8 +110,28 @@ impl DiagnosticLog {
         })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.inner.path
+    pub fn path(&self) -> Option<&Path> {
+        self.inner.path.as_deref()
+    }
+
+    /// A bounded snapshot for the on-demand reader; never a transcript message.
+    pub fn take_snapshot(&self) -> Option<String> {
+        let mut state = self.inner.state.lock();
+        if !state.changed {
+            return None;
+        }
+        state.changed = false;
+        let mode = if self.inner.path.is_some() {
+            "private file enabled"
+        } else {
+            "memory only; not saved"
+        };
+        let mut text = format!("Diagnostics ({mode})\n");
+        if state.omitted > 0 {
+            text.push_str(&format!("{} earlier bytes omitted.\n", state.omitted));
+        }
+        text.push_str(&String::from_utf8_lossy(state.tail.make_contiguous()));
+        Some(text)
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -149,35 +195,55 @@ impl<'a> MakeWriter<'a> for DiagnosticLog {
 
 impl Write for DiagnosticWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let input_len = buffer.len();
+        let safe = if buffer.len() > MAX_BYTES - HEADER.len() - ROLLED.len() {
+            String::from_utf8_lossy(OVERSIZED).into_owned()
+        } else {
+            claurst_tui::application::view::terminal_safe(&String::from_utf8_lossy(buffer))
+        };
+        let payload = if safe.len() > MAX_BYTES - HEADER.len() - ROLLED.len() {
+            OVERSIZED
+        } else {
+            safe.as_bytes()
+        };
         let mut state = self.log.inner.state.lock();
+        for byte in payload {
+            if state.tail.len() == MEMORY_BYTES {
+                state.tail.pop_front();
+                state.omitted = state.omitted.saturating_add(1);
+            }
+            state.tail.push_back(*byte);
+        }
+        state.changed = true;
         if state.failed {
             return Err(io::Error::other(
                 "diagnostic logging stopped after a write failure",
             ));
         }
-        let payload = if buffer.len() > MAX_BYTES - HEADER.len() - ROLLED.len() {
-            OVERSIZED
+        let mut bytes = state.bytes;
+        let result = if let Some(file) = state.file.as_mut() {
+            (|| {
+                if bytes + payload.len() > MAX_BYTES {
+                    file.set_len(0)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.write_all(HEADER)?;
+                    file.write_all(ROLLED)?;
+                    bytes = HEADER.len() + ROLLED.len();
+                }
+                file.write_all(payload)?;
+                bytes += payload.len();
+                Ok(())
+            })()
         } else {
-            buffer
-        };
-        let result = (|| {
-            if state.bytes + payload.len() > MAX_BYTES {
-                state.file.set_len(0)?;
-                state.file.seek(SeekFrom::Start(0))?;
-                state.file.write_all(HEADER)?;
-                state.file.write_all(ROLLED)?;
-                state.bytes = HEADER.len() + ROLLED.len();
-            }
-            state.file.write_all(payload)?;
-            state.bytes += payload.len();
             Ok(())
-        })();
+        };
+        state.bytes = bytes;
         if let Err(error) = result {
             state.failed = true;
             state.error = Some(format!("{error}"));
             return Err(error);
         }
-        Ok(buffer.len())
+        Ok(input_len)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -189,6 +255,38 @@ impl Write for DiagnosticWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_diagnostics_are_bounded_sanitized_and_have_no_file() {
+        let log = DiagnosticLog::memory();
+        assert!(log.path().is_none());
+        log.make_writer()
+            .write_all(&vec![b'x'; MEMORY_BYTES * 2])
+            .unwrap();
+        log.make_writer()
+            .write_all("last\x1b]52;hostile\x07\u{009b}\u{202e}".as_bytes())
+            .unwrap();
+        let snapshot = log.take_snapshot().unwrap();
+        assert!(snapshot.contains("memory only; not saved"));
+        assert!(snapshot.contains("earlier bytes omitted") && snapshot.contains("last"));
+        assert!(snapshot.len() < MEMORY_BYTES + 256);
+        for ch in ['\x1b', '\x07', '\u{009b}', '\u{202e}'] {
+            assert!(!snapshot.contains(ch));
+        }
+        assert!(log.take_snapshot().is_none());
+        assert!(log.inner.state.lock().file.is_none());
+    }
+
+    #[test]
+    fn sanitization_expansion_cannot_exceed_the_persistent_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = DiagnosticLog::open(directory.path()).unwrap();
+        log.make_writer()
+            .write_all(&vec![b'\t'; MAX_BYTES / 2])
+            .unwrap();
+        let bytes = fs::read(log.path().unwrap()).unwrap();
+        assert!(bytes.len() <= MAX_BYTES && bytes.ends_with(OVERSIZED));
+    }
 
     fn prune_until(directory: &Path, keep: usize, expected_files: usize, live: &[&Path]) {
         // Concurrent tests spawn subprocesses. On Unix a fork may briefly inherit
@@ -213,16 +311,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = DiagnosticLog::open(dir.path()).unwrap();
         let b = DiagnosticLog::open(dir.path()).unwrap();
-        assert_ne!(a.path(), b.path());
+        assert_ne!(a.path().unwrap(), b.path().unwrap());
         a.make_writer().write_all(b"first\n").unwrap();
         b.make_writer().write_all(b"second\n").unwrap();
         prune_completed(dir.path(), 0).unwrap();
-        assert!(a.path().exists() && b.path().exists());
+        assert!(a.path().unwrap().exists() && b.path().unwrap().exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                fs::metadata(a.path()).unwrap().permissions().mode() & 0o777,
+                fs::metadata(a.path().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o600
             );
             assert_eq!(
@@ -230,11 +332,11 @@ mod tests {
                 0o700
             );
         }
-        let a_path = a.path().to_owned();
+        let a_path = a.path().unwrap().to_owned();
         drop(a);
-        prune_until(dir.path(), 0, 1, &[b.path()]);
+        prune_until(dir.path(), 0, 1, &[b.path().unwrap()]);
         assert!(!a_path.exists());
-        assert!(b.path().exists());
+        assert!(b.path().unwrap().exists());
     }
 
     #[test]
@@ -260,14 +362,14 @@ mod tests {
         log.make_writer().write_all(&chunk).unwrap();
         log.make_writer().write_all(&chunk).unwrap();
         log.make_writer().write_all(b"latest\n").unwrap();
-        let bytes = fs::read(log.path()).unwrap();
+        let bytes = fs::read(log.path().unwrap()).unwrap();
         assert!(bytes.len() <= MAX_BYTES);
         assert!(bytes.starts_with(&[HEADER, ROLLED].concat()));
         assert!(bytes.ends_with(b"latest\n"));
         log.make_writer()
             .write_all(&vec![b'y'; MAX_BYTES + 1])
             .unwrap();
-        let bytes = fs::read(log.path()).unwrap();
+        let bytes = fs::read(log.path().unwrap()).unwrap();
         assert!(bytes.len() <= MAX_BYTES && bytes.ends_with(OVERSIZED));
     }
 
@@ -276,7 +378,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = DiagnosticLog::open(dir.path()).unwrap();
         // Substitute a read-only handle to provoke a real OS write error.
-        log.inner.state.lock().file = File::open(log.path()).unwrap();
+        log.inner.state.lock().file = Some(File::open(log.path().unwrap()).unwrap());
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .log_internal_errors(false)
