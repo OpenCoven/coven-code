@@ -30,7 +30,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Contract: workflow mirror, smoke fixtures and stamp preflight ───
+  # ── Contract: shared build inputs, smoke fixtures, stamp preflight ──
   contract:
     runs-on: ubuntu-latest
     name: Candidate contract and stamps
@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Verify the build mirrors release.yml and cannot publish
+      - name: Verify every release build uses the shared build and nothing publishes
         run: python3 -B scripts/test-release-candidate.py -v
 
       # A stamped version with no tag yet is a real candidate and gets the

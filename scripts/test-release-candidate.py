@@ -57,6 +57,8 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('  CARGO_TERM_COLOR: ${{ inputs.cargo-term-color }}\n', BUILD)
         for required in ('persist-credentials', 'openssl', 'cargo-term-color'):
             self.assertRegex(BUILD, rf'(?m)^      {required}:\n(?:        .*\n)*?        required: true\n')
+        # Release and patch builds rely on the default to upload their binaries.
+        self.assertRegex(BUILD, r'(?m)^      upload:\n(?:        .*\n)*?        default: true\n')
         for forbidden in ('permissions:', 'secrets.', 'concurrency:', 'pull_request', 'workflow_dispatch'):
             self.assertNotIn(forbidden, BUILD)
 
