@@ -973,8 +973,15 @@ fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
         "{text}"
     );
 
-    // Only time passes: no event, no edit to the rows.
-    std::thread::sleep(std::time::Duration::from_millis(1_050));
+    // Only time passes: no event, no edit to the rows. Frames come often, so
+    // one lands before the first second, when no time is shown yet.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "Bash").trim_end().ends_with("running"),
+        "{text}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(450));
     let text = text_of(&draw(&app, 100, 30));
     assert!(row_of(&text, "Bash").contains("running 1s"), "{text}");
     // The time shown rounds, so the row changes at each half second.
@@ -1083,4 +1090,112 @@ fn the_exit_report_says_which_tools_never_started_and_which_results_were_not_sav
     let lines = report.lines(&saved).join("\n");
     assert!(!lines.contains("Edit /a.rs"), "{lines}");
     assert!(lines.contains("Not started: Edit /b.rs"), "{lines}");
+}
+
+#[test]
+fn a_row_made_from_a_saved_result_takes_its_place_after_the_rows_before_it() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
+    let mut app = next_app();
+    app.push_message(Message::user("look first".to_string()));
+    tool_start(&mut app, "old", "Read", r#"{"file_path":"/old.rs"}"#);
+    tool_end(&mut app, "old", "Read", "contents", false);
+    app.push_message(Message::user("now two".to_string()));
+    tool_start(&mut app, "a", "Grep", r#"{"pattern":"fn"}"#);
+    // A call whose start never arrived, such as one cancelled before it ran,
+    // gets its row from the saved result.
+    app.push_message(Message::assistant_blocks(vec![ContentBlock::ToolUse {
+        id: "b".to_string(),
+        name: "Glob".to_string(),
+        input: serde_json::json!({"pattern": "*.rs"}),
+    }]));
+    apply(
+        &mut app,
+        QueryEvent::DurableMessage {
+            message: Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "b".to_string(),
+                content: ToolResultContent::Text("cancelled".to_string()),
+                is_error: Some(true),
+            }]),
+        },
+    );
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    let order: Vec<&str> = view.tools.iter().map(|tool| tool.id.as_str()).collect();
+    assert_eq!(order, ["old", "a", "b"]);
+}
+
+#[test]
+fn a_cancelled_tool_is_not_reported_as_finished_but_unsaved() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
+    let mut app = next_app();
+    app.push_message(Message::user("search".to_string()));
+    tool_start(&mut app, "grep", "Grep", r#"{"pattern":"fn"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "grep".to_string(),
+            is_error: true,
+        },
+    );
+    let report = claurst_tui::next::TurnExitReport::capture(&app);
+    let mut saved = app.messages.to_vec();
+    saved.push(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "grep".to_string(),
+        content: ToolResultContent::Text(claurst_query::TOOL_CANCELLED_RESULT.to_string()),
+        is_error: Some(true),
+    }]));
+    let lines = report.lines(&saved).join("\n");
+    assert!(!lines.contains("Grep"), "its result was saved: {lines}");
+}
+
+#[test]
+fn a_tool_asking_for_approval_has_not_started_unless_it_was_allowed_before() {
+    let mut app = next_app();
+    app.push_message(Message::user("run two".to_string()));
+    tool_start(&mut app, "first", "Bash", r#"{"command":"make"}"#);
+    tool_start(&mut app, "again", "Bash", r#"{"command":"make install"}"#);
+    app.record_permission_decision("again", true);
+    let ask = |id: &str| {
+        claurst_tui::dialogs::PermissionRequest::bash(
+            id.to_string(),
+            "Bash".to_string(),
+            "make".to_string(),
+            "make".to_string(),
+            None,
+        )
+    };
+    app.permission_request = Some(ask("first"));
+    let lines = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(lines.contains("Not started: Bash make"), "{lines}");
+
+    // Allowed once already, it was at work when it asked again.
+    app.permission_request = Some(ask("again"));
+    let lines = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(
+        lines.contains("No result from Bash make install"),
+        "{lines}"
+    );
+    assert!(!lines.contains("Not started: Bash make install"), "{lines}");
+}
+
+#[test]
+fn a_second_approval_does_not_reset_a_tools_time() {
+    let mut app = next_app();
+    app.push_message(Message::user("deploy".to_string()));
+    tool_start(&mut app, "deploy", "Bash", r#"{"command":"make deploy"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolRunning {
+            tool_id: "deploy".to_string(),
+        },
+    );
+    app.record_permission_decision("deploy", true);
+    app.tool_use_blocks[0].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(65));
+    app.record_permission_decision("deploy", true);
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "make deploy").contains("1m 5s"), "{text}");
 }

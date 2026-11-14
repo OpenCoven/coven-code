@@ -424,8 +424,9 @@ pub struct ToolUseBlock {
 /// `ToolEnd` that waits for every tool in its response. Only Next shows this.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRun {
-    /// When its row opened, which keeps its place among the other rows.
-    pub opened_at: Option<std::time::Instant>,
+    /// The order its row opened in, which keeps its place among the other
+    /// rows; 0 for a row built outside the runtime's events.
+    pub opened: u64,
     /// When its own work began, or the moment it was approved if it asked.
     /// Unset while hooks run or it waits for its turn: that time is not its.
     pub started_at: Option<std::time::Instant>,
@@ -436,6 +437,15 @@ pub struct ToolRun {
 }
 
 impl ToolRun {
+    /// A run for a row opening now, after every row opened before it.
+    fn opening() -> Self {
+        static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
     fn finish(&mut self, is_error: bool) {
         if self.finished.is_none() {
             let took = self.started_at.map(|at| at.elapsed()).unwrap_or_default();
@@ -3475,11 +3485,16 @@ impl App {
     /// Remember the user's decision for a tool call so presentation can
     /// show authorization separately from the execution result.
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
-        self.permission_decisions
-            .insert(tool_use_id.to_string(), allowed);
-        // Time spent waiting on the user is not time the tool spent working.
-        if let Some(run) = self.tool_run_mut(tool_use_id) {
-            run.started_at = Some(std::time::Instant::now());
+        let first = self
+            .permission_decisions
+            .insert(tool_use_id.to_string(), allowed)
+            .is_none();
+        // Time spent waiting on the user before its work began is not time
+        // the tool spent working. A tool that asks again was already at work.
+        if first {
+            if let Some(run) = self.tool_run_mut(tool_use_id) {
+                run.started_at = Some(std::time::Instant::now());
+            }
         }
     }
 
@@ -7904,7 +7919,7 @@ impl App {
                         input_json,
                         status: ToolStatus::Running,
                         output_preview: None,
-                        run: Default::default(),
+                        run: ToolRun::opening(),
                     });
                     self.tool_use_blocks.len() - 1
                 }
@@ -8023,7 +8038,7 @@ impl App {
                     existing.output_preview = None;
                     existing.input_json = input_json;
                     existing.run = ToolRun {
-                        opened_at: existing.run.opened_at,
+                        opened: existing.run.opened,
                         ..ToolRun::default()
                     };
                 } else {
@@ -8034,10 +8049,7 @@ impl App {
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
-                        run: ToolRun {
-                            opened_at: Some(std::time::Instant::now()),
-                            ..ToolRun::default()
-                        },
+                        run: ToolRun::opening(),
                     });
                 }
                 self.invalidate_transcript();

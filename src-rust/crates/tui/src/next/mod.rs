@@ -441,8 +441,8 @@ struct ToolKey {
     diagnostic_path: Option<std::path::PathBuf>,
     memory_diagnostics: bool,
     live: bool,
-    /// Seconds the unfinished tools have been working, rounded as the rows
-    /// show them and summed. While no event touches the rows each count only
+    /// Seconds the unfinished tools have been working, as the rows show them
+    /// (none under a second, then rounded), summed. While no event touches the rows each count only
     /// grows, so the sum changes whenever a row's time would; an event that
     /// resets one changes a stamp above.
     running_seconds: u64,
@@ -494,7 +494,10 @@ impl ToolRows {
                 .iter()
                 .filter(|block| block.run.finished.is_none())
                 .filter_map(|block| block.run.started_at)
-                .map(|at| (at.elapsed() + std::time::Duration::from_millis(500)).as_secs())
+                .map(|at| match at.elapsed() {
+                    elapsed if elapsed < crate::application::view::SHORTEST_ELAPSED => 0,
+                    elapsed => (elapsed + std::time::Duration::from_millis(500)).as_secs(),
+                })
                 .sum(),
             approval: app
                 .permission_request
@@ -718,6 +721,10 @@ impl TurnExitReport {
                 ToolActivityState::Running | ToolActivityState::CancelRequested => report
                     .open
                     .push((tool.id.clone(), format!("No result from {named}"))),
+                // A tool allowed before was already at work when it asked again.
+                ToolActivityState::AwaitingApproval if tool.allowed == Some(true) => report
+                    .open
+                    .push((tool.id.clone(), format!("No result from {named}"))),
                 ToolActivityState::AwaitingApproval | ToolActivityState::Queued => {
                     report.not_started.push(format!("Not started: {named}"))
                 }
@@ -736,32 +743,37 @@ impl TurnExitReport {
         report
     }
 
-    /// The report, leaving out every tool whose result `saved` holds. The
-    /// result cancellation records for a call it cut off is not one: it says
-    /// the call stopped, not what it did.
+    /// The report, read against the conversation as saved. A tool still at
+    /// work is left out once its result is saved, but not for the result
+    /// cancellation records for a call it cut off: that says the call
+    /// stopped, not what it did. A finished tool is left out once any result
+    /// for it is saved.
     pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
         use claurst_core::types::{ContentBlock, ToolResultContent};
-        let answered: std::collections::HashSet<String> = saved
+        let mut answered = std::collections::HashSet::new();
+        let mut saved_results = std::collections::HashSet::new();
+        for block in saved.iter().flat_map(|message| message.content_blocks()) {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            {
+                let cancelled = is_error == Some(true)
+                    && matches!(&content, ToolResultContent::Text(text)
+                        if text == claurst_query::TOOL_CANCELLED_RESULT);
+                if !cancelled {
+                    answered.insert(tool_use_id.clone());
+                }
+                saved_results.insert(tool_use_id);
+            }
+        }
+        let open: Vec<String> = self
+            .open
             .iter()
-            .flat_map(|message| message.content_blocks())
-            .filter_map(|block| match block {
-                ContentBlock::ToolResult {
-                    content: ToolResultContent::Text(text),
-                    is_error: Some(true),
-                    ..
-                } if text == claurst_query::TOOL_CANCELLED_RESULT => None,
-                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
-                _ => None,
-            })
+            .filter(|(id, _)| !answered.contains(id))
+            .map(|(_, line)| line.clone())
             .collect();
-        let unanswered = |lines: &[(String, String)]| -> Vec<String> {
-            lines
-                .iter()
-                .filter(|(id, _)| !answered.contains(id))
-                .map(|(_, line)| line.clone())
-                .collect()
-        };
-        let open = unanswered(&self.open);
         let mut report = vec![
             "Quit during a turn. It stopped here: this session runs inside coven-code, so \
              nothing carries it on."
@@ -776,7 +788,12 @@ impl TurnExitReport {
             );
         }
         report.extend(self.not_started.iter().cloned());
-        report.extend(unanswered(&self.finished));
+        report.extend(
+            self.finished
+                .iter()
+                .filter(|(id, _)| !saved_results.contains(id))
+                .map(|(_, line)| line.clone()),
+        );
         report
     }
 }

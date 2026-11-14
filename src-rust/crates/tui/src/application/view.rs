@@ -103,7 +103,7 @@ pub struct ToolActivity {
 }
 
 /// Shorter than this, a time on a tool row is only noise.
-const SHORTEST_ELAPSED: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const SHORTEST_ELAPSED: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a tool's work has taken. A cancelled tool shows none: whether its
 /// work stopped, and when, is not known here (see #373).
@@ -300,8 +300,9 @@ impl TranscriptView {
             .chain(interrupted)
             .collect();
         // A cancel moves the rows still at work to their own list; each row
-        // keeps the place its tool started in.
-        rows.sort_by_key(|(block, _)| block.run.opened_at);
+        // keeps the place it opened in. Rows built outside the runtime's
+        // events keep their order, after the others.
+        rows.sort_by_key(|(block, _)| (block.run.opened == 0, block.run.opened));
         rows.into_iter()
             .map(|(block, state)| ToolActivity {
                 id: block.id.clone(),
