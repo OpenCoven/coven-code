@@ -12,6 +12,7 @@ use claurst_core::config::Settings;
 use claurst_core::keybindings::UserKeybindings;
 use ratatui::layout::Rect;
 
+use super::style::ColorMode;
 use super::{layout, InspectorPage, NextPresentation, ShellState};
 use crate::app::App;
 
@@ -56,19 +57,31 @@ impl ShellState {
     /// Open the inspector where `choice` asks, and report whether it could.
     /// Work and Inspect wait for room beside the transcript, so a session never
     /// starts with its transcript hidden; the inspector key still opens it at
-    /// any size.
+    /// any size. A layout that cannot place the inspector yet leaves one the
+    /// user opened to them, rather than taking it over for the next resize.
     pub fn apply_layout(&mut self, choice: LayoutChoice, terminal: (u16, u16)) -> bool {
-        self.layout_places = Some(choice);
         let area = Rect::new(0, 0, terminal.0, terminal.1);
         let page = match choice {
             LayoutChoice::Focus => None,
-            _ if layout::SizeClass::of(area) != layout::SizeClass::Split => return false,
+            _ if layout::SizeClass::of(area) != layout::SizeClass::Split => {
+                if !self.user_holds_inspector() {
+                    self.layout_places = Some(choice);
+                }
+                return false;
+            }
             LayoutChoice::Work => Some(InspectorPage::Work),
             LayoutChoice::Inspect => Some(InspectorPage::Activity),
         };
+        self.layout_places = Some(choice);
         self.inspector = page;
         self.inspector_scroll = 0;
         true
+    }
+
+    /// Whether an inspector the user opened or turned is showing: the layout
+    /// setting has not placed it since.
+    pub fn user_holds_inspector(&self) -> bool {
+        self.layout_places.is_none() && self.inspector.is_some()
     }
 
     /// Keep the inspector where the layout setting put it as the terminal
@@ -197,13 +210,16 @@ pub fn run_appearance_command(
     let edits = &app.next_shell.appearance_edits;
     let layout_before = with_preview(saved, edits).next_appearance.layout;
     let mut layout_named = false;
-    let reply = match command {
+    let mut rich_color_named = false;
+    let mut reply = match command {
         AppearanceCommand::Show => return listing(saved, edits),
         AppearanceCommand::Set { key, value } => {
             match app.next_shell.appearance_edits.set(&key, &value) {
                 Err(reason) => return reason,
                 Ok(()) => {
                     layout_named = key == "layout";
+                    rich_color_named =
+                        key == "colorMode" && matches!(value.as_str(), "truecolor" | "256");
                     format!(
                         "Previewing {key} = {value}. Not saved: /config appearance save keeps \
                          it, /config appearance revert drops it."
@@ -249,12 +265,23 @@ pub fn run_appearance_command(
         }
     };
     apply_presentation(app, saved, keybindings, env);
+    // Brand colors need a known background; on an unknown one Next keeps the
+    // terminal's own palette whatever the color mode asks.
+    if rich_color_named && app.next_presentation.appearance.color == ColorMode::Ansi16 {
+        reply.push_str(
+            " The terminal does not report its background, so Next keeps the terminal's own \
+             16 colors; preview theme dark or light to use this color mode.",
+        );
+    }
     let layout_after = with_preview(saved, &app.next_shell.appearance_edits)
         .next_appearance
         .layout;
-    if (layout_named || layout_after != layout_before)
-        && !app.next_shell.apply_layout(layout_after, terminal)
-    {
+    // Naming a layout applies it. Reverting or resetting one applies the
+    // result only while the layout still holds the inspector, so an
+    // inspector the user took stays where they put it.
+    let follow =
+        layout_named || (layout_after != layout_before && !app.next_shell.user_holds_inspector());
+    if follow && !app.next_shell.apply_layout(layout_after, terminal) {
         return format!(
             "{reply} The {} layout opens at 120x32 or larger; this terminal is {}x{}.",
             layout_after.as_str(),

@@ -1831,21 +1831,27 @@ pub mod config {
         path: &std::path::Path,
         edits: &crate::appearance::AppearanceEdits,
     ) -> anyhow::Result<()> {
-        let mut root: serde_json::Value = match std::fs::read_to_string(path) {
-            Ok(content) => serde_json::from_str(&content)
-                .with_context(|| format!("{} is not valid JSON", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                serde_json::Value::Object(Default::default())
-            }
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot read {}", path.display()))
             }
         };
+        let mut root: serde_json::Value = match &content {
+            Some(content) => serde_json::from_str(content)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?,
+            None => serde_json::Value::Object(Default::default()),
+        };
         let object = root
             .as_object_mut()
             .with_context(|| format!("{} does not hold a settings object", path.display()))?;
-        serde_json::from_value::<Settings>(serde_json::Value::Object(object.clone()))
-            .with_context(|| format!("{} cannot be read as settings", path.display()))?;
+        // The text, as the loader reads it: a parsed value has already
+        // dropped all but the last copy of a repeated key.
+        if let Some(content) = &content {
+            serde_json::from_str::<Settings>(content)
+                .with_context(|| format!("{} cannot be read as settings", path.display()))?;
+        }
         let mut layer: crate::appearance::NextAppearanceSettings =
             match object.get("nextAppearance") {
                 Some(value) => serde_json::from_value(value.clone())?,
@@ -2608,6 +2614,23 @@ pub mod config {
             // Valid JSON, but a value of the wrong type: loading falls back to
             // defaults, so saving into it would only hide that.
             let content = r#"{"hasCompletedOnboarding":"yes","kept":1}"#;
+            assert!(serde_json::from_str::<Settings>(content).is_err());
+            std::fs::write(&path, content).unwrap();
+            let mut edits = crate::appearance::AppearanceEdits::default();
+            edits.set("density", "compact").unwrap();
+
+            let error = write_appearance_edits(&path, &edits).unwrap_err();
+            assert!(format!("{error:#}").contains("settings.json"), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+
+        #[test]
+        fn appearance_edits_refuse_a_file_with_a_repeated_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            // The loader rejects a repeated field, so the whole file is
+            // ignored; a parsed JSON value would keep only the last copy.
+            let content = r#"{"reduceMotion":true,"reduceMotion":false,"kept":1}"#;
             assert!(serde_json::from_str::<Settings>(content).is_err());
             std::fs::write(&path, content).unwrap();
             let mut edits = crate::appearance::AppearanceEdits::default();

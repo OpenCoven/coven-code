@@ -196,8 +196,9 @@ fn layout_opens_the_inspector_only_when_it_fits_beside_the_transcript() {
     app.next_shell.apply_action("toggleInspector");
     run(&mut app, &saved, "density compact", SPLIT);
     assert_eq!(app.next_shell.inspector, Some(InspectorPage::Activity));
-    // Dropping a layout preview closes what the preview opened.
     run(&mut app, &saved, "revert", SPLIT);
+    assert_eq!(app.next_shell.inspector, Some(InspectorPage::Activity));
+    // Dropping a layout preview closes what the preview opened.
     run(&mut app, &saved, "layout work", SPLIT);
     run(&mut app, &saved, "revert", SPLIT);
     assert_eq!(app.next_shell.inspector, None);
@@ -308,4 +309,73 @@ fn the_layout_follows_a_resize_until_the_user_takes_the_inspector() {
     let turned = small.next_shell.inspector;
     small.next_shell.follow_layout(NARROW);
     assert_eq!(small.next_shell.inspector, turned);
+}
+
+#[test]
+fn dropping_a_layout_preview_keeps_an_inspector_the_user_opened() {
+    let saved = Settings::default();
+    let mut app = app();
+    run(&mut app, &saved, "layout work", NARROW);
+    app.next_shell.apply_action("toggleInspector");
+    let opened = app.next_shell.inspector;
+    assert!(opened.is_some());
+
+    run(&mut app, &saved, "revert", NARROW);
+    assert_eq!(app.next_shell.inspector, opened, "revert");
+    run(&mut app, &saved, "layout inspect", NARROW);
+    run(&mut app, &saved, "reset", NARROW);
+    assert_eq!(app.next_shell.inspector, opened, "reset");
+}
+
+#[test]
+fn a_layout_that_does_not_fit_leaves_the_users_inspector_to_them() {
+    let saved = Settings::default();
+    let mut app = app();
+    app.next_shell.apply_action("toggleInspector");
+    let opened = app.next_shell.inspector;
+    assert!(opened.is_some());
+
+    let reply = run(&mut app, &saved, "layout work", NARROW);
+    assert!(reply.contains("120x32"), "{reply}");
+    assert_eq!(app.next_shell.inspector, opened);
+    app.next_shell.follow_layout((NARROW.0 - 1, NARROW.1));
+    assert_eq!(app.next_shell.inspector, opened, "a resize leaves it alone");
+}
+
+#[test]
+fn a_color_mode_the_unknown_background_rules_out_says_so() {
+    let unknown_background = |name: &str| match name {
+        "COLORTERM" => Some("truecolor".to_string()),
+        _ => None,
+    };
+    let saved = Settings::default();
+    let mut app = app();
+    let reply = run_appearance_command(
+        &mut app,
+        parse_appearance_command("colorMode truecolor").expect("parses"),
+        &saved,
+        None,
+        &UserKeybindings::default(),
+        unknown_background,
+        SPLIT,
+    );
+    assert_eq!(app.next_presentation.appearance.color, ColorMode::Ansi16);
+    assert!(reply.contains("16 colors"), "{reply}");
+    assert!(reply.contains("theme dark"), "{reply}");
+
+    // A known theme lets the color mode through, and the reply says nothing more.
+    let reply = run_appearance_command(
+        &mut app,
+        parse_appearance_command("theme dark").expect("parses"),
+        &saved,
+        None,
+        &UserKeybindings::default(),
+        unknown_background,
+        SPLIT,
+    );
+    assert_eq!(app.next_presentation.appearance.color, ColorMode::TrueColor);
+    assert!(!reply.contains("16 colors"), "{reply}");
+    let reply = run(&mut app, &saved, "colorMode 256", SPLIT);
+    assert_eq!(app.next_presentation.appearance.color, ColorMode::Ansi256);
+    assert!(!reply.contains("16 colors"), "{reply}");
 }
