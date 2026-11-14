@@ -275,7 +275,7 @@ fn stderr_fixture_worker() {
             model: "fixture".into(), messages: vec![Message::user("fixture prompt")],
             system_prompt: None, tools: Vec::new(), max_tokens: 16,
             temperature: None, top_p: None, top_k: None, stop_sequences: Vec::new(),
-            thinking: None, provider_options: serde_json::json!({}),
+            thinking: None, provider_options: serde_json::json!({}), permission_mode: None,
         };
         if case == "startup-drop" {
             {
