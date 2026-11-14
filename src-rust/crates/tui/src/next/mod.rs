@@ -701,15 +701,21 @@ impl TurnExitReport {
         Self { open }
     }
 
-    /// The report, leaving out every tool whose result `saved` holds.
+    /// The report, leaving out every tool whose result `saved` holds. The
+    /// result cancellation records for a call it cut off is not one: it says
+    /// the call stopped, not what it did.
     pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
+        use claurst_core::types::{ContentBlock, ToolResultContent};
         let answered: std::collections::HashSet<String> = saved
             .iter()
             .flat_map(|message| message.content_blocks())
             .filter_map(|block| match block {
-                claurst_core::types::ContentBlock::ToolResult { tool_use_id, .. } => {
-                    Some(tool_use_id)
-                }
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Text(text),
+                    is_error: Some(true),
+                    ..
+                } if text == claurst_query::TOOL_CANCELLED_RESULT => None,
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
                 _ => None,
             })
             .collect();

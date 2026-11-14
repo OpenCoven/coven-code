@@ -3982,6 +3982,11 @@ struct PreparedTool {
     started: bool,
 }
 
+/// The result recorded for a tool call that cancellation cut off. It says the
+/// call was stopped, not what it did: the outcome stays unknown.
+pub const TOOL_CANCELLED_RESULT: &str =
+    "Tool cancelled before completion; side effects may already have occurred.";
+
 /// Execute tool invocations through the common policy-aware tool path.
 async fn execute_tool_blocks_with_hooks(
     tool_blocks: Vec<(String, String, Value)>,
@@ -3990,8 +3995,7 @@ async fn execute_tool_blocks_with_hooks(
     event_tx: Option<&QueryEventSink>,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Vec<ContentBlock> {
-    const CANCELLED: &str =
-        "Tool cancelled before completion; side effects may already have occurred.";
+    const CANCELLED: &str = TOOL_CANCELLED_RESULT;
     // Phase 1: Run PreToolUse hooks sequentially so policy denials can block
     // execution before any tool side effects occur.
     let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());

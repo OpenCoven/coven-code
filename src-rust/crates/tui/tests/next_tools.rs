@@ -859,3 +859,25 @@ fn the_exit_report_leaves_out_a_tool_whose_result_arrived() {
     assert!(!report.contains("sleep 1"), "its result is saved: {report}");
     assert!(report.contains("No result from Bash sleep 30"), "{report}");
 }
+
+#[test]
+fn the_exit_report_still_names_a_tool_that_was_cancelled_mid_run() {
+    use claurst_core::types::{ContentBlock, ToolResultContent};
+    let mut app = next_app();
+    app.push_message(Message::user("run it".to_string()));
+    tool_start(&mut app, "cut-off", "Bash", r#"{"command":"sleep 30"}"#);
+    // Stopping the turn records the cancellation as the call's result. That
+    // says the call was cut off, not what it did, so the outcome stays unknown.
+    app.push_message(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "cut-off".to_string(),
+        content: ToolResultContent::Text(claurst_query::TOOL_CANCELLED_RESULT.to_string()),
+        is_error: Some(true),
+    }]));
+
+    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    assert!(report.contains("No result from Bash sleep 30"), "{report}");
+    assert!(
+        report.contains("What these finished is unknown"),
+        "{report}"
+    );
+}
