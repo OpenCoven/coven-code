@@ -26,7 +26,10 @@ pub fn run_cases(worker: &str, cases: &[&str]) {
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The bound only catches a hung worker. Every goal write is a synced
+        // SQLite commit, and the valid read case makes over 160 of them, which
+        // took 9-11 s on a macOS host whose disk other builds were using.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let outcome = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
