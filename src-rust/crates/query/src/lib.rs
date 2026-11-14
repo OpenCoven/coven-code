@@ -4002,6 +4002,7 @@ async fn execute_tool_blocks_with_hooks(
                 name,
                 input,
                 blocked_result: Some(ToolResult::error(CANCELLED)),
+                started: false,
             });
             continue;
         }
@@ -4047,6 +4048,7 @@ async fn execute_tool_blocks_with_hooks(
                 name,
                 input,
                 blocked_result: Some(ToolResult::error(CANCELLED)),
+                started: true,
             });
             continue;
         }
@@ -8947,7 +8949,9 @@ mod tests {
         let ctx = scheduling_ctx(dir.path());
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
             release.notify_one();
             assert_eq!(next_progress(&mut rx).await, "finished quick error=true");
@@ -8989,7 +8993,9 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
             // Refused at once, while the other tool in the response still runs.
             assert_eq!(next_progress(&mut rx).await, "finished refused error=true");
@@ -9016,7 +9022,9 @@ mod tests {
         let ctx = scheduling_ctx(dir.path());
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&tx));
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
             assert_eq!(next_progress(&mut rx).await, "queued second");
             release.notify_one();

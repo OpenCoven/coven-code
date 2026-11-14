@@ -90,6 +90,7 @@ fn classic_live_text_and_tool_output_are_inert() {
         status: ToolStatus::Done,
         output_preview: Some(HOSTILE.into()),
         input_json: "{}".into(),
+        run: Default::default(),
     });
     assert_frame_inert(&app);
     assert_eq!(

@@ -99,6 +99,7 @@ fn tool_rows_and_running_count_follow_direct_edits_decisions_and_cancellation() 
         status: ToolStatus::Running,
         output_preview: None,
         input_json: "{\"path\":\"/synthetic/project/file\"}".into(),
+        run: Default::default(),
     });
     matches_fresh(&app, 80, 24);
     app.tool_use_blocks[0].input_json = "{\"path\":\"/synthetic/project/EDIT\"}".into();

@@ -3524,7 +3524,7 @@ impl App {
             rest.into_iter()
                 .filter(|block| block.status == ToolStatus::Running),
         );
-        self.tool_use_blocks = finished;
+        *self.tool_use_blocks = finished;
     }
 
     /// Record a cancellation the loop performed without a key request
