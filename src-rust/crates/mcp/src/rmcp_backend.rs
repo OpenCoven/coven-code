@@ -11,7 +11,7 @@ use rmcp::model as rmcp_model;
 use rmcp::service::RunningService;
 use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-    StreamableHttpClientTransport, TokioChildProcess,
+    StreamableHttpClientTransport,
 };
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{json, Value};
@@ -21,6 +21,8 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
+
+mod stdio;
 
 pub struct RmcpNotificationClient {
     notifications_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Value>>>>,
@@ -117,10 +119,21 @@ impl RmcpClientBackend {
             anyhow::anyhow!("MCP server '{}' has no command configured", config.name)
         })?;
 
-        let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
-            cmd.args(&config.args);
-            cmd.envs(&config.env);
-        }))
+        let (lifetime, shutdown) = match shutdown {
+            Some(shutdown) => (None, shutdown),
+            None => {
+                let (sender, receiver) = watch::channel(false);
+                (Some(sender), receiver)
+            }
+        };
+        let transport = stdio::DiagnosticChild::spawn(
+            Command::new(&command).configure(|cmd| {
+                cmd.args(&config.args);
+                cmd.envs(&config.env);
+            }),
+            &config.name,
+            lifetime,
+        )
         .map_err(|e| {
             anyhow::anyhow!(
                 "failed to spawn rmcp stdio child for '{}': {}",
@@ -130,7 +143,7 @@ impl RmcpClientBackend {
         })?;
 
         let client_info = build_client_info(rmcp_model::ProtocolVersion::default());
-        Self::connect_with_transport(config, transport, client_info, "stdio", shutdown).await
+        Self::connect_with_transport(config, transport, client_info, "stdio", Some(shutdown)).await
     }
 
     pub async fn connect_http(
@@ -330,14 +343,10 @@ impl LegacySseRmcpTransport {
                 transport::bearer_header_value(token)?,
             );
         }
-        let response = request.send().await.map_err(|e| {
-            anyhow::anyhow!(
-                "MCP server '{}': failed to open legacy SSE stream '{}': {}",
-                self.server_name,
-                self.sse_url,
-                e
-            )
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| legacy_sse_request_error(&self.server_name, "GET", error))?;
         if !response.status().is_success() {
             anyhow::bail!(
                 "MCP server '{}': legacy SSE stream returned HTTP {}",
@@ -354,7 +363,13 @@ impl LegacySseRmcpTransport {
         let task = tokio::spawn(async move {
             let result = transport::process_sse_response(response, |event, data| {
                 if matches!(event, Some("endpoint")) {
-                    let endpoint = transport::resolve_legacy_endpoint(&sse_url, data)?;
+                    let endpoint =
+                        transport::resolve_legacy_endpoint(&sse_url, data).map_err(|_| {
+                            anyhow::anyhow!(
+                                "MCP server '{}': invalid legacy SSE POST endpoint",
+                                server_name
+                            )
+                        })?;
                     *post_endpoint.lock().expect("endpoint mutex poisoned") =
                         Some(endpoint.clone());
                     if let Some(tx) = endpoint_tx_for_task
@@ -468,13 +483,10 @@ impl rmcp::transport::Transport<RoleClient> for LegacySseRmcpTransport {
                 );
             }
 
-            let response = request.send().await.map_err(|e| {
-                anyhow::anyhow!(
-                    "MCP server '{}': legacy SSE POST request failed: {}",
-                    server_name,
-                    e
-                )
-            })?;
+            let response = request
+                .send()
+                .await
+                .map_err(|error| legacy_sse_request_error(&server_name, "POST", error))?;
 
             handle_legacy_sse_http_response(server_name, response, incoming_tx, background_tasks)
                 .await
@@ -516,6 +528,36 @@ impl rmcp::transport::Transport<RoleClient> for LegacySseRmcpTransport {
             result
         }
     }
+}
+
+// Classify without retaining the request error: both its URL and its
+// source chain can carry credentials, including after redirects.
+fn legacy_sse_request_error(
+    server_name: &str,
+    stage: &str,
+    error: reqwest::Error,
+) -> anyhow::Error {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection"
+    } else if error.is_builder() {
+        "builder"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
+    };
+    anyhow::anyhow!(
+        "MCP server '{}': legacy SSE {} failed ({})",
+        server_name,
+        stage,
+        category
+    )
 }
 
 fn parse_server_message(
@@ -573,13 +615,10 @@ async fn handle_legacy_sse_http_response(
         return Ok(());
     }
 
-    let text = response.text().await.map_err(|e| {
-        anyhow::anyhow!(
-            "MCP server '{}': failed to read legacy SSE HTTP response body: {}",
-            server_name,
-            e
-        )
-    })?;
+    let text = response
+        .text()
+        .await
+        .map_err(|error| legacy_sse_request_error(&server_name, "POST response body", error))?;
     if text.trim().is_empty() {
         return Ok(());
     }
@@ -1757,3 +1796,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rmcp_endpoint_privacy_tests.rs"]
+mod endpoint_privacy_tests;
+
+#[cfg(test)]
+#[path = "rmcp_http_privacy_tests.rs"]
+mod http_privacy_tests;

@@ -21,6 +21,8 @@ use crate::{
 pub struct ResponseReaderState {
     pub visible: bool,
     pub message_index: Option<usize>,
+    /// Ephemeral local diagnostics, never inserted into the conversation.
+    pub local_text: Option<String>,
     pub scroll_offset: usize,
     pub restore_transcript_offset: usize,
     pub search_query: String,
@@ -46,10 +48,48 @@ impl ResponseReaderState {
     pub fn open(&mut self, message_index: usize, restore_offset: usize) {
         self.visible = true;
         self.message_index = Some(message_index);
+        self.local_text = None;
         self.scroll_offset = 0;
         self.restore_transcript_offset = restore_offset;
         self.search_query.clear();
         self.search_active = false;
+    }
+
+    pub fn open_local(&mut self, text: &str, restore_offset: usize) {
+        self.open(0, restore_offset);
+        self.message_index = None;
+        self.local_text = Some(crate::application::view::terminal_safe(text));
+    }
+
+    pub fn render_lines(&self, text: &str, width: u16) -> Vec<Line<'static>> {
+        if self.local_text.is_none() {
+            return render_markdown(text, width);
+        }
+        // Logs are plain text: Markdown must not hide syntax or turn captured
+        // output into links. Fold by terminal cells so the full tail is reachable.
+        use unicode_width::UnicodeWidthChar;
+        let width = usize::from(width.max(1));
+        let mut lines = Vec::new();
+        for source in text.lines() {
+            let mut line = String::new();
+            let mut cells = 0;
+            for ch in source.chars() {
+                let size = ch.width().unwrap_or(0);
+                if cells + size > width && !line.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut line)));
+                    cells = 0;
+                }
+                if size > width {
+                    line.push('�');
+                    cells += 1;
+                } else {
+                    line.push(ch);
+                    cells += size;
+                }
+            }
+            lines.push(Line::from(line));
+        }
+        lines
     }
 
     /// Close the reader and return the transcript offset captured on open.
@@ -60,6 +100,7 @@ impl ResponseReaderState {
 
         self.visible = false;
         self.message_index = None;
+        self.local_text = None;
         self.scroll_offset = 0;
         let restore_offset = self.restore_transcript_offset;
         self.restore_transcript_offset = 0;
@@ -97,10 +138,10 @@ impl ResponseReaderState {
 pub fn render_response_reader(
     frame: &mut Frame,
     state: &ResponseReaderState,
-    message: &Message,
+    message: Option<&Message>,
     area: Rect,
 ) {
-    if !state.visible {
+    if !state.visible || area.width < 7 || area.height < 7 {
         return;
     }
 
@@ -125,7 +166,12 @@ pub fn render_response_reader(
         width: inner_area.width,
         height: inner_area.height.saturating_sub(2),
     };
-    let lines = render_markdown(&response_reader_text(message), body_area.width);
+    let text = state
+        .local_text
+        .clone()
+        .or_else(|| message.map(response_reader_text))
+        .unwrap_or_default();
+    let lines = state.render_lines(&text, body_area.width);
     let line_count = lines.len();
     let scroll_offset = state
         .scroll_offset
@@ -141,7 +187,14 @@ pub fn render_response_reader(
         .border_style(Style::default().fg(COVEN_CODE_ACCENT));
     frame.render_widget(block, dialog_area);
     let mut header = vec![
-        Span::styled("Reader", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if state.local_text.is_some() {
+                "Diagnostics"
+            } else {
+                "Reader"
+            },
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!(" · line {line_position} / {line_count}"),
             Style::default().fg(COVEN_CODE_MUTED),
@@ -195,10 +248,35 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
+    fn local_reader_keeps_literal_text_and_resets_before_a_conversation_response() {
+        let mut state = ResponseReaderState::default();
+        state.open_local(
+            "[literal](https://example.invalid)\n\x1b]52;hostile\x07",
+            12,
+        );
+        assert!(state.visible && state.message_index.is_none());
+        let text = state.local_text.as_deref().unwrap();
+        assert!(!text.contains('\x1b') && !text.contains('\x07'));
+        let lines = state.render_lines(text, 12);
+        let visible: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(visible.contains("[literal](https://example.invalid)"));
+        assert_eq!(state.close(), Some(12));
+        assert!(state.local_text.is_none());
+        state.open(3, 7);
+        assert_eq!(state.message_index, Some(3));
+        assert!(state.local_text.is_none());
+    }
+
+    #[test]
     fn open_resets_reader_state_and_close_restores_transcript_offset() {
         let mut state = ResponseReaderState {
             visible: false,
             message_index: Some(2),
+            local_text: None,
             scroll_offset: 7,
             restore_transcript_offset: 0,
             search_query: "old".to_string(),
@@ -275,7 +353,7 @@ mod tests {
         ]);
 
         terminal
-            .draw(|frame| render_response_reader(frame, &state, &message, frame.area()))
+            .draw(|frame| render_response_reader(frame, &state, Some(&message), frame.area()))
             .unwrap();
 
         let content: String = terminal
@@ -301,7 +379,7 @@ mod tests {
         state.end(22, 70_001);
 
         terminal
-            .draw(|frame| render_response_reader(frame, &state, &message, frame.area()))
+            .draw(|frame| render_response_reader(frame, &state, Some(&message), frame.area()))
             .unwrap();
 
         let content: String = terminal

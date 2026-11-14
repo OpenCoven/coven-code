@@ -1,9 +1,7 @@
 //! Captured diagnostics from real dispatch and permission wire paths; no runtime startup.
 use super::*;
 use crate::connection::Inbound;
-use crate::runtime::AgentRuntime;
-use crate::server::AgentServer;
-use claurst_core::{Config, Settings};
+use crate::test_support::server;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::Write;
@@ -47,38 +45,6 @@ fn capture<F: Future>(future: F) -> (F::Output, String) {
     });
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     (output, text)
-}
-
-fn server(connection: Arc<Connection>) -> Arc<AgentServer> {
-    let settings = Settings::default();
-    let config = Config::default();
-    let permission_manager = Arc::new(StdMutex::new(
-        claurst_core::permissions::PermissionManager::new(
-            config.permission_mode.clone(),
-            &settings,
-        ),
-    ));
-    let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
-        api_key: "unused-fixture-key".into(),
-        api_base: "http://127.0.0.1:9".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    AgentServer::new(
-        connection,
-        Arc::new(AgentRuntime {
-            config,
-            settings,
-            api_client: Arc::new(client),
-            provider_registry: Arc::new(claurst_api::ProviderRegistry::new()),
-            tools: Arc::new(Vec::new()),
-            cost_tracker: claurst_core::CostTracker::new(),
-            query_config: claurst_query::QueryConfig::default(),
-            mcp_manager: None,
-            permission_manager,
-            working_dir: std::path::PathBuf::from("/unused-fixture"),
-        }),
-    )
 }
 
 fn check_unknown_dispatch_method(request: bool) {
@@ -198,30 +164,33 @@ fn failed_response_does_not_log_method_or_error_contents() {
     assert!(logs.contains("io_kind=Some(BrokenPipe)"));
 }
 
+fn permission_handler(connection: Arc<Connection>) -> AcpPermissionHandler {
+    AcpPermissionHandler {
+        connection,
+        session_id: acp::SessionId::new("fixture-session"),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        next_permission_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    }
+}
+
+fn permission_request() -> PermissionRequest {
+    PermissionRequest {
+        tool_name: "Bash".into(),
+        description: "fixture".into(),
+        details: None,
+        is_read_only: false,
+        path: None,
+        working_dir: None,
+        allowed_roots: Vec::new(),
+        context_description: None,
+    }
+}
+
 async fn permission_reply(reply: Value) -> PermissionDecision {
     let (output, writer) = tokio::io::duplex(8192);
     let connection = Connection::new(writer);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let pending = PendingPermissionRequest {
-        tool_use_id: "fixture-tool".into(),
-        reason: "fixture approval".into(),
-        decision_tx: Some(tx),
-        request: PermissionRequest {
-            tool_name: "Bash".into(),
-            description: "fixture".into(),
-            details: None,
-            is_read_only: false,
-            path: None,
-            working_dir: None,
-            allowed_roots: Vec::new(),
-            context_description: None,
-        },
-    };
-    let task = tokio::spawn(forward_pending(
-        connection.clone(),
-        acp::SessionId::new("fixture-session"),
-        pending,
-    ));
+    let handler = permission_handler(connection.clone());
+    let task = tokio::spawn(async move { handler.resolve(&permission_request()).await });
     let mut output = BufReader::new(output);
     let mut line = String::new();
     output.read_line(&mut line).await.unwrap();
@@ -235,8 +204,7 @@ async fn permission_reply(reply: Value) -> PermissionDecision {
     crate::connection::run_reader(connection, bytes.as_bytes(), inbound)
         .await
         .unwrap();
-    task.await.unwrap();
-    rx.await.unwrap()
+    task.await.unwrap()
 }
 
 #[test]
@@ -306,29 +274,9 @@ fn valid_permission_and_cancel_controls_keep_behavior() {
 #[test]
 fn permission_io_error_is_denied_without_logging_error_contents() {
     let (decision, logs) = capture(async {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let pending = PendingPermissionRequest {
-            tool_use_id: "fixture-tool".into(),
-            reason: "fixture approval".into(),
-            decision_tx: Some(tx),
-            request: PermissionRequest {
-                tool_name: "Bash".into(),
-                description: "fixture".into(),
-                details: None,
-                is_read_only: false,
-                path: None,
-                working_dir: None,
-                allowed_roots: Vec::new(),
-                context_description: None,
-            },
-        };
-        forward_pending(
-            Connection::new(FailingWriter),
-            acp::SessionId::new("fixture-session"),
-            pending,
-        )
-        .await;
-        rx.await.unwrap()
+        permission_handler(Connection::new(FailingWriter))
+            .resolve(&permission_request())
+            .await
     });
     assert!(matches!(decision, PermissionDecision::Deny));
     assert!(logs.contains("ACP permission: send_request failed, denying"));

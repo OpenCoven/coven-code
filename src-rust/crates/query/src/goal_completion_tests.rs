@@ -857,6 +857,7 @@ mod goal_completion {
                                 stop_sequences: vec![],
                                 thinking: None,
                                 provider_options: serde_json::json!({}),
+                                permission_mode: None,
                             };
                             match provider
                                 .create_message_stream_for_goal(
@@ -2566,6 +2567,7 @@ print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'ou
                 stop_sequences: vec![],
                 thinking: None,
                 provider_options: serde_json::json!({}),
+                permission_mode: None,
             };
             let prime = provider
                 .create_message_stream_for_goal(
@@ -2690,6 +2692,7 @@ print(json.dumps({'type':'result','is_error':False}), flush=True)
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::json!({}),
+            permission_mode: None,
         };
         let stream = provider
             .create_message_stream_for_goal(request, Some(&turn), GoalTurnPermission::FinalResponse)

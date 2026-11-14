@@ -21,27 +21,23 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
 
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let child = if cfg!(windows) {
-            Command::new("cmd")
-                .arg("/C")
-                .arg(&command_clone)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd", "/C")
         } else {
-            Command::new("bash")
-                .arg("-c")
-                .arg(&command_clone)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
+            ("bash", "-c")
         };
+        let child = crate::workspace_scope::shell(shell, &[flag.into(), command_clone]).and_then(
+            |(program, args)| {
+                Command::new(program)
+                    .args(args)
+                    .current_dir(&cwd)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .stdin(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+            },
+        );
 
         match child {
             Ok(mut c) => {

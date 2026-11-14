@@ -197,6 +197,11 @@ pub fn render_rate_limit_recovery(
             height: desired_height,
         }
     };
+    // The border, header and separator need four rows; on a smaller terminal
+    // they would land outside the frame (#424).
+    if modal_area.width < 4 || modal_area.height < 4 {
+        return;
+    }
 
     frame.render_widget(Clear, modal_area);
 

@@ -25,6 +25,7 @@ fn isolated(name: &str) -> bool {
         .env("COVEN_CODE_GOAL_DISPATCH_TEST", &name)
         .env("COVEN_CODE_HOME", &home)
         .env("COVEN_HOME", dir.path().join("coven"))
+        .env("COVEN_CAVE_HOME", dir.path().join("cave"))
         .env("CLAUDE_CONFIG_DIR", dir.path().join("claude"))
         .env("COVEN_CODE_CLAUDE_BIN", dir.path().join("absent-claude"))
         .env("COVEN_DAEMON_SOCKET", dir.path().join("absent.sock"))
@@ -190,7 +191,7 @@ async fn dispatch(
     messages: MessagesArc,
     tracker: Arc<CostTracker>,
 ) -> claurst_query::QueryOutcome {
-    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (events, mut receiver) = tokio::sync::mpsc::channel(1);
     let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
     let model = context
         .config
@@ -210,6 +211,7 @@ async fn dispatch(
         },
         tracker,
         events,
+        generation: claurst_tui::application::SessionGeneration::default(),
         cancel: tokio_util::sync::CancellationToken::new(),
     }
     .spawn(messages);
@@ -223,7 +225,12 @@ async fn dispatch(
             panic!("query fixture timed out");
         }
     };
-    drain.await.unwrap();
+    // A finished turn has already delivered every event: the queue's only
+    // sender lived in the worker, so the consumer sees it closed promptly.
+    tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+        .await
+        .expect("event queue must close once the turn has finished")
+        .unwrap();
     outcome
 }
 
@@ -333,7 +340,8 @@ fn goal_dispatch_rate_limited_retry_does_not_adopt_replacement() {
                         serde_json::to_string(&messages).unwrap(),
                         serde_json::to_string(&before).unwrap()
                     );
-                    persist_interactive_session(&session, Some(&owner)).await;
+                    persist_interactive_session(&session, Some(&owner), &mut app.notifications)
+                        .await;
                     assert_eq!(
                         serde_json::to_string(
                             &claurst_core::history::load_session(&session.id)
@@ -411,7 +419,7 @@ fn goal_dispatch_revoked_unattempted_uuid_is_absent_from_persistence() {
                 ),
                 "idle frames must not rewrite an already rolled-back session"
             );
-            persist_interactive_session(&session, Some(&owner)).await;
+            persist_interactive_session(&session, Some(&owner), &mut app.notifications).await;
             assert_eq!(
                 store.try_get_goal(&session.id).unwrap().unwrap(),
                 replacement
@@ -758,7 +766,7 @@ fn goal_dispatch_preparation_failure_then_revoke_rolls_back_json_and_index() {
                 assert!(!turn.request_attempted());
                 messages = history.lock().await.clone();
                 session.messages = messages.clone();
-                persist_interactive_session(&session, Some(&owner)).await;
+                persist_interactive_session(&session, Some(&owner), &mut app.notifications).await;
                 let index = claurst_core::SqliteSessionStore::open(
                     &Settings::config_dir().join("sessions.db"),
                 )
@@ -796,7 +804,8 @@ fn goal_dispatch_preparation_failure_then_revoke_rolls_back_json_and_index() {
                     assert!(turn.request_attempted());
                     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
                     session.messages = history.lock().await.clone();
-                    persist_interactive_session(&session, Some(&owner)).await;
+                    persist_interactive_session(&session, Some(&owner), &mut app.notifications)
+                        .await;
                     assert_eq!(
                         index
                             .list_sessions()
@@ -833,7 +842,7 @@ fn goal_dispatch_preparation_failure_then_revoke_rolls_back_json_and_index() {
                     &mut command_messages
                 ));
                 *history.lock().await = messages.clone();
-                persist_interactive_session(&session, Some(&owner)).await;
+                persist_interactive_session(&session, Some(&owner), &mut app.notifications).await;
                 let loaded = claurst_core::history::load_session(&session.id)
                     .await
                     .unwrap();
@@ -991,7 +1000,7 @@ fn goal_dispatch_repeated_partial_failures_keep_manual_and_synthetic_baselines()
                     assert!(goal.time_used_secs >= 3);
                 }
                 session.messages = messages;
-                persist_interactive_session(&session, Some(&owner)).await;
+                persist_interactive_session(&session, Some(&owner), &mut app.notifications).await;
                 if synthetic {
                     let index = claurst_core::SqliteSessionStore::open(
                         &Settings::config_dir().join("sessions.db"),
@@ -1310,7 +1319,7 @@ fn goal_dispatch_abandoned_inflight_outcome_does_not_rearm_recovery() {
             assert!(app.rate_limit_recovery.auto_retry_deadline.is_none());
             messages = history.lock().await.clone();
             session.messages = messages.clone();
-            persist_interactive_session(&session, owner.as_ref()).await;
+            persist_interactive_session(&session, owner.as_ref(), &mut app.notifications).await;
             settle_abandoned_turn(
                 &mut owner,
                 false,

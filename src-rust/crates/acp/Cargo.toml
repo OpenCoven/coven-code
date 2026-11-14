@@ -25,3 +25,4 @@ agent-client-protocol-schema = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+async-trait = { workspace = true }

@@ -41,7 +41,11 @@ Built-in tools are constructed once per session by `all_tools()`. Cheap lookup p
 
 ### Tool Concurrency
 
-The query loop may run compatible tool calls in parallel. Write and execute tools still pass through permission checks, while read-only tools are generally safe to parallelize.
+The query loop starts the tool calls in one response together. Tools that write, such as `Write`, `Edit`, `BatchEdit`, `ApplyPatch` and `NotebookEdit`, take turns in the order the model requested them, so each sees what the one before it wrote. Every other tool, including `Bash` and MCP tools, runs alongside them and may overlap, so a `Bash` call in the same response as an `Edit` can see the file before or after that edit. All of them still pass through permission checks.
+
+A writer keeps its turn while its approval prompt is open, so when writers and other tools are mixed the prompts can come out of request order: for `Edit A`, `Edit B`, `Bash C` they can appear as A, C, B. Results still return to the model in request order.
+
+Writers outside the response are not covered. Two subagents or `TeamCreate` teammates running at the same time, a subagent and an `Edit` in its parent's response, or a scheduled query loop can still overwrite each other's change to the same file. A configured formatter that runs past its 30-second limit is not stopped, so its late write can replace a change made after it.
 
 ---
 
@@ -92,8 +96,29 @@ settings; project-local settings cannot inject them. Each rule contains:
 - An allow or deny action.
 
 Except in bypass mode, any matching deny wins over matching allows. Rules are
-evaluated before mode defaults, including plan mode. Manage rules with
-`/permissions`. See [configuration](configuration.md#permission-modes) for more.
+evaluated before mode defaults, including plan mode. See
+[configuration](configuration.md#permission-modes) for more. To change or remove
+a saved rule, edit `permissionRules` in your user settings.
+
+For `Bash`, `PowerShell`, and `REPL`, the rule's path is the command or code:
+
+- Approving it for the session or always covers that exact text only. `REPL`
+  approvals don't record the language, so the same text is also covered in another
+  language.
+- In a saved allow rule, a `*` glued to the end of the pattern, as in `git status*`,
+  means exactly `git status`. Earlier versions saved "always allow" in that form.
+- Any other wildcard is a glob over the whole text and can match spaces, so `*.sh`
+  also covers `rm -rf ~ x.sh`. Put a wildcard last, after a space, as in `git *`.
+- A wildcard covers one plain command: ordinary words and simple quotes. Anything
+  else asks for its own approval, including chaining, pipes, redirection,
+  substitution, variables, comments, and backslashes.
+- A wildcard trusts everything the named command can do. `git *` allows git to run
+  other programs through options such as `-c`, and `*` allows any plain command.
+- `PowerShell`, and `Bash` on Windows, also ask for anything containing quotes.
+  No wildcard covers `REPL` code.
+- A deny rule's wildcard is matched against the whole text, so `rm *` catches
+  `rm x; touch y` but not `touch y; rm x`. Don't rely on a deny rule alone to keep
+  a command from running.
 
 ### File target checks
 
@@ -104,6 +129,12 @@ not prevent a concurrent process from changing the filesystem after approval.
 
 The Edit tool instructs the model to read first, but Write and Edit do not enforce
 a prior-read prerequisite. They record previous content for file history.
+
+### Files that change during an approval
+
+With `COVEN_CODE_UI=next`, an approval covers a file as it stood when the approval was asked for. If `Write`, `Edit`, `BatchEdit`, `ApplyPatch` or `NotebookEdit` finds that its file has changed, been created or been deleted by the time you answer, it writes nothing and tells the model to read the file again.
+
+The check compares file size and modification time, so it also refuses after a `touch`. It misses a same-size change that leaves the modification time as it was: a write within the filesystem's timestamp resolution, or a tool that sets the time from elsewhere, such as `touch -r`, `cp -p`, `rsync -t` or `tar -x`, when that time matches. A change that lands after the check, in the moment before the write, is not caught. Classic does not make this check: an approved `Write` replaces whatever the file holds by then.
 
 ---
 
@@ -720,7 +751,7 @@ Cron tools manage scheduled agent triggers.
 
 ### CronCreateTool
 
-**Permission level:** Write
+**Permission level:** Execute. A scheduled prompt runs tools later, so scheduling one needs the permission a command needs: plan mode refuses it, and so does a headless run that isn't in bypass mode. Scheduled prompts fire only in interactive sessions, never inside a headless run.
 
 Create a new scheduled trigger. The trigger fires at the specified cron schedule and executes the configured agent or command.
 

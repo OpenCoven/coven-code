@@ -17,7 +17,7 @@ set -uo pipefail
 # --- configuration (override via env) -----------------------------------
 : "${COVEN_BIN:=}"                       # path to the binary; auto-detected if empty
 : "${TUI_SESSION:=coven-tui-test}"       # tmux session name
-: "${TUI_SOCKET:=coven-tui-test}"        # dedicated tmux server socket (-L)
+: "${TUI_SOCKET:=coven-tui-test-$$}"     # tmux server socket (-L), one per run so runs cannot collide
 : "${TUI_WIDTH:=120}"                    # terminal columns
 : "${TUI_HEIGHT:=40}"                    # terminal rows
 : "${TUI_BOOT_STRING:=Coven v}"          # string proving the TUI has drawn
@@ -27,6 +27,7 @@ set -uo pipefail
 : "${TUI_SETTLE:=0.6}"                   # seconds to let a keypress redraw
 : "${TUI_LOG_DIR:=}"                      # if set, failing-case pane captures are written here
 : "${REQUIRE_TMUX:=0}"                    # if 1, a missing tmux is a hard error (CI), not a skip
+: "${TUI_LAUNCH_PREFIX:=}"               # shell text typed before the binary (cd, env); cases set and restore it
 
 # --- counters (persist across sourced case files) -----------------------
 TESTS_RUN=0
@@ -238,7 +239,7 @@ tui_start() {
 
   local args=""
   if [ "$#" -gt 0 ]; then printf -v args ' %q' "$@"; fi
-  tui_type "$COVEN_BIN$args"; tui_keys Enter
+  tui_type "$TUI_LAUNCH_PREFIX$COVEN_BIN$args"; tui_keys Enter
 
   if wait_for "$TUI_BOOT_STRING" "$TUI_WAIT_TIMEOUT"; then
     return 0
@@ -256,8 +257,12 @@ tui_stop() {
   fi
 }
 
-# tui_shutdown_server — tear down the dedicated tmux server entirely.
-tui_shutdown_server() { _tmux kill-server 2>/dev/null || true; }
+# tui_shutdown_server — tear down the dedicated tmux server entirely. tmux leaves
+# its socket file behind, and each run's has its own name, so remove it too.
+tui_shutdown_server() {
+  _tmux kill-server 2>/dev/null || true
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$TUI_SOCKET"
+}
 
 # --- case framework -----------------------------------------------------
 # register_case <function-name>   (called at top of each cases/*.sh file)

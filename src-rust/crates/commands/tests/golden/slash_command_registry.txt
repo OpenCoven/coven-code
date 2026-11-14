@@ -108,8 +108,9 @@ stash	Coven & Advanced	active	-	/stash <link|attach>	Store useful links and atta
 stash attach	Coven & Advanced	active	-	/stash attach [arguments]	Store and manage attachments
 stash link	Coven & Advanced	active	-	/stash link [arguments]	Store and manage links
 stats	Account & Models	removed:/usage stats	-	Use /usage stats	Removed compatibility command
-status	Coven & Advanced	active	-	/status [doctor]	Show comprehensive system and session status
+status	Coven & Advanced	active	-	/status [doctor|logs]	Show comprehensive system and session status
 status doctor	Coven & Advanced	active	-	/status doctor	Run diagnostic checks
+status logs	Coven & Advanced	active	-	/status logs	Read recent diagnostics in the interactive terminal
 switch	Account & Models	removed:/account switch	-	Use /account switch	Removed compatibility command
 tag	Start & Navigate	removed:/session tag	-	Use /session tag	Removed compatibility command
 tasks	Conversation	active	bashes	/tasks	List and manage background tasks

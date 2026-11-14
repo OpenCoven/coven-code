@@ -36,7 +36,7 @@ pub struct VirtualList<T: VirtualItem> {
     height_cache: HashMap<(usize, u16), u16>,
 
     /// Current scroll offset in rows from the top of all items.
-    pub scroll_offset: u16,
+    pub scroll_offset: usize,
 
     /// Terminal viewport height in rows.
     pub viewport_height: u16,
@@ -115,17 +115,17 @@ impl<T: VirtualItem> VirtualList<T> {
     }
 
     /// Total height of all items at `width`.
-    pub fn total_height(&mut self, width: u16) -> u16 {
+    pub fn total_height(&mut self, width: u16) -> usize {
         (0..self.items.len())
-            .map(|i| self.item_height(i, width))
-            .sum::<u16>()
+            .map(|i| usize::from(self.item_height(i, width)))
+            .fold(0usize, usize::saturating_add)
     }
 
     /// Scroll so item `idx` is visible, with 3 rows of headroom above.
     pub fn scroll_to_index(&mut self, idx: usize, width: u16) {
-        let mut row = 0u16;
+        let mut row = 0usize;
         for i in 0..idx.min(self.items.len()) {
-            row = row.saturating_add(self.item_height(i, width));
+            row = row.saturating_add(usize::from(self.item_height(i, width)));
         }
         // Put it 3 rows from the top of viewport
         self.scroll_offset = row.saturating_sub(3);
@@ -135,20 +135,23 @@ impl<T: VirtualItem> VirtualList<T> {
     pub fn jump_to_bottom(&mut self) {
         // We don't know viewport height in advance without width — set a high value;
         // render() will clamp scroll_offset appropriately.
-        self.scroll_offset = u16::MAX;
+        self.scroll_offset = usize::MAX;
     }
 
     /// Scroll up by `rows` rows.
     pub fn scroll_up(&mut self, rows: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+        self.scroll_offset = self.scroll_offset.saturating_sub(usize::from(rows));
         self.sticky_bottom = false;
     }
 
     /// Scroll down by `rows` rows.
     pub fn scroll_down(&mut self, rows: u16, width: u16) {
         let total = self.total_height(width);
-        let max_offset = total.saturating_sub(self.viewport_height);
-        self.scroll_offset = (self.scroll_offset + rows).min(max_offset);
+        let max_offset = total.saturating_sub(usize::from(self.viewport_height));
+        self.scroll_offset = self
+            .scroll_offset
+            .saturating_add(usize::from(rows))
+            .min(max_offset);
         if self.scroll_offset >= max_offset {
             self.sticky_bottom = true;
         }
@@ -157,18 +160,18 @@ impl<T: VirtualItem> VirtualList<T> {
     /// Find the index of the section header that should be pinned at the top.
     /// This is the last header item that lies entirely above `scroll_offset`.
     pub fn sticky_header_index(&mut self, width: u16) -> Option<usize> {
-        let mut row = 0u16;
+        let mut row = 0usize;
         let mut last_header: Option<usize> = None;
         for i in 0..self.items.len() {
-            let h = self.item_height(i, width);
-            if row + h > self.scroll_offset {
+            let h = usize::from(self.item_height(i, width));
+            if row.saturating_add(h) > self.scroll_offset {
                 // This item is in or after the viewport
                 break;
             }
             if self.items[i].is_section_header() {
                 last_header = Some(i);
             }
-            row += h;
+            row = row.saturating_add(h);
         }
         last_header
     }
@@ -184,17 +187,17 @@ impl<T: VirtualItem> VirtualList<T> {
 
         // Clamp scroll_offset
         let total = self.total_height(width);
-        let max_offset = total.saturating_sub(area.height);
+        let max_offset = total.saturating_sub(usize::from(area.height));
         if self.scroll_offset > max_offset {
             self.scroll_offset = max_offset;
         }
 
-        let mut current_row = 0u16; // absolute row position of current item
+        let mut current_row = 0usize; // absolute row position of current item
         let mut screen_row = area.y; // where to render on screen
 
         for idx in 0..self.items.len() {
-            let h = self.item_height(idx, width);
-            let item_end = current_row + h;
+            let h = usize::from(self.item_height(idx, width));
+            let item_end = current_row.saturating_add(h);
 
             // Skip items entirely above the viewport
             if item_end <= self.scroll_offset {
@@ -203,15 +206,18 @@ impl<T: VirtualItem> VirtualList<T> {
             }
 
             // Stop if we're past the viewport
-            if current_row >= self.scroll_offset + area.height {
+            if current_row >= self.scroll_offset.saturating_add(usize::from(area.height)) {
                 break;
             }
 
             // Compute the portion of this item that's visible
             let visible_start = self.scroll_offset.saturating_sub(current_row);
+            // Only the visible terminal rectangle narrows to u16; virtual
+            // transcript rows and offsets stay full-width above 65,535.
             let visible_rows = h
                 .saturating_sub(visible_start)
-                .min(area.y + area.height - screen_row);
+                .min(usize::from(area.bottom().saturating_sub(screen_row)))
+                as u16;
 
             if visible_rows == 0 {
                 current_row = item_end;
@@ -237,9 +243,9 @@ impl<T: VirtualItem> VirtualList<T> {
         if let Some(header_idx) = self.sticky_header_index(width) {
             // Only render the sticky header if it's not already visible at the top
             // (i.e., the item's virtual row is before scroll_offset)
-            let mut row = 0u16;
+            let mut row = 0usize;
             for i in 0..header_idx {
-                row = row.saturating_add(self.item_height(i, width));
+                row = row.saturating_add(usize::from(self.item_height(i, width)));
             }
             // row is now the virtual start of header_idx
             if row < self.scroll_offset {

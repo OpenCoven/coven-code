@@ -1455,13 +1455,19 @@ impl SlashCommand for StatusCommand {
         "Show comprehensive system and session status"
     }
     fn help(&self) -> &str {
-        "Usage: /status [doctor]\n\n\
+        "Usage: /status [doctor|logs]\n\n\
          Shows authentication, MCP, hook, and session status.\n\
          /status doctor runs the full diagnostic suite (absorbing the\n\
          former /doctor command)."
     }
 
     async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        // Interactive diagnostics are held by the TUI, outside command context.
+        if args.trim() == "logs" {
+            return CommandResult::Error(
+                "/status logs requires an interactive terminal session.".into(),
+            );
+        }
         // /status doctor owns the retained diagnostic implementation.
         let trimmed = args.trim();
         if let Some(rest) = trimmed.strip_prefix("doctor") {
@@ -3757,6 +3763,7 @@ impl SlashCommand for ReviewCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            permission_mode: None,
         };
 
         let review_text = match provider.create_message(request).await {
@@ -6012,6 +6019,7 @@ impl SlashCommand for RenameCommand {
             stop_sequences: vec![],
             thinking: None,
             provider_options: serde_json::Value::Object(Default::default()),
+            permission_mode: None,
         };
 
         match provider.create_message(request).await {
@@ -12480,6 +12488,7 @@ mod tests {
             "familiar handoff",
             "integrations hooks",
             "integrations mcp",
+            "status logs",
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

@@ -1,5 +1,6 @@
 // render.rs — All ratatui rendering logic.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::agents_view::render_agents_menu;
@@ -211,7 +212,7 @@ fn render_error_modal(
 // Text truncation helpers
 // -----------------------------------------------------------------------
 
-fn truncate_end(text: &str, max_width: usize) -> String {
+pub(crate) fn truncate_end(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
@@ -450,10 +451,76 @@ thread_local! {
 // Top-level layout
 // -----------------------------------------------------------------------
 
-/// Render the entire application into the current frame.
+/// Only the local familiar-image encoder can supply this per-frame exception.
+/// Overlays may replace its row; the exception applies only if the complete
+/// generated row is still present at its original position.
+struct FamiliarImageCell {
+    area: Rect,
+    symbols: Vec<String>,
+}
+
+/// Keep each physical cell one column wide when replacing an untrusted control.
+/// Expanding caret notation here would overwrite an adjacent cell or the cursor.
+fn inert_cell_symbol(symbol: &str) -> Cow<'_, str> {
+    let is_control = |ch: char| {
+        ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    if symbol.chars().any(is_control) {
+        Cow::Owned(
+            symbol
+                .chars()
+                .map(|ch| if is_control(ch) { '\u{fffd}' } else { ch })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(symbol)
+    }
+}
+
+fn make_classic_cells_inert(buffer: &mut Buffer, image: Option<&FamiliarImageCell>) {
+    // Compare the whole generated image row, not individual ESC cells: an
+    // overlay must never splice untrusted text into an allowed protocol.
+    let trusted_range = image.and_then(|image| {
+        let intact = image.symbols.iter().enumerate().all(|(offset, symbol)| {
+            buffer
+                .cell((image.area.x + offset as u16, image.area.y))
+                .is_some_and(|cell| cell.symbol() == symbol)
+        });
+        intact.then(|| {
+            let start = buffer.index_of(image.area.x, image.area.y);
+            start..start + image.symbols.len()
+        })
+    });
+    for (index, cell) in buffer.content.iter_mut().enumerate() {
+        if trusted_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&index))
+        {
+            continue;
+        }
+        if let Cow::Owned(safe) = inert_cell_symbol(cell.symbol()) {
+            cell.set_symbol(&safe);
+        }
+    }
+}
+
+/// Render the entire application into the current frame. Control characters
+/// from text never reach the backend, including modal early-return paths.
 pub fn render_app(frame: &mut Frame, app: &App) {
+    let mut image = None;
+    render_classic_contents(frame, app, &mut image);
+    make_classic_cells_inert(frame.buffer_mut(), image.as_ref());
+}
+
+fn render_classic_contents(frame: &mut Frame, app: &App, image: &mut Option<FamiliarImageCell>) {
     let size = frame.area();
     app.last_selectable_area.set(size);
+    // A terminal can report zero columns or rows, briefly at startup or
+    // during a resize (#424). Nothing fits, so skip the frame; the next
+    // resize draws again.
+    if size.is_empty() {
+        return;
+    }
 
     // Fill the entire frame with a true RGB app background so terminal theme
     // palette overrides for ANSI black do not bleed through the TUI shell.
@@ -513,7 +580,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         ])
         .split(size);
 
-    render_messages(frame, app, chunks[0]);
+    render_messages(frame, app, chunks[0], image);
     // chunks[1] is the blank separator — intentionally left empty
     if status_height > 0 {
         render_status_row(frame, app, chunks[2]);
@@ -527,11 +594,11 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 
     // Overlays (rendered on top in Z-order)
 
-    if let Some(message) = app
-        .response_reader
-        .message_index
-        .and_then(|index| app.messages.get(index))
-    {
+    if app.response_reader.visible {
+        let message = app
+            .response_reader
+            .message_index
+            .and_then(|index| app.messages.get(index));
         render_response_reader(frame, &app.response_reader, message, size);
     }
 
@@ -583,8 +650,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     }
 
     if app.diff_viewer.visible {
-        let mut state = app.diff_viewer.clone();
-        render_diff_dialog(&mut state, size, frame.buffer_mut());
+        render_diff_dialog(&app.diff_viewer, size, frame.buffer_mut());
     }
 
     if app.global_search.visible {
@@ -819,6 +885,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     }
 
     // ---- Text selection highlight (topmost post-pass) ---------------------
+    make_classic_cells_inert(frame.buffer_mut(), image.as_ref());
     apply_selection_highlight(frame, app);
     cache_selectable_row_text(frame, app);
     render_context_menu(frame, app);
@@ -833,7 +900,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 /// Snapshot the rendered text of every row inside the selectable area into
 /// `app.last_row_text` so that subsequent double/triple-clicks can locate
 /// word and paragraph boundaries (issue #149 follow-up).
-fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
+pub(crate) fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
     let selectable_area = app.last_selectable_area.get();
     if selectable_area.width == 0 || selectable_area.height == 0 {
         app.last_row_text.borrow_mut().clear();
@@ -858,7 +925,7 @@ fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
                 if sym.is_empty() || sym == "\0" {
                     s.push(' ');
                 } else {
-                    s.push_str(sym);
+                    s.push_str(&inert_cell_symbol(sym));
                 }
             }
         }
@@ -868,7 +935,7 @@ fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
 
 /// Post-render pass: invert colours on selected cells and extract the
 /// selection text into `app.selection_text`.
-fn apply_selection_highlight(frame: &mut Frame, app: &App) {
+pub(crate) fn apply_selection_highlight(frame: &mut Frame, app: &App) {
     let (anchor, focus) = match (app.selection_anchor, app.selection_focus) {
         (Some(a), Some(f)) => (a, f),
         _ => return,
@@ -929,7 +996,7 @@ fn apply_selection_highlight(frame: &mut Frame, app: &App) {
         let col_to = if row == end.1 { end.0 } else { max_col };
         for col in col_from..=col_to {
             if let Some(cell) = buf.cell_mut((col, row)) {
-                let sym = cell.symbol().to_owned();
+                let sym = inert_cell_symbol(cell.symbol());
                 text.push_str(if sym.is_empty() || sym == "\0" {
                     " "
                 } else {
@@ -1064,7 +1131,12 @@ fn render_context_menu(frame: &mut Frame, app: &App) {
 // Messages pane
 // -----------------------------------------------------------------------
 
-fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
+fn render_messages(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    image: &mut Option<FamiliarImageCell>,
+) {
     // Reserve space at the top for plugin hint banners
     let hint_height = if app.plugin_hints.iter().any(|h| h.is_visible()) {
         3u16
@@ -1090,8 +1162,16 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     let notice_lines = startup_notice_lines(app, content_area.width);
     let header_height = WELCOME_BOX_HEIGHT + notice_lines.len() as u16;
     let show_splash = app.config.show_splash_enabled();
-    let show_logo_header =
-        show_splash && content_area.height >= header_height + 3 && content_area.width >= 60;
+    let has_transcript = !app.messages.is_empty()
+        || !app.streaming_text.is_empty()
+        || !app.streaming_thinking.is_empty()
+        || !app.tool_use_blocks.is_empty();
+    // Leave room for the latest answer, response footer and startup annotations
+    // instead of letting the decorative header consume the transcript.
+    let minimum_transcript_rows = if has_transcript { 8 } else { 3 };
+    let show_logo_header = show_splash
+        && content_area.height >= header_height + minimum_transcript_rows
+        && content_area.width >= 60;
     let (logo_area, notices_area, msg_area) = if show_logo_header {
         let splits = Layout::default()
             .direction(Direction::Vertical)
@@ -1114,20 +1194,15 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     if let Some(la) = logo_area {
-        render_welcome_box(frame, app, la);
+        render_welcome_box(frame, app, la, image);
         if let Some(na) = notices_area {
             render_startup_notices(frame, app, na);
         }
-    } else if show_splash
-        && app.messages.is_empty()
-        && app.streaming_text.is_empty()
-        && app.streaming_thinking.is_empty()
-        && app.tool_use_blocks.is_empty()
-    {
+    } else if show_splash && !has_transcript {
         app.last_msg_area.set(Rect::default());
         app.message_row_map.borrow_mut().clear();
         app.thinking_row_map.borrow_mut().clear();
-        render_welcome_box(frame, app, content_area);
+        render_welcome_box(frame, app, content_area, image);
         return;
     }
 
@@ -1171,9 +1246,9 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     // Compute total virtual height and apply scroll clamping.
     // When auto_scroll is on we always show the tail; otherwise we respect
     // the user's scroll_offset.
-    let content_height = lines.len() as u16;
-    let visible_height = msg_area.height; // no borders, full height available
-    let max_scroll = content_height.saturating_sub(visible_height) as usize;
+    let content_height = lines.len();
+    let visible_height = usize::from(msg_area.height); // no borders, full height available
+    let max_scroll = content_height.saturating_sub(visible_height);
     // scroll_offset counts lines above the bottom (0 = at bottom).
     // ratatui scroll() takes an absolute top-row index, so convert:
     //   top_row = max_scroll - scroll_offset  (clamped to [0, max_scroll])
@@ -1209,10 +1284,10 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     list.viewport_height = msg_area.height;
     list.sticky_bottom = app.auto_scroll;
     list.set_items(lines);
-    list.scroll_offset = scroll as u16;
+    list.scroll_offset = scroll;
 
     // Track scroll offset for selection validation
-    app.last_render_scroll_offset.set(scroll as u16);
+    app.last_render_scroll_offset.set(scroll);
 
     list.render(msg_area, frame.buffer_mut());
 
@@ -1232,7 +1307,7 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
         let content_len = max_scroll + 1;
         let mut scrollbar_state = ScrollbarState::new(content_len)
             .position(scroll.min(max_scroll))
-            .viewport_content_length(visible_height as usize);
+            .viewport_content_length(visible_height);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -1833,7 +1908,12 @@ fn coven_crown_lines() -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
+fn render_welcome_box(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    image: &mut Option<FamiliarImageCell>,
+) {
     // --- Box dimensions ---
     // Fixed height; width capped so the box doesn't stretch edge-to-edge on
     // very wide terminals.
@@ -1937,6 +2017,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     let daemon_familiars = crate::coven_status::cached_familiars();
     let left_w_usize = left_w as usize;
 
+    let mut has_familiar_image = false;
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
         welcome_msg,
@@ -1948,6 +2029,7 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(familiar) = visible_familiar(app) {
         let familiar_name = familiar.id.as_str();
         if let Some(seq) = familiar_image::render_familiar_image(familiar_name, 11, 5) {
+            has_familiar_image = true;
             left_lines.push(Line::from(Span::raw(seq)));
         } else {
             let theme = familiar_theme::resolve(familiar_name, &daemon_familiars);
@@ -2000,6 +2082,20 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(left_lines).alignment(Alignment::Center),
         h_chunks[0],
     );
+    if has_familiar_image {
+        // Preserve the existing encoded image row exactly. Only this row is
+        // eligible, and only while every symbol matches the encoder's output.
+        let area = Rect::new(h_chunks[0].x, h_chunks[0].y + 2, h_chunks[0].width, 1);
+        let symbols = (area.x..area.right())
+            .filter_map(|x| {
+                frame
+                    .buffer_mut()
+                    .cell((x, area.y))
+                    .map(|cell| cell.symbol().to_owned())
+            })
+            .collect();
+        *image = Some(FamiliarImageCell { area, symbols });
+    }
 
     // --- Right column: Tips + What's new, left-aligned like the image ---
     let right_w_usize = right_w.saturating_sub(1).max(1) as usize;
@@ -3763,7 +3859,7 @@ mod welcome_tests {
         assert!(should_render_status_row(&app));
         app.streaming_thinking = "let me think".to_string();
         assert_eq!(streaming_status_label(&app), "Reasoning");
-        app.streaming_text = "let me think".to_string();
+        app.streaming_text = "let me think".to_string().into();
         // Text is more user-visible than reasoning, so it wins the race.
         assert_eq!(streaming_status_label(&app), "Generating");
     }
@@ -3790,7 +3886,7 @@ mod welcome_tests {
         // "thinking" / "thinking…" are placeholders — they should NOT win
         // over more informative state.
         app.status_message = Some("thinking".to_string());
-        app.streaming_text = "hello".to_string();
+        app.streaming_text = "hello".to_string().into();
         assert_eq!(streaming_status_label(&app), "Generating");
     }
 
@@ -3926,7 +4022,7 @@ mod welcome_tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).expect("terminal");
         terminal
-            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .draw(|frame| render_welcome_box(frame, &app, frame.area(), &mut None))
             .expect("draw welcome box");
         let content: String = terminal
             .backend()
@@ -3992,7 +4088,7 @@ mod welcome_tests {
         let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
-            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .draw(|frame| render_welcome_box(frame, &app, frame.area(), &mut None))
             .expect("draw welcome");
 
         let buffer = terminal.backend().buffer();
@@ -4069,7 +4165,7 @@ mod welcome_tests {
         let (app, _guard, _tmp) = make_isolated_status_app();
 
         terminal
-            .draw(|frame| render_welcome_box(frame, &app, frame.area()))
+            .draw(|frame| render_welcome_box(frame, &app, frame.area(), &mut None))
             .expect("draw welcome");
 
         let buffer = terminal.backend().buffer();
@@ -4277,5 +4373,565 @@ mod transcript_response_reader_tests {
             !rendered_transcript(&thinking_only, 120).contains("Enter to read"),
             "thinking-only responses must not advertise the reader"
         );
+    }
+}
+
+#[cfg(test)]
+mod zero_size_tests {
+    use super::*;
+    use claurst_core::{config::Config, cost::CostTracker, types::Message};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// Sizes from #424: a terminal can report zero columns, zero rows or
+    /// both (briefly at startup, or after a resize), and tiny sizes sit
+    /// next to them.
+    const SIZES: [(u16, u16); 9] = [
+        (0, 0),
+        (0, 24),
+        (120, 0),
+        (1, 1),
+        (1, 24),
+        (120, 1),
+        (2, 2),
+        (20, 6),
+        (40, 12),
+    ];
+
+    fn sizes_that_panic(app: &App) -> Vec<(u16, u16)> {
+        let mut failed = Vec::new();
+        for (width, height) in SIZES {
+            let drew = catch_unwind(AssertUnwindSafe(|| {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal.draw(|frame| render_app(frame, app)).expect("draw");
+            }));
+            if drew.is_err() {
+                failed.push((width, height));
+            }
+        }
+        failed
+    }
+
+    fn conversation_app() -> App {
+        let mut app = App::new(Config::default(), CostTracker::new());
+        app.push_message(Message::user("list the files"));
+        app.push_message(Message::assistant("Here are the files:\n- a.rs\n- b.rs"));
+        app
+    }
+
+    #[test]
+    fn idle_frame_draws_at_zero_and_tiny_sizes() {
+        let app = App::new(Config::default(), CostTracker::new());
+        assert_eq!(sizes_that_panic(&app), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn conversation_frame_draws_at_zero_and_tiny_sizes() {
+        let app = conversation_app();
+        assert_eq!(sizes_that_panic(&app), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn exit_warning_toast_draws_at_zero_and_tiny_sizes() {
+        // #417 found the first Ctrl+C at 120x0 panicking in Classic.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = conversation_app();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.should_exit, "the first Ctrl+C only warns");
+        assert_eq!(sizes_that_panic(&app), Vec::<(u16, u16)>::new());
+    }
+
+    /// Every Classic overlay at every small size. Overlays lay out fixed rows
+    /// (border, header, separator); on a terminal shorter or narrower than
+    /// that chrome they must skip drawing, not index outside the frame.
+    #[test]
+    fn every_overlay_draws_at_tiny_sizes() {
+        let mut sizes: Vec<(u16, u16)> = SIZES.to_vec();
+        for width in 0..=8u16 {
+            for height in 0..=6u16 {
+                sizes.push((width, height));
+            }
+        }
+        sizes.extend([(120, 2), (120, 3), (2, 40), (3, 60)]);
+        sizes.sort_unstable();
+        sizes.dedup();
+
+        let mut failed = Vec::new();
+        macro_rules! check {
+            ($($overlay:ident),* $(,)?) => {$(
+                let mut app = conversation_app();
+                app.$overlay.visible = true;
+                for &(width, height) in &sizes {
+                    let drew = catch_unwind(AssertUnwindSafe(|| {
+                        let mut terminal =
+                            Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                        terminal.draw(|frame| render_app(frame, &app)).expect("draw");
+                    }));
+                    if drew.is_err() {
+                        failed.push(format!("{} at {width}x{height}", stringify!($overlay)));
+                    }
+                }
+            )*};
+        }
+        check!(
+            agents_menu,
+            ask_user_dialog,
+            bypass_permissions_dialog,
+            command_palette,
+            connect_dialog,
+            context_viz,
+            device_auth_dialog,
+            diff_viewer,
+            elicitation,
+            export_dialog,
+            feedback_survey,
+            global_search,
+            help_overlay,
+            history_search_overlay,
+            hooks_config_menu,
+            import_config_dialog,
+            import_config_picker,
+            invalid_config_dialog,
+            key_input_dialog,
+            mcp_view,
+            memory_file_selector,
+            memory_update_notification,
+            model_picker,
+            onboarding_dialog,
+            overage_upsell,
+            rate_limit_recovery,
+            response_reader,
+            rewind_flow,
+            session_branching,
+            session_browser,
+            settings_screen,
+            stats_dialog,
+            tasks_overlay,
+            theme_screen,
+            voice_mode_notice,
+        );
+        assert_eq!(failed, Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod help_overlay_layout_tests {
+    //! #423: the Classic help overlay at 80x24 and 120x40.
+    use super::*;
+    use crate::command_palette::CommandPaletteEntry;
+    use claurst_core::{config::Config, cost::CostTracker, types::Message};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Shaped like the real catalog: categories that repeat, long names, long
+    /// descriptions, and more rows than either size can show at once. One
+    /// entry per line: category|path|aliases|summary.
+    const CATALOG: &str = "\
+Start & Navigate|clear|c, reset, new|Clear the conversation history
+Start & Navigate|exit|quit, q|Exit Coven
+Start & Navigate|help|h, ?|Show available commands and usage information
+Extend|help feedback||Submit feedback about Coven
+Start & Navigate|init||Initialize a new project with AGENTS.md
+Start & Navigate|search||Search across all sessions
+Start & Navigate|session|remote|Show or manage conversation sessions
+Start & Navigate|session add-dir||Add an allowed workspace directory
+Start & Navigate|session branch||Create a session branch
+Start & Navigate|session fork||Fork the current session
+Start & Navigate|session rename||Rename the current session
+Start & Navigate|session resume||Resume a saved session
+Start & Navigate|session tag||Tag the current session
+Work & Review|commit||Ask Coven to commit staged changes
+Work & Review|diff||Show git diff of changes in the working directory
+Work & Review|memory||View, edit, or clear AGENTS.md memory
+Work & Review|review||Review the current changes for bugs and risks
+Work & Review|rewind||Rewind the conversation and files to a checkpoint
+Work & Review|rewind list||List recorded file-change checkpoints
+Conversation|compact||Compact the conversation to reduce token usage
+Conversation|export||Export conversation to markdown or JSON
+Conversation|export copy||Copy the session export to the clipboard
+Conversation|export share||Create a shareable session export
+Conversation|find||Search the current transcript
+Conversation|plan||Enter plan mode – model outputs a plan for approval before acting
+Conversation|tasks|bashes|List and manage background tasks
+Conversation|thinking|think|Toggle extended thinking mode
+Conversation|thinking back||View earlier thinking traces
+Account & Models|account||Manage accounts and provider connections
+Account & Models|account connect||Connect a provider account
+Account & Models|account dedupe||Remove duplicate credentials
+Account & Models|account list||List configured accounts
+Account & Models|account login||Sign in to a provider
+Account & Models|account logout||Sign out of a provider
+Account & Models|account providers||List available providers
+Account & Models|account refresh||Refresh provider authentication
+Account & Models|account switch||Switch the active account
+Account & Models|model||Show or change the current model
+Account & Models|permissions||View or change tool permission settings
+Account & Models|permissions sandbox||Configure sandbox permissions
+Account & Models|usage||Show API usage, quotas, and rate limit status
+Account & Models|usage context||Show context window usage
+Account & Models|usage cost||Show session cost details
+Account & Models|usage stats||Show detailed session statistics
+Customize|config|settings|Open the settings screen to change configuration
+Customize|familiar||Show or switch the active familiar
+Customize|hooks||View and edit hook configuration for tool events
+Customize|keybindings||Open the keybindings file in your editor
+Customize|mcp||Manage MCP servers and their tools
+Customize|output-style||Choose how responses are formatted
+Customize|plugins||Browse, install, and manage plugins
+Customize|skills||List skills available in this project
+Customize|statusline||Configure the status line shown under the prompt
+Customize|theme||Change the color theme
+Customize|vim||Toggle vim editing mode in the prompt
+Diagnostics|doctor||Check the installation and configuration for problems
+Diagnostics|logs||Show where diagnostic logs are written
+Diagnostics|status||Show version, model, account, and API connectivity
+Diagnostics|version||Print the Coven Code version
+Diagnostics|zz last entry||The final entry in the catalog";
+
+    fn catalog() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+        CATALOG
+            .lines()
+            .map(|line| {
+                let mut fields = line.splitn(4, '|');
+                let mut next = || fields.next().expect("four fields");
+                (next(), next(), next(), next())
+            })
+            .collect()
+    }
+
+    const SHORTCUT_DESCRIPTIONS: &[&str] = &[
+        "Scroll messages",
+        "Scroll one line",
+        "Top / bottom",
+        "Submit message",
+        "Input history",
+        "Search history",
+        "Cancel / close",
+        "Toggle help",
+        "Switch familiar",
+        "Create / switch branch",
+        "Cycle mode: build / plan / explore",
+        "Model picker",
+        "Command palette",
+        "Cancel / quit",
+        "Quit (empty input)",
+        "Clear screen",
+        "Expand/collapse thinking",
+    ];
+
+    fn help_app() -> App {
+        let mut app = App::new(Config::default(), CostTracker::new());
+        app.install_command_catalog(
+            catalog()
+                .into_iter()
+                .map(|(category, path, aliases, summary)| CommandPaletteEntry {
+                    path: (*path).to_string(),
+                    aliases: aliases
+                        .split(", ")
+                        .filter(|alias| !alias.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                    summary: (*summary).to_string(),
+                    usage: format!("/{path}"),
+                    category: (*category).to_string(),
+                    keywords: Vec::new(),
+                    source: "test".to_string(),
+                    suggest_when: Vec::new(),
+                    children: Vec::new(),
+                })
+                .collect(),
+        );
+        app.push_message(Message::user("BEHIND-THE-OVERLAY question"));
+        app.push_message(Message::assistant("BEHIND-THE-OVERLAY answer"));
+        app.help_overlay.toggle();
+        app
+    }
+
+    fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal.draw(|frame| render_app(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Every frame from the top of the help overlay to as far as Down goes.
+    fn scroll_through(width: u16, height: u16) -> Vec<Vec<String>> {
+        let mut app = help_app();
+        let mut frames = vec![rows(&app, width, height)];
+        for _ in 0..300 {
+            press(&mut app, KeyCode::Down);
+            let frame = rows(&app, width, height);
+            if frame == *frames.last().expect("a frame") {
+                break;
+            }
+            frames.push(frame);
+        }
+        frames
+    }
+
+    #[test]
+    fn help_covers_the_screen_behind_it() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            let app = help_app();
+            let frame = rows(&app, width, height);
+            // The dialog is centered with a margin on every side; the margin
+            // must not show the welcome box or transcript behind it.
+            let mut leaks = Vec::new();
+            for (y, row) in frame.iter().enumerate() {
+                let edge: String = row
+                    .chars()
+                    .take(2)
+                    .chain(row.chars().skip(width as usize - 2))
+                    .collect();
+                if y == 0 || y + 1 == frame.len() {
+                    if !row.trim().is_empty() {
+                        leaks.push(format!("{width}x{height} row {y}: {row:?}"));
+                    }
+                } else if !edge.trim().is_empty() {
+                    leaks.push(format!("{width}x{height} row {y} edge: {edge:?}"));
+                }
+            }
+            assert_eq!(leaks, Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn every_shortcut_and_command_is_reachable_by_scrolling() {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            let seen = scroll_through(width, height)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+            // A wrapped row may split its description across rows; its
+            // first two words always stay beside the key.
+            let mut missing: Vec<String> = SHORTCUT_DESCRIPTIONS
+                .iter()
+                .filter(|description| {
+                    let start: Vec<&str> = description.split(' ').take(2).collect();
+                    !seen.contains(&start.join(" "))
+                })
+                .map(|description| format!("{width}x{height} shortcut {description:?}"))
+                .collect();
+            missing.extend(
+                catalog()
+                    .into_iter()
+                    .filter(|(_, path, _, _)| !seen.contains(&format!("/{path}")))
+                    .map(|(_, path, _, _)| format!("{width}x{height} command /{path}")),
+            );
+            assert_eq!(missing, Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn help_draws_and_scrolls_at_tiny_sizes() {
+        use crate::overlays::render_help_overlay;
+        let mut sizes = vec![(120u16, 1u16), (1, 24), (2, 40), (200, 3)];
+        for width in 0..=10 {
+            for height in 0..=8 {
+                sizes.push((width, height));
+            }
+        }
+        for filter in ["", "session", "no such thing"] {
+            let mut app = help_app();
+            for c in filter.chars() {
+                press(&mut app, KeyCode::Char(c));
+            }
+            for &(width, height) in &sizes {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                for key in [KeyCode::End, KeyCode::PageUp, KeyCode::Down, KeyCode::Home] {
+                    terminal
+                        .draw(|frame| render_help_overlay(frame, &app.help_overlay, frame.area()))
+                        .expect("draw");
+                    press(&mut app, key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_descriptions_stay_under_their_column() {
+        // A description that wraps must continue at the column where it
+        // started, never under the key or command name.
+        // Command names are drawn padded to 15 columns, which also keeps
+        // "/usage" from matching "/usage context".
+        let anchors: &[(&str, &str)] = &[
+            ("/clear          ", "Clear the conversation history"),
+            (
+                "/help           ",
+                "Show available commands and usage information",
+            ),
+            (
+                "/plan           ",
+                "Enter plan mode – model outputs a plan for approval before acting",
+            ),
+            (
+                "/usage          ",
+                "Show API usage, quotas, and rate limit status",
+            ),
+            (
+                "/status         ",
+                "Show version, model, account, and API connectivity",
+            ),
+            ("Ctrl+B ", "Create / switch branch"),
+            ("Tab ", "Cycle mode: build / plan / explore"),
+            ("PageUp / PgDn ", "Scroll messages"),
+        ];
+        let mut misaligned = Vec::new();
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            for frame in scroll_through(width, height) {
+                let grid: Vec<Vec<char>> = frame.iter().map(|row| row.chars().collect()).collect();
+                for (y, row) in frame.iter().enumerate().take(frame.len().saturating_sub(1)) {
+                    for (anchor, description) in anchors {
+                        let Some(at) = row.find(anchor) else { continue };
+                        let first_word = description.split(' ').next().expect("a word");
+                        let Some(desc_byte) = row[at..].find(first_word).map(|i| at + i) else {
+                            continue;
+                        };
+                        let anchor_col = row[..at].chars().count();
+                        let desc_col = row[..desc_byte].chars().count();
+                        let shown: String = grid[y][desc_col..].iter().collect();
+                        if shown.contains(description) {
+                            continue; // not wrapped
+                        }
+                        // The rest of the description is on the next row,
+                        // starting at desc_col, with only spaces before it
+                        // back to the start of the entry. On the body's last
+                        // row the rest is one scroll away.
+                        if frame[y + 1].contains("type to filter") {
+                            continue;
+                        }
+                        let next = &grid[y + 1];
+                        let lead: String = next[anchor_col.saturating_sub(2)..desc_col]
+                            .iter()
+                            .collect();
+                        let rest: String = next[desc_col..].iter().collect();
+                        let words: Vec<&str> = description.split(' ').collect();
+                        let continues = (1..words.len())
+                            .any(|i| rest.starts_with(&words[i..].join(" ")[..words[i].len()]));
+                        if !lead.trim().is_empty() || !continues {
+                            misaligned.push(format!(
+                                "{width}x{height} {anchor:?}: {:?} / {:?}",
+                                row.trim_end(),
+                                frame[y + 1].trim_end()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        misaligned.sort();
+        misaligned.dedup();
+        assert_eq!(misaligned, Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod classic_frame_safety_tests {
+    use super::*;
+    use crate::app::test_env::EnvGuard;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn generated_familiar_image_is_preserved_but_an_overlay_cannot_splice_its_protocol() {
+        if std::env::var_os("COVEN_TEST_GRAPHICS_WORKER").is_none() {
+            for term in ["xterm-kitty", "xterm-256color"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "render::classic_frame_safety_tests::generated_familiar_image_is_preserved_but_an_overlay_cannot_splice_its_protocol", "--nocapture"])
+                    .env("COVEN_TEST_GRAPHICS_WORKER", "1")
+                    .env("TERM", term)
+                    .env_remove("TERM_PROGRAM")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{term}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let coven = temp.path().join("coven");
+        let images = home.join(".coven/assets/familiars");
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::create_dir_all(&coven).unwrap();
+        std::fs::write(
+            coven.join("familiars.toml"),
+            "[[familiar]]\nid = \"frame-image-fixture\"\n",
+        )
+        .unwrap();
+        // A valid 1x1 PNG exercises the real local encoder for Kitty or Sixel.
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==").unwrap();
+        std::fs::write(images.join("frame-image-fixture.png"), png).unwrap();
+        let _guard = EnvGuard::set_with_user(&home, &coven, Some("USER\x1b]52;c;dXNlcg==\x07"));
+        let config = claurst_core::config::Config {
+            familiar: Some("frame-image-fixture".into()),
+            ..Default::default()
+        };
+        let app = App::new(config, claurst_core::cost::CostTracker::new());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut image = None;
+                render_classic_contents(frame, &app, &mut image);
+                let image = image.expect("run this test with an image-capable TERM");
+                assert!(
+                    image.symbols.iter().any(|symbol| symbol.contains('\x1b')),
+                    "the fixture must really reach the graphics encoder"
+                );
+                make_classic_cells_inert(frame.buffer_mut(), Some(&image));
+                let row: Vec<_> = (image.area.x..image.area.right())
+                    .map(|x| frame.buffer_mut()[(x, image.area.y)].symbol().to_owned())
+                    .collect();
+                assert_eq!(
+                    row, image.symbols,
+                    "the generated graphics row is byte-for-byte intact"
+                );
+                let outside: String = frame
+                    .buffer_mut()
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| {
+                        let x = *index as u16 % 120;
+                        let y = *index as u16 / 120;
+                        !image.area.contains((x, y).into())
+                    })
+                    .map(|(_, cell)| cell.symbol())
+                    .collect();
+                assert!(
+                    !outside.chars().any(char::is_control),
+                    "untrusted welcome text must still be guarded"
+                );
+                frame.buffer_mut()[(image.area.x, image.area.y)]
+                    .set_symbol("\x1b]52;c;overlay\x07");
+                make_classic_cells_inert(frame.buffer_mut(), Some(&image));
+                assert!(
+                    !frame
+                        .buffer_mut()
+                        .content
+                        .iter()
+                        .any(|cell| cell.symbol().chars().any(char::is_control)),
+                    "a changed image row loses its complete protocol exception"
+                );
+            })
+            .unwrap();
     }
 }
