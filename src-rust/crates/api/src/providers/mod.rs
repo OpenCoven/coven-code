@@ -11,3 +11,5 @@ pub use codex::CodexProvider;
 
 pub mod claude_cli;
 pub use claude_cli::ClaudeCliProvider;
+
+pub mod claude_cli_policy;
