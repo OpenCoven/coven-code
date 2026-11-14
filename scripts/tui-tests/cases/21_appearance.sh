@@ -55,7 +55,7 @@ _look_wait_moving() {
 
 # A turn long enough to watch the status row.
 _look_turn() {
-  tui_type 'tools: [["Bash",{"command":"sleep 3"}]]'; sleep 0.3; tui_keys Enter
+  tui_type 'run: sleep 3'; sleep 0.3; tui_keys Enter
   if wait_for "Approve Bash" 15; then sleep 0.8; tui_keys y
   else _fail "next: the command asks first" "$(tui_capture)"; fi
 }
