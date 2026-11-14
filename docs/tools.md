@@ -58,7 +58,8 @@ Each tool is assigned a conceptual permission level based on what it can do:
 | Level | Description | Examples |
 |-------|-------------|---------|
 | **None** | No external effects; purely passive | `SleepTool` |
-| **ReadOnly** | Reads data; no writes or execution | `FileReadTool`, `GlobTool`, `WebFetchTool` |
+| **ReadOnly** | Reads data; no writes or execution | `FileReadTool`, `GlobTool` |
+| **Network** | Makes an outbound network request; asks for approval unless a rule or the permission mode allows it | `WebFetchTool` |
 | **Write** | Creates or modifies data | `FileWriteTool`, `FileEditTool`, `ConfigTool` |
 | **Execute** | Runs code or spawns processes | `BashTool`, `TaskCreateTool`, `SendMessageTool` |
 | **Dangerous** | Broad system access; high blast radius | `ComputerUseTool` |
@@ -366,16 +367,22 @@ Search available tools by name or keyword to retrieve their full parameter schem
 
 ### WebFetchTool
 
-**Permission level:** ReadOnly
+**Permission level:** Network
 
-Fetch the content of a URL. Returns the page content, typically converted to Markdown for readability. Supports HTML pages, plain text, JSON, and PDF documents.
+Fetch a public `http` or `https` URL and return its content as text. HTML is converted to plain text; other content types are returned as text as received. A few HTML pages that plain conversion handles badly are extracted by a model instead, and the result says so. Text output is capped at 100,000 bytes, cut at a character boundary.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | yes | URL to fetch |
-| `prompt` | string | no | Optional extraction prompt to focus content |
+| `prompt` | string | no | Accepted, but not used to filter the content |
 
-Network requests are subject to the host's firewall and proxy settings.
+Fetch rules:
+
+- Only public destinations are fetched. Every address the host name resolves to must be public; loopback, private, link-local and similar addresses are refused. Each redirect is checked the same way, up to 10.
+- Proxy settings from the environment are not used.
+- The response body is limited to 2 MiB, and a fetch times out after 30 seconds.
+- Each fetch records the requested and final URL (with credentials removed and fragments dropped), HTTP status, content type, retrieval time, the body's SHA-256 and how the text was extracted. The Next Research page reads this record.
+- A stored extraction is reused only when a new fetch returns the same body hash and content type.
 
 ---
 
