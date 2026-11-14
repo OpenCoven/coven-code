@@ -424,8 +424,10 @@ pub struct ToolUseBlock {
 /// `ToolEnd` that waits for every tool in its response. Only Next shows this.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRun {
-    /// When its work began: its start, until the runtime says its own work has
-    /// begun, then the moment it was approved if it asked.
+    /// When its row opened, which keeps its place among the other rows.
+    pub opened_at: Option<std::time::Instant>,
+    /// When its own work began, or the moment it was approved if it asked.
+    /// Unset while hooks run or it waits for its turn: that time is not its.
     pub started_at: Option<std::time::Instant>,
     /// Waiting for another tool in its response to finish first.
     pub queued: bool,
@@ -434,13 +436,6 @@ pub struct ToolRun {
 }
 
 impl ToolRun {
-    fn started() -> Self {
-        Self {
-            started_at: Some(std::time::Instant::now()),
-            ..Self::default()
-        }
-    }
-
     fn finish(&mut self, is_error: bool) {
         if self.finished.is_none() {
             let took = self.started_at.map(|at| at.elapsed()).unwrap_or_default();
@@ -1729,7 +1724,7 @@ impl App {
         }
     }
 
-    fn current_user_turn_index(&self) -> Option<usize> {
+    pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
         self.messages
             .iter()
             .filter(|msg| msg.role == Role::User)
@@ -7967,7 +7962,10 @@ impl App {
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
-                    existing.run = ToolRun::started();
+                    existing.run = ToolRun {
+                        opened_at: existing.run.opened_at,
+                        ..ToolRun::default()
+                    };
                 } else {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
@@ -7976,7 +7974,10 @@ impl App {
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
-                        run: ToolRun::started(),
+                        run: ToolRun {
+                            opened_at: Some(std::time::Instant::now()),
+                            ..ToolRun::default()
+                        },
                     });
                 }
                 self.invalidate_transcript();
@@ -8018,7 +8019,8 @@ impl App {
             QueryEvent::ToolRunning { tool_id } => {
                 // Its time starts now, not when the batch began with its hooks.
                 if let Some(run) = self.tool_run_mut(&tool_id) {
-                    *run = ToolRun::started();
+                    run.queued = false;
+                    run.started_at = Some(std::time::Instant::now());
                 }
             }
 

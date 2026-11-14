@@ -3979,8 +3979,6 @@ struct PreparedTool {
     name: String,
     input: Value,
     blocked_result: Option<ToolResult>,
-    /// Whether `ToolStart` was reported, so a refusal must report the end too.
-    started: bool,
 }
 
 /// The result recorded for a tool call that cancellation cut off. It says the
@@ -4006,7 +4004,6 @@ async fn execute_tool_blocks_with_hooks(
                 name,
                 input,
                 blocked_result: Some(ToolResult::error(TOOL_CANCELLED_RESULT)),
-                started: false,
             });
             continue;
         }
@@ -4018,7 +4015,6 @@ async fn execute_tool_blocks_with_hooks(
                 blocked_result: Some(ToolResult::error(format!(
                     "Goal authority denied tool: {error}"
                 ))),
-                started: false,
             });
             continue;
         }
@@ -4046,55 +4042,45 @@ async fn execute_tool_blocks_with_hooks(
         )
         .await;
 
-        if cancel_token.is_cancelled() {
-            prepared.push(PreparedTool {
-                id,
-                name,
-                input,
-                blocked_result: Some(ToolResult::error(TOOL_CANCELLED_RESULT)),
-                started: true,
-            });
-            continue;
-        }
-
-        if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
-            prepared.push(PreparedTool {
-                id,
-                name,
-                input,
-                blocked_result: Some(ToolResult::error(format!(
-                    "Goal authority denied tool: {error}"
-                ))),
-                started: true,
-            });
-            continue;
-        }
-        let plugin_pre_outcome =
-            claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
-
-        let blocked_result = if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome
-        {
-            warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
-            Some(claurst_tools::ToolResult::error(format!(
-                "Blocked by hook: {}",
-                reason
-            )))
-        } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
-            warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
-            Some(claurst_tools::ToolResult::error(format!(
-                "Blocked by plugin hook: {}",
-                reason
+        let blocked_result = if cancel_token.is_cancelled() {
+            Some(ToolResult::error(TOOL_CANCELLED_RESULT))
+        } else if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
+            Some(ToolResult::error(format!(
+                "Goal authority denied tool: {error}"
             )))
         } else {
-            None
+            let plugin_pre_outcome =
+                claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
+            if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome {
+                warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by hook: {}",
+                    reason
+                )))
+            } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
+                warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by plugin hook: {}",
+                    reason
+                )))
+            } else {
+                None
+            }
         };
+        // A refused tool is over now: its row must not read as running while
+        // the hooks of the tools after it run.
+        if let (Some(result), Some(tx)) = (&blocked_result, event_tx) {
+            let _ = tx.send(QueryEvent::ToolFinished {
+                tool_id: id.clone(),
+                is_error: result.is_error,
+            });
+        }
 
         prepared.push(PreparedTool {
             id,
             name,
             input,
             blocked_result,
-            started: true,
         });
     }
 
@@ -4112,18 +4098,8 @@ async fn execute_tool_blocks_with_hooks(
         .iter()
         .map(|p| {
             if let Some(result) = p.blocked_result.clone() {
-                // A refused tool is over as soon as the turn's tools start:
-                // its row should not read as running beside the others.
-                let finished = p.started.then(|| QueryEvent::ToolFinished {
-                    tool_id: p.id.clone(),
-                    is_error: result.is_error,
-                });
-                futures::future::Either::Left(async move {
-                    if let (Some(event), Some(tx)) = (finished, event_tx) {
-                        let _ = tx.send(event);
-                    }
-                    (result, None)
-                })
+                // Its finish, if it had a row, was reported when it was refused.
+                futures::future::Either::Left(std::future::ready((result, None)))
             } else {
                 let name = p.name.clone();
                 let input = p.input.clone();
@@ -8998,13 +8974,23 @@ mod tests {
             .map(|(id, name)| (id.to_string(), name.to_string(), serde_json::json!({})))
             .to_vec();
         let mut ctx = scheduling_ctx(dir.path());
+        // The other tool's own hook holds until the refusal has been seen, so
+        // the refusal cannot wait for the hooks after it.
+        let go = dir.path().join("go");
         ctx.config.hooks.insert(
             HookEvent::PreToolUse,
-            vec![HookEntry {
-                command: "printf 'not this one' >&2; exit 2".to_string(),
-                tool_filter: Some("Refused".to_string()),
-                blocking: true,
-            }],
+            vec![
+                HookEntry {
+                    command: "printf 'not this one' >&2; exit 2".to_string(),
+                    tool_filter: Some("Refused".to_string()),
+                    blocking: true,
+                },
+                HookEntry {
+                    command: format!("while [ ! -e '{}' ]; do sleep 0.05; done", go.display()),
+                    tool_filter: Some("Slow".to_string()),
+                    blocking: true,
+                },
+            ],
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -9012,9 +8998,10 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
-            // Refused at once, while the other tool in the response still runs.
-            // A refused tool's work never begins.
+            // Refused at once, while the other tool's hook still runs. A
+            // refused tool's work never begins.
             assert_eq!(next_progress(&mut rx).await, "finished refused error=true");
+            std::fs::write(&go, b"").unwrap();
             assert_eq!(next_progress(&mut rx).await, "running slow");
             slow_gate.wait().await;
             assert_eq!(next_progress(&mut rx).await, "finished slow error=false");

@@ -780,12 +780,17 @@ fn quitting_mid_turn_says_what_is_not_known() {
         },
     );
 
-    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    let report = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
     assert!(report.contains("Quit during a turn"), "{report}");
     assert!(report.contains("nothing carries it on"), "{report}");
     assert!(report.contains("No result from Bash make"), "{report}");
-    assert!(report.contains("No result from Edit /b.rs"), "{report}");
-    assert!(!report.contains("Read"), "that one reported: {report}");
+    assert!(report.contains("Not started: Edit /b.rs"), "{report}");
+    assert!(
+        !report.contains("No result from Read"),
+        "that one reported: {report}"
+    );
     assert!(report.contains("unknown"), "{report}");
     assert!(
         !report.chars().any(|ch| ch.is_control() && ch != '\n'),
@@ -797,7 +802,9 @@ fn quitting_mid_turn_says_what_is_not_known() {
 fn quitting_mid_turn_with_no_tool_open_says_only_that_it_stopped() {
     let mut app = next_app();
     app.push_message(Message::user("write a poem".to_string()));
-    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    let report = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
     assert!(report.contains("nothing carries it on"), "{report}");
     assert!(!report.contains("No result"), "{report}");
     assert!(!report.contains("unknown"), "{report}");
@@ -814,7 +821,7 @@ fn a_tool_name_cannot_add_lines_to_the_exit_report() {
         r#"{"command":"make"}"#,
     );
 
-    let report = claurst_tui::next::turn_exit_report(&app);
+    let report = claurst_tui::next::TurnExitReport::capture(&app).lines(&app.messages);
     assert!(
         report.iter().all(|line| !line.contains('\n')),
         "each element is printed as one line: {report:?}"
@@ -841,8 +848,13 @@ fn a_tool_that_finished_stays_finished_when_the_turn_is_interrupted() {
         },
     );
     // Quitting reads the rows before it stops the turn: only the wait is open.
-    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
-    assert!(!report.contains("Edit"), "the edit finished: {report}");
+    let report = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(
+        !report.contains("No result from Edit"),
+        "the edit finished: {report}"
+    );
     assert!(report.contains("No result from Bash sleep 30"), "{report}");
 
     app.interrupt_tool_rows();
@@ -911,7 +923,9 @@ fn the_exit_report_leaves_out_a_tool_whose_result_arrived() {
         is_error: Some(false),
     }]));
 
-    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    let report = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
     assert!(!report.contains("sleep 1"), "its result is saved: {report}");
     assert!(report.contains("No result from Bash sleep 30"), "{report}");
 }
@@ -930,7 +944,9 @@ fn the_exit_report_still_names_a_tool_that_was_cancelled_mid_run() {
         is_error: Some(true),
     }]));
 
-    let report = claurst_tui::next::turn_exit_report(&app).join("\n");
+    let report = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
     assert!(report.contains("No result from Bash sleep 30"), "{report}");
     assert!(
         report.contains("What these finished is unknown"),
@@ -943,6 +959,13 @@ fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
     let mut app = next_app();
     app.push_message(Message::user("build".to_string()));
     tool_start(&mut app, "long", "Bash", r#"{"command":"make"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolRunning {
+            tool_id: "long".to_string(),
+        },
+    );
+    let started = std::time::Instant::now();
 
     let text = text_of(&draw(&app, 100, 30));
     assert!(
@@ -951,7 +974,113 @@ fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
     );
 
     // Only time passes: no event, no edit to the rows.
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    std::thread::sleep(std::time::Duration::from_millis(1_050));
     let text = text_of(&draw(&app, 100, 30));
     assert!(row_of(&text, "Bash").contains("running 1s"), "{text}");
+    // The time shown rounds, so the row changes at each half second.
+    std::thread::sleep(std::time::Duration::from_millis(550));
+    let shown = format!(
+        "running {}s",
+        (started.elapsed() + std::time::Duration::from_millis(500)).as_secs()
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Bash").contains(&shown), "{shown}: {text}");
+}
+
+#[test]
+fn a_tool_counts_no_time_until_its_own_work_begins() {
+    let mut app = next_app();
+    app.push_message(Message::user("check then build".to_string()));
+    tool_start(&mut app, "refused", "Bash", r#"{"command":"rm -rf x"}"#);
+    tool_start(&mut app, "build", "Bash", r#"{"command":"make"}"#);
+    // The response's PreToolUse hooks run before either tool's work.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "refused".to_string(),
+            is_error: true,
+        },
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "rm -rf").trim_end().ends_with("error"),
+        "{text}"
+    );
+    assert!(
+        row_of(&text, "make").trim_end().ends_with("running"),
+        "{text}"
+    );
+}
+
+#[test]
+fn interrupting_a_turn_keeps_its_rows_in_the_order_they_started() {
+    let mut app = next_app();
+    app.push_message(Message::user("read, wait, grep".to_string()));
+    tool_start(&mut app, "read", "Read", r#"{"file_path":"/a.rs"}"#);
+    tool_start(&mut app, "wait", "Bash", r#"{"command":"sleep 30"}"#);
+    tool_start(&mut app, "grep", "Grep", r#"{"pattern":"fn"}"#);
+    tool_end(&mut app, "read", "Read", "contents", false);
+    tool_end(&mut app, "grep", "Grep", "matches", false);
+
+    app.interrupt_tool_rows();
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    let order: Vec<&str> = view.tools.iter().map(|tool| tool.id.as_str()).collect();
+    assert_eq!(order, ["read", "wait", "grep"]);
+}
+
+#[test]
+fn the_exit_report_says_which_tools_never_started_and_which_results_were_not_saved() {
+    let mut app = next_app();
+    // An earlier turn's row stays shown after compaction drops its result.
+    app.push_message(Message::user("look first".to_string()));
+    tool_start(&mut app, "old", "Read", r#"{"file_path":"/old.rs"}"#);
+    tool_end(&mut app, "old", "Read", "contents", false);
+    app.push_message(Message::user("edit twice".to_string()));
+    tool_start(&mut app, "first", "Edit", r#"{"file_path":"/a.rs"}"#);
+    tool_start(&mut app, "second", "Edit", r#"{"file_path":"/b.rs"}"#);
+    apply(
+        &mut app,
+        QueryEvent::ToolQueued {
+            tool_id: "second".to_string(),
+        },
+    );
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "first".to_string(),
+            is_error: false,
+        },
+    );
+    let report = claurst_tui::next::TurnExitReport::capture(&app);
+
+    // The worker was stopped before it saved the response's results.
+    let lines = report.lines(&app.messages).join("\n");
+    assert!(lines.contains("Not started: Edit /b.rs"), "{lines}");
+    assert!(!lines.contains("No result from Edit /b.rs"), "{lines}");
+    assert!(
+        !lines.contains("is unknown"),
+        "nothing ran without a result: {lines}"
+    );
+    assert!(
+        lines.contains("Finished, but not in the saved session: Edit /a.rs"),
+        "{lines}"
+    );
+    assert!(
+        !lines.contains("/old.rs"),
+        "an earlier turn's tool: {lines}"
+    );
+
+    // Saved with its result, the finished edit needs no line.
+    let mut saved = app.messages.to_vec();
+    saved.push(Message::user_blocks(vec![
+        claurst_core::types::ContentBlock::ToolResult {
+            tool_use_id: "first".to_string(),
+            content: claurst_core::types::ToolResultContent::Text("edited".to_string()),
+            is_error: None,
+        },
+    ]));
+    let lines = report.lines(&saved).join("\n");
+    assert!(!lines.contains("Edit /a.rs"), "{lines}");
+    assert!(lines.contains("Not started: Edit /b.rs"), "{lines}");
 }

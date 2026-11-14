@@ -77,7 +77,7 @@ Clear the current conversation history and start a fresh session. The session fi
 ### /exit
 **Aliases:** `quit`, `q`
 
-Exit the Coven Code REPL, like pressing `Ctrl+D` twice on an empty prompt. Finished turns are already saved. With `COVEN_CODE_UI=next`, a turn that is still running is stopped and saved with your prompt and what it delivered so far. If it has not stopped within 2 seconds, for example while a tool ignores the stop, only your prompt from that turn is saved. It then says the turn stopped, names any tool with no reported result, and gives the command to resume the session. Classic does not save a running turn.
+Exit the Coven Code REPL, like pressing `Ctrl+D` twice on an empty prompt. Finished turns are already saved. With `COVEN_CODE_UI=next`, a turn that is still running is stopped and saved with your prompt and what it delivered so far. If it has not stopped within 2 seconds, for example while a tool ignores the stop, only your prompt from that turn is saved. It then says the turn stopped, names any tool with no reported result, any tool that never started, and any finished tool whose result is not in the saved session, and gives the command to resume the session when the save succeeded. Classic does not save a running turn.
 
 ```
 /exit

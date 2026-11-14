@@ -441,8 +441,10 @@ struct ToolKey {
     diagnostic_path: Option<std::path::PathBuf>,
     memory_diagnostics: bool,
     live: bool,
-    /// Whole seconds the unfinished tools have been working, summed. Each
-    /// count only grows, so the sum changes whenever any row's time would.
+    /// Seconds the unfinished tools have been working, rounded as the rows
+    /// show them and summed. While no event touches the rows each count only
+    /// grows, so the sum changes whenever a row's time would; an event that
+    /// resets one changes a stamp above.
     running_seconds: u64,
     /// The call a pending approval names; its row then waits on the user.
     approval: Option<(String, Option<String>)>,
@@ -492,7 +494,7 @@ impl ToolRows {
                 .iter()
                 .filter(|block| block.run.finished.is_none())
                 .filter_map(|block| block.run.started_at)
-                .map(|at| at.elapsed().as_secs())
+                .map(|at| (at.elapsed() + std::time::Duration::from_millis(500)).as_secs())
                 .sum(),
             approval: app
                 .permission_request
@@ -674,47 +676,64 @@ impl ShellState {
     }
 }
 
-/// What to tell the user after they quit during a turn. Tools run inside this
-/// process, so the turn ends with it: nothing is left working on their behalf,
-/// and a tool with no reported result has no known outcome.
-pub fn turn_exit_report(app: &App) -> Vec<String> {
-    TurnExitReport::capture(app).lines(&app.messages)
-}
-
-/// What quitting mid-turn will report, taken before the turn is stopped. The
-/// stop can still deliver results, so [`TurnExitReport::lines`] reads the
-/// conversation as it was saved.
+/// What quitting mid-turn will report, taken before the turn is stopped. Tools
+/// run inside this process, so the turn ends with it: nothing is left working
+/// on their behalf. The stop can still deliver results, so
+/// [`TurnExitReport::lines`] reads the conversation as it was saved.
 #[derive(Debug, Clone, Default)]
 pub struct TurnExitReport {
-    /// Tool call id and the line naming it, for each tool still at work.
+    /// Tool call id and the line naming it, for each tool still at work: with
+    /// no reported result, its outcome is unknown.
     open: Vec<(String, String)>,
+    /// Tools that were waiting for their turn or for approval: none of their
+    /// work began.
+    not_started: Vec<String>,
+    /// Tools that finished; a resumed session knows of them only if their
+    /// results were saved.
+    finished: Vec<(String, String)>,
 }
 
 impl TurnExitReport {
     pub fn capture(app: &App) -> Self {
         let view = TranscriptView::project_without_text(app);
-        let open = view
-            .tools
+        // Rows outlive their turn, and an earlier turn's results may have been
+        // compacted away; only this turn's finished tools can be missing.
+        let turn = app.current_user_turn_index();
+        let this_turn: std::collections::HashSet<&str> = app
+            .tool_use_blocks
             .iter()
-            .filter(|tool| {
-                tool.allowed != Some(false)
-                    && matches!(
-                        tool.state,
-                        ToolActivityState::AwaitingApproval
-                            | ToolActivityState::Queued
-                            | ToolActivityState::Running
-                            | ToolActivityState::CancelRequested
-                    )
-            })
-            .map(|tool| {
-                let line = match &tool.target {
-                    Some(target) => format!("No result from {} {target}", tool.name),
-                    None => format!("No result from {}", tool.name),
-                };
-                (tool.id.clone(), line)
-            })
+            .filter(|block| block.turn_index == turn)
+            .map(|block| block.id.as_str())
             .collect();
-        Self { open }
+        let mut report = Self::default();
+        for tool in &view.tools {
+            if tool.allowed == Some(false) {
+                continue;
+            }
+            let named = match &tool.target {
+                Some(target) => format!("{} {target}", tool.name),
+                None => tool.name.clone(),
+            };
+            match tool.state {
+                ToolActivityState::Running | ToolActivityState::CancelRequested => report
+                    .open
+                    .push((tool.id.clone(), format!("No result from {named}"))),
+                ToolActivityState::AwaitingApproval | ToolActivityState::Queued => {
+                    report.not_started.push(format!("Not started: {named}"))
+                }
+                ToolActivityState::Done | ToolActivityState::Error
+                    if this_turn.contains(tool.id.as_str()) =>
+                {
+                    report.finished.push((
+                        tool.id.clone(),
+                        format!("Finished, but not in the saved session: {named}"),
+                    ))
+                }
+                ToolActivityState::Done | ToolActivityState::Error => {}
+                ToolActivityState::Cancelled => {}
+            }
+        }
+        report
     }
 
     /// The report, leaving out every tool whose result `saved` holds. The
@@ -735,12 +754,14 @@ impl TurnExitReport {
                 _ => None,
             })
             .collect();
-        let open: Vec<String> = self
-            .open
-            .iter()
-            .filter(|(id, _)| !answered.contains(id))
-            .map(|(_, line)| line.clone())
-            .collect();
+        let unanswered = |lines: &[(String, String)]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|(id, _)| !answered.contains(id))
+                .map(|(_, line)| line.clone())
+                .collect()
+        };
+        let open = unanswered(&self.open);
         let mut report = vec![
             "Quit during a turn. It stopped here: this session runs inside coven-code, so \
              nothing carries it on."
@@ -754,6 +775,8 @@ impl TurnExitReport {
                     .to_string(),
             );
         }
+        report.extend(self.not_started.iter().cloned());
+        report.extend(unanswered(&self.finished));
         report
     }
 }

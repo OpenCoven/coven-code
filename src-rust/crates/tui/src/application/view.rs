@@ -274,7 +274,8 @@ impl TranscriptView {
             };
             (block, state)
         });
-        app.tool_use_blocks
+        let mut rows: Vec<_> = app
+            .tool_use_blocks
             .iter()
             .map(|block| {
                 let awaiting_approval = app.permission_request.as_ref().is_some_and(|request| {
@@ -297,6 +298,11 @@ impl TranscriptView {
                 (block, state)
             })
             .chain(interrupted)
+            .collect();
+        // A cancel moves the rows still at work to their own list; each row
+        // keeps the place its tool started in.
+        rows.sort_by_key(|(block, _)| block.run.opened_at);
+        rows.into_iter()
             .map(|(block, state)| ToolActivity {
                 id: block.id.clone(),
                 // A name is one line: the exit report prints it to the shell,
