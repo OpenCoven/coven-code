@@ -641,10 +641,11 @@ Every tool is classified into a risk tier that determines the default permission
 | Tier | Examples | Default behaviour |
 |---|---|---|
 | `forbidden` | Directly destructive operations | Always blocked |
-| `dangerous` | Broad filesystem writes, network access | Prompt required |
+| `dangerous` | Broad system access, such as computer use | Prompt required |
 | `execute` | Bash, shell commands | Prompt required |
 | `write` | FileWrite, FileEdit, TodoWrite | Prompt in default mode |
-| `readonly` | FileRead, Glob, Grep, WebFetch | Allowed automatically |
+| `network` | WebFetch | Prompt in default mode; denied in plan mode and headless runs |
+| `readonly` | FileRead, Glob, Grep | Allowed automatically |
 
 ### Bash command risk classification
 

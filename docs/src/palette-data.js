@@ -185,7 +185,7 @@ export const STATIC_PALETTE_ITEMS = [
     ['GlobTool',       'Search', 'Match files by glob pattern.'],
     ['GrepTool',       'Search', 'Regex-search file contents (ripgrep).'],
     ['ToolSearchTool', 'Search', 'Look up tools by name/keyword.'],
-    ['WebFetchTool',   'Web',   'Fetch a URL and summarize via small model.'],
+    ['WebFetchTool',   'Web',   'Fetch a public URL as text.'],
     ['WebSearchTool',  'Web',   'Web search with snippet results.'],
     ['TaskCreate',     'Task',  'Create a tracked task.'],
     ['TaskUpdate',     'Task',  'Update task status / fields.'],

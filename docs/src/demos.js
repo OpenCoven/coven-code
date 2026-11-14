@@ -490,7 +490,7 @@ export function registerDemos(Alpine) {
       {
         name: 'Web',
         tools: [
-          { name: 'WebFetchTool', level: 'ReadOnly', desc: 'Fetch a URL and summarize via small model', params: ['url', 'prompt'], example: 'WebFetchTool(url="https://...", prompt="extract X")' },
+          { name: 'WebFetchTool', level: 'Network', desc: 'Fetch a public URL as text', params: ['url', 'prompt?'], example: 'WebFetchTool(url="https://...")' },
           { name: 'WebSearchTool', level: 'ReadOnly', desc: 'Web search with snippet results', params: ['query'], example: 'WebSearchTool(query="rustls 0.23 migration")' },
         ],
       },
