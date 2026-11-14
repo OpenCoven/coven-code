@@ -571,8 +571,9 @@ impl ClaudeCliProvider {
         permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
         // Coven's permission policy, when Coven started this engine. Without
-        // it the CLI would run in its headless default mode under whatever
-        // the operator's and the workspace's own settings files allow.
+        // it the CLI would run under whatever the operator's and the
+        // workspace's own settings files allow. The policy never names a
+        // permission mode: `build_args` passes the turn's own.
         let policy_args = super::claude_cli_policy::args_from_environment().map_err(|message| {
             ProviderError::Other {
                 provider: self.id.clone(),

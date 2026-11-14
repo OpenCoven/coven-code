@@ -27,8 +27,10 @@ if case == 'resume':
 (root / 'pid.tmp').write_text(str(os.getpid()))
 os.replace(root / 'pid.tmp', root / 'pid')
 policy = ['--add-dir', str(root / 'granted'), '--mcp-config', str(root / 'mcp.json'),
-          '--permission-mode', 'bypassPermissions', '--setting-sources', 'project',
-          '--settings', str(root / 'policy.json')]
+          '--setting-sources', 'project', '--settings', str(root / 'policy.json')]
+# The turn's own mode, once, with or without a policy.
+modes = [sys.argv[i + 1] for i, arg in enumerate(sys.argv) if arg == '--permission-mode']
+assert modes == ['plan'], sys.argv
 if case == 'policy':
     assert sys.argv[-len(policy):] == policy, sys.argv
     (root / 'policy-verified').write_text('yes')
@@ -110,7 +112,6 @@ fn policy_environment(case: &str, root: &Path) -> Vec<(&'static str, String)> {
                 "version": 1,
                 "settingsFile": root.join("policy.json"),
                 "settingSources": "project",
-                "permissionMode": "bypassPermissions",
                 "addDirs": [root.join("granted")],
                 "mcpConfigFile": root.join("mcp.json"),
             })

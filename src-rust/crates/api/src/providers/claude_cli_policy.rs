@@ -1,35 +1,38 @@
 // providers/claude_cli_policy.rs — Coven's permission policy for the Claude CLI.
 //
 // The CLI runs its own tools under its own permission system. Started bare, it
-// uses its headless default mode plus whatever the operator's `~/.claude` and
-// the workspace's `.claude` files allow, so one chat behaves differently on
-// each machine and the engine's own permission never reaches it. Coven hands
-// its policy to a headless engine in `COVEN_CLAUDE_POLICY`
-// (OpenCoven/coven#1738), and every CLI launch then carries it. Without the
-// variable (an interactive or standalone engine, or an older Coven) the CLI
-// starts as it always has.
+// reads whatever the operator's `~/.claude` and the workspace's `.claude` files
+// allow, so one chat behaves differently on each machine. Coven hands its
+// policy to a headless engine in `COVEN_CLAUDE_POLICY` (OpenCoven/coven#1738),
+// and every CLI launch then carries it. Without the variable (an interactive
+// or standalone engine, or an older Coven) the CLI starts as it always has.
+//
+// The policy says which rules and settings files apply. It does not name a
+// permission mode: each turn's own mode reaches the CLI through `build_args`,
+// so exactly one `--permission-mode` is ever passed.
 
 use serde::Deserialize;
 use std::path::Path;
 
 /// Set by Coven to a JSON object: `version`, `settingsFile`, `settingSources`,
-/// `permissionMode`, `addDirs` and `mcpConfigFile`.
+/// `addDirs` and `mcpConfigFile`.
 pub const CLAUDE_POLICY_ENV: &str = "COVEN_CLAUDE_POLICY";
 
 const SUPPORTED_VERSION: u32 = 1;
 
+// A field this engine does not know is a part of the policy it cannot apply,
+// so it is refused rather than dropped.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClaudePolicy {
+    /// Checked against `SUPPORTED_VERSION` before the rest is read.
+    #[serde(rename = "version")]
+    _version: u32,
     /// Claude Code settings that sit above every settings file.
     settings_file: String,
     /// The settings files the CLI still reads: a comma-separated subset of
     /// `user`, `project` and `local`, or nothing.
     setting_sources: String,
-    /// The CLI's name for the engine's permission. Absent leaves the CLI in
-    /// its headless default, which refuses whatever no rule allows.
-    #[serde(default)]
-    permission_mode: Option<String>,
     #[serde(default)]
     add_dirs: Vec<String>,
     /// The operator's own MCP servers, which the user source would have read.
@@ -99,12 +102,6 @@ fn policy_args(value: Option<&str>) -> Result<Vec<String>, String> {
         }
         args.extend(["--mcp-config".to_string(), file.clone()]);
     }
-    if let Some(mode) = &policy.permission_mode {
-        if mode.is_empty() || !mode.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(unusable("its permission mode is not a mode name"));
-        }
-        args.extend(["--permission-mode".to_string(), mode.clone()]);
-    }
     // `--add-dir` and `--mcp-config` take several values. These two take one
     // each and come last, so nothing after them can be read as a directory.
     args.extend([
@@ -158,7 +155,6 @@ mod tests {
             "version": 1,
             "settingsFile": settings,
             "settingSources": "project",
-            "permissionMode": "bypassPermissions",
             "addDirs": ["/granted/one", "/granted/two"],
             "mcpConfigFile": "/operator/.claude.json",
         });
@@ -171,8 +167,6 @@ mod tests {
                 "/granted/two",
                 "--mcp-config",
                 "/operator/.claude.json",
-                "--permission-mode",
-                "bypassPermissions",
                 "--setting-sources",
                 "project",
                 "--settings",
@@ -187,7 +181,7 @@ mod tests {
         let expected = ["--setting-sources", "", "--settings", settings.as_str()];
         let explicit = json!({
             "version": 1, "settingsFile": settings, "settingSources": "",
-            "permissionMode": null, "addDirs": [], "mcpConfigFile": null,
+            "addDirs": [], "mcpConfigFile": null,
         });
         assert_eq!(policy_args(Some(&explicit.to_string())).unwrap(), expected);
         let minimal = json!({"version": 1, "settingsFile": settings, "settingSources": ""});
@@ -225,11 +219,13 @@ mod tests {
                 with("settingSources", json!("project --flag")),
                 "setting sources",
             ),
+            // The turn's own mode is the only one: a policy may not name another.
             (
-                with("permissionMode", json!("plan --bare")),
-                "permission mode",
+                with("permissionMode", json!("bypassPermissions")),
+                "unknown field `permissionMode`",
             ),
-            (with("permissionMode", json!("")), "permission mode"),
+            (with("permissionMode", json!(null)), "unknown field"),
+            (with("futureRule", json!(true)), "unknown field"),
             (
                 with("addDirs", json!(["--dangerously-skip-permissions"])),
                 "directory",
