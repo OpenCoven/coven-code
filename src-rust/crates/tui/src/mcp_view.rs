@@ -1,6 +1,8 @@
 //! MCP server management UI.
 //! Mirrors src/components/mcp/ (12 files).
 
+use std::cell::Cell;
+
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -85,6 +87,7 @@ pub enum McpViewPane {
     ServerList,
     ToolList,
     ToolDetail,
+    ErrorDetail,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +102,11 @@ pub struct McpViewState {
     pub tool_scroll: usize,
     /// Whether the full error detail for the selected server is expanded.
     pub error_expanded: bool,
+    /// Wrapped rows, updated by rendering so navigation clamps after resize.
+    pub error_scroll: Cell<usize>,
+    pub error_scroll_max: Cell<usize>,
+    pub error_viewport_rows: Cell<usize>,
+    error_return_pane: McpViewPane,
 }
 
 impl McpViewState {
@@ -113,6 +121,10 @@ impl McpViewState {
             server_scroll: 0,
             tool_scroll: 0,
             error_expanded: false,
+            error_scroll: Cell::new(0),
+            error_scroll_max: Cell::new(0),
+            error_viewport_rows: Cell::new(1),
+            error_return_pane: McpViewPane::ServerList,
         }
     }
 
@@ -123,12 +135,38 @@ impl McpViewState {
         self.tool_search.clear();
         self.active_pane = McpViewPane::ServerList;
         self.error_expanded = false;
+        self.error_scroll.set(0);
+        self.error_scroll_max.set(0);
+        self.error_viewport_rows.set(1);
+        self.error_return_pane = McpViewPane::ServerList;
         self.visible = true;
     }
 
     /// Toggle full error detail for the currently selected server.
     pub fn toggle_error_detail(&mut self) {
         self.error_expanded = !self.error_expanded;
+        if self.error_expanded {
+            if self
+                .servers
+                .get(self.selected_server)
+                .is_some_and(|server| server.error_message.is_some())
+            {
+                self.error_return_pane = self.active_pane;
+                self.active_pane = McpViewPane::ErrorDetail;
+                self.error_scroll.set(0);
+            }
+        } else if self.active_pane == McpViewPane::ErrorDetail {
+            self.active_pane = self.error_return_pane;
+        }
+    }
+
+    pub fn scroll_error(&self, rows: isize) {
+        self.error_scroll.set(
+            self.error_scroll
+                .get()
+                .saturating_add_signed(rows)
+                .min(self.error_scroll_max.get()),
+        );
     }
 
     pub fn close(&mut self) {
@@ -138,8 +176,18 @@ impl McpViewState {
     pub fn switch_pane(&mut self) {
         self.active_pane = match self.active_pane {
             McpViewPane::ServerList => McpViewPane::ToolList,
+            McpViewPane::ToolList
+                if self.error_expanded
+                    && self
+                        .servers
+                        .get(self.selected_server)
+                        .is_some_and(|server| server.error_message.is_some()) =>
+            {
+                McpViewPane::ErrorDetail
+            }
             McpViewPane::ToolList => McpViewPane::ToolDetail,
             McpViewPane::ToolDetail => McpViewPane::ServerList,
+            McpViewPane::ErrorDetail => McpViewPane::ServerList,
         };
     }
 
@@ -155,6 +203,7 @@ impl McpViewState {
                 } else {
                     self.selected_server -= 1;
                 }
+                self.error_scroll.set(0);
             }
             McpViewPane::ToolList | McpViewPane::ToolDetail => {
                 let count = self.filtered_tools().len();
@@ -167,6 +216,7 @@ impl McpViewState {
                     self.selected_tool -= 1;
                 }
             }
+            McpViewPane::ErrorDetail => self.scroll_error(-1),
         }
     }
 
@@ -176,6 +226,7 @@ impl McpViewState {
                 let count = self.servers.len();
                 if count > 0 {
                     self.selected_server = (self.selected_server + 1) % count;
+                    self.error_scroll.set(0);
                 }
             }
             McpViewPane::ToolList | McpViewPane::ToolDetail => {
@@ -184,6 +235,7 @@ impl McpViewState {
                     self.selected_tool = (self.selected_tool + 1) % count;
                 }
             }
+            McpViewPane::ErrorDetail => self.scroll_error(1),
         }
     }
 
@@ -467,7 +519,10 @@ fn render_server_list(state: &McpViewState, area: Rect, buf: &mut Buffer) {
             if let Some(err) = &server.error_message {
                 *row += 1;
                 if *row < area.height {
-                    let short: String = err.chars().take(area.width as usize - 4).collect();
+                    let short: String = err
+                        .chars()
+                        .take(usize::from(area.width.saturating_sub(4)))
+                        .collect();
                     Paragraph::new(Line::from(vec![Span::styled(
                         format!("    {}", short),
                         Style::default().fg(Color::Red),
@@ -628,12 +683,6 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
     if state.error_expanded {
         if let Some(server) = state.servers.get(state.selected_server) {
             if let Some(ref err_msg) = server.error_message {
-                Block::default()
-                    .title(" Error Detail [e: close] ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red))
-                    .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
-                    .render(area, buf);
                 let inner = Rect {
                     x: area.x + 1,
                     y: area.y + 1,
@@ -649,9 +698,26 @@ fn render_tool_detail(state: &McpViewState, area: Rect, buf: &mut Buffer) {
                         )])
                     })
                     .collect();
-                Paragraph::new(lines)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .render(inner, buf);
+                let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+                let rows = paragraph.line_count(inner.width);
+                let viewport = usize::from(inner.height);
+                let max_scroll = rows.saturating_sub(viewport).min(usize::from(u16::MAX));
+                state.error_scroll_max.set(max_scroll);
+                state.error_viewport_rows.set(viewport.max(1));
+                let scroll = state.error_scroll.get().min(max_scroll);
+                state.error_scroll.set(scroll);
+                Block::default()
+                    .title(format!(
+                        " Error Detail {}-{}/{} [e: close] ",
+                        scroll.saturating_add(1).min(rows),
+                        scroll.saturating_add(viewport).min(rows),
+                        rows,
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red))
+                    .style(Style::default().bg(COVEN_CODE_PANEL_BG).fg(COVEN_CODE_TEXT))
+                    .render(area, buf);
+                paragraph.scroll((scroll as u16, 0)).render(inner, buf);
                 return;
             }
         }

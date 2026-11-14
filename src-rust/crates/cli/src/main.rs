@@ -176,6 +176,10 @@ struct Cli {
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
 
+    /// Save bounded private diagnostic logs for this interactive session
+    #[arg(long = "diagnostics", action = ArgAction::SetTrue)]
+    diagnostics: bool,
+
     /// API key for the active provider (overrides provider-specific env vars)
     #[arg(long = "api-key")]
     api_key: Option<String>,
@@ -585,25 +589,30 @@ async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(log_filter)
         .with_target(false);
-    let diagnostic_log = if !is_headless
-        && !cli.dump_system_prompt
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        let directory = claurst_core::config::config_home().join("logs");
-        let log = diagnostics::DiagnosticLog::open(&directory).with_context(|| {
-            format!(
-                "Could not open private diagnostics in {}",
-                directory.display()
-            )
-        })?;
-        subscriber
-            .with_ansi(false)
-            .log_internal_errors(false)
-            .with_writer(log.clone())
-            .init();
+    let diagnostic_log = if !is_headless && !cli.dump_system_prompt {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let log = if cli.diagnostics {
+            let directory = claurst_core::config::config_home().join("logs");
+            diagnostics::DiagnosticLog::open(&directory).with_context(|| {
+                format!(
+                    "Could not open private diagnostics in {}",
+                    directory.display()
+                )
+            })?
+        } else {
+            diagnostics::DiagnosticLog::memory()
+        };
+        let subscriber = subscriber.with_ansi(false).log_internal_errors(false);
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            subscriber.with_writer(log.clone()).init();
+        } else {
+            // Explicit stderr redirection remains under the caller's control.
+            subscriber
+                .with_writer(log.clone().and(std::io::stderr))
+                .init();
+        }
         Some(log)
     } else {
-        // Keep headless stdout protocol-safe and respect explicit stderr redirection.
         subscriber
             .without_time()
             .with_writer(std::io::stderr)
@@ -1010,20 +1019,9 @@ async fn main() -> anyhow::Result<()> {
     apply_headless_review_query_defaults(&mut query_config, github_context.as_ref());
     let tools = filter_tools_for_hosted_review(tools, &config);
 
-    // Spawn the background cron scheduler (fires cron tasks at scheduled times).
-    // Cancelled automatically when the process exits since we use a shared token.
-    let cron_cancel = tokio_util::sync::CancellationToken::new();
-    if scoped_workspace.is_none() {
-        claurst_query::start_cron_scheduler(
-            client.clone(),
-            tools.clone(),
-            tool_ctx.clone(),
-            query_config.clone(),
-            cron_cancel.clone(),
-        );
-    }
-
-    // --print / headless mode
+    // --print / headless mode. No scheduled prompt runs here: a headless run is
+    // one turn under that turn's permission, and nothing a scheduled prompt did
+    // would reach the output stream.
     if is_headless {
         // Long-lived stream-json mode: the Coven runtime stream protocol.
         // Turns arrive as stdin JSON frames; the process exits on stdin EOF.
@@ -1046,7 +1044,6 @@ async fn main() -> anyhow::Result<()> {
                 resume_id: cli.resume.clone(),
             })
             .await;
-            cron_cancel.cancel();
             return run;
         }
 
@@ -1083,8 +1080,6 @@ async fn main() -> anyhow::Result<()> {
             cost_tracker,
         )
         .await;
-
-        cron_cancel.cancel();
 
         // If --output was requested, write the coven-github result envelope and,
         // for a real GitHub run, honor the exit-code contract
@@ -1155,6 +1150,16 @@ async fn main() -> anyhow::Result<()> {
         // Keyless Claude runs through the local `claude` CLI runtime.
         || claurst_api::providers::claude_cli::resolve_claude_binary().is_some()
         || config.provider.as_deref().is_some_and(|p| p != "anthropic");
+
+    // Interactive sessions fire scheduled prompts in the background.
+    let cron_cancel = tokio_util::sync::CancellationToken::new();
+    claurst_query::start_cron_scheduler(
+        client.clone(),
+        tools.clone(),
+        tool_ctx.clone(),
+        query_config.clone(),
+        cron_cancel.clone(),
+    );
     let result = run_interactive(
         config,
         settings,
@@ -3149,8 +3154,14 @@ async fn run_interactive(
         None => claurst_tui::application::SessionOwnership::EngineLocal,
     };
     if let Some(log) = &diagnostic_log {
+        app.diagnostic_log_path = log.path().map(std::path::Path::to_path_buf);
+        app.diagnostic_buffer = log.take_snapshot();
+        let location = log
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "memory only; not saved".into());
         app.push_system_message(
-            format!("Diagnostics: {}", log.path().display()),
+            format!("Diagnostics: {location} · /status logs"),
             claurst_tui::app::SystemMessageStyle::Info,
         );
     }
@@ -3413,11 +3424,16 @@ async fn run_interactive(
     let mut memory_poll = MemoryPoll::default();
     'main: loop {
         if let Some(log) = &diagnostic_log {
+            if let Some(snapshot) = log.take_snapshot() {
+                app.diagnostic_buffer = Some(snapshot);
+            }
             if let Some(error) = log.take_error() {
                 app.push_system_message(
                     format!(
                         "Diagnostic logging stopped: {error}. File: {}",
-                        log.path().display()
+                        log.path()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "memory only".into())
                     ),
                     claurst_tui::app::SystemMessageStyle::Warning,
                 );
@@ -3462,11 +3478,37 @@ async fn run_interactive(
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
 
-        // Draw the UI
-        terminal.draw(|f| match renderer {
-            claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
-            claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
+        // Opt-in trace timing separates widget/layout work from completed draw
+        // (including backend diff and terminal writes). No content is recorded.
+        let measure_frame =
+            tracing::enabled!(target: "coven_code::render_timing", tracing::Level::TRACE);
+        let draw_started = measure_frame.then(std::time::Instant::now);
+        let mut render_elapsed = None;
+        let mut cells = (0, 0);
+        terminal.draw(|f| {
+            let render_started = measure_frame.then(std::time::Instant::now);
+            let area = f.area();
+            cells = (area.width, area.height);
+            match renderer {
+                claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
+                claurst_tui::application::UiRenderer::Next => {
+                    claurst_tui::next::render_next(f, &app)
+                }
+            }
+            render_elapsed = render_started.map(|start| start.elapsed());
         })?;
+        if let (Some(draw_started), Some(render_elapsed)) = (draw_started, render_elapsed) {
+            let draw_elapsed = draw_started.elapsed();
+            tracing::trace!(
+                target: "coven_code::render_timing",
+                renderer = ?renderer, cols = cells.0, rows = cells.1,
+                active = app.is_streaming,
+                render_ns = render_elapsed.as_nanos(), draw_ns = draw_elapsed.as_nanos(),
+                input_chars = app.prompt_input.text.chars().count(),
+                scroll_offset = app.scroll_offset, follow = app.auto_scroll,
+                "TUI frame timing"
+            );
+        }
         app.settle_scroll_anchor();
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
@@ -3575,6 +3617,11 @@ async fn run_interactive(
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
+                        let (name, args) = claurst_tui::input::parse_slash_command(&input);
+                        if name.eq_ignore_ascii_case("status") && args.trim() == "logs" {
+                            app.intercept_slash_command_with_args("status", "logs");
+                            continue;
+                        }
                         if !input.is_empty() {
                             let preview: String = input.chars().take(40).collect();
                             app.queued_messages.push_back(input);
@@ -3750,8 +3797,9 @@ async fn run_interactive(
                             // Always runs — some commands need BOTH (e.g. /clear clears
                             // app state via TUI AND the messages vec via CLI).
                             cmd_ctx.messages = messages.clone();
-                            let picker_only = canonical_path.as_deref() == Some("session resume")
-                                && cmd_args.split_whitespace().count() == 1;
+                            let picker_only = (canonical_path.as_deref() == Some("session resume")
+                                && cmd_args.split_whitespace().count() == 1)
+                                || canonical_path.as_deref() == Some("status logs");
                             let cli_result = if handled_by_tui && (canonical_path.is_none() || picker_only) {
                                 None
                             } else {
@@ -4540,10 +4588,9 @@ async fn run_interactive(
                                                     claurst_core::config::Settings::load_sync(
                                                     ).unwrap_or_default();
                                                 if let Some(path) = selected_path.as_deref() {
-                                                    let pattern = format!("{}*", path);
                                                     let _ = manager.add_persistent_allow_path(
                                                         &pending.request.tool_name,
-                                                        &pattern,
+                                                        path,
                                                         &mut settings,
                                                     );
                                                 } else {

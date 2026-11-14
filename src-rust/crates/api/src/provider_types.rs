@@ -4,6 +4,7 @@
 // These types form a provider-agnostic layer that every concrete provider
 // adapter (Anthropic, OpenAI, Google, …) maps to/from.
 
+use claurst_core::config::PermissionMode;
 use claurst_core::types::{ContentBlock, Message, ToolDefinition, UsageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -86,6 +87,12 @@ pub struct ProviderRequest {
     /// Defaults to an empty JSON object `{}`.
     #[serde(default)]
     pub provider_options: Value,
+
+    /// The turn's permission mode, for providers that run their own tools
+    /// (the keyless `claude` transport). `None` means the caller did not say,
+    /// and such a provider runs the turn read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 // ---------------------------------------------------------------------------

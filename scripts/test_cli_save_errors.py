@@ -85,7 +85,9 @@ def run_case(binary, blocked, private_diagnostics):
             raise AssertionError(f"missing {needle!r}:\n{pane}")
         try:
             launch = [str(binary), "--resume", session_id, "--api-base", proxy]
-            if not private_diagnostics:
+            if private_diagnostics:
+                launch.append("--diagnostics")
+            else:
                 launch = ["/bin/sh", "-c", 'exec "$@" 2>"$SAVE_STDERR"', "fixture", *launch]
             call("new-session", "-d", "-s", "fixture", "-x", "140", "-y", "45",
                  "-c", str(project), "/usr/bin/env", "-i",

@@ -30,7 +30,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BIN: &str = env!("CARGO_BIN_EXE_coven-code");
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -426,6 +426,120 @@ fn contract_permission_mode_values_are_accepted() {
     assert_eq!(
         run.code, 2,
         "invalid --permission-mode must be a usage error\n{run}"
+    );
+}
+
+/// coven passes `plan` for a read-only turn and `bypass-permissions` for a
+/// full one. Without an API key the engine hands the turn to `claude`, which
+/// runs its own tools, so the mode has to reach `claude` as its own
+/// `--permission-mode`. Without it, `claude` falls back to its settings, which
+/// can widen a read-only turn and still refuse a full one.
+#[test]
+fn contract_permission_mode_reaches_the_keyless_claude_transport() {
+    for (engine_args, claude_mode) in [
+        (&["--permission-mode", "plan"][..], "plan"),
+        (
+            &["--permission-mode", "bypass-permissions"][..],
+            "bypassPermissions",
+        ),
+        (&["--permission-mode", "accept-edits"][..], "acceptEdits"),
+        (&["--permission-mode", "default"][..], "default"),
+        (&[][..], "default"),
+        (&["--dangerously-skip-permissions"][..], "bypassPermissions"),
+    ] {
+        let scratch = Scratch::new();
+        let run = run_engine(
+            scratch
+                .engine()
+                .args(stream_json_args())
+                .args(engine_args)
+                .args(["--model", FAKE_MODEL]),
+            &user_frame("ping"),
+        );
+        assert_eq!(run.code, 0, "{engine_args:?}\n{run}");
+        assert!(
+            run.stdout.contains(FAKE_REPLY),
+            "{engine_args:?}: the reply did not come back\n{run}"
+        );
+        let argv = scratch.claude_argv();
+        let modes: Vec<&str> = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--permission-mode")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            modes,
+            [claude_mode],
+            "{engine_args:?} reached claude as {modes:?}: {argv:?}"
+        );
+    }
+}
+
+/// A headless run is one turn on coven's behalf, under that turn's
+/// permission. A prompt saved earlier for a schedule must not run inside it:
+/// it would run with this turn's permission, and nothing it did would reach
+/// the stream. The run stays open across a minute boundary with a due
+/// one-shot prompt on disk. Afterwards the prompt must still be on disk and
+/// the provider must never have started.
+#[test]
+fn contract_headless_run_does_not_fire_scheduled_prompts() {
+    let scratch = Scratch::new();
+    let engine_home = scratch.coven_home().join("code");
+    fs::create_dir_all(&engine_home).expect("create engine home");
+    let tasks = engine_home.join("scheduled_tasks.json");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch");
+    let planted = serde_json::json!([{
+        "id": "due-fixture",
+        "cron": "* * * * *",
+        "prompt": "scheduled fixture prompt",
+        "recurring": false,
+        "durable": true,
+        "created_at": now.as_secs(),
+    }]);
+    fs::write(&tasks, planted.to_string()).expect("plant scheduled prompt");
+
+    let mut child = scratch
+        .engine()
+        .args(stream_json_args())
+        .args(["--permission-mode", "bypass-permissions"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn coven-code");
+    let stdin = child.stdin.take().expect("stdin");
+    // Past the next whole minute, with time for a fired prompt to start.
+    let into_minute = Duration::from_millis((now.as_millis() % 60_000) as u64);
+    std::thread::sleep(Duration::from_secs(65) - into_minute);
+    drop(stdin);
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    while child.try_wait().expect("try_wait").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("coven-code did not exit on stdin EOF within {RUN_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().expect("wait_with_output");
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    assert_eq!(run.code, 0, "{run}");
+    let left: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&tasks).expect("scheduled prompts on disk"))
+            .expect("scheduled prompts parse");
+    assert_eq!(
+        left, planted,
+        "the due prompt was taken off disk, so it fired inside a headless run\n{run}"
+    );
+    assert!(
+        !scratch.claude_argv_log().exists(),
+        "a scheduled prompt started the provider inside a headless run: {:?}\n{run}",
+        scratch.claude_argv()
     );
 }
 

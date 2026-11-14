@@ -56,9 +56,10 @@ async fn cron_persistence_child() {
     let home = std::path::PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap());
     let ctx = ToolContext {
         working_dir: home.clone(),
-        permission_mode: PermissionMode::Default,
+        // Scheduling needs the permission running a command needs.
+        permission_mode: PermissionMode::BypassPermissions,
         permission_handler: Arc::new(AutoPermissionHandler {
-            mode: PermissionMode::Default,
+            mode: PermissionMode::BypassPermissions,
         }),
         cost_tracker: claurst_core::cost::CostTracker::new(),
         session_id: "cron-persistence-fixture".into(),

@@ -139,6 +139,9 @@ impl Tool for FixtureTool {
             self.late_entered.notify_one();
             self.release_late.notified().await;
         }
+        if name == "first" {
+            *self.captured.lock().unwrap() = Some(ctx.clone());
+        }
         if let Err(error) =
             ctx.check_permission_with_details(self.name(), self.description(), name, false)
         {
@@ -339,20 +342,36 @@ async fn scenario(root: &Path, max_turns: u32) {
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), late_entered.notified())
-        .await
-        .expect("session/cancel did not release the first permission without a client reply");
+    // Current query cancellation suppresses queued writers before they execute.
+    // Observe prompt completion directly, then probe its retained generation while
+    // the next generation has a live unanswered approval.
+    response(&mut output, 1, "cancelled").await;
+    old.await.unwrap();
     assert!(executed.lock().unwrap().is_empty());
+    let old_ctx = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("first tool captured its generation");
     if max_turns > 1 {
-        // The new generation must retain its pending approval while the old turn exits.
         let next = prompt(&server, 2, "next");
         let request = permission(&mut output, "next").await;
-        release_late.notify_one();
-        response(&mut output, 1, "cancelled").await;
-        old.await.unwrap();
+        let late = tokio::spawn(async move {
+            old_ctx.check_permission_with_details(
+                "PermissionFixture",
+                "old generation",
+                "late",
+                false,
+            )
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(2), late)
+            .await
+            .expect("canceled generation must deny without a reply")
+            .unwrap()
+            .is_err());
         assert!(
             !next.is_finished(),
-            "old turn cleanup resolved another turn's permission"
+            "old generation resolved the new approval"
         );
         assert!(executed.lock().unwrap().is_empty());
         assert_ne!(unanswered["id"], request["id"]);
@@ -389,9 +408,6 @@ async fn scenario(root: &Path, max_turns: u32) {
         next.await.unwrap();
         assert_eq!(*executed.lock().unwrap(), ["next"]);
     } else {
-        release_late.notify_one();
-        response(&mut output, 1, "cancelled").await;
-        old.await.unwrap();
         let next = prompt(&server, 2, "plain");
         response(&mut output, 2, "end_turn").await;
         next.await.unwrap();
