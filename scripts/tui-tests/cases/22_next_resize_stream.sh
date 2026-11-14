@@ -48,11 +48,30 @@ tc_next_resize_stream() {
     else _fail "the turn is streaming" "$(tui_capture)"; fi
 
     tui_type "kept draft"
+    # tmux can drop a resize on a loaded host, so each size is confirmed and
+    # reapplied; the extremes must really have been reached.
+    local reached="" want got tries
     for size in "80 24" "40 10" "200 50" "20 5" "120 40" "1 1" "2 2" "160 30" "10 3" "80 24" "120 40"; do
+      want="${size% *}x${size#* }" tries=0
       _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
+      got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
+      while [ "$got" != "$want" ] && [ "$tries" -lt 3 ]; do
+        sleep 0.1; tries=$((tries + 1))
+        _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
+        got="$(_tmux display-message -p -t "$TUI_SESSION" '#{window_width}x#{window_height}')"
+      done
+      [ "$got" = "$want" ] && reached+=" $want"
       sleep 0.25
       if tui_capture | grep -q "working"; then sizes_while_working=$((sizes_while_working + 1)); fi
     done
+    case " $reached " in
+      *" 200x50 "*) _pass "the largest size was applied" ;;
+      *) _fail "the largest size was applied" "applied:$reached" ;;
+    esac
+    case " $reached " in
+      *" 1x1 "* | *" 2x2 "*) _pass "the smallest sizes were applied" ;;
+      *) _fail "the smallest sizes were applied" "applied:$reached" ;;
+    esac
     # The smallest sizes have no room for the word, so not every look can see it.
     if [ "$sizes_while_working" -ge 3 ]; then
       _pass "sizes changed while the turn was running ($sizes_while_working seen working)"
