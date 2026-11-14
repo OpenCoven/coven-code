@@ -91,112 +91,16 @@ jobs:
           fi
           echo "Version still pinned at $CARGO_VERSION — safe to patch in place."
 
-  # ── Build matrix ────────────────────────────────────────────────────
-  # Mirrors release.yml exactly — keep these two job specs in sync.
+  # ── Build: the five targets, in release-build.yml ──────────────────
+  # Same build as release.yml, with the patch release's own inputs: its
+  # checkout keeps credentials and it installs libssl-dev.
   build:
     needs: preflight
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact: coven-code-windows-x86_64
-            ext: .exe
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: coven-code-linux-x86_64
-            ext: ""
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: coven-code-linux-aarch64
-            ext: ""
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: coven-code-macos-x86_64
-            ext: ""
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: coven-code-macos-aarch64
-            ext: ""
-
-    runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.artifact }}
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux' && !matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libssl-dev pkg-config
-
-      - name: Install cross (aarch64-linux)
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-rust/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
-
-      - name: Build release binary (native)
-        if: ${{ !matrix.cross }}
-        working-directory: src-rust
-        run: cargo build --release --locked --package claurst --target ${{ matrix.target }}
-
-      - name: Create Cross.toml for cross-compilation
-        if: matrix.cross
-        working-directory: src-rust
-        run: |
-          cat > Cross.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          pre-build = [
-            "dpkg --add-architecture $CROSS_DEB_ARCH",
-            "apt-get update",
-            "apt-get install -y pkg-config libssl-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH"
-          ]
-          EOF
-
-      - name: Build release binary (cross)
-        if: matrix.cross
-        working-directory: src-rust
-        run: cross build --release --locked --package claurst --target ${{ matrix.target }}
-
-      - name: Verify binary exists
-        shell: bash
-        run: |
-          BINARY="src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}"
-          if [[ ! -f "$BINARY" ]]; then
-            echo "::error::Binary not found at $BINARY"
-            exit 1
-          fi
-          ls -lh "$BINARY"
-
-      - name: Stage binary for packaging
-        shell: bash
-        run: |
-          mkdir -p "stage/${{ matrix.artifact }}"
-          cp "src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}" \
-             "stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}
+    uses: ./.github/workflows/release-build.yml
+    with:
+      persist-credentials: true
+      openssl: true
+      cargo-term-color: always
 
   # ── Re-upload assets to the existing release ────────────────────────
   patch:
