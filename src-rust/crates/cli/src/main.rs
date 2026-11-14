@@ -2179,7 +2179,7 @@ fn permission_request_from_core(
     let tool_name = pending.request.tool_name.clone();
     let tool_use_id = pending.tool_use_id.clone();
 
-    let request = match (tool_name.as_str(), pending.request.path.clone()) {
+    let mut request = match (tool_name.as_str(), pending.request.path.clone()) {
         ("Bash", Some(command)) => {
             let suggested_prefix = if command
                 .chars()
@@ -2226,7 +2226,8 @@ fn permission_request_from_core(
             pending.request.path.clone(),
         ),
     };
-    request.for_call(pending.call_id.clone())
+    request.call_id = pending.call_id.clone();
+    request
 }
 
 /// One submitted logical turn, retained through failures and model-switch retries.
@@ -2589,11 +2590,13 @@ async fn save_session_with_warning(
     }
 }
 
+/// Saves the transcript and indexes it for search. Returns whether the
+/// transcript was saved; indexing is best effort.
 async fn persist_interactive_session(
     session: &claurst_core::history::ConversationSession,
     owner: Option<&InteractiveTurn>,
     notifications: &mut claurst_tui::notifications::NotificationQueue,
-) {
+) -> bool {
     // A recoverable preparation/auth failure can finish without an attempt.
     // Delay indexing its synthetic UUID until attempted; a later stale retry
     // can then roll it back without leaving an immutable search-index entry.
@@ -2606,7 +2609,7 @@ async fn persist_interactive_session(
         })
         .and_then(|owner| owner.synthetic_uuid.as_deref());
     // JSON is primary storage; index only the finalized transcript.
-    save_session_with_warning(session, notifications, "transcript update").await;
+    let saved = save_session_with_warning(session, notifications, "transcript update").await;
 
     // Also index into SQLite for /search support
     {
@@ -2640,6 +2643,7 @@ async fn persist_interactive_session(
             }
         }
     }
+    saved
 }
 
 fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
@@ -5913,15 +5917,17 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             );
-            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+            let saved =
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
             for line in exit_report.lines(&session.messages) {
                 println!("{line}");
             }
-            let saved = !session.messages.is_empty()
-                && claurst_core::history::load_session(&session.id)
-                    .await
-                    .is_ok();
-            if saved {
+            // The in-app warning is gone once the terminal is restored, and an
+            // earlier save on disk would lack this turn.
+            if !saved {
+                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
+            } else if !session.messages.is_empty() {
                 let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
                 println!(
                     "Pick it up with: {}",

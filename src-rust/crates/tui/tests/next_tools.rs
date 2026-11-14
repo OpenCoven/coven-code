@@ -586,7 +586,7 @@ fn a_tool_waiting_for_its_turn_says_so_until_its_turn_comes() {
 
     apply(
         &mut app,
-        QueryEvent::ToolDequeued {
+        QueryEvent::ToolRunning {
             tool_id: "second".to_string(),
         },
     );
@@ -595,10 +595,32 @@ fn a_tool_waiting_for_its_turn_says_so_until_its_turn_comes() {
 }
 
 #[test]
+fn time_spent_on_the_batchs_hooks_before_a_tool_runs_is_not_the_tools() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(&mut app, "long", "Bash", r#"{"command":"make"}"#);
+    // Every tool's PreToolUse hooks run before any tool's work begins.
+    app.tool_use_blocks[0].run.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+    apply(
+        &mut app,
+        QueryEvent::ToolRunning {
+            tool_id: "long".to_string(),
+        },
+    );
+    let text = text_of(&draw(&app, 100, 30));
+    let row = row_of(&text, "Bash");
+    assert!(row.trim_end().ends_with("running"), "{row}");
+}
+
+#[test]
 fn a_tool_asking_for_approval_is_not_shown_as_running() {
     let mut app = next_app();
     app.push_message(Message::user("run it".to_string()));
     tool_start(&mut app, "call-1", "Bash", r#"{"command":"make"}"#);
+    // A frame drawn before the request arrives must not be reused after it.
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(text.contains("1 tool(s) running"), "{text}");
     let bash = claurst_tui::dialogs::PermissionRequest::bash(
         "call-1".to_string(),
         "Bash".to_string(),
@@ -612,6 +634,8 @@ fn a_tool_asking_for_approval_is_not_shown_as_running() {
         view.tools[0].state,
         claurst_tui::application::view::ToolActivityState::AwaitingApproval
     );
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(!text.contains("tool(s) running"), "{text}");
 
     app.permission_request = None;
     app.tool_use_blocks[0].run.started_at =
@@ -841,6 +865,38 @@ fn a_tool_that_finished_stays_finished_when_the_turn_is_interrupted() {
 }
 
 #[test]
+fn interrupting_a_turn_keeps_every_row_that_already_did_its_work() {
+    let mut app = next_app();
+    app.push_message(Message::user("read, grep, wait".to_string()));
+    tool_start(&mut app, "read", "Read", r#"{"file_path":"/a.rs"}"#);
+    tool_start(&mut app, "grep", "Grep", r#"{"pattern":"fn"}"#);
+    tool_start(&mut app, "wait", "Bash", r#"{"command":"sleep 30"}"#);
+    tool_end(&mut app, "read", "Read", "contents", false);
+    apply(
+        &mut app,
+        QueryEvent::ToolFinished {
+            tool_id: "grep".to_string(),
+            is_error: false,
+        },
+    );
+
+    app.interrupt_tool_rows();
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    let state = |id: &str| {
+        view.tools
+            .iter()
+            .find(|tool| tool.id == id)
+            .unwrap_or_else(|| panic!("no {id} row: {:?}", view.tools))
+            .state
+    };
+    use claurst_tui::application::view::ToolActivityState;
+    // An ended row and a row still owed its result are treated alike.
+    assert_eq!(state("read"), ToolActivityState::Done);
+    assert_eq!(state("grep"), ToolActivityState::Done);
+    assert_ne!(state("wait"), ToolActivityState::Done);
+}
+
+#[test]
 fn the_exit_report_leaves_out_a_tool_whose_result_arrived() {
     use claurst_core::types::{ContentBlock, ToolResultContent};
     let mut app = next_app();
@@ -880,4 +936,22 @@ fn the_exit_report_still_names_a_tool_that_was_cancelled_mid_run() {
         report.contains("What these finished is unknown"),
         "{report}"
     );
+}
+
+#[test]
+fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
+    let mut app = next_app();
+    app.push_message(Message::user("build".to_string()));
+    tool_start(&mut app, "long", "Bash", r#"{"command":"make"}"#);
+
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "Bash").trim_end().ends_with("running"),
+        "{text}"
+    );
+
+    // Only time passes: no event, no edit to the rows.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(row_of(&text, "Bash").contains("running 1s"), "{text}");
 }

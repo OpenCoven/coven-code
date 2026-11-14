@@ -39,6 +39,7 @@ fn matches_fresh(current: &App, width: u16, height: u16) {
     fresh.tool_use_blocks = current.tool_use_blocks.clone().into();
     fresh.interrupted_tools = current.interrupted_tools.clone().into();
     fresh.permission_decisions = current.permission_decisions.clone().into();
+    fresh.permission_request = current.permission_request.clone();
     fresh.is_streaming = current.is_streaming;
     fresh.cancellation = current.cancellation;
     fresh.next_presentation = current.next_presentation.clone();

@@ -886,8 +886,9 @@ pub enum QueryEvent {
     },
     /// A tool is waiting for another in its response to finish first.
     ToolQueued { tool_id: String },
-    /// A queued tool's turn has come.
-    ToolDequeued { tool_id: String },
+    /// A tool's own work begins: at once, or when its turn to write comes.
+    /// Time before this, on hooks or waiting, is not the tool's.
+    ToolRunning { tool_id: String },
     /// A tool's own work has ended. Its [`QueryEvent::ToolEnd`], which carries
     /// the result, follows once its hooks have run and every tool in the
     /// response has ended.
@@ -3995,7 +3996,6 @@ async fn execute_tool_blocks_with_hooks(
     event_tx: Option<&QueryEventSink>,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Vec<ContentBlock> {
-    const CANCELLED: &str = TOOL_CANCELLED_RESULT;
     // Phase 1: Run PreToolUse hooks sequentially so policy denials can block
     // execution before any tool side effects occur.
     let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());
@@ -4005,7 +4005,7 @@ async fn execute_tool_blocks_with_hooks(
                 id,
                 name,
                 input,
-                blocked_result: Some(ToolResult::error(CANCELLED)),
+                blocked_result: Some(ToolResult::error(TOOL_CANCELLED_RESULT)),
                 started: false,
             });
             continue;
@@ -4051,7 +4051,7 @@ async fn execute_tool_blocks_with_hooks(
                 id,
                 name,
                 input,
-                blocked_result: Some(ToolResult::error(CANCELLED)),
+                blocked_result: Some(ToolResult::error(TOOL_CANCELLED_RESULT)),
                 started: true,
             });
             continue;
@@ -4122,7 +4122,7 @@ async fn execute_tool_blocks_with_hooks(
                     if let (Some(event), Some(tx)) = (finished, event_tx) {
                         let _ = tx.send(event);
                     }
-                    result
+                    (result, None)
                 })
             } else {
                 let name = p.name.clone();
@@ -4147,16 +4147,15 @@ async fn execute_tool_blocks_with_hooks(
                                     report(QueryEvent::ToolQueued {
                                         tool_id: tool_id.clone(),
                                     });
-                                    let turn = writer_turn.lock().await;
-                                    report(QueryEvent::ToolDequeued {
-                                        tool_id: tool_id.clone(),
-                                    });
-                                    turn
+                                    writer_turn.lock().await
                                 }
                             })
                         } else {
                             None
                         };
+                        report(QueryEvent::ToolRunning {
+                            tool_id: tool_id.clone(),
+                        });
                         execute_tool(&name, &input, tools, tool_ctx).await
                     };
                     // Cancel each unfinished call rather than dropping the
@@ -4164,51 +4163,61 @@ async fn execute_tool_blocks_with_hooks(
                     // and queued writers must not start after cancellation.
                     // A call cancelled while it waits its turn still finishes,
                     // so its row does not stay queued.
-                    let result = tokio::select! {
+                    let mut result = tokio::select! {
                         biased;
-                        _ = cancel_token.cancelled() => ToolResult::error(CANCELLED),
+                        _ = cancel_token.cancelled() => ToolResult::error(TOOL_CANCELLED_RESULT),
                         result = execute => result,
+                    };
+                    // A fetch without a usable retrieval record fails here, so
+                    // its finish reports the outcome the result will carry.
+                    let retrieval_content = if name == claurst_core::constants::TOOL_NAME_WEB_FETCH
+                        && !result.is_error
+                    {
+                        let retrieval = result
+                            .metadata
+                            .take()
+                            .and_then(|metadata| {
+                                serde_json::from_value::<claurst_tools::web_fetch::Retrieval>(
+                                    metadata,
+                                )
+                                .ok()
+                            })
+                            .filter(claurst_tools::web_fetch::Retrieval::is_supported);
+                        match retrieval {
+                            Some(retrieval) => match retrieval.with_body(result.content.clone()) {
+                                Ok(content) => Some(content),
+                                Err(_) => {
+                                    result = ToolResult::error(
+                                        "Could not serialize WebFetch retrieval record",
+                                    );
+                                    None
+                                }
+                            },
+                            None => {
+                                result = ToolResult::error(
+                                    "WebFetch returned no supported retrieval record",
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
                     };
                     report(QueryEvent::ToolFinished {
                         tool_id,
                         is_error: result.is_error,
                     });
-                    result
+                    (result, retrieval_content)
                 }))
             }
         })
         .collect();
-    let exec_results: Vec<ToolResult> = futures::future::join_all(exec_futures).await;
+    let exec_results: Vec<(ToolResult, Option<ToolResultContent>)> =
+        futures::future::join_all(exec_futures).await;
 
     // Phase 3: run post-hooks, emit completion events, and return result blocks.
     let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(prepared.len());
-    for (p, mut result) in prepared.iter().zip(exec_results) {
-        let retrieval_content = if p.name == claurst_core::constants::TOOL_NAME_WEB_FETCH
-            && !result.is_error
-        {
-            let retrieval = result
-                .metadata
-                .take()
-                .and_then(|metadata| {
-                    serde_json::from_value::<claurst_tools::web_fetch::Retrieval>(metadata).ok()
-                })
-                .filter(claurst_tools::web_fetch::Retrieval::is_supported);
-            match retrieval {
-                Some(retrieval) => match retrieval.with_body(result.content.clone()) {
-                    Ok(content) => Some(content),
-                    Err(_) => {
-                        result = ToolResult::error("Could not serialize WebFetch retrieval record");
-                        None
-                    }
-                },
-                None => {
-                    result = ToolResult::error("WebFetch returned no supported retrieval record");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+    for (p, (result, retrieval_content)) in prepared.iter().zip(exec_results) {
         let post_ctx = claurst_core::hooks::HookContext {
             event: "PostToolUse".to_string(),
             tool_name: Some(p.name.clone()),
@@ -8920,7 +8929,7 @@ mod tests {
                 .expect("the channel closed");
             match event {
                 QueryEvent::ToolQueued { tool_id } => return format!("queued {tool_id}"),
-                QueryEvent::ToolDequeued { tool_id } => return format!("dequeued {tool_id}"),
+                QueryEvent::ToolRunning { tool_id } => return format!("running {tool_id}"),
                 QueryEvent::ToolFinished { tool_id, is_error } => {
                     return format!("finished {tool_id} error={is_error}")
                 }
@@ -8957,6 +8966,8 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running quick");
+            assert_eq!(next_progress(&mut rx).await, "running slow");
             release.notify_one();
             assert_eq!(next_progress(&mut rx).await, "finished quick error=true");
             slow_gate.wait().await;
@@ -9002,7 +9013,9 @@ mod tests {
         let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
             // Refused at once, while the other tool in the response still runs.
+            // A refused tool's work never begins.
             assert_eq!(next_progress(&mut rx).await, "finished refused error=true");
+            assert_eq!(next_progress(&mut rx).await, "running slow");
             slow_gate.wait().await;
             assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
             assert_eq!(next_progress(&mut rx).await, "end refused");
@@ -9030,14 +9043,109 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
         let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running first");
             assert_eq!(next_progress(&mut rx).await, "queued second");
             release.notify_one();
             assert_eq!(next_progress(&mut rx).await, "finished first error=true");
-            assert_eq!(next_progress(&mut rx).await, "dequeued second");
+            assert_eq!(next_progress(&mut rx).await, "running second");
             release.notify_one();
             assert_eq!(next_progress(&mut rx).await, "finished second error=true");
         };
         tokio::join!(run, watch);
+    }
+
+    #[tokio::test]
+    async fn a_web_fetch_without_a_retrieval_record_reports_finishing_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(RendezvousTool {
+            name: claurst_core::constants::TOOL_NAME_WEB_FETCH,
+            level: PermissionLevel::ReadOnly,
+            barrier: Arc::new(tokio::sync::Barrier::new(1)),
+        })];
+        let calls = vec![(
+            "fetch".to_string(),
+            claurst_core::constants::TOOL_NAME_WEB_FETCH.to_string(),
+            serde_json::json!({}),
+        )];
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel).await;
+        // The row must not read done before the result says it failed.
+        assert_eq!(next_progress(&mut rx).await, "running fetch");
+        assert_eq!(next_progress(&mut rx).await, "finished fetch error=true");
+        assert_eq!(next_progress(&mut rx).await, "end fetch");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writer_cancelled_while_it_waits_finishes_without_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release,
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
+        let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running first");
+            assert_eq!(next_progress(&mut rx).await, "queued second");
+            cancel.cancel();
+            // The waiting writer finishes so its row does not stay queued, and
+            // its work never begins.
+            assert_eq!(next_progress(&mut rx).await, "finished first error=true");
+            assert_eq!(next_progress(&mut rx).await, "finished second error=true");
+            assert_eq!(next_progress(&mut rx).await, "end first");
+            assert_eq!(next_progress(&mut rx).await, "end second");
+        };
+        let (results, ()) = tokio::join!(run, watch);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn calls_cancelled_before_the_batch_starts_report_only_their_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release: Arc::new(tokio::sync::Notify::new()),
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel).await;
+        drop(sink);
+        let mut seen = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                QueryEvent::ToolStart { tool_id, .. } => seen.push(format!("start {tool_id}")),
+                QueryEvent::ToolQueued { tool_id } => seen.push(format!("queued {tool_id}")),
+                QueryEvent::ToolRunning { tool_id } => seen.push(format!("running {tool_id}")),
+                QueryEvent::ToolFinished { tool_id, .. } => {
+                    seen.push(format!("finished {tool_id}"))
+                }
+                QueryEvent::ToolEnd { tool_id, .. } => seen.push(format!("end {tool_id}")),
+                _ => {}
+            }
+        }
+        // No row was ever shown, so none is left to settle.
+        assert_eq!(seen, ["end first", "end second"]);
     }
 
     #[test]

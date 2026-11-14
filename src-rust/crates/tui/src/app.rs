@@ -424,8 +424,8 @@ pub struct ToolUseBlock {
 /// `ToolEnd` that waits for every tool in its response. Only Next shows this.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRun {
-    /// When its work began: the start, the end of its wait for a turn, or the
-    /// moment it was approved.
+    /// When its work began: its start, until the runtime says its own work has
+    /// begun, then the moment it was approved if it asked.
     pub started_at: Option<std::time::Instant>,
     /// Waiting for another tool in its response to finish first.
     pub queued: bool,
@@ -3506,25 +3506,21 @@ impl App {
             .retain(|id, _| shown.contains(id.as_str()));
     }
 
-    /// Clear the live tool rows of a turn being cancelled, keeping the ones
-    /// still running as evidence of what the cancel interrupted.
+    /// Move the tools a cancel interrupts to their own list, as evidence of
+    /// what it cut off. A tool that ended, or reported finishing before its
+    /// result arrived, did its work and keeps its row.
     pub fn interrupt_tool_rows(&mut self) {
         if self.renderer == crate::application::UiRenderer::Classic {
             // Classic clears its tool rows on cancel, as it always has.
             self.tool_use_blocks.clear();
             return;
         }
-        // A tool that reported finishing did its work, even if its result has
-        // not arrived; only the ones still at work are interrupted.
-        let (finished, rest): (Vec<_>, Vec<_>) = self
+        let (interrupted, kept): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_some());
-        self.interrupted_tools.extend(
-            rest.into_iter()
-                .filter(|block| block.status == ToolStatus::Running),
-        );
-        *self.tool_use_blocks = finished;
+            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_none());
+        self.interrupted_tools.extend(interrupted);
+        *self.tool_use_blocks = kept;
     }
 
     /// Record a cancellation the loop performed without a key request
@@ -8019,7 +8015,8 @@ impl App {
                 }
             }
 
-            QueryEvent::ToolDequeued { tool_id } => {
+            QueryEvent::ToolRunning { tool_id } => {
+                // Its time starts now, not when the batch began with its hooks.
                 if let Some(run) = self.tool_run_mut(&tool_id) {
                     *run = ToolRun::started();
                 }

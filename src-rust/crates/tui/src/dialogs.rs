@@ -89,12 +89,6 @@ impl PermissionRequest {
     /// Guard the request against stray keys (Next renderer, #411): focus
     /// the deny option, so the default action is never destructive, and
     /// ignore keys other than Escape until a quiet gap has passed.
-    /// Name the model's tool call this request asks about.
-    pub fn for_call(mut self, call_id: Option<String>) -> Self {
-        self.call_id = call_id;
-        self
-    }
-
     pub fn guarded(mut self) -> Self {
         self.selected_option = self
             .options

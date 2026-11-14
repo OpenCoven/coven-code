@@ -441,6 +441,11 @@ struct ToolKey {
     diagnostic_path: Option<std::path::PathBuf>,
     memory_diagnostics: bool,
     live: bool,
+    /// Whole seconds the unfinished tools have been working, summed. Each
+    /// count only grows, so the sum changes whenever any row's time would.
+    running_seconds: u64,
+    /// The call a pending approval names; its row then waits on the user.
+    approval: Option<(String, Option<String>)>,
 }
 
 #[derive(Debug, Default)]
@@ -482,6 +487,17 @@ impl ToolRows {
             diagnostic_path: app.diagnostic_log_path.clone(),
             memory_diagnostics: app.diagnostic_buffer.is_some(),
             live: !app.streaming_text.is_empty(),
+            running_seconds: app
+                .tool_use_blocks
+                .iter()
+                .filter(|block| block.run.finished.is_none())
+                .filter_map(|block| block.run.started_at)
+                .map(|at| at.elapsed().as_secs())
+                .sum(),
+            approval: app
+                .permission_request
+                .as_ref()
+                .map(|request| (request.tool_use_id.clone(), request.call_id.clone())),
         };
         let changed = self.key.as_ref() != Some(&key);
         if changed {
