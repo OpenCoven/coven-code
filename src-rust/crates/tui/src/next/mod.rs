@@ -688,11 +688,15 @@ impl ShellState {
 /// [`TurnExitReport::lines`] reads the conversation as it was saved.
 #[derive(Debug, Clone, Default)]
 pub struct TurnExitReport {
-    /// Tool call id and the line naming it, as last seen, for each tool with
-    /// no reported result: its outcome is unknown. None is said not to have
-    /// started. The rows trail the worker by up to a frame, a call cut off
-    /// before it began saves the same result as one cut off mid-run, and a
-    /// tool may ask for approval after a first step of its work.
+    /// False when the work being stopped is auto-compaction, not a turn:
+    /// there is nothing to report.
+    turn: bool,
+    /// Tool call id and the line naming it, with how it was last shown, for
+    /// each tool with no reported result: its outcome is unknown. None is
+    /// said not to have started. The rows trail the worker by up to a frame,
+    /// a call cut off before it began saves the same result as one cut off
+    /// mid-run, and a tool may ask for approval after a first step of its
+    /// work.
     open: Vec<(String, String)>,
     /// Tools that finished; a resumed session knows of them only if their
     /// results were saved.
@@ -701,6 +705,9 @@ pub struct TurnExitReport {
 
 impl TurnExitReport {
     pub fn capture(app: &App) -> Self {
+        if app.auto_compact_running {
+            return Self::default();
+        }
         let view = TranscriptView::project_without_text(app);
         // Rows outlive their turn, and an earlier turn's results may have been
         // compacted away; only this turn's finished tools can be missing.
@@ -711,11 +718,11 @@ impl TurnExitReport {
             .filter(|block| block.turn_index == turn)
             .map(|block| block.id.as_str())
             .collect();
-        let mut report = Self::default();
+        let mut report = Self {
+            turn: true,
+            ..Self::default()
+        };
         for tool in &view.tools {
-            if tool.allowed == Some(false) {
-                continue;
-            }
             let named = match &tool.target {
                 Some(target) => format!("{} {target}", tool.name),
                 None => tool.name.clone(),
@@ -726,12 +733,14 @@ impl TurnExitReport {
                     .push((tool.id.clone(), format!("No result from {named}"))),
                 // An open prompt takes every key, so quitting waits for the
                 // answer; this holds for any other way a turn ends mid-prompt.
-                ToolActivityState::AwaitingApproval => report
-                    .open
-                    .push((tool.id.clone(), format!("Waiting for approval: {named}"))),
-                ToolActivityState::Queued => report
-                    .open
-                    .push((tool.id.clone(), format!("Waiting for its turn: {named}"))),
+                ToolActivityState::AwaitingApproval => report.open.push((
+                    tool.id.clone(),
+                    format!("No result from {named} (last shown waiting for approval)"),
+                )),
+                ToolActivityState::Queued => report.open.push((
+                    tool.id.clone(),
+                    format!("No result from {named} (last shown waiting for its turn)"),
+                )),
                 ToolActivityState::Done | ToolActivityState::Error
                     if this_turn.contains(tool.id.as_str()) =>
                 {
@@ -754,6 +763,9 @@ impl TurnExitReport {
     /// for it is saved.
     pub fn lines(&self, saved: &[claurst_core::types::Message]) -> Vec<String> {
         use claurst_core::types::{ContentBlock, ToolResultContent};
+        if !self.turn {
+            return Vec::new();
+        }
         let mut answered = std::collections::HashSet::new();
         let mut saved_results = std::collections::HashSet::new();
         for block in saved.iter().flat_map(|message| message.content_blocks()) {

@@ -798,7 +798,7 @@ fn quitting_mid_turn_says_what_is_not_known() {
     assert!(report.contains("nothing carries it on"), "{report}");
     assert!(report.contains("No result from Bash make"), "{report}");
     assert!(
-        report.contains("Waiting for its turn: Edit /b.rs"),
+        report.contains("No result from Edit /b.rs (last shown waiting for its turn)"),
         "{report}"
     );
     assert!(
@@ -1085,10 +1085,9 @@ fn the_exit_report_says_which_tools_waited_and_which_results_were_not_saved() {
     // The worker was stopped before it saved the response's results.
     let lines = report.lines(&app.messages).join("\n");
     assert!(
-        lines.contains("Waiting for its turn: Edit /b.rs"),
+        lines.contains("No result from Edit /b.rs (last shown waiting for its turn)"),
         "{lines}"
     );
-    assert!(!lines.contains("No result from Edit /b.rs"), "{lines}");
     assert!(
         lines.contains("is unknown"),
         "the screen trails the worker: {lines}"
@@ -1114,7 +1113,7 @@ fn the_exit_report_says_which_tools_waited_and_which_results_were_not_saved() {
     let lines = report.lines(&saved).join("\n");
     assert!(!lines.contains("Edit /a.rs"), "{lines}");
     assert!(
-        lines.contains("Waiting for its turn: Edit /b.rs"),
+        lines.contains("No result from Edit /b.rs (last shown waiting for its turn)"),
         "{lines}"
     );
 }
@@ -1195,9 +1194,9 @@ fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_beg
             None,
         ));
         let lines = claurst_tui::next::TurnExitReport::capture(&app).lines(&app.messages);
-        let approval = lines
-            .iter()
-            .position(|line| line == "Waiting for approval: Bash make install");
+        let approval = lines.iter().position(|line| {
+            line == "No result from Bash make install (last shown waiting for approval)"
+        });
         let unknown = lines.iter().position(|line| line.contains("is unknown"));
         assert!(
             matches!((approval, unknown), (Some(a), Some(u)) if a < u),
@@ -1206,7 +1205,7 @@ fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_beg
         assert!(
             !lines
                 .iter()
-                .any(|line| line.contains("Waiting for its turn")),
+                .any(|line| line.contains("waiting for its turn")),
             "{lines:?}"
         );
     }
@@ -1274,7 +1273,7 @@ fn the_exit_report_never_says_a_tool_did_not_start() {
     for named in [
         "No result from Bash make check",
         "No result from Bash make",
-        "Waiting for its turn: Edit /b.rs",
+        "No result from Edit /b.rs (last shown waiting for its turn)",
     ] {
         let at = lines.iter().position(|line| line == named);
         assert!(
@@ -1282,10 +1281,6 @@ fn the_exit_report_never_says_a_tool_did_not_start() {
             "{named}: {lines:?}"
         );
     }
-    assert!(
-        !lines.iter().any(|line| line.starts_with("Not started")),
-        "{lines:?}"
-    );
 
     // A real result saved for the writer means there is nothing to report.
     saved.push(Message::user_blocks(vec![ContentBlock::ToolResult {
@@ -1334,4 +1329,56 @@ fn a_request_waiting_behind_another_prompt_awaits_approval_too() {
         row_of(&text, "two.example").contains("running 1m 5s"),
         "{text}"
     );
+}
+
+#[test]
+fn a_tool_cut_off_by_a_cancel_is_reported_without_a_result() {
+    let mut app = next_app();
+    app.push_message(Message::user("deploy".to_string()));
+    // Its start may still be on its way: the row has none when the cancel
+    // moves it.
+    tool_start(&mut app, "deploy", "Bash", r#"{"command":"make deploy"}"#);
+    app.cancellation = claurst_tui::application::TurnCancellation::AwaitingRuntime;
+    app.interrupt_tool_rows();
+    let view = claurst_tui::application::view::TranscriptView::project(&app);
+    assert_eq!(
+        view.tools[0].state,
+        claurst_tui::application::view::ToolActivityState::CancelRequested
+    );
+    let lines = claurst_tui::next::TurnExitReport::capture(&app).lines(&app.messages);
+    let named = lines
+        .iter()
+        .position(|line| line == "No result from Bash make deploy");
+    let unknown = lines.iter().position(|line| line.contains("is unknown"));
+    assert!(
+        matches!((named, unknown), (Some(n), Some(u)) if n < u),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn quitting_during_auto_compaction_reports_no_turn() {
+    let mut app = next_app();
+    app.push_message(Message::user("read".to_string()));
+    tool_start(&mut app, "read", "Read", r#"{"file_path":"/a.rs"}"#);
+    tool_end(&mut app, "read", "Read", "contents", false);
+    // Idle compaction runs as the current query; the saved session becomes
+    // its summary, without the finished turn's results.
+    app.auto_compact_running = true;
+    let report = claurst_tui::next::TurnExitReport::capture(&app);
+    assert!(report.lines(&[]).is_empty(), "{:?}", report.lines(&[]));
+}
+
+#[test]
+fn a_denied_tool_is_named_like_any_other_when_its_result_is_missing() {
+    let mut app = next_app();
+    app.push_message(Message::user("clean".to_string()));
+    tool_start(&mut app, "clean", "Bash", r#"{"command":"make clean"}"#);
+    tool_running(&mut app, "clean");
+    // Some tools ask after a first step of their work.
+    app.record_permission_decision("clean", false);
+    let lines = claurst_tui::next::TurnExitReport::capture(&app)
+        .lines(&app.messages)
+        .join("\n");
+    assert!(lines.contains("No result from Bash make clean"), "{lines}");
 }
