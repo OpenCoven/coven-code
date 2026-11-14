@@ -252,9 +252,9 @@ async fn web_fetch_provenance_survives_durable_dispatch_and_context_budgeting() 
     let mut session = claurst_core::history::ConversationSession::new("scripted".into());
     session.messages = working_messages;
     let resumed = {
-        let _env_lock = CONFIG_HOME_ENV_LOCK.lock().await;
+        let env_lock = CONFIG_HOME_ENV_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
-        let _home = ConfigHomeOverride::set(home.path());
+        let _home = ConfigHomeOverride::set(&env_lock, home.path());
         claurst_core::history::save_session(&session).await.unwrap();
         claurst_core::history::load_session(&session.id)
             .await

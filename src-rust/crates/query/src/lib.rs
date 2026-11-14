@@ -132,14 +132,15 @@ tokio::task_local! {
 static CONFIG_HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Points `COVEN_CODE_HOME` at a directory until dropped, then puts back what
-/// was there, also when the test panics. Hold [`CONFIG_HOME_ENV_LOCK`] while
-/// it lives, and declare it after the directory so it drops first.
+/// was there, also when the test panics. Setting it takes the
+/// [`CONFIG_HOME_ENV_LOCK`] guard, which must outlive it; declare it after
+/// the directory so it drops first.
 #[cfg(test)]
 struct ConfigHomeOverride(Option<std::ffi::OsString>);
 
 #[cfg(test)]
 impl ConfigHomeOverride {
-    fn set(home: &std::path::Path) -> Self {
+    fn set(_lock: &tokio::sync::MutexGuard<'_, ()>, home: &std::path::Path) -> Self {
         let previous = std::env::var_os("COVEN_CODE_HOME");
         std::env::set_var("COVEN_CODE_HOME", home);
         Self(previous)

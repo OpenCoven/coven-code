@@ -522,9 +522,9 @@ mod tests {
 
     #[test]
     fn default_wrapper_reports_concurrent_pause_at_runaway_boundary() {
-        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
+        let env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _home = crate::ConfigHomeOverride::set(dir.path());
+        let _home = crate::ConfigHomeOverride::set(&env_lock, dir.path());
 
         let path = GoalStore::default_path();
         let store = GoalStore::open(&path).unwrap();
@@ -562,9 +562,9 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_pause_a_replacement_at_runaway_boundary() {
-        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
+        let env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _home = crate::ConfigHomeOverride::set(dir.path());
+        let _home = crate::ConfigHomeOverride::set(&env_lock, dir.path());
 
         let path = GoalStore::default_path();
         let store = GoalStore::open(&path).unwrap();
@@ -598,9 +598,9 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_record_progress_on_a_replacement() {
-        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
+        let env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _home = crate::ConfigHomeOverride::set(dir.path());
+        let _home = crate::ConfigHomeOverride::set(&env_lock, dir.path());
 
         let path = GoalStore::default_path();
         let store = GoalStore::open(&path).unwrap();
@@ -638,9 +638,9 @@ mod tests {
 
     #[test]
     fn default_wrapper_does_not_budget_limit_a_replacement() {
-        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
+        let env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _home = crate::ConfigHomeOverride::set(dir.path());
+        let _home = crate::ConfigHomeOverride::set(&env_lock, dir.path());
 
         let path = GoalStore::default_path();
         let store = GoalStore::open(&path).unwrap();
@@ -710,9 +710,9 @@ mod tests {
 
     #[test]
     fn default_wrappers_terminal_goals_stop_without_recording_progress() {
-        let _env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
+        let env_lock = crate::CONFIG_HOME_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
-        let _home = crate::ConfigHomeOverride::set(dir.path());
+        let _home = crate::ConfigHomeOverride::set(&env_lock, dir.path());
 
         let path = GoalStore::default_path();
         let store = GoalStore::open(&path).unwrap();
