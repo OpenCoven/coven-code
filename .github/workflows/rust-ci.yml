@@ -17,6 +17,7 @@ on:
       - 'scripts/test-package-release.py'
       - '.github/workflows/patch-release.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/release-build.yml'
       - '.github/workflows/rust-ci.yml'
   workflow_dispatch:
 

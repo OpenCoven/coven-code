@@ -1,4 +1,5 @@
-"""Hold the release-candidate workflow to its contract and exercise the smoke checks."""
+"""Hold the release-candidate workflow and the shared release build to their contracts,
+and exercise the smoke checks."""
 import hashlib
 import io
 import os
@@ -15,6 +16,8 @@ SMOKE = runpy.run_path(str(Path(__file__).with_name('smoke-release-archive.py'))
 PACK = runpy.run_path(str(Path(__file__).with_name('package-release.py')))
 CANDIDATE = (ROOT / '.github/workflows/release-candidate.yml').read_text(encoding='utf-8')
 RELEASE = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
+PATCH = (ROOT / '.github/workflows/patch-release.yml').read_text(encoding='utf-8')
+BUILD = (ROOT / '.github/workflows/release-build.yml').read_text(encoding='utf-8')
 
 
 def job(workflow, name):
@@ -25,10 +28,54 @@ def job(workflow, name):
     return match[1].rstrip('\n')
 
 
+def caller(needs, persist, openssl, upload=None):
+    """A job that runs the shared release build with one profile's inputs."""
+    lines = [f'    needs: {needs}', '    uses: ./.github/workflows/release-build.yml', '    with:',
+             f'      persist-credentials: {persist}', f'      openssl: {openssl}',
+             '      cargo-term-color: always']
+    if upload is not None:
+        lines.append(f'      upload: {upload}')
+    return '\n'.join(lines)
+
+
+def rendered(persist, openssl):
+    """The shared build job's text with one profile's inputs filled in."""
+    text = job(BUILD, 'build').replace('${{ inputs.persist-credentials }}', str(persist).lower())
+    return re.sub(r"\$\{\{ inputs\.openssl && '([^']*)' \|\| '' \}\}",
+                  lambda match: match[1] if openssl else '', text)
+
+
 class WorkflowContract(unittest.TestCase):
-    def test_build_job_is_the_release_build_job(self):
-        release = job(RELEASE, 'build').replace('needs: preflight', 'needs: contract', 1)
-        self.assertEqual(job(CANDIDATE, 'build'), release)
+    def test_every_release_build_runs_the_shared_build_with_its_profile(self):
+        self.assertEqual(job(RELEASE, 'build'), caller('preflight', 'false', 'false'))
+        self.assertEqual(job(PATCH, 'build'), caller('preflight', 'true', 'true'))
+        self.assertEqual(job(CANDIDATE, 'build'), caller('contract', 'false', 'false'))
+        self.assertEqual(job(CANDIDATE, 'patch-profile'), caller('contract', 'true', 'true', 'false'))
+
+    def test_shared_build_takes_every_setting_from_its_caller(self):
+        self.assertRegex(BUILD, r'(?m)^on:\n  workflow_call:\n    inputs:\n')
+        self.assertIn('  CARGO_TERM_COLOR: ${{ inputs.cargo-term-color }}\n', BUILD)
+        for required in ('persist-credentials', 'openssl', 'cargo-term-color'):
+            self.assertRegex(BUILD, rf'(?m)^      {required}:\n(?:        .*\n)*?        required: true\n')
+        for forbidden in ('permissions:', 'secrets.', 'concurrency:', 'pull_request', 'workflow_dispatch'):
+            self.assertNotIn(forbidden, BUILD)
+
+    def test_each_profile_checks_out_and_installs_what_its_release_did(self):
+        release, patch = rendered(False, False), rendered(True, True)
+        self.assertIn('persist-credentials: false\n', release)
+        self.assertIn('persist-credentials: true\n', patch)
+        self.assertIn('sudo apt-get install -y libasound2-dev pkg-config\n', release)
+        self.assertIn('sudo apt-get install -y libasound2-dev libssl-dev pkg-config\n', patch)
+        self.assertIn('"apt-get install -y pkg-config libasound2-dev:$CROSS_DEB_ARCH"\n', release)
+        self.assertIn('"apt-get install -y pkg-config libssl-dev:$CROSS_DEB_ARCH '
+                      'libasound2-dev:$CROSS_DEB_ARCH"\n', patch)
+
+    def test_shared_build_is_locked_and_uploads_every_packaged_artifact(self):
+        build = job(BUILD, 'build')
+        self.assertEqual(build.count('build --release --locked --package claurst --target'), 2)
+        self.assertEqual(set(re.findall(r'artifact: (\S+)', build)), set(PACK['ARTIFACTS']))
+        self.assertIn('        if: inputs.upload\n        uses: actions/upload-artifact@', build)
+        self.assertIn('name: ${{ matrix.artifact }}\n', build)
 
     def test_packaging_commands_are_the_release_commands(self):
         for command in ('python scripts/package-release.py artifacts release',
