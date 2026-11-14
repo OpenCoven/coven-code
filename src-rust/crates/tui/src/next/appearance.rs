@@ -58,14 +58,15 @@ impl ShellState {
     /// Work and Inspect wait for room beside the transcript, so a session never
     /// starts with its transcript hidden; the inspector key still opens it at
     /// any size. A layout that cannot place the inspector yet leaves one the
-    /// user opened to them, rather than taking it over for the next resize.
+    /// user has open to them, rather than taking it over for the next resize.
     pub fn apply_layout(&mut self, choice: LayoutChoice, terminal: (u16, u16)) -> bool {
         let area = Rect::new(0, 0, terminal.0, terminal.1);
         let page = match choice {
             LayoutChoice::Focus => None,
             _ if layout::SizeClass::of(area) != layout::SizeClass::Split => {
-                if !self.user_holds_inspector() {
+                if !self.users_inspector_showing() {
                     self.layout_places = Some(choice);
+                    self.inspector_taken = false;
                 }
                 return false;
             }
@@ -73,15 +74,21 @@ impl ShellState {
             LayoutChoice::Inspect => Some(InspectorPage::Activity),
         };
         self.layout_places = Some(choice);
+        self.inspector_taken = false;
         self.inspector = page;
         self.inspector_scroll = 0;
         true
     }
 
-    /// Whether an inspector the user opened or turned is showing: the layout
-    /// setting has not placed it since.
+    /// Whether the user opened, closed or turned the inspector since the
+    /// layout setting last placed it, so the setting leaves it to them.
     pub fn user_holds_inspector(&self) -> bool {
-        self.layout_places.is_none() && self.inspector.is_some()
+        self.inspector_taken
+    }
+
+    /// Whether an inspector the user opened or turned is showing.
+    pub fn users_inspector_showing(&self) -> bool {
+        self.inspector_taken && self.inspector.is_some()
     }
 
     /// Keep the inspector where the layout setting put it as the terminal
@@ -282,6 +289,16 @@ pub fn run_appearance_command(
     let follow =
         layout_named || (layout_after != layout_before && !app.next_shell.user_holds_inspector());
     if follow && !app.next_shell.apply_layout(layout_after, terminal) {
+        if app.next_shell.users_inspector_showing() {
+            return format!(
+                "{reply} The {} layout needs 120x32 or larger and this terminal is {}x{}, so \
+                 the inspector stays as you left it. Preview the layout again at that size to \
+                 apply it.",
+                layout_after.as_str(),
+                terminal.0,
+                terminal.1
+            );
+        }
         return format!(
             "{reply} The {} layout opens at 120x32 or larger; this terminal is {}x{}.",
             layout_after.as_str(),

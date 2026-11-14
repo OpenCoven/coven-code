@@ -72,7 +72,7 @@ When Coven Code saves the engine-global file, it preserves the JSON values of un
 | `colorMode` | `auto`, `truecolor`, `256`, `16`, `none` | `auto` | Color capability. `auto` follows `NO_COLOR`, `TERM` and `COLORTERM`; an explicit value overrides `NO_COLOR`. `truecolor` and `256` need a known background: with `theme` set to `auto` and no `COLORFGBG`, Next keeps the terminal's own 16 colors, and a preview says so. |
 | `glyphs` | `auto`, `unicode`, `ascii` | `auto` | `auto` uses Unicode under a UTF-8 locale, except CJK locales. |
 | `density` | `comfortable`, `compact` | `comfortable` | Blank rows between transcript entries. |
-| `layout` | `focus`, `work`, `inspect` | `focus` | Where the inspector sits: closed, on Work, or on Activity. It opens only while the terminal is 120x32 or larger, so a session never starts with its transcript hidden, and it follows a resize until you open, close or turn it yourself. Reverting or resetting a layout preview, or previewing a layout that does not fit yet, leaves an inspector you opened where it is. |
+| `layout` | `focus`, `work`, `inspect` | `focus` | Where the inspector sits: closed, on Work, or on Activity. It opens only while the terminal is 120x32 or larger, so a session never starts with its transcript hidden, and it follows a resize until you open, close or turn it yourself. Reverting or resetting a layout preview leaves the inspector as you left it, and previewing a layout that does not fit yet leaves an inspector you have open where it is until you preview the layout again at a size that fits. |
 | `hints` | `true`, `false` | `false` | The key-hint row. |
 
 The top-level `reduceMotion` setting makes Next's activity indicator static.
@@ -87,7 +87,7 @@ Under Next, `/config appearance` previews these before anything is saved:
 /config appearance reset            Preview the defaults; save keeps them
 ```
 
-A save changes only the keys you previewed and keeps every other key and value, including keys this version does not know. The file is written back with its keys in alphabetical order. `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out when set to their default, `hints` is written as you set it, and after a reset no appearance key is written. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+A save changes only the keys you previewed and keeps every other key and value, including keys this version does not know. The file is written back with its keys in alphabetical order. `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out when set to their default, `hints` is written as you set it, and after a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
 
 Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
 

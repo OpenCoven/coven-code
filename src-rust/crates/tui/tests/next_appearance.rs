@@ -336,10 +336,51 @@ fn a_layout_that_does_not_fit_leaves_the_users_inspector_to_them() {
     assert!(opened.is_some());
 
     let reply = run(&mut app, &saved, "layout work", NARROW);
-    assert!(reply.contains("120x32"), "{reply}");
+    assert!(reply.contains("stays as you left it"), "{reply}");
+    assert!(!reply.contains("opens at"), "{reply}");
     assert_eq!(app.next_shell.inspector, opened);
     app.next_shell.follow_layout((NARROW.0 - 1, NARROW.1));
     assert_eq!(app.next_shell.inspector, opened, "a resize leaves it alone");
+    // As the reply says, the layout waits to be previewed again at size.
+    app.next_shell.apply_action("closeInspector");
+    app.next_shell.follow_layout(SPLIT);
+    assert_eq!(app.next_shell.inspector, None);
+    run(&mut app, &saved, "layout work", SPLIT);
+    assert_eq!(app.next_shell.inspector, Some(InspectorPage::Work));
+}
+
+#[test]
+fn a_closed_inspector_stays_closed_when_a_layout_preview_is_dropped() {
+    let saved: Settings =
+        serde_json::from_str(r#"{"nextAppearance":{"layout":"inspect"}}"#).expect("settings");
+    let mut app = app();
+    assert!(app
+        .next_shell
+        .apply_layout(saved.next_appearance.layout, SPLIT));
+    run(&mut app, &saved, "layout work", SPLIT);
+    assert_eq!(app.next_shell.inspector, Some(InspectorPage::Work));
+    app.next_shell.apply_action("closeInspector");
+
+    run(&mut app, &saved, "revert", SPLIT);
+    assert_eq!(app.next_shell.inspector, None);
+    app.next_shell.follow_layout(SPLIT);
+    assert_eq!(
+        app.next_shell.inspector, None,
+        "and a resize leaves it closed"
+    );
+}
+
+#[test]
+fn a_layout_named_after_closing_the_inspector_opens_when_there_is_room() {
+    let saved = Settings::default();
+    let mut app = app();
+    app.next_shell.apply_action("toggleInspector");
+    app.next_shell.apply_action("closeInspector");
+
+    let reply = run(&mut app, &saved, "layout work", NARROW);
+    assert!(reply.contains("opens at 120x32"), "{reply}");
+    app.next_shell.follow_layout(SPLIT);
+    assert_eq!(app.next_shell.inspector, Some(InspectorPage::Work));
 }
 
 #[test]

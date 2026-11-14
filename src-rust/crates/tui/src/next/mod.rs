@@ -227,6 +227,10 @@ pub struct ShellState {
     /// The layout setting that still places the inspector as the terminal
     /// resizes. Cleared once the user opens, closes or turns it.
     layout_places: Option<claurst_core::appearance::LayoutChoice>,
+    /// Whether the user opened, closed or turned the inspector since the
+    /// layout setting last placed it. Unlike an empty `layout_places`, this
+    /// is false at launch, before the setting first applies.
+    inspector_taken: bool,
     /// Largest useful `inspector_scroll` for the last drawn page.
     inspector_scroll_max: Cell<usize>,
     anchor: Cell<ReadingAnchor>,
@@ -570,17 +574,20 @@ impl ShellState {
                 };
                 self.inspector_scroll = 0;
                 self.layout_places = None;
+                self.inspector_taken = true;
             }
             "closeInspector" => {
                 self.inspector = None;
                 self.inspector_scroll = 0;
                 self.layout_places = None;
+                self.inspector_taken = true;
             }
             "nextInspectorPage" | "previousInspectorPage" => {
                 if let Some(page) = self.inspector {
                     self.inspector = Some(page.step(action == "nextInspectorPage"));
                     self.inspector_scroll = 0;
                     self.layout_places = None;
+                    self.inspector_taken = true;
                 }
             }
             "scrollInspectorUp" => {
