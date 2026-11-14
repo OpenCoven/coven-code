@@ -1282,9 +1282,12 @@ fn approval_lines(
         "Enforced by",
         "this coven-code process; no daemon protection applies".to_string(),
     ));
+    let is_command = claurst_core::permissions::is_command_tool(&request.tool_name);
     let consequence = |key: char| match key {
         'y' => Some("this call only"),
+        'Y' if is_command => Some("this exact command for the rest of this session"),
         'Y' => Some("this tool or path for the rest of this session"),
+        'p' if is_command => Some("saves this exact command to settings for future sessions"),
         'p' => Some("saves a persistent allow rule to settings for future sessions"),
         'P' => Some("commands with this prefix for the rest of this session"),
         'n' => Some("the call is refused and the model is told"),

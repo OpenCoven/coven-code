@@ -102,6 +102,7 @@ fn retrieval_envelope_uses_existing_anthropic_and_codex_wire_shapes() {
         stop_sequences: vec![],
         thinking: None,
         provider_options: serde_json::json!({}),
+        permission_mode: None,
     };
     let wire = claurst_api::providers::responses_input::to_responses_input(&request);
     let output = wire
