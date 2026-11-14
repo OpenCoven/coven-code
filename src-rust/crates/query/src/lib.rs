@@ -125,10 +125,36 @@ tokio::task_local! {
     static TEST_STREAM_STALL_TIMEOUT: std::time::Duration;
 }
 
-/// Held by every test in this crate that points `COVEN_CODE_HOME` elsewhere or
-/// resolves the config home, since tests share one process environment.
+/// Held by every test in this crate that changes `COVEN_CODE_HOME` or needs
+/// it to stay the same across calls, since tests share one process
+/// environment.
 #[cfg(test)]
 static CONFIG_HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Points `COVEN_CODE_HOME` at a directory until dropped, then puts back what
+/// was there, also when the test panics. Hold [`CONFIG_HOME_ENV_LOCK`] while
+/// it lives, and declare it after the directory so it drops first.
+#[cfg(test)]
+struct ConfigHomeOverride(Option<std::ffi::OsString>);
+
+#[cfg(test)]
+impl ConfigHomeOverride {
+    fn set(home: &std::path::Path) -> Self {
+        let previous = std::env::var_os("COVEN_CODE_HOME");
+        std::env::set_var("COVEN_CODE_HOME", home);
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ConfigHomeOverride {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("COVEN_CODE_HOME", previous),
+            None => std::env::remove_var("COVEN_CODE_HOME"),
+        }
+    }
+}
 
 // Goal checks bound the next observable request/work boundary. They cannot
 // atomically interrupt work already started in another process or a tool.

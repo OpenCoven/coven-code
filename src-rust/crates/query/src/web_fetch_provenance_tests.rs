@@ -254,16 +254,11 @@ async fn web_fetch_provenance_survives_durable_dispatch_and_context_budgeting() 
     let resumed = {
         let _env_lock = CONFIG_HOME_ENV_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("COVEN_CODE_HOME");
-        std::env::set_var("COVEN_CODE_HOME", home.path());
-        let saved = claurst_core::history::save_session(&session).await;
-        let resumed = claurst_core::history::load_session(&session.id).await;
-        match previous_home {
-            Some(previous) => std::env::set_var("COVEN_CODE_HOME", previous),
-            None => std::env::remove_var("COVEN_CODE_HOME"),
-        }
-        saved.unwrap();
-        resumed.unwrap()
+        let _home = ConfigHomeOverride::set(home.path());
+        claurst_core::history::save_session(&session).await.unwrap();
+        claurst_core::history::load_session(&session.id)
+            .await
+            .unwrap()
     };
     let restored = resumed
         .messages
