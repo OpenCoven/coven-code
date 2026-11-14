@@ -87,9 +87,12 @@ class WorkflowContract(unittest.TestCase):
         self.assertEqual(re.findall(r'^permissions:\n((?:  .*\n)+)', CANDIDATE, re.MULTILINE),
                          ['  contents: read\n'])
         self.assertNotIn('permissions:', CANDIDATE.split('\njobs:\n', 1)[1])
-        for forbidden in ('action-gh-release', 'gh release', 'gh workflow run', 'gh api',
-                          'secrets.', 'git push', 'git tag', 'npm publish', ': write'):
-            self.assertNotIn(forbidden, CANDIDATE)
+        # The shared build also runs under the release workflows' write token,
+        # so it is held to the same list.
+        for workflow in (CANDIDATE, BUILD):
+            for forbidden in ('action-gh-release', 'gh release', 'gh workflow run', 'gh api',
+                              'secrets.', 'git push', 'git tag', 'npm publish', ': write'):
+                self.assertNotIn(forbidden, workflow)
 
     def test_every_packaged_artifact_runs_on_its_own_platform(self):
         smoke = job(CANDIDATE, 'smoke')

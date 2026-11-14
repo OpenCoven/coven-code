@@ -92,7 +92,8 @@ jobs:
           echo "Version still pinned at $CARGO_VERSION — safe to patch in place."
 
   # ── Build: the five targets, in release-build.yml ──────────────────
-  # Mirrors release.yml exactly — keep these two job specs in sync.
+  # Same build as release.yml, with the patch release's own inputs: its
+  # checkout keeps credentials and it installs libssl-dev.
   build:
     needs: preflight
     uses: ./.github/workflows/release-build.yml
