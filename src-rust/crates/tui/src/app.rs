@@ -3485,16 +3485,13 @@ impl App {
     /// Remember the user's decision for a tool call so presentation can
     /// show authorization separately from the execution result.
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
-        let first = self
-            .permission_decisions
-            .insert(tool_use_id.to_string(), allowed)
-            .is_none();
-        // Time spent waiting on the user before its work began is not time
-        // the tool spent working. A tool that asks again was already at work.
-        if first {
-            if let Some(run) = self.tool_run_mut(tool_use_id) {
-                run.started_at = Some(std::time::Instant::now());
-            }
+        self.permission_decisions
+            .insert(tool_use_id.to_string(), allowed);
+        // Time spent waiting on the user is not time the tool spent working.
+        // Tools ask at different points, some before any work and some after
+        // a first step, so a row times from its latest approval.
+        if let Some(run) = self.tool_run_mut(tool_use_id) {
+            run.started_at = Some(std::time::Instant::now());
         }
     }
 

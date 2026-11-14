@@ -966,32 +966,38 @@ fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
         },
     );
     let started = std::time::Instant::now();
-
-    let text = text_of(&draw(&app, 100, 30));
-    assert!(
-        row_of(&text, "Bash").trim_end().ends_with("running"),
-        "{text}"
-    );
+    // What the row may show, judged by the time read on each side of the
+    // frame, so a slow machine moves the frame but cannot fail it.
+    let shown_at = |elapsed: std::time::Duration| {
+        if elapsed < std::time::Duration::from_secs(1) {
+            "running".to_string()
+        } else {
+            format!(
+                "running {}s",
+                (elapsed + std::time::Duration::from_millis(500)).as_secs()
+            )
+        }
+    };
+    let frame = |app: &App| {
+        let before = started.elapsed();
+        let row = row_of(&text_of(&draw(app, 100, 30)), "Bash")
+            .trim_end()
+            .to_string();
+        let after = started.elapsed();
+        assert!(
+            row.ends_with(&shown_at(before)) || row.ends_with(&shown_at(after)),
+            "{row:?} between {before:?} and {after:?}"
+        );
+    };
 
     // Only time passes: no event, no edit to the rows. Frames come often, so
-    // one lands before the first second, when no time is shown yet.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let text = text_of(&draw(&app, 100, 30));
-    assert!(
-        row_of(&text, "Bash").trim_end().ends_with("running"),
-        "{text}"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(450));
-    let text = text_of(&draw(&app, 100, 30));
-    assert!(row_of(&text, "Bash").contains("running 1s"), "{text}");
-    // The time shown rounds, so the row changes at each half second.
-    std::thread::sleep(std::time::Duration::from_millis(550));
-    let shown = format!(
-        "running {}s",
-        (started.elapsed() + std::time::Duration::from_millis(500)).as_secs()
-    );
-    let text = text_of(&draw(&app, 100, 30));
-    assert!(row_of(&text, "Bash").contains(&shown), "{shown}: {text}");
+    // one lands before the first second, when no time is shown yet, and the
+    // shown time rounds, so the row changes at each half second after that.
+    frame(&app);
+    for wait in [600, 450, 550] {
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        frame(&app);
+    }
 }
 
 #[test]
@@ -1118,9 +1124,11 @@ fn a_row_made_from_a_saved_result_takes_its_place_after_the_rows_before_it() {
             }]),
         },
     );
+    app.push_message(Message::user("then one more".to_string()));
+    tool_start(&mut app, "c", "Read", r#"{"file_path":"/c.rs"}"#);
     let view = claurst_tui::application::view::TranscriptView::project(&app);
     let order: Vec<&str> = view.tools.iter().map(|tool| tool.id.as_str()).collect();
-    assert_eq!(order, ["old", "a", "b"]);
+    assert_eq!(order, ["old", "a", "b", "c"]);
 }
 
 #[test]
@@ -1148,7 +1156,7 @@ fn a_cancelled_tool_is_not_reported_as_finished_but_unsaved() {
 }
 
 #[test]
-fn a_tool_asking_for_approval_has_not_started_unless_it_was_allowed_before() {
+fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_begun() {
     let mut app = next_app();
     app.push_message(Message::user("run two".to_string()));
     tool_start(&mut app, "first", "Bash", r#"{"command":"make"}"#);
@@ -1163,26 +1171,24 @@ fn a_tool_asking_for_approval_has_not_started_unless_it_was_allowed_before() {
             None,
         )
     };
-    app.permission_request = Some(ask("first"));
-    let lines = claurst_tui::next::TurnExitReport::capture(&app)
-        .lines(&app.messages)
-        .join("\n");
-    assert!(lines.contains("Not started: Bash make"), "{lines}");
-
-    // Allowed once already, it was at work when it asked again.
-    app.permission_request = Some(ask("again"));
-    let lines = claurst_tui::next::TurnExitReport::capture(&app)
-        .lines(&app.messages)
-        .join("\n");
-    assert!(
-        lines.contains("No result from Bash make install"),
-        "{lines}"
-    );
-    assert!(!lines.contains("Not started: Bash make install"), "{lines}");
+    // Some tools ask before any work, others after a first step; the prompt
+    // says which it is for neither.
+    for (id, named) in [("first", "Bash make"), ("again", "Bash make install")] {
+        app.permission_request = Some(ask(id));
+        let lines = claurst_tui::next::TurnExitReport::capture(&app)
+            .lines(&app.messages)
+            .join("\n");
+        assert!(
+            lines.contains(&format!("Waiting for approval: {named}")),
+            "{lines}"
+        );
+        assert!(!lines.contains("Not started"), "{lines}");
+        assert!(lines.contains("is unknown"), "{lines}");
+    }
 }
 
 #[test]
-fn a_second_approval_does_not_reset_a_tools_time() {
+fn a_tool_times_its_work_from_its_latest_approval() {
     let mut app = next_app();
     app.push_message(Message::user("deploy".to_string()));
     tool_start(&mut app, "deploy", "Bash", r#"{"command":"make deploy"}"#);
@@ -1195,7 +1201,14 @@ fn a_second_approval_does_not_reset_a_tools_time() {
     app.record_permission_decision("deploy", true);
     app.tool_use_blocks[0].run.started_at =
         Some(std::time::Instant::now() - std::time::Duration::from_secs(65));
-    app.record_permission_decision("deploy", true);
     let text = text_of(&draw(&app, 100, 30));
     assert!(row_of(&text, "make deploy").contains("1m 5s"), "{text}");
+
+    // Asked again, the wait on the user is not counted either.
+    app.record_permission_decision("deploy", true);
+    let text = text_of(&draw(&app, 100, 30));
+    assert!(
+        row_of(&text, "make deploy").trim_end().ends_with("running"),
+        "{text}"
+    );
 }

@@ -47,7 +47,7 @@ A writer keeps its turn while its approval prompt is open, so when writers and o
 
 Writers outside the response are not covered. Two subagents or `TeamCreate` teammates running at the same time, a subagent and an `Edit` in its parent's response, or a scheduled query loop can still overwrite each other's change to the same file. A configured formatter that runs past its 30-second limit is not stopped, so its late write can replace a change made after it.
 
-The Next renderer reports each tool as it goes: `waiting for its turn` while another writing tool runs, `awaiting approval` while it asks you, and `running`, `done` or `error` with how long its work took, once that passes a second. The time starts when the tool's own work begins, so the response's `PreToolUse` hooks, its wait for a turn and your answer to its approval are not counted. A result can still arrive later than its `done`, because results are returned to the model together. Classic and headless output are unchanged.
+The Next renderer reports each tool as it goes: `waiting for its turn` while another writing tool runs, `awaiting approval` while it asks you, and `running`, `done` or `error` with how long its work took, once that passes a second. The time starts when the tool's own work begins, so the response's `PreToolUse` hooks and its wait for a turn are not counted. Your answer to an approval is not counted either: the time restarts when you approve, because some tools ask before any work and others after a first step. A result can still arrive later than its `done`, because results are returned to the model together. Classic and headless output are unchanged.
 
 ---
 

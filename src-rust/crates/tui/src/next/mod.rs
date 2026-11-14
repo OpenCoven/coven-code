@@ -442,9 +442,9 @@ struct ToolKey {
     memory_diagnostics: bool,
     live: bool,
     /// Seconds the unfinished tools have been working, as the rows show them
-    /// (none under a second, then rounded), summed. While no event touches the rows each count only
-    /// grows, so the sum changes whenever a row's time would; an event that
-    /// resets one changes a stamp above.
+    /// (none under a second, then rounded), summed. While no event touches
+    /// the rows each count only grows, so the sum changes whenever a row's
+    /// time would; an event that resets one changes a stamp above.
     running_seconds: u64,
     /// The call a pending approval names; its row then waits on the user.
     approval: Option<(String, Option<String>)>,
@@ -685,11 +685,13 @@ impl ShellState {
 /// [`TurnExitReport::lines`] reads the conversation as it was saved.
 #[derive(Debug, Clone, Default)]
 pub struct TurnExitReport {
-    /// Tool call id and the line naming it, for each tool still at work: with
-    /// no reported result, its outcome is unknown.
+    /// Tool call id and the line naming it, for each tool still at work or
+    /// asking for approval: with no reported result, its outcome is unknown.
+    /// A tool may ask after a first step of its work, so asking is no sign
+    /// that nothing ran.
     open: Vec<(String, String)>,
-    /// Tools that were waiting for their turn or for approval: none of their
-    /// work began.
+    /// Tools that were waiting for their turn to write: none of their work
+    /// began.
     not_started: Vec<String>,
     /// Tools that finished; a resumed session knows of them only if their
     /// results were saved.
@@ -721,11 +723,10 @@ impl TurnExitReport {
                 ToolActivityState::Running | ToolActivityState::CancelRequested => report
                     .open
                     .push((tool.id.clone(), format!("No result from {named}"))),
-                // A tool allowed before was already at work when it asked again.
-                ToolActivityState::AwaitingApproval if tool.allowed == Some(true) => report
+                ToolActivityState::AwaitingApproval => report
                     .open
-                    .push((tool.id.clone(), format!("No result from {named}"))),
-                ToolActivityState::AwaitingApproval | ToolActivityState::Queued => {
+                    .push((tool.id.clone(), format!("Waiting for approval: {named}"))),
+                ToolActivityState::Queued => {
                     report.not_started.push(format!("Not started: {named}"))
                 }
                 ToolActivityState::Done | ToolActivityState::Error
