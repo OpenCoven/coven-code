@@ -28,12 +28,7 @@ Implemented in `src-rust/crates/cli/src/stream_mode.rs`. With
 `--print --input-format stream-json --output-format stream-json` the process
 stays alive across chat turns:
 
-- **stdin** — one JSON frame per line. A
-  `{"type":"user","message":{"role":"user","content":...}}` frame (content as
-  a string or an array of `{"type":"text","text":...}` blocks) triggers a
-  turn; `assistant` frames append as prefill; the legacy
-  `{"role":...,"content":"..."}` shape is also accepted. The positional
-  prompt argument is ignored in this mode, matching Claude Code.
+- **stdin** — one JSON frame per line. A `{"type":"user","message":{"role":"user","content":...}}` frame accepts a string or an ordered array of text and inline PNG/JPEG image blocks. Image-only messages trigger a turn. Assistant prefill remains text-only, and the legacy `{"role":...,"content":"..."}` shape remains accepted. The positional prompt argument is ignored in this mode, matching Claude Code. See [input validation and limits](stream-json-input.md).
 - **stdout** — strictly JSONL: one `system`/`init` frame at startup, then per
   turn `assistant` frames (tool-use and final text), `tool_result` frames,
   and a closing `result` frame (`subtype`, `duration_ms`, `is_error`,

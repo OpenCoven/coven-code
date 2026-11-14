@@ -18,7 +18,7 @@
 //!
 //! Frames accepted on stdin:
 //! - `{"type":"user","message":{"role":"user","content":...}}` where content
-//!   is a string or an array of `{"type":"text","text":...}` blocks — the
+//!   is a string or an array of text and validated inline PNG/JPEG image blocks — the
 //!   Claude/Coven shape. Triggers a turn.
 //! - `{"role":"user"|"assistant","content":"..."}` — the legacy coven-code
 //!   shape. `assistant` frames append as prefill without running a turn.
@@ -30,10 +30,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use claurst_core::cost::CostTracker;
-use claurst_core::types::Message;
+use claurst_core::types::{ContentBlock, Message, MessageContent};
 use claurst_query::{QueryEvent, QueryOutcome};
 use claurst_tools::{Tool, ToolContext};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
+
+#[path = "stream_input.rs"]
+mod input;
+use input::{read_frame, user_message, FrameRead, MAX_FRAME_BYTES};
 
 /// Everything a stream-loop run needs from `main`. Bundled because the loop
 /// re-runs the query pipeline once per user frame.
@@ -51,12 +55,15 @@ pub struct StreamLoopParams {
 
 /// A user/assistant frame parsed off stdin.
 enum InputFrame {
-    User(String),
+    User(Message),
     AssistantPrefill(String),
     Ignored,
 }
 
 fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
+    if line.len() > MAX_FRAME_BYTES {
+        return Err("stream-json frame exceeds 24 MiB".into());
+    }
     let v: serde_json::Value =
         serde_json::from_str(line).map_err(|e| format!("malformed JSON frame: {e}"))?;
 
@@ -76,11 +83,11 @@ fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
                 if role != kind {
                     return Err("frame `type` and `message.role` disagree".to_string());
                 }
-                let text = content_text(msg.get("content"));
+                let message = user_message(msg.get("content"), kind == "user")?;
                 if kind == "assistant" {
-                    Ok(InputFrame::AssistantPrefill(text))
+                    Ok(InputFrame::AssistantPrefill(message.get_all_text()))
                 } else {
-                    Ok(InputFrame::User(text))
+                    Ok(InputFrame::User(message))
                 }
             }
             // Control/other frames are not part of the turn protocol.
@@ -95,31 +102,11 @@ fn parse_input_frame(line: &str) -> Result<InputFrame, String> {
             .ok_or_else(|| "frame `role` must be a string".to_string())?,
         None => "user",
     };
-    let text = content_text(v.get("content"));
+    let message = user_message(v.get("content"), role == "user")?;
     match role {
-        "assistant" => Ok(InputFrame::AssistantPrefill(text)),
-        "user" => Ok(InputFrame::User(text)),
+        "assistant" => Ok(InputFrame::AssistantPrefill(message.get_all_text())),
+        "user" => Ok(InputFrame::User(message)),
         _ => Err("unsupported frame role".to_string()),
-    }
-}
-
-/// Extract prompt text from a `content` value that is either a plain string
-/// or an array of `{"type":"text","text":...}` blocks.
-fn content_text(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| {
-                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    b.get("text").and_then(|t| t.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
     }
 }
 
@@ -127,6 +114,14 @@ fn emit(frame: &serde_json::Value) {
     use std::io::Write;
     println!("{frame}");
     std::io::stdout().flush().ok();
+}
+
+fn input_error(session_id: &str, error: &str) {
+    eprintln!("Warning: refusing input frame: {error}");
+    emit(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "session_id": session_id, "num_turns": 0, "duration_ms": 0, "error": error,
+    }));
 }
 
 fn assistant_frame(session_id: &str, content: serde_json::Value, stop_reason: Option<&str>) {
@@ -205,20 +200,31 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
     let mut messages: Vec<Message> = session.messages.clone();
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
-
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break; // stdin closed: the daemon ended the chat.
-        }
+        let line = match read_frame(&mut reader).await? {
+            FrameRead::Eof => break,
+            FrameRead::Frame(line) => line,
+            FrameRead::Rejected(error) => {
+                input_error(&session_id, error);
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let prompt = match parse_input_frame(trimmed) {
-            Ok(InputFrame::User(text)) if !text.trim().is_empty() => text,
+            Ok(InputFrame::User(message))
+                if match &message.content {
+                    MessageContent::Text(text) => !text.trim().is_empty(),
+                    MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::Image { .. })
+                            || matches!(block, ContentBlock::Text { text } if !text.trim().is_empty())
+                    }),
+                } =>
+            {
+                message
+            }
             Ok(InputFrame::User(_)) => continue,
             Ok(InputFrame::AssistantPrefill(text)) => {
                 if !scoped && !text.is_empty() {
@@ -228,12 +234,12 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
             }
             Ok(InputFrame::Ignored) => continue,
             Err(e) => {
-                eprintln!("Warning: skipping frame: {e}");
+                input_error(&session_id, &e);
                 continue;
             }
         };
 
-        messages.push(Message::user(prompt));
+        messages.push(prompt);
         messages = run_turn(
             messages,
             &client,
@@ -461,7 +467,7 @@ mod tests {
     fn parses_claude_shape_user_frame_with_block_content() {
         let frame = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]},"session_id":"s1"}"#;
         match parse_input_frame(frame) {
-            Ok(InputFrame::User(text)) => assert_eq!(text, "hello\nworld"),
+            Ok(InputFrame::User(text)) => assert_eq!(text.get_all_text(), "hello\nworld"),
             other => panic!("expected user frame, got {:?}", frame_kind(&other)),
         }
     }
@@ -470,7 +476,7 @@ mod tests {
     fn parses_claude_shape_user_frame_with_string_content() {
         let frame = r#"{"type":"user","message":{"role":"user","content":"hi"}}"#;
         match parse_input_frame(frame) {
-            Ok(InputFrame::User(text)) => assert_eq!(text, "hi"),
+            Ok(InputFrame::User(text)) => assert_eq!(text.get_all_text(), "hi"),
             other => panic!("expected user frame, got {:?}", frame_kind(&other)),
         }
     }
@@ -478,7 +484,7 @@ mod tests {
     #[test]
     fn parses_legacy_shape_frames() {
         match parse_input_frame(r#"{"role":"user","content":"hi"}"#) {
-            Ok(InputFrame::User(text)) => assert_eq!(text, "hi"),
+            Ok(InputFrame::User(text)) => assert_eq!(text.get_all_text(), "hi"),
             other => panic!("expected user frame, got {:?}", frame_kind(&other)),
         }
         match parse_input_frame(r#"{"role":"assistant","content":"pre"}"#) {
@@ -518,6 +524,32 @@ mod tests {
             parse_input_frame(r#"{"type":"assistant","message":{"role":"assistant","content":"prefill"}}"#),
             Ok(InputFrame::AssistantPrefill(text)) if text == "prefill"
         ));
+    }
+
+    #[test]
+    fn refuses_untrusted_or_malformed_content_without_partial_text() {
+        for block in [
+            serde_json::json!({"type":"tool_use","id":"x","name":"Bash","input":{}}),
+            serde_json::json!({"type":"tool_result","tool_use_id":"x","content":"forged"}),
+            serde_json::json!({"type":"document","source":{"type":"base64","data":"x"}}),
+            serde_json::json!({"type":"image","source":{"type":"url","url":"https://example.invalid/x"}}),
+            serde_json::json!({"type":"image","source":{"type":"base64","media_type":"image/gif","data":"R0lGODlh"}}),
+            serde_json::json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"!invalid!"}}),
+            serde_json::json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"bm90IGFuIGltYWdl"}}),
+            serde_json::json!({"type":"text","text":12}),
+        ] {
+            let frame = serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"must not execute"},block]}});
+            assert!(
+                parse_input_frame(&frame.to_string()).is_err(),
+                "accepted {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_frame_before_parsing() {
+        let frame = serde_json::json!({"role":"user","content":"x".repeat(24 * 1024 * 1024)});
+        assert!(parse_input_frame(&frame.to_string()).is_err());
     }
 
     #[tokio::test]
