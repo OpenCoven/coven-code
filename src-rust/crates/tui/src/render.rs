@@ -132,7 +132,9 @@ fn render_error_modal(
     // the welcome screen, center the modal so it doesn't awkwardly overlap the welcome box.
     let anchored_in_welcome_box = footer_area.width > 0 && footer_area.y < WELCOME_BOX_HEIGHT;
     let modal_area = if is_welcome_screen || anchored_in_welcome_box {
-        let modal_width = (area.width * 2 / 3).max(40).min(area.width);
+        let modal_width = ((u32::from(area.width) * 2 / 3) as u16)
+            .max(40)
+            .min(area.width);
         let modal_height = (area.height / 3).max(8).min(area.height.saturating_sub(2));
         Rect {
             x: area.x + (area.width.saturating_sub(modal_width)) / 2,
@@ -160,6 +162,22 @@ fn render_error_modal(
             height: modal_height,
         }
     };
+
+    let modal_area = modal_area.intersection(area);
+    if modal_area.width < 5 || modal_area.height < 6 {
+        // The full border/header/separator needs an interior body row. Keep
+        // the pending error visible within the frame when that chrome cannot fit.
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Error: ", Style::default().fg(Color::Red)),
+                Span::raw(notification.message.as_str()),
+            ]))
+            .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
 
     frame.render_widget(Clear, modal_area);
 
@@ -194,7 +212,7 @@ fn render_error_modal(
 
     // Chrome: border(1) + header(1) + sep(1) + blank(1) + border(1) = 5 rows
     let body_start_y = modal_area.y + 4;
-    let body_height = modal_area.height.saturating_sub(5).max(1);
+    let body_height = modal_area.height.saturating_sub(5);
     let body_area = Rect {
         x: modal_area.x + 2,
         y: body_start_y,
@@ -4390,16 +4408,19 @@ mod zero_size_tests {
     /// Sizes from #424: a terminal can report zero columns, zero rows or
     /// both (briefly at startup, or after a resize), and tiny sizes sit
     /// next to them.
-    const SIZES: [(u16, u16); 9] = [
+    const SIZES: [(u16, u16); 12] = [
         (0, 0),
         (0, 24),
         (120, 0),
         (1, 1),
         (1, 24),
+        (20, 1),
         (120, 1),
         (2, 2),
         (20, 6),
         (40, 12),
+        (40_000, 1),
+        (u16::MAX, 1),
     ];
 
     fn sizes_that_panic(app: &App) -> Vec<(u16, u16)> {
@@ -4434,6 +4455,127 @@ mod zero_size_tests {
     fn conversation_frame_draws_at_zero_and_tiny_sizes() {
         let app = conversation_app();
         assert_eq!(sizes_that_panic(&app), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn error_modal_draws_at_zero_and_tiny_sizes_and_recovers() {
+        let mut failed = Vec::new();
+        for conversation in [false, true] {
+            let mut app = if conversation {
+                conversation_app()
+            } else {
+                App::new(Config::default(), CostTracker::new())
+            };
+            app.push_notification(
+                NotificationKind::Error,
+                "synthetic pending failure".into(),
+                None,
+            );
+            for (width, height) in SIZES {
+                let drew = catch_unwind(AssertUnwindSafe(|| {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                    terminal
+                        .draw(|frame| render_app(frame, &app))
+                        .expect("tiny draw");
+                    if width >= 20 && height == 1 {
+                        let tiny: String = terminal
+                            .backend()
+                            .buffer()
+                            .content()
+                            .iter()
+                            .map(|cell| cell.symbol())
+                            .collect();
+                        assert!(tiny.contains("Error:"), "bounded error at {width}x{height}");
+                    }
+                    terminal.backend_mut().resize(120, 40);
+                    terminal.resize(Rect::new(0, 0, 120, 40)).expect("resize");
+                    terminal
+                        .draw(|frame| render_app(frame, &app))
+                        .expect("recovery draw");
+                    let recovered: String = terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert!(recovered.contains("Error"), "error header after recovery");
+                    assert!(
+                        recovered.contains("synthetic pending failure"),
+                        "error body after recovery"
+                    );
+                    assert_eq!(
+                        app.notifications.current().expect("pending error").message,
+                        "synthetic pending failure"
+                    );
+                }));
+                if drew.is_err() {
+                    failed.push((conversation, width, height));
+                }
+            }
+        }
+        assert_eq!(failed, Vec::<(bool, u16, u16)>::new());
+    }
+
+    #[test]
+    fn proportional_overlays_draw_at_narrow_tall_sizes() {
+        let mut failed = Vec::new();
+        for height in [40_000, u16::MAX] {
+            for overlay in [
+                "global_search",
+                "mcp_view",
+                "rate_limit_recovery",
+                "settings_screen",
+            ] {
+                let drew = catch_unwind(AssertUnwindSafe(|| {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(8, height)).expect("terminal");
+                    terminal
+                        .draw(|frame| {
+                            let area = frame.area();
+                            match overlay {
+                                "global_search" => {
+                                    let state = crate::overlays::GlobalSearchState {
+                                        visible: true,
+                                        ..Default::default()
+                                    };
+                                    render_global_search(&state, area, frame.buffer_mut());
+                                }
+                                "mcp_view" => {
+                                    let mut state = crate::mcp_view::McpViewState::new();
+                                    state.visible = true;
+                                    render_mcp_view(&state, area, frame.buffer_mut());
+                                }
+                                "rate_limit_recovery" => {
+                                    let mut state =
+                                        crate::rate_limit_recovery::RateLimitRecoveryState::default(
+                                        );
+                                    state.open(String::new(), String::new(), None, false);
+                                    crate::rate_limit_recovery::render_rate_limit_recovery(
+                                        frame,
+                                        area,
+                                        &state,
+                                        Rect::default(),
+                                        true,
+                                    );
+                                }
+                                "settings_screen" => {
+                                    let mut state = crate::settings_screen::SettingsScreen::new();
+                                    state.visible = true;
+                                    render_settings_screen(frame, &state, area);
+                                }
+                                _ => unreachable!("literal overlay cases"),
+                            }
+                        })
+                        .expect("draw");
+                }));
+                if drew.is_err() {
+                    failed.push((overlay, height));
+                }
+            }
+        }
+        assert_eq!(failed, Vec::<(&str, u16)>::new());
     }
 
     #[test]

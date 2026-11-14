@@ -4076,6 +4076,66 @@ impl App {
     // Voice PTT helpers
     // -----------------------------------------------------------------------
 
+    /// Drain recorder events without blocking, updating the prompt and notices.
+    /// Called before drawing by both interactive event loops.
+    pub fn poll_voice_events(&mut self) {
+        use claurst_core::voice::VoiceEvent;
+        let mut events = Vec::new();
+        if let Some(ref mut rx) = self.voice_event_rx {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            match ev {
+                VoiceEvent::RecordingStarted => {
+                    self.voice_recording = true;
+                    self.status_message =
+                        Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
+                }
+                VoiceEvent::RecordingStopped => {
+                    self.voice_recording = false;
+                    self.status_message = Some("Transcribing\u{2026}".to_string());
+                }
+                VoiceEvent::TranscriptReady(text) => {
+                    if !text.is_empty() {
+                        // Append to existing prompt text with a space separator
+                        // so the user can combine voice + typed input.
+                        if !self.prompt_input.text.is_empty()
+                            && !self.prompt_input.text.ends_with(' ')
+                        {
+                            self.prompt_input.paste(" ");
+                        }
+                        self.prompt_input.paste(&text);
+                        self.refresh_prompt_input();
+                        let preview_end = text
+                            .char_indices()
+                            .nth(60)
+                            .map_or(text.len(), |(index, _)| index);
+                        self.status_message =
+                            Some(format!("Transcribed: {}", &text[..preview_end]));
+                    }
+                    // Clear the channel once we have the result.
+                    self.voice_event_rx = None;
+                }
+                VoiceEvent::Error(msg) => {
+                    self.voice_recording = false;
+                    self.voice_event_rx = None;
+                    // Keep the operation and diagnostic visible in the compact
+                    // warning row; the Warning severity already signals failure.
+                    let detail = msg
+                        .strip_prefix("Transcription failed ")
+                        .or_else(|| msg.strip_prefix("Transcription API returned "));
+                    let message = match detail {
+                        Some(detail) => format!("Voice: Transcription {detail}"),
+                        None => format!("Voice: {msg}"),
+                    };
+                    self.push_notification(NotificationKind::Warning, message, Some(8));
+                }
+            }
+        }
+    }
+
     /// Start PTT recording: open the microphone capture stream and signal the
     /// UI.  No-op when no voice recorder is attached or recording is already
     /// in progress.
@@ -8164,58 +8224,7 @@ impl App {
 
             self.poll_session_list();
 
-            // Drain voice transcription events (non-blocking).
-            // When the background recording/transcription task emits a
-            // TranscriptReady event we insert the text directly into the
-            // prompt so the user can review and submit it.
-            {
-                use claurst_core::voice::VoiceEvent;
-                let mut events = Vec::new();
-                if let Some(ref mut rx) = self.voice_event_rx {
-                    while let Ok(ev) = rx.try_recv() {
-                        events.push(ev);
-                    }
-                }
-                for ev in events {
-                    match ev {
-                        VoiceEvent::RecordingStarted => {
-                            self.voice_recording = true;
-                            self.status_message =
-                                Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
-                        }
-                        VoiceEvent::RecordingStopped => {
-                            self.voice_recording = false;
-                            self.status_message = Some("Transcribing\u{2026}".to_string());
-                        }
-                        VoiceEvent::TranscriptReady(text) => {
-                            if !text.is_empty() {
-                                // Append to existing prompt text with a space separator
-                                // so the user can combine voice + typed input.
-                                if !self.prompt_input.text.is_empty()
-                                    && !self.prompt_input.text.ends_with(' ')
-                                {
-                                    self.prompt_input.paste(" ");
-                                }
-                                self.prompt_input.paste(&text);
-                                self.refresh_prompt_input();
-                                self.status_message =
-                                    Some(format!("Transcribed: {}", &text[..text.len().min(60)]));
-                            }
-                            // Clear the channel once we have the result.
-                            self.voice_event_rx = None;
-                        }
-                        VoiceEvent::Error(msg) => {
-                            self.voice_recording = false;
-                            self.voice_event_rx = None;
-                            self.push_notification(
-                                NotificationKind::Warning,
-                                format!("Voice: {}", msg),
-                                Some(8),
-                            );
-                        }
-                    }
-                }
-            }
+            self.poll_voice_events();
 
             // Draw the frame, and immediately scan the *just-rendered*
             // buffer for URL runs. ratatui swaps its two buffers at the
