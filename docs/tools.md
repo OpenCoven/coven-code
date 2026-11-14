@@ -96,8 +96,29 @@ settings; project-local settings cannot inject them. Each rule contains:
 - An allow or deny action.
 
 Except in bypass mode, any matching deny wins over matching allows. Rules are
-evaluated before mode defaults, including plan mode. Manage rules with
-`/permissions`. See [configuration](configuration.md#permission-modes) for more.
+evaluated before mode defaults, including plan mode. See
+[configuration](configuration.md#permission-modes) for more. To change or remove
+a saved rule, edit `permissionRules` in your user settings.
+
+For `Bash`, `PowerShell`, and `REPL`, the rule's path is the command or code:
+
+- Approving it for the session or always covers that exact text only. `REPL`
+  approvals don't record the language, so the same text is also covered in another
+  language.
+- In a saved allow rule, a `*` glued to the end of the pattern, as in `git status*`,
+  means exactly `git status`. Earlier versions saved "always allow" in that form.
+- Any other wildcard is a glob over the whole text and can match spaces, so `*.sh`
+  also covers `rm -rf ~ x.sh`. Put a wildcard last, after a space, as in `git *`.
+- A wildcard covers one plain command: ordinary words and simple quotes. Anything
+  else asks for its own approval, including chaining, pipes, redirection,
+  substitution, variables, comments, and backslashes.
+- A wildcard trusts everything the named command can do. `git *` allows git to run
+  other programs through options such as `-c`, and `*` allows any plain command.
+- `PowerShell`, and `Bash` on Windows, also ask for anything containing quotes.
+  No wildcard covers `REPL` code.
+- A deny rule's wildcard is matched against the whole text, so `rm *` catches
+  `rm x; touch y` but not `touch y; rm x`. Don't rely on a deny rule alone to keep
+  a command from running.
 
 ### File target checks
 

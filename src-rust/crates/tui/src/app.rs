@@ -6779,47 +6779,11 @@ impl App {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
             {
-                if !Self::bash_command_has_shell_control(prefix) {
+                if !claurst_core::permissions::bash_command_has_shell_control(prefix) {
                     self.bash_prefix_allowlist.insert(prefix.to_string());
                 }
             }
         }
-    }
-
-    fn bash_command_has_shell_control(command: &str) -> bool {
-        let mut chars = command.chars().peekable();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escaped = false;
-
-        while let Some(c) = chars.next() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-
-            // In bash, backslash does not escape characters inside single quotes.
-            if c == '\\' && !in_single_quote {
-                escaped = true;
-                continue;
-            }
-
-            match c {
-                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-                '"' if !in_single_quote => in_double_quote = !in_double_quote,
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r'
-                    if !in_single_quote && !in_double_quote =>
-                {
-                    return true;
-                }
-                '`' if !in_single_quote => return true,
-                '$' if !in_single_quote && chars.peek() == Some(&'(') => return true,
-                _ => {}
-            }
-        }
-
-        // Treat unterminated quotes / dangling escapes as unsafe.
-        escaped || in_single_quote || in_double_quote
     }
 
     fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
@@ -6842,7 +6806,7 @@ impl App {
     /// prefix allowlist.  Shell compound commands are never allowed by prefix;
     /// they must go through the normal permission dialog.
     pub fn bash_command_allowed_by_prefix(&self, command: &str) -> bool {
-        !Self::bash_command_has_shell_control(command)
+        !claurst_core::permissions::bash_command_has_shell_control(command)
             && self
                 .bash_prefix_allowlist
                 .iter()
@@ -10302,6 +10266,24 @@ role = "Research"
         assert!(!app.bash_command_allowed_by_prefix("git status"));
         assert!(!app.bash_command_allowed_by_prefix("ls -la"));
         assert!(!app.bash_command_allowed_by_prefix(""));
+    }
+
+    #[test]
+    fn test_bash_prefix_allowlist_refuses_commands_it_cannot_read() {
+        let mut app = make_app();
+        app.bash_prefix_allowlist.insert("cargo build".to_string());
+        assert!(app.bash_command_allowed_by_prefix("cargo build --release"));
+        for hostile in [
+            "cargo build # '\ntouch x # '",
+            "cargo build $'\\'' ; touch x ; echo \\'",
+            "cargo build $\\\n(touch x)",
+            r"cargo build ${x:=a\[\$\(touch\ x\)\]} $[x]",
+        ] {
+            assert!(
+                !app.bash_command_allowed_by_prefix(hostile),
+                "{hostile:?} needs its own approval"
+            );
+        }
     }
 
     #[test]
