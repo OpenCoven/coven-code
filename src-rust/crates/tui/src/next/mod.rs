@@ -442,7 +442,8 @@ struct ToolKey {
     memory_diagnostics: bool,
     live: bool,
     /// Seconds the unfinished tools have been working, as the rows show them
-    /// (none under a second, then rounded), summed. While no event touches
+    /// (none under a second, then rounded), summed; a row awaiting approval
+    /// counts too, though it shows none. While no event touches
     /// the rows each count only grows, so the sum changes whenever a row's
     /// time would; an event that resets one changes a stamp above.
     running_seconds: u64,
@@ -723,6 +724,8 @@ impl TurnExitReport {
                 ToolActivityState::Running | ToolActivityState::CancelRequested => report
                     .open
                     .push((tool.id.clone(), format!("No result from {named}"))),
+                // An open prompt takes every key, so quitting waits for the
+                // answer; this holds for any other way a turn ends mid-prompt.
                 ToolActivityState::AwaitingApproval => report
                     .open
                     .push((tool.id.clone(), format!("Waiting for approval: {named}"))),
@@ -783,8 +786,8 @@ impl TurnExitReport {
         if !open.is_empty() {
             report.extend(open);
             report.push(
-                "What these finished is unknown, and anything they started in the background \
-                 may still be running."
+                "What these did is unknown, and anything they started in the background may \
+                 still be running."
                     .to_string(),
             );
         }

@@ -948,10 +948,7 @@ fn the_exit_report_still_names_a_tool_that_was_cancelled_mid_run() {
         .lines(&app.messages)
         .join("\n");
     assert!(report.contains("No result from Bash sleep 30"), "{report}");
-    assert!(
-        report.contains("What these finished is unknown"),
-        "{report}"
-    );
+    assert!(report.contains("What these did is unknown"), "{report}");
 }
 
 #[test]
@@ -965,7 +962,7 @@ fn a_running_tools_time_counts_up_between_frames_with_nothing_else_changing() {
             tool_id: "long".to_string(),
         },
     );
-    let started = std::time::Instant::now();
+    let started = app.tool_use_blocks[0].run.started_at.expect("running");
     // What the row may show, judged by the time read on each side of the
     // frame, so a slow machine moves the frame but cannot fail it.
     let shown_at = |elapsed: std::time::Duration| {
@@ -1157,33 +1154,35 @@ fn a_cancelled_tool_is_not_reported_as_finished_but_unsaved() {
 
 #[test]
 fn a_tool_asking_for_approval_is_reported_without_a_result_since_it_may_have_begun() {
-    let mut app = next_app();
-    app.push_message(Message::user("run two".to_string()));
-    tool_start(&mut app, "first", "Bash", r#"{"command":"make"}"#);
-    tool_start(&mut app, "again", "Bash", r#"{"command":"make install"}"#);
-    app.record_permission_decision("again", true);
-    let ask = |id: &str| {
-        claurst_tui::dialogs::PermissionRequest::bash(
-            id.to_string(),
-            "Bash".to_string(),
-            "make".to_string(),
-            "make".to_string(),
-            None,
-        )
-    };
     // Some tools ask before any work, others after a first step; the prompt
-    // says which it is for neither.
-    for (id, named) in [("first", "Bash make"), ("again", "Bash make install")] {
-        app.permission_request = Some(ask(id));
-        let lines = claurst_tui::next::TurnExitReport::capture(&app)
-            .lines(&app.messages)
-            .join("\n");
+    // says which it is for neither, first time or again.
+    for asked_before in [false, true] {
+        let mut app = next_app();
+        app.push_message(Message::user("install".to_string()));
+        tool_start(&mut app, "install", "Bash", r#"{"command":"make install"}"#);
+        if asked_before {
+            app.record_permission_decision("install", true);
+        }
+        app.permission_request = Some(claurst_tui::dialogs::PermissionRequest::bash(
+            "install".to_string(),
+            "Bash".to_string(),
+            "make install".to_string(),
+            "make install".to_string(),
+            None,
+        ));
+        let lines = claurst_tui::next::TurnExitReport::capture(&app).lines(&app.messages);
+        let approval = lines
+            .iter()
+            .position(|line| line == "Waiting for approval: Bash make install");
+        let unknown = lines.iter().position(|line| line.contains("is unknown"));
         assert!(
-            lines.contains(&format!("Waiting for approval: {named}")),
-            "{lines}"
+            matches!((approval, unknown), (Some(a), Some(u)) if a < u),
+            "{lines:?}"
         );
-        assert!(!lines.contains("Not started"), "{lines}");
-        assert!(lines.contains("is unknown"), "{lines}");
+        assert!(
+            !lines.iter().any(|line| line.contains("Not started")),
+            "{lines:?}"
+        );
     }
 }
 

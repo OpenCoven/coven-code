@@ -2109,6 +2109,27 @@ async fn run_headless(
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
+/// Settles a queued approval request that an answer to an earlier prompt now
+/// decides. Returns the model call it belongs to and whether it was allowed.
+fn settle_queued_permission(
+    mut pending: claurst_tools::PendingPermissionRequest,
+    decision: claurst_core::permissions::PermissionDecision,
+) -> (String, bool) {
+    use claurst_core::permissions::PermissionDecision;
+    let call_id = pending
+        .call_id
+        .clone()
+        .unwrap_or_else(|| pending.tool_use_id.clone());
+    let allowed = matches!(
+        decision,
+        PermissionDecision::Allow | PermissionDecision::AllowPermanently
+    );
+    if let Some(tx) = pending.decision_tx.take() {
+        let _ = tx.send(decision);
+    }
+    (call_id, allowed)
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -4724,7 +4745,7 @@ async fn run_interactive(
         if app.permission_request.is_none() {
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
-                let Some(mut pending) = next_pending else {
+                let Some(pending) = next_pending else {
                     break;
                 };
 
@@ -4774,9 +4795,9 @@ async fn run_interactive(
                         break;
                     }
                     Some(decision) => {
-                        if let Some(tx) = pending.decision_tx.take() {
-                            let _ = tx.send(decision);
-                        }
+                        // Its wait on the user ends here too.
+                        let (call_id, allowed) = settle_queued_permission(pending, decision);
+                        app.record_permission_decision(&call_id, allowed);
                     }
                 }
             }
@@ -6900,6 +6921,26 @@ mod tests {
                 handle_bridge_permission_response(&mut dialog, &mut store, "perm-1", response);
 
             assert_eq!(decided, Some((expected.0.to_string(), expected.1)));
+        }
+    }
+
+    #[test]
+    fn a_queued_request_decided_by_an_earlier_answer_names_its_model_call() {
+        use claurst_core::permissions::PermissionDecision as Decision;
+
+        for (call_id, decision, expected) in [
+            (Some("toolu_model"), Decision::Allow, ("toolu_model", true)),
+            (Some("toolu_model"), Decision::Deny, ("toolu_model", false)),
+            (None, Decision::AllowPermanently, ("perm-1", true)),
+            (None, Decision::DenyPermanently, ("perm-1", false)),
+        ] {
+            let (mut pending, mut rx) = bridge_permission_fixture("perm-1");
+            pending.call_id = call_id.map(str::to_string);
+
+            let settled = settle_queued_permission(pending, decision.clone());
+
+            assert_eq!(settled, (expected.0.to_string(), expected.1));
+            assert_eq!(rx.try_recv(), Ok(decision));
         }
     }
 

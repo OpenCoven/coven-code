@@ -427,8 +427,9 @@ pub struct ToolRun {
     /// The order its row opened in, which keeps its place among the other
     /// rows; 0 for a row built outside the runtime's events.
     pub opened: u64,
-    /// When its own work began, or the moment it was approved if it asked.
-    /// Unset while hooks run or it waits for its turn: that time is not its.
+    /// When its own work began, or the moment it was last approved if it
+    /// asked. Unset while hooks run or it waits for its turn: that time is not
+    /// its.
     pub started_at: Option<std::time::Instant>,
     /// Waiting for another tool in its response to finish first.
     pub queued: bool,
