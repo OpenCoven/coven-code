@@ -4895,13 +4895,9 @@ pub mod history {
                     }
                 }
                 // Check tags
-                if s.tags
+                s.tags
                     .iter()
                     .any(|t| t.to_lowercase().contains(&lower_query))
-                {
-                    return true;
-                }
-                false
             })
             .collect()
     }
