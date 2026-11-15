@@ -3,8 +3,10 @@
 #
 # Committed Unicode text in Next's composer (#410): CJK, right-to-left text, a
 # base letter with a combining mark and an emoji ZWJ sequence are typed through
-# tmux, shown and kept unsent, edited, then sent to a local fake of the
-# Messages API. The provider and the saved session must get exactly the text.
+# tmux and kept unsent, the CJK text is edited, and all of it is sent to a local
+# fake of the Messages API. The screen is checked for all but the emoji, whose
+# drawing differs between tmux versions; the provider and the saved session
+# must get exactly the text.
 #
 # tmux delivers committed characters only: an input method's preedit
 # (composition) state cannot be driven through it, so that is not covered.
@@ -33,8 +35,11 @@ def strings(value):
 
 found = False
 for path in files:
-    with open(path, encoding="utf-8") as f:
-        raw = f.read()
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        continue
     docs = [raw] if path.endswith(".json") else raw.splitlines()
     for doc in docs:
         try:
@@ -76,10 +81,11 @@ tc_next_unicode_composer() {
     ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$(cat "$scratch/port" 2>/dev/null)")"
   TUI_BOOT_STRING="preview"
 
-  if [ -s "$scratch/port" ] && tui_start; then
+  # tui_start reports its own failure.
+  if [ ! -s "$scratch/port" ]; then
+    _fail "the fake provider starts" "no port file"
+  elif tui_start; then
     _next_unicode_journey "$scratch"
-  else
-    _fail "Next starts against the fake provider" "$(tui_capture)"
   fi
   tui_stop
   kill "$fake_pid" 2>/dev/null
@@ -124,19 +130,27 @@ _next_unicode_journey() {
   if wait_for "unicode-done" 5; then _pass "the rest of the draft is shown"
   else _fail "the rest of the draft is shown" "$(tui_capture)"; fi
   s="$(tui_capture)"
+  assert_contains "$s" "مرحبا" "Arabic text is shown"
+  assert_contains "$s" "${combining}" "the letter with a combining mark is shown"
   assert_contains "$s" "draft not sent" "the whole draft is still unsent"
-  assert_eq "$(wc -l <"$scratch/requests.log" | tr -d ' ')" "0" "nothing reached the provider before Enter"
+  # The fake logs streamed requests, which is what a turn sends.
+  assert_eq "$(wc -l <"$scratch/requests.log" | tr -d ' ')" "0" "no turn reached the provider before Enter"
 
   # ---- sent exactly, and saved exactly -----------------------------------
   tui_keys Enter
   # The fake answers with a Bash call that touches a marker named after the
   # prompt's last word; approving it lets the turn finish.
-  if wait_for "Approve Bash" 20; then
-    sleep 0.7; tui_keys y
-  else
+  if ! wait_for "Approve Bash" 20; then
     _fail "the prompt reaches the fake provider" "$(tui_capture)"
     return 0
   fi
+  # A loaded host can drop a key pressed as the prompt opens: try up to 3 times.
+  local tries=0
+  while [ "$tries" -lt 3 ]; do
+    sleep 0.7; tui_keys y
+    if wait_absent "Approve Bash" 5; then break; fi
+    tries=$((tries + 1))
+  done
   if wait_for "TOOL_RESULT_OK" 30; then _pass "the turn finishes"
   else _fail "the turn finishes" "$(tui_capture)"; fi
 
