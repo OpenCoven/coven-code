@@ -76,7 +76,7 @@ bytes = "1"
 base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
-getrandom = "0.2"
+getrandom = "0.4"
 enigo = "0.2"
 xcap = { version = "0.3.3", features = ["vendored"] }
 url = "2"
@@ -108,8 +108,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls-vendored"] }
 schemars = { version = "0.8", features = ["derive"] }
 
 # Runtime registry
-coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
-coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
+coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.2.0" }
+coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.2.0" }
 
 # Workspace crates
 claurst-core = { path = "crates/core" }
