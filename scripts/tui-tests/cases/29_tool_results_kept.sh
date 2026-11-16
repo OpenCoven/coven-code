@@ -123,7 +123,8 @@ _trk_journey() { # renderer, dir
 }
 
 _trk_turns() { # renderer, dir
-  local r="$1" log="$2/requests.log" shape
+  # The fake writes this file last for each request.
+  local r="$1" log="$2/messages.log" shape
   tui_type "run: echo first-tool"; sleep 0.3; tui_keys Enter
   if ! wait_for "allow once" 15; then
     _fail "$r: the Bash call asks for approval" "$(tui_capture)"; return 0
@@ -148,7 +149,7 @@ _trk_turns() { # renderer, dir
       "$(_trk_requests "$log") requests; $(tui_capture)"
     return 0
   fi
-  shape="$(_trk_last_request_shape "$2/messages.log")"
+  shape="$(_trk_last_request_shape "$log")"
   if [ "$shape" = ok ]; then
     _pass "$r: the follow-up request carries the call and its tool result"
   else
