@@ -2562,6 +2562,23 @@ async fn stop_turn_and_keep_it(
     exit_report
 }
 
+/// Replace the conversation with `replacement` and start a new session
+/// generation, so nothing still queued from the replaced conversation's
+/// worker is admitted to it (#408).
+fn replace_conversation(
+    scope: &mut claurst_tui::application::SessionScope,
+    replacement: Vec<claurst_core::types::Message>,
+    messages: &mut Vec<claurst_core::types::Message>,
+    app: &mut claurst_tui::App,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    scope.advance();
+    app.replace_messages(replacement.clone());
+    session.messages = replacement.clone();
+    *messages = replacement;
+    session.updated_at = chrono::Utc::now();
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -3926,20 +3943,24 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
-                                    session_scope.advance();
-                                    messages.clear();
-                                    app.replace_messages(Vec::new());
-                                    session.messages.clear();
-                                    session.updated_at = chrono::Utc::now();
+                                    replace_conversation(
+                                        &mut session_scope,
+                                        Vec::new(),
+                                        &mut messages,
+                                        &mut app,
+                                        &mut session,
+                                    );
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
-                                    session_scope.advance();
                                     let removed = messages.len().saturating_sub(new_msgs.len());
-                                    messages = new_msgs.clone();
-                                    app.replace_messages(new_msgs);
-                                    session.messages = messages.clone();
-                                    session.updated_at = chrono::Utc::now();
+                                    replace_conversation(
+                                        &mut session_scope,
+                                        new_msgs,
+                                        &mut messages,
+                                        &mut app,
+                                        &mut session,
+                                    );
                                     app.status_message = Some(format!(
                                         "Rewound {} message{}.",
                                         removed,
@@ -8313,6 +8334,9 @@ mod tests {
 
 #[cfg(test)]
 mod goal_dispatch_tests;
+
+#[cfg(test)]
+mod reconcile_tests;
 
 #[cfg(test)]
 mod session_save_tests;
