@@ -28,25 +28,44 @@ _trk_wait_for_requests() { # log, count
   return 1
 }
 
-# "ok" when every tool call in the last request's history is answered by a
-# tool result with its id; otherwise the history's shape, message by message.
-_trk_last_request_shape() { # log
+# "ok" when the last request's history holds a tool call and every call is
+# answered by a tool result with its id in the user message right after it,
+# as the Messages API requires; otherwise the history's shape.
+_trk_last_request_shape() { # messages log
   python3 -B -c 'import json, sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 messages = json.loads(lines[-1])["messages"]
-calls, results, shape = [], set(), []
-for message in messages:
+def blocks(message):
     content = message.get("content")
-    blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-    kinds = []
-    for block in blocks:
-        if block.get("type") == "tool_use":
-            calls.append(block.get("id")); kinds.append("tool_use " + str(block.get("id")))
-        elif block.get("type") == "tool_result":
-            results.add(block.get("tool_use_id")); kinds.append("tool_result " + str(block.get("tool_use_id")))
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+def ids(message, kind, key):
+    return [b.get(key) for b in blocks(message) if b.get("type") == kind]
+answered, shape = False, []
+for message in messages:
+    calls = ids(message, "tool_use", "id")
+    results = ids(message, "tool_result", "tool_use_id")
+    kinds = ["tool_use " + str(c) for c in calls] + ["tool_result " + str(r) for r in results]
     shape.append(message.get("role", "?") + (" (" + ", ".join(kinds) + ")" if kinds else ""))
-answered = bool(calls) and all(call in results for call in calls)
+for i, message in enumerate(messages):
+    calls = ids(message, "tool_use", "id")
+    if not calls:
+        continue
+    following = messages[i + 1] if i + 1 < len(messages) else {}
+    answered = following.get("role") == "user" and \
+        set(calls) <= set(ids(following, "tool_result", "tool_use_id"))
+    if not answered:
+        break
 print("ok" if answered else "; ".join(shape))' "$1"
+}
+
+# Wait until the turn no longer shows as running.
+_trk_wait_idle() {
+  local waited=0
+  while [ "$waited" -lt 50 ]; do
+    grep -qF -- "$TRK_BUSY" <<<"$(tui_capture)" || return 0
+    sleep 0.2; waited=$((waited + 1))
+  done
+  return 1
 }
 
 # Start the TUI for one renderer against the fake API, with its own home.
@@ -57,8 +76,8 @@ _trk_launch() { # renderer, home, port, project
     COVEN_CODE_TEST_HOME COVEN_CODE_CLAUDE_BIN COVEN_PARENT COVEN_DAEMON_SOCKET COVEN_CODE_UI; do
     TUI_LAUNCH_PREFIX+=" -u $var"
   done
-  if [ "$1" = next ]; then ui="COVEN_CODE_UI=next"; TUI_BOOT_STRING="preview"
-  else TUI_BOOT_STRING="Coven v"; fi
+  if [ "$1" = next ]; then ui="COVEN_CODE_UI=next"; TUI_BOOT_STRING="preview"; TRK_BUSY="working"
+  else TUI_BOOT_STRING="Coven v"; TRK_BUSY="… · "; fi
   # shellcheck disable=SC2086 # an empty selector adds nothing
   TUI_LAUNCH_PREFIX+=" $(printf '%q ' "HOME=$2" "COVEN_HOME=$2/.coven" $ui \
     ANTHROPIC_API_KEY=fake-key "ANTHROPIC_BASE_URL=http://127.0.0.1:$3")"
@@ -80,13 +99,13 @@ tc_tool_results_kept() {
 }
 
 # One approved tool turn, then a follow-up prompt, with a fake of its own so
-# the request log holds this renderer's requests only.
+# its logs hold this renderer's requests only.
 _trk_journey() { # renderer, dir
-  local r="$1" dir="$2" log="$2/requests.log" waited=0 fake_pid
+  local r="$1" dir="$2" waited=0 fake_pid
   mkdir -p "$dir/home/.coven-code" "$dir/project" "$dir/markers"
   printf '%s\n' '{"hasCompletedOnboarding": true}' >"$dir/home/.coven-code/settings.json"
   python3 -B "${BASH_SOURCE[0]%/*}/../fake_anthropic.py" \
-    "$dir/port" "$log" "$dir/markers" 2>/dev/null &
+    "$dir/port" "$dir/requests.log" "$dir/markers" "$dir/messages.log" 2>/dev/null &
   fake_pid=$!
   while [ "$waited" -lt 50 ] && [ ! -s "$dir/port" ]; do
     sleep 0.1; waited=$((waited + 1))
@@ -97,16 +116,14 @@ _trk_journey() { # renderer, dir
     return 0
   fi
 
-  if _trk_launch "$r" "$dir/home" "$(cat "$dir/port")" "$dir/project"; then
-    _trk_turns "$r" "$log"
-    tui_stop
-  fi
+  _trk_launch "$r" "$dir/home" "$(cat "$dir/port")" "$dir/project" && _trk_turns "$r" "$dir"
+  tui_stop
   kill "$fake_pid" 2>/dev/null
   wait "$fake_pid" 2>/dev/null
 }
 
-_trk_turns() { # renderer, log
-  local r="$1" log="$2" shape
+_trk_turns() { # renderer, dir
+  local r="$1" log="$2/requests.log" shape
   tui_type "run: echo first-tool"; sleep 0.3; tui_keys Enter
   if ! wait_for "allow once" 15; then
     _fail "$r: the Bash call asks for approval" "$(tui_capture)"; return 0
@@ -116,16 +133,22 @@ _trk_turns() { # renderer, log
     _fail "$r: the model answers the approved call's result" "$(tui_capture)"; return 0
   fi
   _pass "$r: the model answers the approved call's result"
-  # Let the loop join the finished turn, then press keys one at a time.
-  sleep 1
-  tui_keys x; sleep 0.3; tui_keys BSpace; sleep 0.3
+  if ! _trk_wait_idle; then
+    _fail "$r: the turn ends" "$(tui_capture)"; return 0
+  fi
+  # Press keys one at a time, as typing does, over a couple of seconds, so
+  # some land after the loop has joined the finished turn.
+  local _
+  for _ in 1 2 3; do
+    tui_keys x; sleep 0.3; tui_keys BSpace; sleep 0.4
+  done
   tui_type "run: echo second"; sleep 0.3; tui_keys Enter
   if ! _trk_wait_for_requests "$log" 3; then
     _fail "$r: the follow-up prompt reaches the model" \
       "$(_trk_requests "$log") requests; $(tui_capture)"
     return 0
   fi
-  shape="$(_trk_last_request_shape "$log")"
+  shape="$(_trk_last_request_shape "$2/messages.log")"
   if [ "$shape" = ok ]; then
     _pass "$r: the follow-up request carries the call and its tool result"
   else

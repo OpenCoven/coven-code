@@ -13,10 +13,13 @@ every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
 can act while text is still arriving; a `release` file already there means no
 hold.
 Any other word after the count is an error.
-Each streamed request appends one JSON line to the log for later checks:
-"last" holds its last message and "messages" all of them, in order.
+Each streamed request appends one JSON line to LOG_FILE for later checks,
+whose "last" holds the request's last message. Given MESSAGES_LOG, it also
+appends there a JSON line whose "messages" holds all of them, in order. That
+is a file of its own, because cases search LOG_FILE's lines for text that the
+history of a later request would repeat.
 
-Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
+Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG]
 """
 import http.server
 import json
@@ -192,6 +195,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     log_path = ""
     marker_dir = ""
+    messages_log_path = ""
     turn = 0
 
     def log_message(self, *_):
@@ -221,7 +225,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         messages = request.get("messages") or [{}]
         with open(self.log_path, "a", encoding="utf-8") as log:
-            log.write(json.dumps({"last": messages[-1], "messages": messages}) + "\n")
+            log.write(json.dumps({"last": messages[-1]}) + "\n")
+        if self.messages_log_path:
+            with open(self.messages_log_path, "a", encoding="utf-8") as log:
+                log.write(json.dumps({"messages": messages}) + "\n")
         Handler.turn += 1
         reply = reply_for(messages, self.marker_dir, Handler.turn)
         if isinstance(reply, Held):
@@ -255,6 +262,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     port_file, Handler.log_path, Handler.marker_dir = sys.argv[1:4]
+    Handler.messages_log_path = sys.argv[4] if len(sys.argv) > 4 else ""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     with open(port_file + ".tmp", "w", encoding="utf-8") as f:
         f.write(str(server.server_address[1]))
