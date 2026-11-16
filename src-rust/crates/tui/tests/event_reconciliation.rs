@@ -33,6 +33,7 @@ use claurst_tui::application::{
     PresentationEffect, ScopedQueryEvent, SessionScope, TurnCancellation, UiRenderer,
 };
 use claurst_tui::NotificationKind;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -161,7 +162,11 @@ impl Turn {
         app.bell_on_complete = true;
         app.completion_toast_enabled = true;
         app.push_message(Message::user("Run the tests.".to_string()));
-        app.turn_start = Instant::now().checked_sub(TURN_AGE);
+        app.turn_start = Some(
+            Instant::now()
+                .checked_sub(TURN_AGE)
+                .expect("the host has been up for longer than TURN_AGE"),
+        );
         // As the loop does when it starts the worker.
         app.is_streaming = true;
         Self {
@@ -245,6 +250,16 @@ impl Turn {
             .map(|tool| tool.state)
     }
 
+    fn warnings(&self) -> Vec<String> {
+        self.app
+            .notifications
+            .notifications
+            .iter()
+            .filter(|notification| notification.kind == NotificationKind::Warning)
+            .map(|notification| notification.message.clone())
+            .collect()
+    }
+
     fn successes(&self) -> usize {
         self.app
             .notifications
@@ -274,6 +289,14 @@ impl Turn {
             "{case} {renderer:?}: turn recorded as complete"
         );
     }
+}
+
+fn press(app: &mut App, code: KeyCode) {
+    app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+fn texts(app: &App) -> Vec<String> {
+    app.messages.iter().map(Message::get_all_text).collect()
 }
 
 fn draw(app: &App, renderer: UiRenderer) {
@@ -433,8 +456,8 @@ fn a_duplicate_turn_complete_commits_the_turn_once() {
 
 /// An end for a call the App has not seen start is not applied, so the call
 /// is not shown done on its late start, and a turn that then completes is
-/// not reported done. Its finalized result, when it arrives, is authoritative
-/// and reconciles both.
+/// not reported done and says the call had no result. Its finalized result,
+/// when it arrives, is authoritative and reconciles both.
 #[test]
 fn an_end_before_its_start_does_not_show_the_call_done() {
     let call = "toolu-early-end";
@@ -454,9 +477,12 @@ fn an_end_before_its_start_does_not_show_the_call_done() {
             "{renderer:?}: the late start shows the call done"
         );
         turn.apply(end_turn());
-        assert_ne!(
-            turn.tool_state(call),
-            Some(ToolActivityState::Done),
+        // The completion drops the row, as before, and says the call had no
+        // result.
+        assert_eq!(turn.tool_state(call), None, "{renderer:?}");
+        assert_eq!(
+            turn.warnings(),
+            ["Turn ended with no result from Bash"],
             "{renderer:?}"
         );
         turn.assert_not_reported_done("end before start");
@@ -485,8 +511,8 @@ fn an_end_before_its_start_does_not_show_the_call_done() {
     });
 }
 
-/// A completion while a call has no result does not show that call done or
-/// report the turn done. A call that did report keeps its result.
+/// A completion while a call has no result does not report the turn done,
+/// and says which call had none. A call that did report keeps its result.
 #[test]
 fn a_turn_that_completes_without_a_tool_result_is_not_reported_done() {
     in_both_renderers(|renderer| {
@@ -499,9 +525,11 @@ fn a_turn_that_completes_without_a_tool_result_is_not_reported_done() {
             end_turn(),
         ]);
         assert!(!turn.app.is_streaming, "{renderer:?}");
-        assert_ne!(
-            turn.tool_state("toolu-missing"),
-            Some(ToolActivityState::Done),
+        // Its row is dropped, as before; the warning says it had no result.
+        assert_eq!(turn.tool_state("toolu-missing"), None, "{renderer:?}");
+        assert_eq!(
+            turn.warnings(),
+            ["Turn ended with no result from Bash"],
             "{renderer:?}"
         );
         assert_eq!(
@@ -525,41 +553,100 @@ fn a_turn_that_completes_without_a_tool_result_is_not_reported_done() {
     });
 }
 
-/// An error after a partial answer does not commit the partial text as an
-/// answer, show a running call done, or report the turn done.
+/// A provider error after a partial answer: the query loop finalizes the
+/// partial answer as a durable message and returns the error to the loop,
+/// which ends the turn at the join. No completion arrives, so nothing reports
+/// the turn done. (`QueryEvent::Error` is not sent by the runtime.)
 #[test]
 fn an_error_after_a_partial_answer_is_not_reported_done() {
     in_both_renderers(|renderer| {
         let mut turn = Turn::started(renderer);
         turn.run([
             delta("The first half of an ans"),
-            tool_start("toolu-cut", "Bash", r#"{"command":"cargo test"}"#),
-            QueryEvent::Error("overloaded_error (529)".to_string()),
+            durable_answer("msg-partial", "The first half of an ans", None),
         ]);
         let app = &turn.app;
-        assert!(!app.is_streaming, "{renderer:?}");
-        assert!(
-            !app.messages
-                .iter()
-                .any(|message| message.get_all_text().contains("The first half")),
-            "{renderer:?}: the partial answer was committed as an answer"
+        assert_eq!(
+            texts(app),
+            ["Run the tests.", "The first half of an ans"],
+            "{renderer:?}: the partial answer is kept once, as finalized"
         );
-        assert!(
-            app.notifications
-                .notifications
-                .iter()
-                .any(|notification| notification.kind == NotificationKind::Error),
-            "{renderer:?}: the error is shown"
-        );
-        assert_ne!(
-            turn.tool_state("toolu-cut"),
-            Some(ToolActivityState::Done),
-            "{renderer:?}"
-        );
+        assert!(app.streaming_text.is_empty(), "{renderer:?}");
         assert_eq!(app.last_turn_verb, None, "{renderer:?}: done marker");
         assert_eq!(turn.successes(), 0, "{renderer:?}: completion toast");
         assert!(turn.effects.is_empty(), "{renderer:?}: {:?}", turn.effects);
+        let record = app.turn_metadata.last().expect("the submitted turn");
+        assert_eq!(record.duration, None, "{renderer:?}: recorded complete");
         turn.assert_sent_nothing("error after a partial answer");
+        turn
+    });
+}
+
+/// A turn after an in-App rewind completes as its own turn, once: the
+/// records of the turns the rewind removed do not make its completion look
+/// like a duplicate.
+#[test]
+fn a_turn_after_a_rewind_completes_once() {
+    in_both_renderers(|renderer| {
+        let mut turn = Turn::started(renderer);
+        turn.app.completion_toast_min_secs = 0;
+        turn.run([
+            delta("All tests pass."),
+            durable_answer("msg-tests", "All tests pass.", None),
+            end_turn(),
+        ]);
+        turn.app
+            .push_message(Message::user("And the docs?".to_string()));
+        turn.app.is_streaming = true;
+        turn.run([
+            delta("Docs pass."),
+            durable_answer("msg-docs", "Docs pass.", None),
+            end_turn(),
+        ]);
+        assert_eq!(turn.effects.len(), 2, "{renderer:?}");
+
+        // Rewind to before "And the docs?" through the overlay.
+        assert!(turn.app.intercept_slash_command_with_args("rewind", ""));
+        press(&mut turn.app, KeyCode::Up);
+        press(&mut turn.app, KeyCode::Enter);
+        press(&mut turn.app, KeyCode::Char('y'));
+        assert_eq!(
+            texts(&turn.app),
+            ["Run the tests.", "All tests pass."],
+            "{renderer:?}"
+        );
+        assert_eq!(
+            turn.app.turn_metadata.len(),
+            1,
+            "{renderer:?}: each kept turn keeps its own record"
+        );
+
+        turn.app
+            .push_message(Message::user("Check the docs again.".to_string()));
+        turn.app.is_streaming = true;
+        turn.run([
+            delta("Docs pass now."),
+            durable_answer("msg-docs-again", "Docs pass now.", None),
+            end_turn(),
+        ]);
+        assert_eq!(
+            turn.effects,
+            [PresentationEffect::RingBell; 3],
+            "{renderer:?}: the turn after the rewind rings"
+        );
+        assert!(
+            turn.app.last_turn_verb.is_some(),
+            "{renderer:?}: done marker"
+        );
+        assert_eq!(turn.app.context_used_tokens, 3600, "{renderer:?}");
+        let records: Vec<bool> = turn
+            .app
+            .turn_metadata
+            .iter()
+            .map(|record| record.duration.is_some() && !record.interrupted)
+            .collect();
+        assert_eq!(records, [true, true], "{renderer:?}");
+        turn.assert_sent_nothing("turn after a rewind");
         turn
     });
 }

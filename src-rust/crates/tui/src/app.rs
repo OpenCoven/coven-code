@@ -1755,6 +1755,14 @@ impl App {
             .checked_sub(1)
     }
 
+    /// The tool rows opened in the current user turn.
+    fn current_turn_tool_rows(&self) -> impl Iterator<Item = &ToolUseBlock> {
+        let turn = self.current_user_turn_index();
+        self.tool_use_blocks
+            .iter()
+            .filter(move |block| block.turn_index == turn)
+    }
+
     fn current_agent_mode_snapshot(&self) -> String {
         self.agent_mode
             .clone()
@@ -1798,7 +1806,7 @@ impl App {
         }
     }
 
-    fn complete_current_turn_snapshot(&mut self, interrupted: bool) {
+    fn complete_current_turn_snapshot(&mut self, duration: Option<String>, interrupted: bool) {
         if let Some(index) = self.current_user_turn_index() {
             if self.turn_metadata.len() <= index {
                 self.sync_turn_metadata_to_messages();
@@ -1807,7 +1815,7 @@ impl App {
             let model_name = self.model_name.clone();
             let agent_mode = self.current_agent_mode_snapshot();
             if let Some(meta) = self.turn_metadata.get_mut(index) {
-                meta.duration = self.last_turn_elapsed.clone();
+                meta.duration = duration;
                 meta.interrupted = interrupted;
                 if meta.model_name.is_none() {
                     meta.model_name = Some(model_name);
@@ -5676,7 +5684,7 @@ impl App {
                 self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
                 self.request_turn_cancellation();
-                self.complete_current_turn_snapshot(true);
+                self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
             // ---- Quit / cancel ----------------------------------------
@@ -5709,7 +5717,7 @@ impl App {
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
                     self.request_turn_cancellation();
-                    self.complete_current_turn_snapshot(true);
+                    self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
                     // Always clear the prompt input on Ctrl+C.
@@ -6431,6 +6439,9 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
+                        // Each kept user turn keeps its own record; the next
+                        // prompt's record follows them.
+                        self.sync_turn_metadata_to_messages();
                         self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
@@ -8071,12 +8082,9 @@ impl App {
             // (#408). The runtime starts each call once, so a later turn's
             // start with the same id is a new call and takes the row over.
             QueryEvent::ToolStart { tool_id, .. }
-                if {
-                    let turn = self.current_user_turn_index();
-                    self.tool_use_blocks.iter().any(|block| {
-                        block.id == tool_id && block.turn_index == turn && !block.is_unfinished()
-                    })
-                } => {}
+                if self
+                    .current_turn_tool_rows()
+                    .any(|block| block.id == tool_id && !block.is_unfinished()) => {}
 
             QueryEvent::ToolStart {
                 tool_name,
@@ -8169,17 +8177,17 @@ impl App {
                 }
             }
 
-            // The runtime completes a turn once. A completion delivered again
-            // commits nothing more (#408): no second usage count, toast or
-            // bell, and the duration recorded for the turn stays.
-            QueryEvent::TurnComplete { .. }
-                if self
-                    .current_user_turn_index()
-                    .and_then(|index| self.turn_metadata.get(index))
-                    .is_some_and(|turn| turn.duration.is_some()) =>
-            {
+            // The runtime completes a turn once, and the completion spends the
+            // timer its prompt started (`begin_user_turn_snapshot`; the stream
+            // starts one for a caller that pushed no prompt). A completion
+            // with no timer running is a duplicate and commits nothing more
+            // (#408): no second usage count, toast or bell, and the turn's
+            // record stays. Streamed text is still kept.
+            QueryEvent::TurnComplete { .. } if self.turn_start.is_none() => {
                 self.is_streaming = false;
                 self.spinner_verb = None;
+                self.flush_streamed_assistant_message();
+                self.invalidate_transcript();
             }
 
             QueryEvent::TurnComplete {
@@ -8212,22 +8220,34 @@ impl App {
                     .take()
                     .map(|start| format_elapsed_ms(start.elapsed().as_millis()));
                 let elapsed_label = elapsed.unwrap_or_else(|| "0s".to_string());
-                self.last_turn_elapsed = Some(elapsed_label.clone());
-                // A call still at work has no result: the turn ended without
-                // it, so it is not reported done and is recorded interrupted
-                // (#408). Its row is dropped, as before.
-                let unfinished = self.tool_use_blocks.iter().any(ToolUseBlock::is_unfinished);
-                self.last_turn_verb = (!unfinished).then(|| sample_completion_verb(seed));
+                let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
+                // A call of this turn still at work has no result: the turn
+                // ended without it. It is not reported done and the turn is
+                // recorded interrupted (#408). Its row is dropped, as before,
+                // so say which calls had none, unless the user is cancelling.
+                let unfinished: Vec<String> = self
+                    .current_turn_tool_rows()
+                    .filter(|block| block.is_unfinished())
+                    .map(|block| block.name.clone())
+                    .collect();
+                if unfinished.is_empty() {
+                    self.last_turn_elapsed = Some(elapsed_label.clone());
+                    self.last_turn_verb = Some(sample_completion_verb(seed));
+                } else if !cancelled && !cancelling {
+                    self.push_notification(
+                        NotificationKind::Warning,
+                        format!("Turn ended with no result from {}", unfinished.join(", ")),
+                        Some(10),
+                    );
+                }
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks
                     .retain(|b| b.status != ToolStatus::Running);
-                let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
-                self.complete_current_turn_snapshot(cancelled || unfinished);
-                if unfinished {
-                    // Recorded with the turn above; with no done marker to
-                    // label, Classic keeps no status row for it.
-                    self.last_turn_elapsed = None;
-                }
+                // A turn the user is cancelling settles as cancelled.
+                self.complete_current_turn_snapshot(
+                    Some(elapsed_label.clone()),
+                    cancelled || cancelling || !unfinished.is_empty(),
+                );
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
 
@@ -8238,7 +8258,7 @@ impl App {
                 // cancelled. Nor does one that ended without a call's result.
                 if !cancelled
                     && !cancelling
-                    && !unfinished
+                    && unfinished.is_empty()
                     && turn_elapsed_secs >= self.completion_toast_min_secs
                 {
                     if self.completion_toast_enabled {
