@@ -420,6 +420,14 @@ pub struct ToolUseBlock {
     pub run: ToolRun,
 }
 
+impl ToolUseBlock {
+    /// Still at work as far as the runtime has shown: no result, and no
+    /// report that its own work ended.
+    fn is_unfinished(&self) -> bool {
+        self.status == ToolStatus::Running && self.run.finished.is_none()
+    }
+}
+
 /// What the query loop has reported about a tool's own work, ahead of the
 /// `ToolEnd` that waits for every tool in its response. Only Next shows this.
 #[derive(Debug, Clone, Default)]
@@ -3551,7 +3559,7 @@ impl App {
         let (interrupted, kept): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_none());
+            .partition(ToolUseBlock::is_unfinished);
         self.interrupted_tools.extend(interrupted);
         *self.tool_use_blocks = kept;
     }
@@ -3576,10 +3584,10 @@ impl App {
             // request, and the worker is gone without finishing it. Rows
             // that finished, or reported finishing, keep their place, as
             // `interrupt_tool_rows` keeps them.
-            let (running, finished): (Vec<_>, Vec<_>) =
-                self.tool_use_blocks.drain(..).partition(|block| {
-                    block.status == ToolStatus::Running && block.run.finished.is_none()
-                });
+            let (running, finished): (Vec<_>, Vec<_>) = self
+                .tool_use_blocks
+                .drain(..)
+                .partition(ToolUseBlock::is_unfinished);
             *self.tool_use_blocks = finished;
             self.interrupted_tools.extend(running);
             // A completion that arrived while the cancel was pending does not
@@ -8058,6 +8066,18 @@ impl App {
                 }
             }
 
+            // A start delivered again in its turn once its call has ended is a
+            // duplicate: it must not reopen the call or drop its result
+            // (#408). The runtime starts each call once, so a later turn's
+            // start with the same id is a new call and takes the row over.
+            QueryEvent::ToolStart { tool_id, .. }
+                if {
+                    let turn = self.current_user_turn_index();
+                    self.tool_use_blocks.iter().any(|block| {
+                        block.id == tool_id && block.turn_index == turn && !block.is_unfinished()
+                    })
+                } => {}
+
             QueryEvent::ToolStart {
                 tool_name,
                 tool_id,
@@ -8149,6 +8169,19 @@ impl App {
                 }
             }
 
+            // The runtime completes a turn once. A completion delivered again
+            // commits nothing more (#408): no second usage count, toast or
+            // bell, and the duration recorded for the turn stays.
+            QueryEvent::TurnComplete { .. }
+                if self
+                    .current_user_turn_index()
+                    .and_then(|index| self.turn_metadata.get(index))
+                    .is_some_and(|turn| turn.duration.is_some()) =>
+            {
+                self.is_streaming = false;
+                self.spinner_verb = None;
+            }
+
             QueryEvent::TurnComplete {
                 turn,
                 stop_reason,
@@ -8180,12 +8213,21 @@ impl App {
                     .map(|start| format_elapsed_ms(start.elapsed().as_millis()));
                 let elapsed_label = elapsed.unwrap_or_else(|| "0s".to_string());
                 self.last_turn_elapsed = Some(elapsed_label.clone());
-                self.last_turn_verb = Some(sample_completion_verb(seed));
+                // A call still at work has no result: the turn ended without
+                // it, so it is not reported done and is recorded interrupted
+                // (#408). Its row is dropped, as before.
+                let unfinished = self.tool_use_blocks.iter().any(ToolUseBlock::is_unfinished);
+                self.last_turn_verb = (!unfinished).then(|| sample_completion_verb(seed));
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks
                     .retain(|b| b.status != ToolStatus::Running);
                 let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
-                self.complete_current_turn_snapshot(cancelled);
+                self.complete_current_turn_snapshot(cancelled || unfinished);
+                if unfinished {
+                    // Recorded with the turn above; with no done marker to
+                    // label, Classic keeps no status row for it.
+                    self.last_turn_elapsed = None;
+                }
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
 
@@ -8193,8 +8235,11 @@ impl App {
                 // user might have stepped away from. The faint "✽ Worked for Ns"
                 // status line is too quiet on its own. A turn the user is
                 // cancelling gets none: they are here, and it settles as
-                // cancelled.
-                if !cancelled && !cancelling && turn_elapsed_secs >= self.completion_toast_min_secs
+                // cancelled. Nor does one that ended without a call's result.
+                if !cancelled
+                    && !cancelling
+                    && !unfinished
+                    && turn_elapsed_secs >= self.completion_toast_min_secs
                 {
                     if self.completion_toast_enabled {
                         self.push_notification(
