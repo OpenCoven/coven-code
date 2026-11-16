@@ -12,14 +12,13 @@
 //! transcript, tool rows, status, streaming state, notifications or turn
 //! records, and no effect for the loop.
 //!
-//! The rewind is the replacement that can overlap a running worker: the
-//! overlay is opened while no turn runs, and a remote-control prompt can start
-//! one before the user confirms. The loop runs `/clear` only once no worker is
-//! running (input is queued while one is), so there the filter is a second
-//! guard.
-//!
-//! The conversation the loop saves is not covered here: at the join it comes
-//! from the worker's own transcript, which no generation check guards.
+//! In the loop neither replacement overlaps a running worker: `/clear` runs
+//! only once no worker is running (input is queued while one is), an open
+//! rewind holds every turn the loop would start, and a rewind is adopted
+//! only after a running turn's join
+//! (`a_rewind_holds_new_turns_and_waits_for_the_running_one`). These tests
+//! build the overlap anyway, so the generation filter, the second guard, is
+//! checked on its own.
 
 use super::*;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
@@ -36,14 +35,6 @@ fn delta(text: &str) -> QueryEvent {
             text: text.to_string(),
         },
     })
-}
-
-fn end_turn() -> QueryEvent {
-    QueryEvent::TurnComplete {
-        turn: 1,
-        stop_reason: "end_turn".to_string(),
-        usage: None,
-    }
 }
 
 /// One of every observation a worker can send, for a call `id`.
@@ -231,9 +222,14 @@ impl Interactive {
         for event in events {
             worker.send(event).expect("worker is running");
         }
-        while self.queue.len() < target {
-            tokio::task::yield_now().await;
-        }
+        let queued = async {
+            while self.queue.len() < target {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), queued)
+            .await
+            .expect("the forwarder queues every event it is sent");
     }
 
     /// The loop's drain: everything queued, through the generation filter.
@@ -255,9 +251,9 @@ enum Replacement {
     /// `/clear`: the App's own clear, then the CLI's
     /// `CommandResult::ClearConversation` arm.
     Clear,
-    /// The rewind overlay, opened before a remote-control prompt started the
-    /// turn and confirmed once the App stopped streaming; then the loop's
-    /// adoption, which runs after every key.
+    /// The rewind overlay, opened while no turn ran, confirmed once the App
+    /// stopped streaming; then the loop's adoption, which runs after every
+    /// key, as if the turn had been joined.
     Rewind,
 }
 
@@ -301,7 +297,14 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
             },
         ],
         // The rewind is adopted only once the App has stopped streaming.
-        Replacement::Rewind => vec![delta("third answer"), end_turn()],
+        Replacement::Rewind => vec![
+            delta("third answer"),
+            QueryEvent::TurnComplete {
+                turn: 1,
+                stop_reason: "end_turn".to_string(),
+                usage: None,
+            },
+        ],
     };
     let expected = before.len();
     cli.deliver(&old, before).await;
@@ -328,6 +331,7 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
             adopt_in_app_rewind(
                 &mut cli.scope,
                 &cli.app,
+                false,
                 &mut cli.messages,
                 &mut cli.session,
             );
@@ -397,4 +401,59 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
     fresh_worker.await.expect("fresh worker");
     cli.drain();
     assert_eq!(cli.app.streaming_text.as_str(), "fresh answer", "{case}");
+}
+
+/// An open rewind holds every turn the loop would start on its own: remote
+/// prompts and rate-limit retries (both by `rewind_flow.visible` at their
+/// start sites) and idle compaction (here). A rewind confirmed while a turn
+/// still runs is adopted only after that turn's join, so the join cannot
+/// replace the adopted conversation with the worker's.
+#[test]
+fn a_rewind_holds_new_turns_and_waits_for_the_running_one() {
+    for renderer in [UiRenderer::Classic, UiRenderer::Next] {
+        let case = format!("{renderer:?}");
+        let mut cli = Interactive::resumed(renderer, history());
+        cli.app.auto_compact_enabled = true;
+        cli.app.context_window_size = 100;
+        cli.app.context_used_tokens = 99;
+        cli.app.auto_compact_threshold = 90;
+        assert_eq!(select_idle_compaction(&cli.app, false), Some(99), "{case}");
+
+        assert!(cli.app.intercept_slash_command_with_args("rewind", ""));
+        assert_eq!(
+            select_idle_compaction(&cli.app, false),
+            None,
+            "{case}: compaction started under the rewind"
+        );
+        press(&mut cli.app, crossterm::event::KeyCode::Up);
+        press(&mut cli.app, crossterm::event::KeyCode::Enter);
+        press(&mut cli.app, crossterm::event::KeyCode::Char('y'));
+        assert!(!cli.app.rewind_flow.visible, "{case}");
+
+        let generation = cli.scope.current();
+        let before = texts(&cli.messages);
+        adopt_in_app_rewind(
+            &mut cli.scope,
+            &cli.app,
+            true,
+            &mut cli.messages,
+            &mut cli.session,
+        );
+        assert!(cli.scope.admits(generation), "{case}: adopted under a turn");
+        assert_eq!(texts(&cli.messages), before, "{case}");
+        assert_eq!(texts(&cli.session.messages), before, "{case}");
+
+        // After the join, the next key adopts it.
+        adopt_in_app_rewind(
+            &mut cli.scope,
+            &cli.app,
+            false,
+            &mut cli.messages,
+            &mut cli.session,
+        );
+        assert!(!cli.scope.admits(generation), "{case}");
+        let kept = ["First question.", "First answer."];
+        assert_eq!(texts(&cli.messages), kept, "{case}");
+        assert_eq!(texts(&cli.session.messages), kept, "{case}");
+    }
 }

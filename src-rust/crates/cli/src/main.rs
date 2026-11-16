@@ -2579,16 +2579,18 @@ fn replace_conversation(
     session.updated_at = chrono::Utc::now();
 }
 
-/// Once the App is not streaming, adopt the shorter conversation an in-App
-/// rewind left and start a new session generation, so nothing still queued
-/// from before the rewind reaches it (#408).
+/// Once no turn runs, adopt the shorter conversation an in-App rewind left
+/// and start a new session generation, so nothing still queued from before
+/// the rewind reaches it (#408). While a turn runs, its join would replace
+/// the adopted conversation with the worker's, so adoption waits for it.
 fn adopt_in_app_rewind(
     scope: &mut claurst_tui::application::SessionScope,
     app: &claurst_tui::App,
+    turn_running: bool,
     messages: &mut Vec<claurst_core::types::Message>,
     session: &mut claurst_core::history::ConversationSession,
 ) {
-    if !app.is_streaming && app.messages.len() < messages.len() {
+    if !turn_running && !app.is_streaming && app.messages.len() < messages.len() {
         scope.advance();
         *messages = app.messages.clone();
         session.messages = messages.clone();
@@ -2753,6 +2755,7 @@ fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option
         || app.rate_limit_recovery.is_pending()
         || app.file_injection_dialog.visible
         || app.file_injection_force
+        || app.rewind_flow.visible
         || app.notifications.current_is_error()
     {
         return None;
@@ -4789,7 +4792,13 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
-                    adopt_in_app_rewind(&mut session_scope, &app, &mut messages, &mut session);
+                    adopt_in_app_rewind(
+                        &mut session_scope,
+                        &app,
+                        current_query.is_some(),
+                        &mut messages,
+                        &mut session,
+                    );
                 }
                 Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
@@ -5238,12 +5247,16 @@ async fn run_interactive(
         // Both bridge transports share the same literal-prompt launch path.
         // Primary events observed above precede supplementary messages read here;
         // each transport retains FIFO ordering. Never reinterpret remote slash text.
-        // A pending file-injection decision also holds remote prompts in their queue.
-        let file_injection_pending = app.file_injection_dialog.visible || app.file_injection_force;
+        // A pending file-injection decision also holds remote prompts in their
+        // queue, and so does an open rewind: a turn started under it would run
+        // from, and be saved with, the conversation the rewind removes (#408).
+        let remote_prompts_held = app.file_injection_dialog.visible
+            || app.file_injection_force
+            || app.rewind_flow.visible;
         if let Some(content) = take_remote_prompt(
             &mut pending_remote_prompts,
             &mut remote_prompt_rx,
-            app.is_streaming || file_injection_pending,
+            app.is_streaming || remote_prompts_held,
             current_query.is_some(),
         ) {
             if rollback_unattempted_turn(
@@ -5610,7 +5623,8 @@ async fn run_interactive(
         // existing conversation — the failed turn's prompt is never lost and
         // never duplicated.
         app.rate_limit_recovery.tick();
-        if current_query.is_none() && !app.is_streaming {
+        // An open rewind holds the retry, as it holds remote prompts (#408).
+        if current_query.is_none() && !app.is_streaming && !app.rewind_flow.visible {
             if let Some(directive) = app.rate_limit_recovery.take_retry_directive() {
                 if !messages.is_empty() && goal_turn.as_ref().is_some_and(|owner| !owner.abandoned)
                 {
@@ -5620,6 +5634,10 @@ async fn run_interactive(
                     });
                     app.is_streaming = true;
                     app.streaming_text.clear();
+                    // The retry pushes no prompt: it reruns a turn that never
+                    // completed, so that turn's timer is still running, and
+                    // the retry's completion spends it (#408).
+                    app.turn_start.get_or_insert_with(std::time::Instant::now);
 
                     let ct = CancellationToken::new();
                     cancel = Some(ct.clone());
