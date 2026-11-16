@@ -16,7 +16,10 @@ means the workspace manifest `src-rust/Cargo.toml`.
 
 ## Summary
 
-- Neither the seam nor any later TUI v2 PR added, removed or bumped a dependency.
+- The seam and the TUI v2 PRs after it added, removed or bumped no dependency.
+  The one exception is the v0.9.1 remediation (#461), which edited TUI v2 code
+  and also added a ratatui feature that only Classic uses and a tools `sha2`
+  edge for a hash the Next Research page shows (`sha2` was already locked).
   Every external crate the TUI v2 code uses was declared in
   `src-rust/crates/tui/Cargo.toml` before the seam.
 - Ten first-parent commits since the seam changed a manifest or `Cargo.lock`:
@@ -82,7 +85,7 @@ non-merge commits. Any first-parent commit not listed here changed no manifest.
 |---|---|---|---|---|
 | `d23b1eab` (direct) | 2026-11-08 | same | Workspace version 0.8.0 to 0.9.0 (`Cargo.toml:23`) and lock stamps | No, release |
 | `1fbe8e20` #404 | 2026-11-10 | `2c9adb36` (2026-10-18) | acp dev-dependency `async-trait` (`src-rust/crates/acp/Cargo.toml:28`) | No, ACP |
-| `b8f22148` #461 | 2026-11-13 | `85ba0525` (2026-11-10) | Version 0.9.1. `tokio-util` "0.7" to "0.7.19" (`Cargo.toml:102`; lock 0.7.18 to 0.7.19). Tools gains `sha2` (`src-rust/crates/tools/Cargo.toml:15`). Mcp gains a unix dev-dependency `nix` (`src-rust/crates/mcp/Cargo.toml:30-31`). Tui `ratatui` gains `unstable-rendered-line-info` (`src-rust/crates/tui/Cargo.toml:66`). The mcp, tools and tui manifests went from CRLF to LF line endings; nothing else in them changed | Mixed, see below |
+| `b8f22148` #461 | 2026-11-13 | `85ba0525` (2026-11-10) | Version 0.9.1. `tokio-util` "0.7" to "0.7.19" (`Cargo.toml:102`; lock 0.7.18 to 0.7.19). Tools gains `sha2` (`src-rust/crates/tools/Cargo.toml:15`). Mcp gains a unix dev-dependency `nix` (`src-rust/crates/mcp/Cargo.toml:30-31`). Tui `ratatui` gains `unstable-rendered-line-info` (`src-rust/crates/tui/Cargo.toml:66`). Acp gains the same `async-trait` dev-dependency line as `2c9adb36`, so the merge shows no net change there. The mcp, tools and tui manifests went from CRLF to LF line endings; nothing else in them changed | Mixed, see below |
 | `31e15119` #475 | 2026-11-14 | `bf0d1ee9` | Cli gains `image` (`src-rust/crates/cli/Cargo.toml:46`) | No, stream input |
 | `83e48d8d` #477 | 2026-11-15 | `9df40aeb` (2026-11-14) | Version 0.9.1 to 0.9.2 (`Cargo.toml:23`) | No, release |
 | `272768ff` #467 | 2026-11-15 | `829742e3` (2026-11-13) | Lock only: `arboard` 3.6.1 to 3.7.0, drops `windows-sys` 0.60.2 | No, commands |
@@ -109,8 +112,8 @@ After the seam, 25 first-parent commits touched `src-rust/crates/tui`. Apart
 from `b8f22148` (#461), none changed a manifest. That covers the TUI v2 PRs #427,
 #429, #430, #431, #432, #434, #436, #438, #440, #444, #445, #447, #448, #450,
 #456, #458, #485, #494 and #495, and the other PRs #454, #469 (which also edited
-`next/`), #473, #478 and #481. The #408 PRs #493 and #496 touched only CLI files
-and scripts, and changed no manifest either.
+`next/`), #473, #478 and #481. The #408 PRs #493 and #496 touched CLI files,
+scripts and `docs/commands.md`, and changed no manifest either.
 
 Net change from `bf861665` to `04d6c0f8`, ignoring line endings:
 
@@ -129,7 +132,8 @@ Net change from `bf861665` to `04d6c0f8`, ignoring line endings:
 
 ### External crates
 
-Each row is declared in `src-rust/crates/tui/Cargo.toml` as `{ workspace = true }`.
+Each row is declared in `src-rust/crates/tui/Cargo.toml` with `workspace = true`;
+ratatui also lists a feature.
 Resolved versions come from `cargo tree -p claurst-tui`. "Since" is the commit that
 added the tui manifest line, found with `git log -S`. Every one predates the seam.
 
@@ -224,7 +228,8 @@ application;` (`src-rust/crates/tui/src/lib.rs:78`) and `pub mod next;`
   `next/mod.rs:2335-2336`).
 - **The tui `cpal` path.** In claurst-tui, `cpal` is used only in
   `voice_capture.rs`: the `ActiveCapture.stream` field (`:42`) and
-  `VoiceRecorder::start_recording` (`:78-133`). Nothing outside
+  the `cfg(feature = "voice")` block (`:78-133`) of
+  `VoiceRecorder::start_recording` (`:69`). Nothing outside
   `voice_capture.rs` refers to `voice_capture::VoiceRecorder` (`:49`). The only
   other references to the module are its declaration (`tui/src/lib.rs:192`) and
   `transcribe`/`samples_to_wav_bytes` in
