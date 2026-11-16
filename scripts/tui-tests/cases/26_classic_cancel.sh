@@ -4,7 +4,9 @@
 # Cancelling a turn, in Classic and in Next (#408). A local fake of the Messages
 # API drives real turns through the real client and query loop:
 #   J1  Escape while an approved Bash command appends a line to a file every
-#       second: once the cancel settles, the file stops growing.
+#       second: the cancel settles within a few lines of the Escape, so it
+#       stopped the command rather than waiting for it, and the file stops
+#       growing.
 #   J2  Escape while text is still arriving: the fake sends a burst of text
 #       deltas and then holds the stream open, so the turn is still running in
 #       the runtime when Escape lands. The backlog does not restart the turn on
@@ -40,7 +42,7 @@ _cq_launch() { # renderer
 }
 
 _cq_j1() { # renderer
-  local r="$1" log="$CQ_SCRATCH/project/j1-$1.log" waited=0 settled at3 at6
+  local r="$1" log="$CQ_SCRATCH/project/j1-$1.log" waited=0 at_escape settled at3 at6
   tui_type "run: for i in \$(seq 30); do echo \$i >> j1-$r.log; sleep 1; done"
   sleep 0.3; tui_keys Enter
   if ! wait_for "allow once" 15; then
@@ -53,6 +55,7 @@ _cq_j1() { # renderer
   if [ "$(_cq_lines "$log")" -lt 3 ]; then
     _fail "J1 $r: the approved command runs" "$(tui_capture)"; return 0
   fi
+  at_escape="$(_cq_lines "$log")"
   tui_keys Escape
   if wait_for "ancel" 5; then _pass "J1 $r: Escape is acknowledged"
   else _fail "J1 $r: Escape is acknowledged" "$(tui_capture)"; fi
@@ -61,7 +64,15 @@ _cq_j1() { # renderer
   settled="$(_cq_lines "$log")"; sleep 3
   at3="$(_cq_lines "$log")"; sleep 3
   at6="$(_cq_lines "$log")"
-  log "       J1 $r lines: at settle $settled, +3 s $at3, +6 s $at6"
+  log "       J1 $r lines: at Escape $at_escape, at settle $settled, +3 s $at3, +6 s $at6"
+  # The command writes a line a second and would run for 30; 3 more lines
+  # leave room for a loaded host.
+  if [ "$settled" -le $((at_escape + 3)) ]; then
+    _pass "J1 $r: the cancel stops the command instead of waiting for it"
+  else
+    _fail "J1 $r: the cancel stops the command instead of waiting for it" \
+      "at Escape $at_escape lines, at settle $settled"
+  fi
   assert_eq "$at3" "$settled" "J1 $r: the command has stopped 3 s after the cancel settles"
   assert_eq "$at6" "$settled" "J1 $r: the command has stopped 6 s after the cancel settles"
 }

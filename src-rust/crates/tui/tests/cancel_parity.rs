@@ -417,15 +417,26 @@ fn ctrl_c_cancels_a_running_tool_the_same_way_in_either_renderer() {
         .any(|block| block.id == "toolu-cancel-running"));
 }
 
+/// On a first turn, so no last-turn line holds the status row up: a tool the
+/// backlog finishes clears the status message, and the row still says the
+/// cancel is pending.
 #[test]
 fn classic_says_cancelling_until_the_worker_stops_then_cancelled() {
     let classic = Replay::new(UiRenderer::Classic).run(vec![
         Step::Event(delta("partial answer ")),
         Step::Key(escape()),
         Step::Event(delta("more from the backlog")),
+        Step::Event(tool_start("toolu-cancel-finished")),
+        Step::Event(QueryEvent::ToolEnd {
+            tool_name: "Bash".to_string(),
+            tool_id: "toolu-cancel-finished".to_string(),
+            result: "done".to_string(),
+            is_error: false,
+        }),
         Step::Settle,
     ]);
-    for (index, frame) in classic.frames[1..3].iter().enumerate() {
+    assert!(classic.app.last_turn_elapsed.is_none());
+    for (index, frame) in classic.frames[1..5].iter().enumerate() {
         assert!(
             frame.contains("Cancelling…"),
             "step {}:\n{frame}",
@@ -437,7 +448,7 @@ fn classic_says_cancelling_until_the_worker_stops_then_cancelled() {
             index + 1
         );
     }
-    let settled = &classic.frames[3];
+    let settled = &classic.frames[5];
     assert!(settled.contains("Cancelled."), "{settled}");
     assert!(!settled.contains("Cancelling"), "{settled}");
 }
