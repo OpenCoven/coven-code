@@ -324,7 +324,7 @@ In vim insert mode, `Enter` also submits. Use `Shift+Enter` for newlines in vim 
 
 Pressing `Escape` while a turn is running cancels the whole turn, the same way `Ctrl+C` does, in both renderers: the model stops generating and the runtime cancels any tool call in progress. Output the turn delivered before the cancel is kept in the saved session. Text still arriving from the cancelled turn is not shown, and nothing it sends restarts the turn, so the next `Ctrl+C` starts the exit sequence instead of cancelling again. The input field keeps focus and you can send a follow-up message.
 
-Until the runtime has actually stopped the turn, the status says the cancel is pending: `Cancelling…` in Classic, `cancelling` in the Next renderer (`COVEN_CODE_UI=next`). Then it shows `Cancelled.`. A cancel from remote control follows the same steps. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
+Until the runtime has actually stopped the turn, the status says the cancel is pending: `Cancelling…` in Classic, `cancelling` in the Next renderer (`COVEN_CODE_UI=next`). Then it shows `Cancelled.`, with no turn-done notice or bell, even if the turn had already finished when the cancel reached it. A cancel from remote control follows the same steps. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
 
