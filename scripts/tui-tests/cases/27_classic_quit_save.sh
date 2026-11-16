@@ -5,7 +5,8 @@
 # Messages API drives real turns through the real client and query loop.
 # Quitting mid-turn with Ctrl+D twice must exit, give the terminal back, stop
 # the turn and save its prompt and the output it delivered, and must not wait
-# long for a tool that ignores the stop. Classic runs with COVEN_CODE_UI unset;
+# long while an approved command runs. (A unit test covers a turn that ignores
+# the stop: the exit waits 2 s at most.) Classic runs with COVEN_CODE_UI unset;
 # Next, which case 18 also covers, with COVEN_CODE_UI=next. Time limits are
 # generous because this also runs on debug builds and loaded hosts.
 
@@ -80,7 +81,7 @@ tc_classic_quit_save() {
       printf '%s\n' '{"hasCompletedOnboarding": true}' >"$home/.coven-code/settings.json"
       _cqs_held "$r" "$home" "$port" "$scratch/project"
       tui_stop
-      _cqs_stuck "$r" "$home" "$port" "$scratch/project"
+      _cqs_command "$r" "$home" "$port" "$scratch/project"
       tui_stop
     done
   else
@@ -113,10 +114,10 @@ _cqs_held() { # renderer, home, port, project
   fi
 }
 
-# Quitting while a tool ignores the stop still exits within the bound. Quitting
+# Quitting while an approved command runs exits within the bound. Quitting
 # waits up to 2 s for the turn; 8 s leaves room for a loaded host and still
-# fails if that wait grows. Only the prompt can be saved here.
-_cqs_stuck() { # renderer, home, port, project
+# fails if that wait grows. The prompt must be saved.
+_cqs_command() { # renderer, home, port, project
   local r="$1" home="$2" saved
   _cqs_launch "$@" || return 0
   tui_type "run: sleep 20"; sleep 0.3; tui_keys Enter
@@ -124,13 +125,13 @@ _cqs_stuck() { # renderer, home, port, project
     _fail "$r: a Bash call asks for approval" "$(tui_capture)"; return 0
   fi
   sleep 0.7; tui_keys y; sleep 1.5
-  _cqs_quit "$r: Ctrl+D twice while a tool ignores the stop" C-d C-d
+  _cqs_quit "$r: Ctrl+D twice while a command runs" C-d C-d
   if [ "$CQS_QUIT_TENTHS" -lt 80 ]; then
-    _pass "$r: quitting exits within 8 s while a turn does not stop"
+    _pass "$r: quitting exits within 8 s while a command runs"
   else
-    _fail "$r: quitting exits within 8 s while a turn does not stop" "took about $((CQS_QUIT_TENTHS / 10))s"
+    _fail "$r: quitting exits within 8 s while a command runs" "took about $((CQS_QUIT_TENTHS / 10))s"
   fi
   saved="$(_cqs_saved_with "$home" "run: sleep 20")"
-  if [ -n "$saved" ]; then _pass "$r: a turn that did not stop in time keeps its prompt"
-  else _fail "$r: a turn that did not stop in time keeps its prompt" "no saved session names it"; fi
+  if [ -n "$saved" ]; then _pass "$r: quitting while a command runs keeps the prompt"
+  else _fail "$r: quitting while a command runs keeps the prompt" "no saved session names it"; fi
 }
