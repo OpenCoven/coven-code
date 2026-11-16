@@ -5,15 +5,22 @@
 //! still queued from the cancelled turn cannot restart it. Each trace is
 //! replayed into an App per renderer, drawn with that renderer after every
 //! step the way the interactive loop draws, and both must reach the same
-//! semantic state after every step: the durable messages, tool observations
-//! by id (name, input, the result preview the row holds, and status, which
-//! tells running, done and error apart), `is_streaming`, the cancellation
-//! phase, the presentation effects and the cancel requests handed to the loop.
+//! semantic state after every step:
+//! - the durable messages;
+//! - the live tool rows by id: name, input, the result preview the row holds,
+//!   and status, which tells running, done and error apart;
+//! - `is_streaming` and the cancellation phase;
+//! - the operations the loop performs next: the presentation effects, the
+//!   cancel request it takes, and whether a key took its interrupt path,
+//!   which cancels the token as well.
 //!
-//! Presentation-only, so not compared: tool rows on interrupt (Classic clears
-//! them, Next keeps the interrupted ones), status wording and the spinner
-//! verb. Tool observations collect every row an App has shown, so clearing
-//! rows does not hide what a renderer observed.
+//! Presentation-only, so not compared:
+//! - Rows of the calls a cancel interrupts, and anything later shown for
+//!   those calls. Classic drops the rows; Next keeps them in its interrupted
+//!   list. They are compared only as what each App observed: every row it has
+//!   shown, live or not. Rows the backlog starts afterwards are live rows like
+//!   any other and are compared.
+//! - Status wording and the spinner verb.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +30,7 @@ use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::types::Message;
 use claurst_query::QueryEvent;
-use claurst_tui::app::{App, ToolStatus};
+use claurst_tui::app::{App, ToolStatus, ToolUseBlock};
 use claurst_tui::application::{
     PresentationEffect, ScopedQueryEvent, SessionScope, TurnCancellation, UiRenderer,
 };
@@ -68,6 +75,8 @@ fn ctrl_c() -> KeyEvent {
 #[derive(Clone)]
 enum Step {
     Event(QueryEvent),
+    /// A key, routed the way the interactive loop routes it: the interrupt and
+    /// exit keys first, then the App's own handling.
     Key(KeyEvent),
     /// Remote control cancelled the turn; the loop has cancelled its token.
     RemoteCancel,
@@ -89,12 +98,17 @@ struct ToolObservation {
 struct Semantic {
     /// The durable conversation, serialized.
     messages: String,
+    /// Live tool rows by id, except those of calls a cancel interrupted.
     tools: BTreeMap<String, ToolObservation>,
+    /// Every row the App has shown so far, live, interrupted or dropped.
+    observed: BTreeMap<String, ToolObservation>,
     is_streaming: bool,
     cancellation: TurnCancellation,
     /// Operations the interactive loop performs after this step.
     effects: Vec<PresentationEffect>,
     cancel_requested: bool,
+    /// The key took the loop's interrupt path, which cancels the turn's token.
+    interrupt_key: bool,
 }
 
 fn draw(app: &App, renderer: UiRenderer) -> String {
@@ -118,7 +132,9 @@ struct Replay {
     renderer: UiRenderer,
     app: App,
     scope: SessionScope,
-    tools: BTreeMap<String, ToolObservation>,
+    observed: BTreeMap<String, ToolObservation>,
+    /// Calls whose rows were live when a cancel was asked for.
+    interrupted: std::collections::BTreeSet<String>,
     steps: Vec<Semantic>,
     /// The frame drawn after each step.
     frames: Vec<String>,
@@ -144,7 +160,8 @@ impl Replay {
             renderer,
             app,
             scope: SessionScope::default(),
-            tools: BTreeMap::new(),
+            observed: BTreeMap::new(),
+            interrupted: Default::default(),
             steps: Vec::new(),
             frames: Vec::new(),
         }
@@ -155,6 +172,14 @@ impl Replay {
     fn run(mut self, steps: Vec<Step>) -> Self {
         for step in steps {
             let mut effects = Vec::new();
+            let mut interrupt_key = false;
+            let was_idle = self.app.cancellation == TurnCancellation::Idle;
+            let live_before: Vec<String> = self
+                .app
+                .tool_use_blocks
+                .iter()
+                .map(|block| block.id.clone())
+                .collect();
             match step {
                 Step::Event(event) => {
                     effects = self.scope.apply(
@@ -165,21 +190,22 @@ impl Replay {
                         },
                     );
                 }
-                Step::Key(key) => {
-                    self.app.handle_key_event(key);
-                }
+                Step::Key(key) => match self.app.handle_control_key(key) {
+                    Some(interrupt) => interrupt_key = interrupt,
+                    None => {
+                        self.app.handle_key_event(key);
+                    }
+                },
                 Step::RemoteCancel => self.app.note_cancellation_sent(true),
                 Step::Settle => self.app.settle_cancellation(),
             }
             self.frames.push(draw(&self.app, self.renderer));
+            if was_idle && self.app.cancellation != TurnCancellation::Idle {
+                self.interrupted.extend(live_before);
+            }
             let cancel_requested = self.app.take_cancellation_request();
-            for block in self
-                .app
-                .tool_use_blocks
-                .iter()
-                .chain(self.app.interrupted_tools.iter())
-            {
-                self.tools.insert(
+            let observe = |block: &ToolUseBlock| {
+                (
                     block.id.clone(),
                     ToolObservation {
                         name: block.name.clone(),
@@ -187,15 +213,24 @@ impl Replay {
                         result: block.output_preview.clone(),
                         status: block.status.clone(),
                     },
-                );
-            }
+                )
+            };
+            let live: BTreeMap<_, _> = self.app.tool_use_blocks.iter().map(observe).collect();
+            self.observed.extend(live.clone());
+            self.observed
+                .extend(self.app.interrupted_tools.iter().map(observe));
             self.steps.push(Semantic {
                 messages: serde_json::to_string(&*self.app.messages).expect("messages serialize"),
-                tools: self.tools.clone(),
+                tools: live
+                    .into_iter()
+                    .filter(|(id, _)| !self.interrupted.contains(id))
+                    .collect(),
+                observed: self.observed.clone(),
                 is_streaming: self.app.is_streaming,
                 cancellation: self.app.cancellation,
                 effects,
                 cancel_requested,
+                interrupt_key,
             });
         }
         self
@@ -256,6 +291,16 @@ fn remote_cancel_during_a_tool() -> Vec<Step> {
         Step::Event(tool_start("toolu-cancel-remote-backlog")),
         Step::Event(tool_start("toolu-cancel-remote-done")),
         Step::Event(tool_end("toolu-cancel-remote-done")),
+        Step::Settle,
+    ]
+}
+
+/// Ctrl+C while a tool runs, then the backlog repeats that call's start.
+fn ctrl_c_then_a_repeated_start() -> Vec<Step> {
+    vec![
+        Step::Event(tool_start("toolu-cancel-repeated")),
+        Step::Key(ctrl_c()),
+        Step::Event(tool_start("toolu-cancel-repeated")),
         Step::Settle,
     ]
 }
@@ -370,4 +415,38 @@ fn a_remote_cancel_follows_the_same_model_in_either_renderer() {
             replay.renderer
         );
     }
+}
+
+#[test]
+fn a_repeated_start_of_an_interrupted_call_cannot_restart_the_turn() {
+    let (classic, next) = assert_parity("repeated start", ctrl_c_then_a_repeated_start());
+    assert!(
+        classic.steps[1].interrupt_key,
+        "Ctrl+C takes the interrupt path"
+    );
+    assert!(classic.steps[1].cancel_requested);
+    assert!(
+        !classic.steps[2].is_streaming,
+        "the repeat restarted the turn"
+    );
+    assert_eq!(classic.steps[3].cancellation, TurnCancellation::Idle);
+    for replay in [&classic, &next] {
+        assert!(
+            replay
+                .app
+                .tool_use_blocks
+                .iter()
+                .all(|block| block.status != ToolStatus::Running),
+            "{:?}",
+            replay.renderer
+        );
+    }
+    // Next keeps the call's one interrupted row.
+    let rows: Vec<_> = next
+        .app
+        .interrupted_tools
+        .iter()
+        .map(|block| block.id.as_str())
+        .collect();
+    assert_eq!(rows, ["toolu-cancel-repeated"]);
 }

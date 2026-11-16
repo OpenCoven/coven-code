@@ -7990,12 +7990,19 @@ impl App {
                     self.status_message = Some(format!("Running {}…", tool_name));
                 }
                 let turn_index = self.current_user_turn_index();
+                // A call the cancel already interrupted keeps its row there; a
+                // repeated start must not add a live one beside it.
+                let interrupted = cancelling
+                    && self
+                        .interrupted_tools
+                        .iter()
+                        .any(|block| block.id == tool_id);
                 if let Some(existing) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
-                } else {
+                } else if !interrupted {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
                         name: tool_name,
