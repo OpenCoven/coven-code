@@ -98,18 +98,23 @@ tc_classic_quit_save() {
 # The fake holds the stream open after its burst, so the turn is still running
 # when the keys land.
 _cqs_held() { # renderer, home, port, project
-  local r="$1" home="$2" saved
+  local r="$1" home="$2" saved pane
   _cqs_launch "$@" || return 0
   tui_type "flood: 2000 hold"; sleep 0.3; tui_keys Enter
   if ! wait_for "held line" 30; then
     _fail "$r: the held turn starts" "$(tui_capture)"; return 0
   fi
   _cqs_quit "$r: Ctrl+D twice during a turn" C-d C-d
-  # The pane now shows the shell, with whatever the TUI printed as it exited.
+  # The pane now shows the shell, with whatever the TUI printed as it exited:
+  # Next's report on the turn and the resume command; nothing from Classic.
+  pane="$(tui_capture)"
   if [ "$r" = next ]; then
-    assert_contains "$(tui_capture)" "Pick it up with" "$r: the exit report follows the exit"
+    assert_contains "$pane" "Quit during a turn" "$r: the exit report follows the exit"
+    assert_contains "$pane" "Pick it up with" "$r: the resume command follows the exit"
   else
-    assert_absent "$(tui_capture)" "Pick it up with" "$r: no exit report follows the exit"
+    assert_absent "$pane" "Quit during a turn" "$r: no exit report follows the exit"
+    assert_absent "$pane" "Pick it up with" "$r: no resume command follows the exit"
+    assert_absent "$pane" "Session not saved" "$r: no save warning follows the exit"
   fi
   saved="$(_cqs_saved_with "$home" "flood: 2000 hold")"
   if [ -n "$saved" ]; then _pass "$r: quitting during a turn keeps the prompt"

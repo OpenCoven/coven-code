@@ -6762,72 +6762,67 @@ mod tests {
     }
 
     /// #408: quitting during a turn stops it and keeps the prompt and the
-    /// output it delivered, in Classic as in Next.
+    /// output it delivered. Both renderers' exit blocks call
+    /// `stop_turn_and_keep_it`, which does not read the renderer; case 27
+    /// checks that Classic's exit reaches it.
     #[tokio::test]
-    async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered_in_either_renderer() {
-        for renderer in [
-            claurst_tui::application::UiRenderer::Classic,
-            claurst_tui::application::UiRenderer::Next,
-        ] {
-            let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
-            app.select_renderer(renderer);
-            assert_eq!(app.renderer, renderer);
-            let prompt = claurst_core::types::Message::user("the prompt".to_string());
-            let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
-            let token = tokio_util::sync::CancellationToken::new();
-            let (worker_messages, worker_token) = (messages.clone(), token.clone());
-            // Delivers its partial answer once cancelled, and not before.
-            let handle = tokio::spawn(async move {
-                worker_token.cancelled().await;
-                worker_messages
-                    .lock()
-                    .await
-                    .push(claurst_core::types::Message::assistant(
-                        "partial answer".to_string(),
-                    ));
-                claurst_query::QueryOutcome::Cancelled
-            });
-            let (_events, queue) = tokio::sync::mpsc::channel(1);
-            let mut session = claurst_core::history::ConversationSession::new("model".into());
-            let started = std::time::Instant::now();
+    async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (worker_messages, worker_token) = (messages.clone(), token.clone());
+        // Delivers its partial answer once cancelled, and not before.
+        let handle = tokio::spawn(async move {
+            worker_token.cancelled().await;
+            worker_messages
+                .lock()
+                .await
+                .push(claurst_core::types::Message::assistant(
+                    "partial answer".to_string(),
+                ));
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
 
-            stop_turn_and_keep_it(
-                (handle, messages),
-                queue,
-                &mut None,
-                &mut app,
-                &Some(token.clone()),
-                &mut session,
-                &mut Vec::new(),
-            )
-            .await;
+        stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(token.clone()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
 
-            assert!(token.is_cancelled(), "{renderer:?}: the turn is cancelled");
-            assert!(
-                started.elapsed() < TURN_EXIT_WAIT,
-                "{renderer:?}: a turn that stops is not waited out"
-            );
-            let kept: Vec<_> = session
-                .messages
-                .iter()
-                .map(|message| (message.role.clone(), message.get_all_text()))
-                .collect();
-            assert_eq!(
-                kept,
-                [
-                    (claurst_core::types::Role::User, "the prompt".to_string()),
-                    (
-                        claurst_core::types::Role::Assistant,
-                        "partial answer".to_string()
-                    ),
-                ],
-                "{renderer:?}"
-            );
-        }
+        assert!(token.is_cancelled(), "the turn is cancelled");
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a turn that stops is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| (message.role.clone(), message.get_all_text()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (claurst_core::types::Role::User, "the prompt".to_string()),
+                (
+                    claurst_core::types::Role::Assistant,
+                    "partial answer".to_string()
+                ),
+            ]
+        );
     }
 
     /// #408: quitting waits up to `TURN_EXIT_WAIT` for a turn that ignores
-    /// the stop, then keeps its prompt, in either renderer.
+    /// the stop, then keeps its prompt.
     #[tokio::test]
     async fn quitting_mid_turn_waits_out_a_turn_that_ignores_the_stop_then_keeps_its_prompt() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
@@ -6858,7 +6853,53 @@ mod tests {
             started.elapsed() >= TURN_EXIT_WAIT,
             "the turn gets its full chance to stop"
         );
-        assert_eq!(session.messages.len(), 1, "the prompt is still saved");
+        assert_eq!(session.messages.len(), 1, "the prompt is kept");
+    }
+
+    /// #408: auto-compaction does not watch the token, so quitting waits for
+    /// it. If it finishes within `TURN_EXIT_WAIT`, its compacted conversation
+    /// is what is kept.
+    #[tokio::test]
+    async fn quitting_during_auto_compaction_keeps_the_compacted_conversation_if_it_finishes() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let worker_messages = messages.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let summary = claurst_core::types::Message::assistant("the summary".to_string());
+            *worker_messages.lock().await = vec![summary.clone()];
+            claurst_query::QueryOutcome::EndTurn {
+                message: summary,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(tokio_util::sync::CancellationToken::new()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a compaction that finishes is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| message.get_all_text())
+            .collect();
+        assert_eq!(kept, ["the summary"]);
     }
 
     #[tokio::test]
