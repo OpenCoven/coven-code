@@ -80,12 +80,9 @@ impl Job {
     /// exited, such as a process it started to outlive it. Unix keeps those
     /// after an ordinary exit as well.
     pub(crate) fn release(self) {
-        if let Err(error) = self.limit(0) {
-            tracing::warn!(
-                %error,
-                "Could not release a foreground command's job; closing it kills what the command left running"
-            );
-        }
+        // Mutation for #499's review, reverted by the next commit: close the
+        // job with its kill-on-close limit, as `drop(job)` would.
+        drop(self);
     }
 }
 
