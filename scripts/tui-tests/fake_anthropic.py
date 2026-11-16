@@ -13,7 +13,8 @@ every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
 can act while text is still arriving; a `release` file already there means no
 hold.
 Any other word after the count is an error.
-Every request's messages are appended to the log for later checks.
+Each streamed request appends one JSON line to the log for later checks:
+"last" holds its last message and "messages" all of them, in order.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
 """
@@ -220,7 +221,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         messages = request.get("messages") or [{}]
         with open(self.log_path, "a", encoding="utf-8") as log:
-            log.write(json.dumps({"last": messages[-1]}) + "\n")
+            log.write(json.dumps({"last": messages[-1], "messages": messages}) + "\n")
         Handler.turn += 1
         reply = reply_for(messages, self.marker_dir, Handler.turn)
         if isinstance(reply, Held):
