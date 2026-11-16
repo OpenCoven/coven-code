@@ -76,7 +76,7 @@ bytes = "1"
 base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
-getrandom = "0.2"
+getrandom = "0.4"
 enigo = "0.2"
 xcap = { version = "0.3.3", features = ["vendored"] }
 url = "2"
