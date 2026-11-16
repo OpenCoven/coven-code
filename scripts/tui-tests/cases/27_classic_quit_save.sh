@@ -5,8 +5,9 @@
 # Messages API drives real turns through the real client and query loop.
 # Quitting mid-turn with Ctrl+D twice must exit, give the terminal back, stop
 # the turn and save its prompt and the output it delivered, and must not wait
-# long while an approved command runs. (A unit test covers a turn that ignores
-# the stop: the exit waits 2 s at most.) Classic runs with COVEN_CODE_UI unset;
+# long while an approved command runs. Only Next reports on the turn after it
+# exits. (A unit test covers a turn that ignores the stop: the exit waits 2 s
+# at most.) Classic runs with COVEN_CODE_UI unset;
 # Next, which case 18 also covers, with COVEN_CODE_UI=next. Time limits are
 # generous because this also runs on debug builds and loaded hosts.
 
@@ -104,6 +105,12 @@ _cqs_held() { # renderer, home, port, project
     _fail "$r: the held turn starts" "$(tui_capture)"; return 0
   fi
   _cqs_quit "$r: Ctrl+D twice during a turn" C-d C-d
+  # The pane now shows the shell, with whatever the TUI printed as it exited.
+  if [ "$r" = next ]; then
+    assert_contains "$(tui_capture)" "Pick it up with" "$r: the exit report follows the exit"
+  else
+    assert_absent "$(tui_capture)" "Pick it up with" "$r: no exit report follows the exit"
+  fi
   saved="$(_cqs_saved_with "$home" "flood: 2000 hold")"
   if [ -n "$saved" ]; then _pass "$r: quitting during a turn keeps the prompt"
   else _fail "$r: quitting during a turn keeps the prompt" "no saved session names it"; fi
@@ -114,9 +121,9 @@ _cqs_held() { # renderer, home, port, project
   fi
 }
 
-# Quitting while an approved command runs exits within the bound. Quitting
-# waits up to 2 s for the turn; 8 s leaves room for a loaded host and still
-# fails if that wait grows. The prompt must be saved.
+# Quitting while an approved command runs exits promptly; 8 s leaves room for a
+# loaded host. The command stops with the turn here, so this does not reach the
+# 2 s bound. The prompt must be saved.
 _cqs_command() { # renderer, home, port, project
   local r="$1" home="$2" saved
   _cqs_launch "$@" || return 0

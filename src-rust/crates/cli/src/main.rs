@@ -6826,6 +6826,41 @@ mod tests {
         }
     }
 
+    /// #408: quitting waits up to `TURN_EXIT_WAIT` for a turn that ignores
+    /// the stop, then keeps its prompt, in either renderer.
+    #[tokio::test]
+    async fn quitting_mid_turn_waits_out_a_turn_that_ignores_the_stop_then_keeps_its_prompt() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let handle = tokio::spawn(std::future::pending::<claurst_query::QueryOutcome>());
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut None,
+                &mut app,
+                &Some(tokio_util::sync::CancellationToken::new()),
+                &mut session,
+                &mut Vec::new(),
+            ),
+        )
+        .await
+        .expect("quitting waits for the turn only up to its bound");
+
+        assert!(
+            started.elapsed() >= TURN_EXIT_WAIT,
+            "the turn gets its full chance to stop"
+        );
+        assert_eq!(session.messages.len(), 1, "the prompt is still saved");
+    }
+
     #[tokio::test]
     async fn quitting_does_not_wait_forever_for_a_turn_that_ignores_cancellation() {
         let prompt = vec![claurst_core::types::Message::user("prompt".to_string())];
