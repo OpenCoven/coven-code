@@ -46,8 +46,9 @@ const FAKE_REPLY: &str = "pong";
 /// golden frames is deterministic.
 const CONTRACT_SESSION: &str = "contract-fixture-session";
 
-/// Env vars that would let real credentials, a real engine home, or a real
-/// daemon leak into a fixture run. Scrubbed from every child process.
+/// Env vars that would let real credentials, a real engine home, a real
+/// daemon, or a log filter (which changes stderr) leak into a fixture run.
+/// Scrubbed from every child process.
 const SCRUBBED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
@@ -65,6 +66,7 @@ const SCRUBBED_ENV: &[&str] = &[
     "COVEN_DAEMON_SOCKET",
     "COVENCAVE",
     "RUST_LOG",
+    "COVEN_CODE_ACP_LOG",
 ];
 
 /// Scratch filesystem for one fixture run.
@@ -226,13 +228,13 @@ impl std::fmt::Display for Run {
     }
 }
 
-/// Spawn `cmd`, feed `stdin` (then close it so EOF is delivered), and wait
-/// at most `RUN_TIMEOUT`.
+/// [`run_engine_output`] as a [`Run`].
 fn run_engine(cmd: &mut Command, stdin: &str) -> Run {
     Run::from(&run_engine_output(cmd, stdin))
 }
 
-/// [`run_engine`], keeping the exact exit status and output bytes.
+/// Spawn `cmd`, feed `stdin` (then close it so EOF is delivered), and wait
+/// at most `RUN_TIMEOUT`. Returns the exact exit status and output bytes.
 fn run_engine_output(cmd: &mut Command, stdin: &str) -> Output {
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -250,7 +252,14 @@ fn run_engine_output(cmd: &mut Command, stdin: &str) -> Output {
             Some(_) => break,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
-                panic!("coven-code did not exit within {RUN_TIMEOUT:?}");
+                let args: Vec<_> = cmd.get_args().collect();
+                let selector = cmd
+                    .get_envs()
+                    .find(|(key, _)| *key == "COVEN_CODE_UI")
+                    .and_then(|(_, value)| value);
+                panic!(
+                    "coven-code {args:?} (COVEN_CODE_UI {selector:?}) did not exit within {RUN_TIMEOUT:?}"
+                );
             }
             None => std::thread::sleep(Duration::from_millis(25)),
         }
@@ -549,12 +558,7 @@ fn contract_headless_run_does_not_fire_scheduled_prompts() {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let output = child.wait_with_output().expect("wait_with_output");
-    let run = Run {
-        code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    };
+    let run = Run::from(&child.wait_with_output().expect("wait_with_output"));
     assert_eq!(run.code, 0, "{run}");
     let left: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&tasks).expect("scheduled prompts on disk"))
@@ -752,7 +756,8 @@ fn contract_stream_json_turn_matches_golden_frames() {
 // `COVEN_CODE_UI` picks the interactive renderer. Only the interactive route
 // reads it: an unsupported value makes that route warn on stderr, and the
 // chosen renderer then takes over the terminal (alternate screen, hidden
-// cursor). Every machine route must behave exactly as if it were unset.
+// cursor). Each machine-route probe below must give the same exit status,
+// stdout and stderr as with the selector unset.
 
 /// The selector states each machine route runs under: unset (the baseline),
 /// both renderers, and an unsupported value.
@@ -797,8 +802,8 @@ fn describe(output: &Output) -> String {
 /// Run one machine-route probe under every [`SELECTOR_STATES`] value and
 /// require each run to match the unset run exactly: the same exit status,
 /// the same stdout bytes (only `duration_ms` masked) and the same stderr
-/// bytes. No run may write an escape byte (ESC, 0x1b) to either stream, so
-/// renderer setup such as ESC[?1049h or ESC[?25l cannot slip through.
+/// bytes. No run may write an escape byte (ESC, 0x1b) to its piped stdout or
+/// stderr, so renderer setup such as ESC[?1049h or ESC[?25l is caught.
 ///
 /// Each run starts from a clean scratch at the same paths, so no path or
 /// earlier state can differ between runs. `configure` adds the probe's
