@@ -76,6 +76,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/23_classic_zero_size.sh` | Zero and tiny sizes | Classic starts at 0x0, 0x40 and 120x0 and survives 120x0 with the exit toast, 0x40, 0x0, 1x1 and 20x6, then draws a full frame at 120x40, exits 0 and restores the terminal; tmux cannot make a zero-sized window, so `zero_size_pty.py` drives a raw PTY and needs `python3` |
 | `cases/25_next_unicode_composer.sh` | Unicode in the Next composer | CJK, right-to-left text, a combining mark and an emoji ZWJ sequence typed through tmux stay unsent, and all but the emoji (drawn differently by tmux versions) are checked on screen; Left and Backspace act on whole CJK characters; no turn reaches the provider (`fake_anthropic.py`) before Enter, and it and the saved session get exactly the edited text. tmux sends committed characters only, so input-method preedit is not covered, and editing moves by Unicode scalar, so the ZWJ emoji and combining mark are not edited; needs `python3` |
 | `cases/26_classic_cancel.sh` | Cancelling a turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Escape while an approved Bash command appends a line every second: once the status no longer says cancelling, at most 3 more lines were written than at the Escape, and the file stops growing. Escape while text is still arriving (a burst of 200,000 text deltas, then a stream held open, so the turn is still running in the runtime): the status acknowledges it, the backlog still arriving does not bring the running turn back within 10 s, and the status settles to `Cancelled`; needs `python3` |
+| `cases/27_classic_quit_save.sh` | Quitting mid-turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Ctrl+D twice while a held stream is still sending text exits, leaves the alternate screen, restores the cursor and turns mouse reporting off, and the saved session holds the prompt and the text delivered so far. Only Next prints its report and the resume command after exiting. Ctrl+D twice while an approved `sleep 20` runs exits within 8 s and saves the prompt; needs `python3` |
 
 ## Configuration
 
@@ -122,7 +123,9 @@ paste. The distinction matters: only the second shape engages the TUI's
 paste-burst detector.
 
 Helpers from [`lib.sh`](lib.sh): `tui_start` / `tui_stop`, `tui_keys`,
-`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`, and the assertions
+`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`,
+`tui_quit_and_check` (press quit keys, then check the exit and the terminal
+restore), and the assertions
 `assert_contains` / `assert_absent` / `assert_matches` / `assert_eq`. For
 headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 
