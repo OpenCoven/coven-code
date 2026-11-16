@@ -120,7 +120,7 @@ fn tool_elapsed(
 }
 
 /// [`terminal_safe`] text folded onto one line.
-fn one_line_safe(text: &str) -> String {
+pub(crate) fn one_line_safe(text: &str) -> String {
     terminal_safe(text).replace('\n', " ")
 }
 

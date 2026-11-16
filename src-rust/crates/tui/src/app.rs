@@ -6439,9 +6439,21 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
-                        // Each kept user turn keeps its own record; the next
-                        // prompt's record follows them.
+                        // Each kept user turn keeps its own record and tool
+                        // rows; the next prompt's follow them. A removed
+                        // turn's row would otherwise count as the next
+                        // turn's (#408).
                         self.sync_turn_metadata_to_messages();
+                        let kept_turns = self
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == Role::User)
+                            .count();
+                        let kept_row = |block: &ToolUseBlock| {
+                            block.turn_index.is_none_or(|turn| turn < kept_turns)
+                        };
+                        self.tool_use_blocks.retain(kept_row);
+                        self.interrupted_tools.retain(kept_row);
                         self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
@@ -8178,11 +8190,14 @@ impl App {
             }
 
             // The runtime completes a turn once, and the completion spends the
-            // timer its prompt started (`begin_user_turn_snapshot`; the stream
-            // starts one for a caller that pushed no prompt). A completion
-            // with no timer running is a duplicate and commits nothing more
-            // (#408): no second usage count, toast or bell, and the turn's
-            // record stays. Streamed text is still kept.
+            // timer its prompt started (`begin_user_turn_snapshot`). Every
+            // turn the CLI starts pushes its prompt first, except a rate-limit
+            // retry, which reruns a turn that never completed and keeps its
+            // timer; the stream starts one only for a caller that is not yet
+            // streaming. A
+            // completion with no timer running is a duplicate and commits
+            // nothing more (#408): no second usage count, toast or bell, and
+            // the turn's record stays. Streamed text is still kept.
             QueryEvent::TurnComplete { .. } if self.turn_start.is_none() => {
                 self.is_streaming = false;
                 self.spinner_verb = None;
@@ -8225,11 +8240,16 @@ impl App {
                 // ended without it. It is not reported done and the turn is
                 // recorded interrupted (#408). Its row is dropped, as before,
                 // so say which calls had none, unless the user is cancelling.
-                let unfinished: Vec<String> = self
+                let mut unfinished: Vec<String> = Vec::new();
+                for block in self
                     .current_turn_tool_rows()
                     .filter(|block| block.is_unfinished())
-                    .map(|block| block.name.clone())
-                    .collect();
+                {
+                    let name = crate::application::view::one_line_safe(&block.name);
+                    if !unfinished.contains(&name) {
+                        unfinished.push(name);
+                    }
+                }
                 if unfinished.is_empty() {
                     self.last_turn_elapsed = Some(elapsed_label.clone());
                     self.last_turn_verb = Some(sample_completion_verb(seed));

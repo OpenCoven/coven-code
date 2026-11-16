@@ -521,15 +521,18 @@ fn a_turn_that_completes_without_a_tool_result_is_not_reported_done() {
             tool_start("toolu-reported", "Read", r#"{"file_path":"COVEN.md"}"#),
             tool_end("toolu-reported", "Read", "coven text", false),
             tool_start("toolu-missing", "Bash", r#"{"command":"cargo test"}"#),
+            tool_start("toolu-missing-2", "Bash", r#"{"command":"cargo doc"}"#),
+            tool_start("toolu-odd", "Odd\u{1b}[2J", "{}"),
             delta("Done."),
             end_turn(),
         ]);
         assert!(!turn.app.is_streaming, "{renderer:?}");
-        // Its row is dropped, as before; the warning says it had no result.
+        // Their rows are dropped, as before; the warning names each tool
+        // once, terminal-safe.
         assert_eq!(turn.tool_state("toolu-missing"), None, "{renderer:?}");
         assert_eq!(
             turn.warnings(),
-            ["Turn ended with no result from Bash"],
+            ["Turn ended with no result from Bash, Odd^[[2J"],
             "{renderer:?}"
         );
         assert_eq!(
@@ -595,15 +598,19 @@ fn a_turn_after_a_rewind_completes_once() {
             durable_answer("msg-tests", "All tests pass.", None),
             end_turn(),
         ]);
+        // The second turn ends in an error: a partial answer, a call that
+        // never got its result, and no completion. The loop stops streaming
+        // at the join and leaves the row.
         turn.app
             .push_message(Message::user("And the docs?".to_string()));
         turn.app.is_streaming = true;
         turn.run([
-            delta("Docs pass."),
-            durable_answer("msg-docs", "Docs pass.", None),
-            end_turn(),
+            delta("Checking the docs."),
+            tool_start("toolu-docs", "Bash", r#"{"command":"cargo doc"}"#),
+            durable_answer("msg-docs", "Checking the docs.", None),
         ]);
-        assert_eq!(turn.effects.len(), 2, "{renderer:?}");
+        turn.app.is_streaming = false;
+        assert_eq!(turn.effects.len(), 1, "{renderer:?}");
 
         // Rewind to before "And the docs?" through the overlay.
         assert!(turn.app.intercept_slash_command_with_args("rewind", ""));
@@ -631,14 +638,19 @@ fn a_turn_after_a_rewind_completes_once() {
         ]);
         assert_eq!(
             turn.effects,
-            [PresentationEffect::RingBell; 3],
+            [PresentationEffect::RingBell; 2],
             "{renderer:?}: the turn after the rewind rings"
         );
         assert!(
             turn.app.last_turn_verb.is_some(),
             "{renderer:?}: done marker"
         );
-        assert_eq!(turn.app.context_used_tokens, 3600, "{renderer:?}");
+        assert!(
+            turn.warnings().is_empty(),
+            "{renderer:?}: the removed turn's call is not this turn's"
+        );
+        assert_eq!(turn.tool_state("toolu-docs"), None, "{renderer:?}");
+        assert_eq!(turn.app.context_used_tokens, 2400, "{renderer:?}");
         let records: Vec<bool> = turn
             .app
             .turn_metadata
