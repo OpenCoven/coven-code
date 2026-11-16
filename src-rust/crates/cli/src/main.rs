@@ -2579,6 +2579,23 @@ fn replace_conversation(
     session.updated_at = chrono::Utc::now();
 }
 
+/// Once the App is not streaming, adopt the shorter conversation an in-App
+/// rewind left and start a new session generation, so nothing still queued
+/// from before the rewind reaches it (#408).
+fn adopt_in_app_rewind(
+    scope: &mut claurst_tui::application::SessionScope,
+    app: &claurst_tui::App,
+    messages: &mut Vec<claurst_core::types::Message>,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    if !app.is_streaming && app.messages.len() < messages.len() {
+        scope.advance();
+        *messages = app.messages.clone();
+        session.messages = messages.clone();
+        session.updated_at = chrono::Utc::now();
+    }
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -4772,13 +4789,7 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
-                    if !app.is_streaming && app.messages.len() < messages.len() {
-                        // An in-App rewind replaced the visible conversation.
-                        session_scope.advance();
-                        messages = app.messages.clone();
-                        session.messages = messages.clone();
-                        session.updated_at = chrono::Utc::now();
-                    }
+                    adopt_in_app_rewind(&mut session_scope, &app, &mut messages, &mut session);
                 }
                 Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)

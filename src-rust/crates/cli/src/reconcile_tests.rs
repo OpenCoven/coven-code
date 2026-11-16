@@ -3,18 +3,23 @@
 //!
 //! The interactive loop tags each worker's events with the generation it was
 //! spawned in (`forward_scoped_events`), and admits only the current
-//! generation to the App (`SessionScope::apply` in its drain). Clearing or
-//! rewinding the conversation starts a new generation through
-//! `replace_conversation`. These tests put those real pieces together around
-//! a worker that is still delivering when the conversation is replaced, and
-//! check that nothing it sends afterwards reaches the new workspace in either
-//! renderer: not its transcript, tool rows, status, streaming state or
-//! notifications, not an effect for the loop, and not the conversation the
-//! loop sends or saves.
+//! generation to the App (`SessionScope::apply` in its drain). Replacing the
+//! conversation starts a new generation: `/clear` through
+//! `replace_conversation`, an in-App rewind through `adopt_in_app_rewind`.
+//! These tests put those real pieces together around a worker that is still
+//! delivering when the conversation is replaced, and check that nothing it
+//! sends afterwards reaches the new workspace in either renderer: not its
+//! transcript, tool rows, status, streaming state, notifications or turn
+//! records, and no effect for the loop.
 //!
-//! The loop runs `/clear` and `/rewind <n>` only once no worker is running
-//! (input is queued while one is), so there the filter is a second guard; the
-//! guarantee is the filter's, and it is tested here, where it is applied.
+//! The rewind is the replacement that can overlap a running worker: the
+//! overlay is opened while no turn runs, and a remote-control prompt can start
+//! one before the user confirms. The loop runs `/clear` only once no worker is
+//! running (input is queued while one is), so there the filter is a second
+//! guard.
+//!
+//! The conversation the loop saves is not covered here: at the join it comes
+//! from the worker's own transcript, which no generation check guards.
 
 use super::*;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
@@ -31,6 +36,14 @@ fn delta(text: &str) -> QueryEvent {
             text: text.to_string(),
         },
     })
+}
+
+fn end_turn() -> QueryEvent {
+    QueryEvent::TurnComplete {
+        turn: 1,
+        stop_reason: "end_turn".to_string(),
+        usage: None,
+    }
 }
 
 /// One of every observation a worker can send, for a call `id`.
@@ -137,6 +150,17 @@ fn workspace(app: &claurst_tui::App) -> Workspace {
     }
 }
 
+fn texts(messages: &[Message]) -> Vec<String> {
+    messages.iter().map(Message::get_all_text).collect()
+}
+
+fn press(app: &mut claurst_tui::App, code: crossterm::event::KeyCode) {
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        code,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+}
+
 /// What the interactive loop holds for one session: the App, the
 /// conversation it sends and saves, the session, the generation and the
 /// bounded queue its workers deliver into.
@@ -150,17 +174,22 @@ struct Interactive {
 }
 
 impl Interactive {
-    fn new(renderer: UiRenderer) -> Self {
+    /// A session resumed with `history`, set up as the loop sets it up.
+    fn resumed(renderer: UiRenderer, history: Vec<Message>) -> Self {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
         app.select_renderer(renderer);
         app.bell_on_complete = true;
         app.completion_toast_min_secs = 0;
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        session.messages = history.clone();
+        app.replace_messages(history.clone());
+        app.enter_session_scope(&session.id);
         let (events, queue) =
             tokio::sync::mpsc::channel(claurst_tui::application::QUERY_EVENT_QUEUE_CAPACITY);
         Self {
             app,
-            messages: Vec::new(),
-            session: claurst_core::history::ConversationSession::new("model".into()),
+            messages: history,
+            session,
             scope: SessionScope::default(),
             events,
             queue,
@@ -192,6 +221,21 @@ impl Interactive {
         (turn_tx, worker)
     }
 
+    /// Send `events` from a worker and wait until the queue holds them all.
+    async fn deliver(
+        &mut self,
+        worker: &tokio::sync::mpsc::UnboundedSender<QueryEvent>,
+        events: Vec<QueryEvent>,
+    ) {
+        let target = self.queue.len() + events.len();
+        for event in events {
+            worker.send(event).expect("worker is running");
+        }
+        while self.queue.len() < target {
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// The loop's drain: everything queued, through the generation filter.
     /// Returns how many events were taken and the effects they asked for.
     fn drain(&mut self) -> (usize, Vec<PresentationEffect>) {
@@ -205,38 +249,25 @@ impl Interactive {
     }
 }
 
-/// How the conversation is replaced.
+/// How the conversation is replaced while the old worker still delivers.
 #[derive(Debug, Clone, Copy)]
 enum Replacement {
-    /// `/clear`: the App's own clear, then the CLI's.
+    /// `/clear`: the App's own clear, then the CLI's
+    /// `CommandResult::ClearConversation` arm.
     Clear,
-    /// `/rewind <n>`: the CLI sets the conversation to its first message.
+    /// The rewind overlay, opened before a remote-control prompt started the
+    /// turn and confirmed once the App stopped streaming; then the loop's
+    /// adoption, which runs after every key.
     Rewind,
 }
 
-impl Replacement {
-    fn perform(self, loop_state: &mut Interactive) {
-        let Interactive {
-            app,
-            messages,
-            session,
-            scope,
-            ..
-        } = loop_state;
-        match self {
-            Replacement::Clear => {
-                // Step 1 of the slash-command path, then the
-                // `CommandResult::ClearConversation` arm.
-                assert!(app.intercept_slash_command_with_args("clear", ""));
-                replace_conversation(scope, Vec::new(), messages, app, session);
-                app.status_message = Some("Conversation cleared.".to_string());
-            }
-            Replacement::Rewind => {
-                let kept = messages[..1].to_vec();
-                replace_conversation(scope, kept, messages, app, session);
-            }
-        }
-    }
+fn history() -> Vec<Message> {
+    vec![
+        Message::user("First question.".to_string()),
+        Message::assistant("First answer.".to_string()),
+        Message::user("Second question.".to_string()),
+        Message::assistant("Second answer.".to_string()),
+    ]
 }
 
 #[tokio::test]
@@ -250,58 +281,79 @@ async fn a_replaced_conversation_takes_nothing_from_its_old_worker() {
 
 async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement: Replacement) {
     let case = format!("{renderer:?}, {replacement:?}");
-    let mut cli = Interactive::new(renderer);
-    let (first, first_worker) = cli.submit("First question.");
-    for event in [
-        delta("first answer"),
-        QueryEvent::TurnComplete {
-            turn: 1,
-            stop_reason: "end_turn".to_string(),
-            usage: None,
-        },
-    ] {
-        first.send(event).expect("worker is running");
+    let mut cli = Interactive::resumed(renderer, history());
+    if let Replacement::Rewind = replacement {
+        // Opened while no turn runs, on "Second question.".
+        assert!(cli.app.intercept_slash_command_with_args("rewind", ""));
+        press(&mut cli.app, crossterm::event::KeyCode::Up);
     }
-    drop(first);
-    first_worker.await.expect("first worker");
-    cli.drain();
-    // As the loop does when it joins the worker.
-    cli.app.is_streaming = false;
 
-    // The second turn's worker is still delivering when the
-    // conversation is replaced.
-    let (old, old_worker) = cli.submit("Second question.");
+    let (old, old_worker) = cli.submit("Third question.");
     let old_generation: SessionGeneration = cli.scope.current();
-    for event in [
-        delta("partial "),
-        QueryEvent::ToolStart {
-            tool_name: "Bash".to_string(),
-            tool_id: "toolu-old-running".to_string(),
-            input_json: r#"{"command":"cargo test"}"#.to_string(),
-        },
-    ] {
-        old.send(event).expect("worker is running");
-    }
-    tokio::task::yield_now().await;
+    let before = match replacement {
+        // `/clear` lands mid-turn, with a call running.
+        Replacement::Clear => vec![
+            delta("partial "),
+            QueryEvent::ToolStart {
+                tool_name: "Bash".to_string(),
+                tool_id: "toolu-old-running".to_string(),
+                input_json: r#"{"command":"cargo test"}"#.to_string(),
+            },
+        ],
+        // The rewind is adopted only once the App has stopped streaming.
+        Replacement::Rewind => vec![delta("third answer"), end_turn()],
+    };
+    let expected = before.len();
+    cli.deliver(&old, before).await;
     let (taken, _) = cli.drain();
-    assert_eq!(taken, 2, "{case}: the turn reached the App before");
-    assert!(!cli.app.tool_use_blocks.is_empty(), "{case}");
+    assert_eq!(taken, expected, "{case}: the turn reached the App before");
 
-    replacement.perform(&mut cli);
+    match replacement {
+        Replacement::Clear => {
+            assert!(!cli.app.tool_use_blocks.is_empty(), "{case}");
+            assert!(cli.app.intercept_slash_command_with_args("clear", ""));
+            replace_conversation(
+                &mut cli.scope,
+                Vec::new(),
+                &mut cli.messages,
+                &mut cli.app,
+                &mut cli.session,
+            );
+            cli.app.status_message = Some("Conversation cleared.".to_string());
+        }
+        Replacement::Rewind => {
+            assert!(!cli.app.is_streaming, "{case}");
+            press(&mut cli.app, crossterm::event::KeyCode::Enter);
+            press(&mut cli.app, crossterm::event::KeyCode::Char('y'));
+            adopt_in_app_rewind(
+                &mut cli.scope,
+                &cli.app,
+                &mut cli.messages,
+                &mut cli.session,
+            );
+        }
+    }
     assert!(
         !cli.scope.admits(old_generation),
         "{case}: the replacement started a new generation"
     );
     let replaced = workspace(&cli.app);
-    let kept = cli.messages.clone();
-    let saved = cli.session.messages.clone();
+    match replacement {
+        Replacement::Clear => {
+            assert!(cli.app.messages.is_empty(), "{case}");
+            assert!(cli.app.tool_use_blocks.is_empty(), "{case}");
+        }
+        Replacement::Rewind => {
+            let kept = ["First question.", "First answer."];
+            assert_eq!(texts(&cli.app.messages), kept, "{case}");
+            assert_eq!(texts(&cli.messages), kept, "{case}: adopted");
+        }
+    }
 
     // Everything the old worker still sends arrives late.
     let late = every_kind_of_event("toolu-old-late");
     let sent = late.len();
-    for event in late {
-        old.send(event).expect("worker is running");
-    }
+    cli.deliver(&old, late).await;
     drop(old);
     old_worker.await.expect("old worker");
     let (taken, effects) = cli.drain();
@@ -315,19 +367,6 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
         workspace(&cli.app),
         replaced,
         "{case}: a late event changed the new workspace"
-    );
-    let texts = |messages: &[Message]| -> Vec<String> {
-        messages.iter().map(Message::get_all_text).collect()
-    };
-    assert_eq!(
-        texts(&cli.messages),
-        texts(&kept),
-        "{case}: sent conversation"
-    );
-    assert_eq!(
-        texts(&cli.session.messages),
-        texts(&saved),
-        "{case}: saved conversation"
     );
     // Spelled out, for a clearer failure than the comparison above.
     let shown = serde_json::to_string(&*cli.app.messages).expect("messages serialize");
@@ -350,26 +389,10 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
         "{case}"
     );
     assert_eq!(cli.app.context_used_tokens, 0, "{case}: late usage counted");
-    match replacement {
-        Replacement::Clear => {
-            assert!(cli.app.messages.is_empty(), "{case}");
-            assert!(cli.app.tool_use_blocks.is_empty(), "{case}");
-            assert_eq!(
-                cli.app.status_message.as_deref(),
-                Some("Conversation cleared."),
-                "{case}"
-            );
-        }
-        Replacement::Rewind => {
-            assert_eq!(texts(&cli.app.messages), ["First question."], "{case}");
-        }
-    }
 
     // The new generation's own worker does reach the App.
-    let (fresh, fresh_worker) = cli.submit("Third question.");
-    fresh
-        .send(delta("fresh answer"))
-        .expect("worker is running");
+    let (fresh, fresh_worker) = cli.submit("Fourth question.");
+    cli.deliver(&fresh, vec![delta("fresh answer")]).await;
     drop(fresh);
     fresh_worker.await.expect("fresh worker");
     cli.drain();
