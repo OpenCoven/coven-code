@@ -16,7 +16,7 @@ binary and `tmux`.
 # From the repo root. Auto-detects target/{debug,release}/coven-code.
 scripts/tui-tests/run.sh
 
-# Build the debug binary first, then test it.
+# Build the debug binary and the panic probe first, then test them.
 scripts/tui-tests/run.sh --build
 
 # Test a specific binary (e.g. an installed release).
@@ -51,13 +51,18 @@ CI runs them before building and exercising the real engine.
 Runs automatically via [`.github/workflows/tui-tests.yml`](../../.github/workflows/tui-tests.yml)
 on pushes to `main` and on PRs that touch `src-rust/**` or this suite (plus
 manual `workflow_dispatch`). The job installs `tmux`, builds the debug binary
-(`cargo build --locked --package claurst`), seeds an offline settings file
+and the panic probe (`cargo build --locked --package claurst --package
+claurst-tui --bins --example panic_restore`), seeds an offline settings file
 (`hasCompletedOnboarding: true`) so a credential-less runner lands on the main
 screen, and runs `run.sh`. No secrets or network access required.
 
 ## Requirements
 
 - The `coven-code` binary (built debug/release, or on `PATH`).
+- For `cases/30_panic_restore.sh`, the tui crate's `panic_restore` example
+  (`cargo build -p claurst-tui --example panic_restore`, or `run.sh --build`).
+  It is built from the source tree, not taken from `COVEN_BIN`; a missing
+  probe fails the case.
 - `tmux` (3.x). If absent, the headless cases still run and the interactive
   cases are reported as **skipped** rather than failed.
 
@@ -77,6 +82,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/25_next_unicode_composer.sh` | Unicode in the Next composer | CJK, right-to-left text, a combining mark and an emoji ZWJ sequence typed through tmux stay unsent, and all but the emoji (drawn differently by tmux versions) are checked on screen; Left and Backspace act on whole CJK characters; no turn reaches the provider (`fake_anthropic.py`) before Enter, and it and the saved session get exactly the edited text. tmux sends committed characters only, so input-method preedit is not covered, and editing moves by Unicode scalar, so the ZWJ emoji and combining mark are not edited; needs `python3` |
 | `cases/26_classic_cancel.sh` | Cancelling a turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Escape while an approved Bash command appends a line every second: once the status no longer says cancelling, at most 3 more lines were written than at the Escape, and the file stops growing. Escape while text is still arriving (a burst of 200,000 text deltas, then a stream held open, so the turn is still running in the runtime): the status acknowledges it, the backlog still arriving does not bring the running turn back within 10 s, and the status settles to `Cancelled`; needs `python3` |
 | `cases/27_classic_quit_save.sh` | Quitting mid-turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Ctrl+D twice while a held stream is still sending text exits, leaves the alternate screen, restores the cursor and turns mouse reporting off, and the saved session holds the prompt and the text delivered so far. Only Next prints its report and the resume command after exiting. Ctrl+D twice while an approved `sleep 20` runs exits within 8 s and saves the prompt; needs `python3` |
+| `cases/30_panic_restore.sh` | Panic restoration | The product has no input that panics, so the tui crate's `panic_restore` example takes the terminal with the real `setup_terminal` and panics on request; `panic_restore_pty.py` runs it on a raw PTY for Classic and Next. Before the panic: raw termios, alternate screen, mouse capture, bracketed paste, hidden cursor and pushed keyboard flags. A main-thread panic restores every termios field, then leaves the alternate screen, turns mouse capture and bracketed paste off, pops the keyboard flags and shows the cursor, all before the panic message; the message is printed and the exit status is 101. The pop is sent after leaving the alternate screen; that order is pinned as current behaviour. A worker-thread panic restores nothing and the probe keeps drawing; its later main-thread panic still restores. With `COVEN_CODE_KEYBOARD_ENHANCEMENT=0` no flags are pushed. Needs `python3` and the probe |
 
 ## Configuration
 
@@ -91,6 +97,7 @@ Override via environment variables:
 | `TUI_SOCKET` | `coven-tui-test-<pid>` | tmux server socket (`-L`), one per run, so the harness never touches your own tmux sessions and runs in parallel never touch each other |
 | `TUI_LOG_DIR` | _(unset)_ | If set, the full pane capture for each failing case is written here (CI uploads these as artifacts) |
 | `REQUIRE_TMUX` | `0` | If `1`, a missing `tmux` is a hard error instead of skipping the interactive cases (set in CI) |
+| `COVEN_PANIC_PROBE` | `examples/panic_restore` next to `COVEN_BIN` | The `panic_restore` probe for `cases/30_panic_restore.sh` |
 
 ## Writing a new case
 

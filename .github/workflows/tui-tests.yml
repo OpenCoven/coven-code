@@ -73,9 +73,11 @@ jobs:
           key: tui-tests-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
           restore-keys: tui-tests-cargo-
 
-      - name: Build debug binary
+      # One invocation, so the panic probe shares the binary's feature set
+      # and build output instead of compiling the tui crate a second time.
+      - name: Build debug binary and panic probe
         working-directory: src-rust
-        run: cargo build --locked --package claurst
+        run: cargo build --locked --package claurst --package claurst-tui --bins --example panic_restore
 
       # Belt-and-suspenders: mark onboarding complete so a credential-less
       # runner lands on the main screen rather than (potentially) a blocking
