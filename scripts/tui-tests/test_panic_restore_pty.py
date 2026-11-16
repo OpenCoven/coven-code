@@ -1,5 +1,4 @@
 """panic_restore_pty.py against fake probes on a real PTY; no engine or cargo."""
-import os
 import pathlib
 import subprocess
 import sys
@@ -15,7 +14,8 @@ import os, sys, termios, tty
 BEHAVIOUR = {behaviour!r}
 fd = 0
 saved = termios.tcgetattr(fd)
-tty.setraw(fd)
+if BEHAVIOUR != "no-setup":
+    tty.setraw(fd)
 
 def write(stream, data):
     stream.buffer.write(data)
@@ -29,17 +29,19 @@ def restore():
 def message(thread, text):
     write(sys.stderr, b"\nthread '" + thread + b"' (7) panicked at fake.rs:1:1:\n" + text + b"\n")
 
-write(sys.stdout, b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?2004h")
-if os.environ.get("COVEN_CODE_KEYBOARD_ENHANCEMENT") != "0":
-    write(sys.stdout, b"\x1b[>9u")
-write(sys.stdout, b"\x1b[?25l\x1b[1;1Hpanic-restore: ready")
-os.read(fd, 1)
+if BEHAVIOUR != "no-setup":
+    write(sys.stdout, b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?2004h")
+    if os.environ.get("COVEN_CODE_KEYBOARD_ENHANCEMENT") != "0":
+        write(sys.stdout, b"\x1b[>9u")
+    write(sys.stdout, b"\x1b[?25l")
+write(sys.stdout, b"\x1b[1;1Hpanic-restore: ready")
+os.read(fd, 64)  # one byte in raw mode, a whole line in canonical mode
 if sys.argv[2] == "worker":
     if BEHAVIOUR == "worker-restores":
         restore()
     message(b"<unnamed>", b"panic-restore: deliberate worker-thread panic")
     write(sys.stdout, b"\x1b[1;1Hpanic-restore: worker panicked")
-    os.read(fd, 1)
+    os.read(fd, 64)
 if BEHAVIOUR == "message-first":
     message(b"main", b"panic-restore: deliberate main-thread panic")
 if BEHAVIOUR != "no-restore":
@@ -72,7 +74,8 @@ class PanicRestoreDriverTests(unittest.TestCase):
     def test_missing_restore_fails(self):
         result, failed = self.drive("no-restore")
         self.assertEqual(result.returncode, 1)
-        for check in ("every termios field is restored", "leaves the alternate screen",
+        for check in ("every termios field is restored", "termios is restored before the panic message",
+                      "leaves the alternate screen",
                       "turns mouse capture off", "turns bracketed paste off", "shows the cursor",
                       "pops the keyboard flags"):
             self.assertTrue(any(check in line for line in failed), check + "\n" + result.stdout)
@@ -87,8 +90,16 @@ class PanicRestoreDriverTests(unittest.TestCase):
         result, failed = self.drive("message-first")
         self.assertEqual(result.returncode, 1)
         self.assertIn("ok classic main: every termios field is restored", result.stdout)
-        self.assertTrue(any("leaves the alternate screen before the panic message" in line
-                            for line in failed), result.stdout)
+        for check in ("termios is restored before the panic message",
+                      "leaves the alternate screen before the panic message"):
+            self.assertTrue(any(check in line for line in failed), check + "\n" + result.stdout)
+
+    def test_probe_that_never_takes_the_terminal_fails(self):
+        result, failed = self.drive("no-setup")
+        self.assertEqual(result.returncode, 1)
+        for check in ("the probe puts the PTY in raw mode", "the probe enters TUI mode",
+                      "keyboard flags are pushed once"):
+            self.assertTrue(any(check in line for line in failed), check + "\n" + result.stdout)
 
 
 if __name__ == "__main__":

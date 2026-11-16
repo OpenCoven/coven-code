@@ -39,7 +39,7 @@ fi
 
 if ! detect_bin; then
   warn "Could not find the coven-code binary."
-  warn "Build it first:  (cd src-rust && cargo build)   or run:  $0 --build"
+  warn "Build it first:  $0 --build   (the binary and the panic probe)"
   warn "Or point COVEN_BIN at an installed binary."
   exit 2
 fi

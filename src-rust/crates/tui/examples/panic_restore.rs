@@ -52,6 +52,9 @@ fn main() -> io::Result<()> {
         } else {
             "panic-restore: worker did not panic"
         };
+        // Repaint every cell: the worker's panic message was written over the
+        // frame behind ratatui's back.
+        terminal.clear()?;
         draw(&mut terminal, status)?;
         wait_for_byte()?;
     }

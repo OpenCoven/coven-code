@@ -15,9 +15,13 @@ Checks, per run:
 - A panic on the main thread restores every termios field, then leaves the
   alternate screen, turns mouse capture and bracketed paste off, pops the
   keyboard flags and shows the cursor, all before the panic message. The
-  message is printed and the process exits 101. The pop is sent after
-  leaving the alternate screen, where the flags were pushed; that order is
-  pinned as current behaviour so a change to it is deliberate.
+  message is printed and the process exits 101. Termios is shown restored
+  before the message by its newlines arriving translated to CRLF, which raw
+  mode does not do.
+- Two keyboard details are pinned as current behaviour, not endorsed, so a
+  change to them is deliberate: the pop is sent after leaving the alternate
+  screen the flags were pushed on (case 13 requires suspend to pop on the
+  alternate screen), and a pop is sent even when nothing was pushed.
 - A panic on a spawned thread changes none of that (the hook only restores
   on the thread that set the terminal up). The probe keeps running, and its
   later main-thread panic still restores.
@@ -46,6 +50,9 @@ WORKER_DONE = "panic-restore: worker panicked"
 # Newer toolchains print the thread id: `thread 'main' (1234) panicked at`.
 MAIN_PANIC = re.compile(rb"thread 'main'(?: \(\d+\))? panicked at")
 MAIN_MESSAGE = b"panic-restore: deliberate main-thread panic"
+# Raw mode turns output processing off, so the line break before the message
+# arrives as CRLF only if termios was restored before the message was written.
+COOKED_MESSAGE = re.compile(MAIN_PANIC.pattern + rb"[^\r\n]*\r\n" + re.escape(MAIN_MESSAGE))
 WORKER_MESSAGE = b"panic-restore: deliberate worker-thread panic"
 LEAVE_ALT = b"\x1b[?1049l"
 KEYBOARD_PUSH = re.compile(rb"\x1b\[>\d*u")
@@ -167,13 +174,15 @@ def check_main_panic(report, label, probe, keyboard):
     report.check(probe.proc.returncode == 101, f"{label}: exits with the panic status 101",
                  f"exit {probe.proc.returncode}: {text(after[-300:])}")
     match = MAIN_PANIC.search(after)
-    panic_at = match.start() if match else -1
-    report.check(match is not None and MAIN_MESSAGE in after[panic_at:],
+    hook = after[:match.start()] if match else after
+    report.check(match is not None and MAIN_MESSAGE in after[len(hook):],
                  f"{label}: the panic message is printed", text(after[-300:]))
     report.check(termios_restored(probe.termios_before, termios.tcgetattr(probe.slave)),
                  f"{label}: every termios field is restored",
                  repr((probe.termios_before, termios.tcgetattr(probe.slave))))
-    observer.feed(after[:panic_at] if panic_at >= 0 else after)
+    report.check(COOKED_MESSAGE.search(after) is not None,
+                 f"{label}: termios is restored before the panic message", repr(after[-300:]))
+    observer.feed(hook)
     modes = observer.modes
     for ok, what in (
         (not modes.get(1049, False), "leaves the alternate screen"),
@@ -182,15 +191,21 @@ def check_main_panic(report, label, probe, keyboard):
         (modes[25], "shows the cursor"),
     ):
         report.check(ok, f"{label}: {what} before the panic message", text(after[:300]))
+    pop = KEYBOARD_POP.search(hook)
     if keyboard:
         report.check(observer.keyboard_depth == 0,
                      f"{label}: pops the keyboard flags before the panic message", text(after[:300]))
-        # Current behaviour, pinned so a change is deliberate: the flags were
-        # pushed on the alternate screen, and the pop is sent after leaving it.
-        pop = KEYBOARD_POP.search(after)
-        leave = after.find(LEAVE_ALT)
+        # Pinned, not endorsed: the flags were pushed on the alternate screen,
+        # and the pop is sent after leaving it.
+        leave = hook.find(LEAVE_ALT)
         report.check(pop is not None and 0 <= leave < pop.start(),
-                     f"{label}: the keyboard pop follows leaving the alternate screen", text(after[:300]))
+                     f"{label}: current behaviour: the keyboard pop is sent after leaving the alternate screen",
+                     text(after[:300]))
+    else:
+        # Pinned, not endorsed: the hook pops though nothing was pushed.
+        report.check(pop is not None,
+                     f"{label}: current behaviour: a keyboard pop is sent though none was pushed",
+                     text(after[:300]))
 
 
 def run(path, report, renderer, mode, keyboard=True):
@@ -227,7 +242,8 @@ def main():
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
-    path = sys.argv[1]
+    # Each probe runs in its own temporary directory.
+    path = os.path.abspath(sys.argv[1])
     report = Report()
     for renderer in ("classic", "next"):
         run(path, report, renderer, "main")
