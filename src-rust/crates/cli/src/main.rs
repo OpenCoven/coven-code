@@ -4746,6 +4746,15 @@ async fn run_interactive(
             }
         }
 
+        // A worker joins its forwarder before it finishes, so one seen finished
+        // here has queued every event it produced, and the drain below takes
+        // them all. Checked after the drain instead, a worker could finish in
+        // between and leave events queued; once its cancel is settled they
+        // would restart the turn on screen.
+        let task_finished = current_query
+            .as_ref()
+            .is_some_and(|(handle, _)| handle.is_finished());
+
         // Drain query events — also forward relevant ones to the bridge as outbound.
         while let Ok(scoped) = event_rx.try_recv() {
             let evt = &scoped.event;
@@ -5543,12 +5552,7 @@ async fn run_interactive(
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
         }
 
-        // Check if query task is done; sync messages from the task
-        let task_finished = current_query
-            .as_ref()
-            .map(|(h, _)| h.is_finished())
-            .unwrap_or(false);
-
+        // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
                 // Get the outcome and handle errors
@@ -6612,6 +6616,42 @@ mod tests {
         .await
         .expect("forwarder must stop once the interactive queue is closed");
         drop(turn_tx);
+    }
+
+    #[tokio::test]
+    async fn a_worker_seen_finished_before_a_drain_leaves_no_event_behind() {
+        // The interactive loop's order each pass: check whether the worker
+        // has finished, drain the queue, do other awaited work, and only then
+        // handle a finished worker and settle its cancel. A worker finishes
+        // only once its forwarder has queued everything, so after a pass that
+        // saw it finished nothing of its turn can arrive any more.
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut queue) = tokio::sync::mpsc::channel(1);
+        for n in 0..3 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let handle = tokio::spawn(async move {
+            forward_scoped_events(turn_rx, events, Default::default()).await;
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let mut drained = 0;
+        loop {
+            let task_finished = handle.is_finished();
+            while queue.try_recv().is_ok() {
+                drained += 1;
+            }
+            // The awaited work between the drain and the settle lets the
+            // forwarder deliver more and the worker finish.
+            tokio::task::yield_now().await;
+            if task_finished {
+                break;
+            }
+        }
+        assert_eq!(drained, 3, "every event was applied before the settle");
+        assert!(queue.try_recv().is_err(), "nothing is left to arrive later");
     }
 
     #[tokio::test]

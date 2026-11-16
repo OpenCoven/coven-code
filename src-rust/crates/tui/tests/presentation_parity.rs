@@ -6,17 +6,26 @@
 //! Both must reach the same semantic state and send the same operations, and
 //! both renderers must show the semantic content of that state.
 //!
-//! Semantic, compared after every step: the durable `App::messages`; tool
-//! observations by id (name, input, result, is_error); `is_streaming`; the
-//! cancellation phase; and the outgoing operations: `take_input`
-//! submissions, permission decisions, `take_cancellation_request` results
-//! and the `PresentationEffect` list.
+//! Semantic, compared after every step of a trace: the durable
+//! `App::messages`; tool observations by id (name, input, the result preview
+//! the row holds, and status, which tells running, done and error apart; full
+//! results reach the durable messages); `is_streaming`; the cancellation
+//! phase; the `PresentationEffect` list; and the `take_cancellation_request`
+//! result. A key sequence is compared once at its end: the `take_input`
+//! submission, the permission decision and the whole projected
+//! `TranscriptView`, which on that path includes status and tool rows.
 //!
-//! Presentation-only, so allowed to differ and not compared: tool rows on
-//! interrupt (Classic clears them, Next keeps the interrupted ones), status
-//! wording, the spinner verb, and Next's shell and inspector state. Tool
-//! observations therefore collect every row an App has shown, so a renderer
-//! that clears rows on interrupt still reports what it observed.
+//! Presentation-only, so allowed to differ and not compared across a trace:
+//! tool rows on interrupt (Classic clears them, Next keeps the interrupted
+//! ones), status wording, the spinner verb, and Next's shell and inspector
+//! state. Tool observations therefore collect every row an App has shown, so
+//! a renderer that clears rows on interrupt still reports what it observed.
+//!
+//! Cancelling is not among the compared traces. On this base Classic's Escape
+//! and Ctrl+C do not ask the loop to cancel the turn, so a cancel trace
+//! differs in `cancel_requested`, the cancellation phase and `is_streaming`.
+//! That is #408 decision D1, which moves Classic to Next's cancel model; the
+//! Next side is covered by `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
 
 use std::collections::BTreeMap;
 
@@ -88,17 +97,14 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn ctrl(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-}
-
 /// One step of what the interactive loop feeds the App.
 #[derive(Clone)]
 enum Step {
     /// An observation from the current generation's worker.
     Event(QueryEvent),
-    /// The conversation is replaced (clear, rewind, resume) and a new
-    /// generation starts.
+    /// A new session generation starts, as when the conversation is cleared,
+    /// rewound or resumed. Only the generation changes; the App keeps its
+    /// state, so this exercises the filtering of the old generation's events.
     Advance,
     /// An observation from a worker of the generation before the current one.
     Stale(QueryEvent),
@@ -112,8 +118,9 @@ enum Step {
 struct ToolObservation {
     name: String,
     input: String,
+    /// The preview the row holds; the full result is in the durable messages.
     result: Option<String>,
-    is_error: bool,
+    status: ToolStatus,
 }
 
 /// The state both renderers must agree on after a step.
@@ -143,6 +150,11 @@ struct Replay {
 impl Replay {
     fn new(renderer: UiRenderer) -> Self {
         let mut app = fixture_app(renderer);
+        // Without this the comparison would hold trivially: two Classic Apps.
+        assert_eq!(
+            app.renderer, renderer,
+            "the replay runs the renderer under test"
+        );
         app.push_message(Message::user("Summarize the engine contract.".to_string()));
         app.turn_start = None;
         let scope = SessionScope::default();
@@ -202,7 +214,7 @@ impl Replay {
                         name: block.name.clone(),
                         input: block.input_json.clone(),
                         result: block.output_preview.clone(),
-                        is_error: block.status == ToolStatus::Error,
+                        status: block.status.clone(),
                     },
                 );
             }
@@ -347,56 +359,75 @@ fn assert_parity(name: &str, steps: Vec<Step>) -> (Replay, Replay) {
 
 #[test]
 fn each_renderer_reaches_the_same_semantic_state_for_every_trace() {
-    let (plain, _) = assert_parity("plain turn", plain_turn());
-    let projected = TranscriptView::project(&plain.app);
-    assert_eq!(projected.live_text, "Reading the contract now.");
-    assert_eq!(
-        plain.last().tools["toolu-parity-1"].result.as_deref(),
-        Some("contract text")
-    );
-    assert!(plain.last().is_streaming);
-
-    let (stale, _) = assert_parity("stale generation", stale_generation());
-    // Nothing a stale worker sends changes the state left at the advance.
-    let at_advance = &stale.steps[2];
-    for (index, step) in stale.steps[3..9].iter().enumerate() {
-        assert_eq!(step, at_advance, "stale step {} changed state", index + 3);
+    // Per-trace checks run on both replays, so neither side can satisfy the
+    // comparison by both being wrong in a way only one App shows.
+    let (classic, next) = assert_parity("plain turn", plain_turn());
+    for plain in [&classic, &next] {
+        let projected = TranscriptView::project(&plain.app);
+        assert_eq!(projected.live_text, "Reading the contract now.");
+        let tool = &plain.last().tools["toolu-parity-1"];
+        assert_eq!(tool.result.as_deref(), Some("contract text"));
+        assert_eq!(tool.status, ToolStatus::Done);
+        assert!(plain.last().is_streaming);
     }
-    assert!(!stale.last().tools.contains_key("toolu-parity-stale"));
-    assert_eq!(stale.app.streaming_text.as_str(), "before the clear fresh");
 
-    let (duplicate, _) = assert_parity("duplicate tool events", duplicate_tool_events());
-    assert_eq!(
-        duplicate.app.tool_use_blocks.len(),
-        1,
-        "one row per call id"
-    );
-    assert_eq!(
-        duplicate.last().tools["toolu-parity-dup"],
-        ToolObservation {
-            name: "Grep".to_string(),
-            input: r#"{"pattern":"second"}"#.to_string(),
-            result: Some("second result".to_string()),
-            is_error: true,
+    let (classic, next) = assert_parity("stale generation", stale_generation());
+    for stale in [&classic, &next] {
+        // Nothing a stale worker sends changes the state left at the advance.
+        let at_advance = &stale.steps[2];
+        for (index, step) in stale.steps[3..9].iter().enumerate() {
+            assert_eq!(
+                step,
+                at_advance,
+                "{:?}: stale step {} changed state",
+                stale.renderer,
+                index + 3
+            );
         }
-    );
+        assert!(!stale.last().tools.contains_key("toolu-parity-stale"));
+        assert_eq!(
+            stale.last().tools["toolu-parity-old"].status,
+            ToolStatus::Running
+        );
+        assert_eq!(stale.app.streaming_text.as_str(), "before the clear fresh");
+    }
 
-    let (error, _) = assert_parity("error", error_turn());
-    assert!(!error.last().is_streaming);
-    assert!(error
-        .last()
-        .messages
-        .contains("Error: overloaded_error (529)"));
+    let (classic, next) = assert_parity("duplicate tool events", duplicate_tool_events());
+    for duplicate in [&classic, &next] {
+        assert_eq!(
+            duplicate.app.tool_use_blocks.len(),
+            1,
+            "{:?}: one row per call id",
+            duplicate.renderer
+        );
+        assert_eq!(
+            duplicate.last().tools["toolu-parity-dup"],
+            ToolObservation {
+                name: "Grep".to_string(),
+                input: r#"{"pattern":"second"}"#.to_string(),
+                result: Some("second result".to_string()),
+                status: ToolStatus::Error,
+            }
+        );
+    }
 
-    let (durable, _) = assert_parity("durable message and completion", durable_completion());
-    assert!(!durable.last().is_streaming);
-    assert!(durable.last().messages.contains("msg-parity-durable"));
-    assert_eq!(
-        durable.last().tools["toolu-parity-durable"]
-            .result
-            .as_deref(),
-        Some("coven text")
-    );
+    let (classic, next) = assert_parity("error", error_turn());
+    for error in [&classic, &next] {
+        assert!(!error.last().is_streaming);
+        assert!(error
+            .last()
+            .messages
+            .contains("Error: overloaded_error (529)"));
+    }
+
+    let (classic, next) = assert_parity("durable message and completion", durable_completion());
+    for durable in [&classic, &next] {
+        assert!(!durable.last().is_streaming);
+        assert!(durable.last().messages.contains("msg-parity-durable"));
+        let tool = &durable.last().tools["toolu-parity-durable"];
+        assert_eq!(tool.result.as_deref(), Some("coven text"));
+        assert_eq!(tool.status, ToolStatus::Done);
+    }
 }
 
 #[test]
@@ -501,7 +532,7 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         Step::Event(delta("partial answer ")),
         Step::Key(key(KeyCode::Esc)),
         Step::Event(backlog.clone()),
-        Step::Key(ctrl('c')),
+        Step::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
     ]);
     let at_escape = &cancelled.steps[1];
     assert!(at_escape.cancel_requested, "Escape asks the loop to cancel");
@@ -534,8 +565,12 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
     ]);
     let tool = &finished.last().tools["toolu-parity-backlog"];
     assert_eq!(tool.result.as_deref(), Some("cancelled"));
-    assert!(tool.is_error);
+    assert_eq!(tool.status, ToolStatus::Error);
     assert!(finished.last().messages.contains("msg-parity-backlog"));
+    assert!(
+        finished.app.last_turn_elapsed.is_some(),
+        "the completion still applies"
+    );
     assert!(!finished.last().is_streaming);
     assert_eq!(finished.last().cancellation, TurnCancellation::Idle);
     assert!(finished
@@ -544,13 +579,32 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         .iter()
         .all(|block| block.status != ToolStatus::Running));
 
-    // A backlog tool that never ends is interrupted when the cancel settles.
+    // A backlog tool that never ends is interrupted when the cancel settles;
+    // one that ended keeps its row.
     let unfinished = Replay::new(UiRenderer::Next).run([
         Step::Event(delta("partial answer ")),
         Step::Key(key(KeyCode::Esc)),
         Step::Event(backlog),
+        Step::Event(tool_start(
+            "toolu-parity-backlog-done",
+            "Read",
+            r#"{"file_path":"COVEN.md"}"#,
+        )),
+        Step::Event(tool_end(
+            "toolu-parity-backlog-done",
+            "Read",
+            "coven text",
+            false,
+        )),
         Step::Settle,
     ]);
+    let kept: Vec<_> = unfinished
+        .app
+        .tool_use_blocks
+        .iter()
+        .map(|block| (block.id.as_str(), block.status.clone()))
+        .collect();
+    assert_eq!(kept, [("toolu-parity-backlog-done", ToolStatus::Done)]);
     assert!(unfinished
         .app
         .tool_use_blocks
