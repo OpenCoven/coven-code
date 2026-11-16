@@ -1799,8 +1799,12 @@ pub fn render_global_search(
         return;
     }
 
-    let w = (area.width * 4 / 5).max(40).min(area.width);
-    let h = (area.height * 3 / 4).max(10).min(area.height);
+    let w = ((u32::from(area.width) * 4 / 5) as u16)
+        .max(40)
+        .min(area.width);
+    let h = ((u32::from(area.height) * 3 / 4) as u16)
+        .max(10)
+        .min(area.height);
     let x = area.x + (area.width - w) / 2;
     let y = area.y + (area.height - h) / 4;
     let dialog = Rect {

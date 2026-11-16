@@ -3447,6 +3447,7 @@ async fn run_interactive(
             app.poll_session_list();
         }
         app.notifications.tick();
+        app.poll_voice_events();
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
             continue;
