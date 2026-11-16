@@ -16,6 +16,14 @@
 // one-line notices. It never emits `ToolUse` blocks, so the
 // query loop treats every turn as self-contained (`end_turn`).
 //
+// Liveness: the CLI prints nothing while one of its tools runs or while it
+// waits on a long reply, and those silences routinely outlast the query
+// loop's stream stall timeout. A stalled HTTP stream is retried; a "stalled"
+// CLI turn would be killed mid-tool and its prompt run again. So while the
+// CLI process is alive and quiet, the stream sends `StreamEvent::Ping`, the
+// same keepalive the HTTP transport forwards, and the stall timeout is left
+// to mean what it says: nothing is there to answer.
+//
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
 // cached per process and replayed via `--resume` on follow-up turns. A fresh
 // conversation (no assistant turns in the request) resets the cache. When no
@@ -53,6 +61,11 @@ use stderr::StderrDrain;
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
 
 const INSTALL_HINT: &str = "claude CLI not found — install with `npm install -g @anthropic-ai/claude-code`, sign in by running `claude`, and ensure it is on PATH (or set COVEN_CODE_CLAUDE_BIN)";
+
+/// How often a quiet, running CLI turn tells the consumer it is still alive.
+/// Well inside the query loop's 45-second stall timeout, so a late tick
+/// cannot let it fire.
+const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The `claude` session id carried across turns within this process.
 static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -528,6 +541,8 @@ pub struct ClaudeCliProvider {
     /// Resolved lazily so construction never fails; a missing binary
     /// surfaces the install hint when a turn is actually attempted.
     binary: Option<PathBuf>,
+    /// See [`HEARTBEAT_PERIOD`]. A field so tests need not wait for it.
+    heartbeat: std::time::Duration,
     goal_authority: Option<(
         claurst_core::goal::GoalTurn,
         claurst_core::goal::GoalTurnPermission,
@@ -545,6 +560,7 @@ impl ClaudeCliProvider {
         Self {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: resolve_claude_binary(),
+            heartbeat: HEARTBEAT_PERIOD,
             goal_authority: None,
         }
     }
@@ -833,6 +849,7 @@ impl LlmProvider for ClaudeCliProvider {
         let mut turn = self.start_turn(&request).await?;
         let provider_id = self.id.clone();
         let fallback_model = request.model.clone();
+        let heartbeat_period = self.heartbeat;
 
         let s = stream! {
             // Retain ownership even before the stream is first polled; dropping
@@ -840,6 +857,11 @@ impl LlmProvider for ClaudeCliProvider {
             let _stdin_writer = turn.stdin_writer;
             let mut mapper = EnvelopeMapper::new(&fallback_model);
             let mut line = std::mem::take(&mut turn.first_line);
+            let mut heartbeat = tokio::time::interval_at(
+                tokio::time::Instant::now() + heartbeat_period,
+                heartbeat_period,
+            );
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let outcome = mapper.map_line(&line);
                 if let Some(session_id) = mapper.session_id.as_deref() {
@@ -863,7 +885,33 @@ impl LlmProvider for ClaudeCliProvider {
                 }
 
                 line.clear();
-                match turn.stdout.read_line(&mut line).await {
+                let read = {
+                    // `read_line` loses what it has read if it is dropped, so
+                    // one read stays pinned across the heartbeats.
+                    let read_line = turn.stdout.read_line(&mut line);
+                    tokio::pin!(read_line);
+                    loop {
+                        let finished = tokio::select! {
+                            result = &mut read_line => Some(result),
+                            _ = heartbeat.tick() => None,
+                        };
+                        match finished {
+                            Some(result) => break result,
+                            // Quiet, and still running: a tool is at work or
+                            // a reply is on its way. A process that has gone
+                            // sends no keepalive, so the consumer's stall
+                            // timeout still covers a pipe left open behind it.
+                            None => {
+                                if matches!(turn.child.try_wait(), Ok(None)) {
+                                    yield Ok(StreamEvent::Ping);
+                                }
+                            }
+                        }
+                    }
+                };
+                // Keepalives are for silence only.
+                heartbeat.reset();
+                match read {
                     Ok(0) => {
                         let stderr = turn.stderr.finish().await;
                         let detail = if stderr.is_empty() {
@@ -912,6 +960,7 @@ impl LlmProvider for ClaudeCliProvider {
                 Self {
                     id: self.id.clone(),
                     binary: self.binary.clone(),
+                    heartbeat: self.heartbeat,
                     goal_authority: Some((turn.clone(), permission)),
                 }
                 .create_message_stream(request)
@@ -986,6 +1035,7 @@ mod tests {
             binary: Some(
                 std::env::temp_dir().join(format!("missing-claude-{}", uuid::Uuid::new_v4())),
             ),
+            heartbeat: HEARTBEAT_PERIOD,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -994,6 +1044,106 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, ProviderError::Other { message, .. } if message == INSTALL_HINT));
+    }
+
+    /// A stand-in `claude` that starts a turn, stays quiet for `quiet`
+    /// seconds the way a long tool call does, then finishes the turn.
+    #[cfg(unix)]
+    fn quiet_cli(quiet: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("quiet-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let binary = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\n\
+             echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n\
+             sleep {quiet}\n\
+             echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}'\n\
+             echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (dir, binary)
+    }
+
+    /// The query loop gives up on a stream that is silent for 45 seconds,
+    /// kills the CLI and runs the prompt again. A CLI that is busy must not
+    /// look like that: it has to send keepalives for as long as it is quiet.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_quiet_running_cli_sends_keepalives_until_it_answers() {
+        use futures::StreamExt;
+        let (dir, binary) = quiet_cli("1");
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_millis(100),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let mut stream = provider.create_message_stream(request).await.unwrap();
+
+        let mut events = Vec::new();
+        let mut longest_gap = std::time::Duration::ZERO;
+        let mut last = std::time::Instant::now();
+        while let Some(event) = stream.next().await {
+            longest_gap = longest_gap.max(last.elapsed());
+            last = std::time::Instant::now();
+            events.push(event.unwrap());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+
+        let pings = events
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::Ping))
+            .count();
+        // One second of silence at a 100 ms heartbeat. Fewer than a handful
+        // would mean the keepalive stopped while the CLI was still working.
+        assert!(pings >= 5, "{pings} keepalives in one quiet second");
+        assert!(
+            longest_gap < std::time::Duration::from_millis(700),
+            "the stream was silent for {longest_gap:?}"
+        );
+        // The turn itself is untouched: its text arrives and it completes.
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "after the wait")
+        ));
+        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
+        // Keepalives are for silence only: none trails the answer.
+        let last_ping = events
+            .iter()
+            .rposition(|event| matches!(event, StreamEvent::Ping))
+            .unwrap();
+        let first_text = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::TextDelta { .. }))
+            .unwrap();
+        assert!(last_ping < first_text, "a keepalive followed the answer");
+    }
+
+    /// A CLI that answers at once is not padded with keepalives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prompt_cli_sends_no_keepalive() {
+        use futures::StreamExt;
+        let (dir, binary) = quiet_cli("0");
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_secs(30),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let mut stream = provider.create_message_stream(request).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Ping)));
+        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
     #[test]

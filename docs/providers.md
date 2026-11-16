@@ -55,6 +55,11 @@ for provider setup and `/account` for account management. The separate
 `coven-code auth login` flow requires a configured
 `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`; it is not a Claude CLI token-import path.
 
+A turn through the `claude` binary can be quiet for minutes while one of the
+CLI's own tools runs, such as a build or a test suite. The engine keeps
+waiting for as long as the `claude` process is running. The 45-second stall
+timeout, which retries a silent API stream, does not cut that wait short.
+
 Model availability and defaults depend on the installed catalog and account.
 Inspect the engine's resolved models rather than relying on a static price or
 context-window table:
