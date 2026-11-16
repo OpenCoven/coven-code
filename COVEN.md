@@ -192,12 +192,24 @@ tag; use a new version for fixes rather than replacing published assets.
    Each contains `coven-code` (Windows: `coven-code.exe`). Require the final
    checksum manifest and verify archive contents and native smoke tests before
    declaring the candidate ready. Do not infer platform support from compilation
-   alone.
+   alone. The
+   [release-candidate workflow](.github/workflows/release-candidate.yml) does
+   this without publishing: it runs on a version-stamp pull request or by
+   manual dispatch on any ref, repeats the release build and packaging, keeps
+   the archives and manifest as run artifacts, and runs each archive on its own
+   platform. Its archives are not the published ones; the release workflow
+   builds those again.
 6. After authorized Git delivery and passing exact-commit CI, dispatch
    `.github/workflows/release.yml` from the approved main commit with the chosen
    version. The workflow publishes a GitHub Release; it is not a dry run.
    Verify the uploaded archives, installers and checksum manifest before
-   announcing the release or updating managed engine pins.
+   announcing the release or merging a managed engine pin. By default the
+   workflow's last job asks OpenCoven/coven to propose the pin: it dispatches
+   Coven's `engine-bump.yml`, which regenerates `engine.lock` from the new
+   release and opens a pull request there for review. The job needs the
+   `COVEN_ENGINE_BUMP_TOKEN` secret, a token allowed to run workflows in
+   OpenCoven/coven. Without it the job warns and Coven's scheduled run
+   proposes the pin later. Pass `advance_coven_engine=false` to skip it.
 7. Keep `publish_npm` false. `@opencoven/coven-code` is deprecated; npm publication
    is an explicit opt-in through the release workflow, not a routine release step.
 

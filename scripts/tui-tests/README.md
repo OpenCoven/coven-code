@@ -72,6 +72,11 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/05_input_editing.sh` | Prompt input | typed text echoes into the buffer, `Ctrl+U` clears it |
 | `cases/06_quit.sh` | Shutdown | `Ctrl+C` twice exits cleanly back to the shell |
 | `cases/07_paste_burst.sh` | Paste burst | a line delivered in one write still submits; interior newlines coalesce without submitting |
+| `cases/22_next_resize_stream.sh` | Resize during a turn | `fake_anthropic.py` streams 150,000 lines into Next, then holds the stream open, adding a line every 0.2 s, while tmux moves through 80x24, 40x10, 200x50, 20x5, 120x40, 1x1, 2x2, 160x30, 10x3, 80x24 and 120x40; tmux must apply 200x50, 20x5, 1x1, 2x2, 10x3 and 120x40, each held past its 250 ms resize delay, and nothing saved before the release proves every size landed during the turn; the process survives, the draft stays as typed in the composer, the end of the answer is on screen, every streamed line is saved, including at least 20 sent while the stream was held, and the frame fills 40 rows at 120x40; needs `python3` |
+| `cases/23_classic_zero_size.sh` | Zero and tiny sizes | Classic starts at 0x0, 0x40 and 120x0 and survives 120x0 with the exit toast, 0x40, 0x0, 1x1 and 20x6, then draws a full frame at 120x40, exits 0 and restores the terminal; tmux cannot make a zero-sized window, so `zero_size_pty.py` drives a raw PTY and needs `python3` |
+| `cases/25_next_unicode_composer.sh` | Unicode in the Next composer | CJK, right-to-left text, a combining mark and an emoji ZWJ sequence typed through tmux stay unsent, and all but the emoji (drawn differently by tmux versions) are checked on screen; Left and Backspace act on whole CJK characters; no turn reaches the provider (`fake_anthropic.py`) before Enter, and it and the saved session get exactly the edited text. tmux sends committed characters only, so input-method preedit is not covered, and editing moves by Unicode scalar, so the ZWJ emoji and combining mark are not edited; needs `python3` |
+| `cases/26_classic_cancel.sh` | Cancelling a turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Escape while an approved Bash command appends a line every second: once the status no longer says cancelling, at most 3 more lines were written than at the Escape, and the file stops growing. Escape while text is still arriving (a burst of 200,000 text deltas, then a stream held open, so the turn is still running in the runtime): the status acknowledges it, the backlog still arriving does not bring the running turn back within 10 s, and the status settles to `Cancelled`; needs `python3` |
+| `cases/27_classic_quit_save.sh` | Quitting mid-turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Ctrl+D twice while a held stream is still sending text exits, leaves the alternate screen, restores the cursor and turns mouse reporting off, and the saved session holds the prompt and the text delivered so far. Only Next prints its report and the resume command after exiting. Ctrl+D twice while an approved `sleep 20` runs exits within 8 s and saves the prompt; needs `python3` |
 
 ## Configuration
 
@@ -118,7 +123,9 @@ paste. The distinction matters: only the second shape engages the TUI's
 paste-burst detector.
 
 Helpers from [`lib.sh`](lib.sh): `tui_start` / `tui_stop`, `tui_keys`,
-`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`, and the assertions
+`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`,
+`tui_quit_and_check` (press quit keys, then check the exit and the terminal
+restore), and the assertions
 `assert_contains` / `assert_absent` / `assert_matches` / `assert_eq`. For
 headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 
@@ -161,6 +168,19 @@ the turn and the gap between paints. That gap is a boundary proxy for active
 render cost; its floor is the event loop's 16 ms poll, and a slower fake
 producer would widen it. The fake is set from launch, so every figure from a
 `--stream` run, cold start and idle ones included, comes from a session with a
-provider: compare it only with other `--stream` runs. Classic cannot show the
-live end of a transcript past 65,535 rows (#441), so `--stream` with 100,000
-lines exits nonzero on Classic.
+provider: compare it only with other `--stream` runs. The long-history fixture must prove live tail visibility; older Classic builds fail this check past 65,535 rows (#441).
+
+
+### Actual render and completed draw timing
+
+Add `--render-timing` to opt in to private diagnostic files for each synthetic benchmark session. The engine records renderer, terminal dimensions, active state, input character count, scroll offset and follow state, and numeric render/draw durations. It records no prompt text. The widget/layout measurement surrounds the renderer call; the complete draw measurement also includes Ratatui diffing and backend writes. These are actual in-process durations, separate from paint gaps.
+
+In this mode, key latency waits for a completed draw with the new input length, and resize latency waits for a completed draw at the requested dimensions. Both match records written after the operation began. Repeated probe letters and the first output chunk cannot satisfy them. Observing the local diagnostic file adds overhead, so these latencies are upper bounds that include observation cost; they do not require clock alignment between Python and Rust. Cold timing requires both the usable PTY text and a completed draw. Existing runs without this flag retain their PTY boundary probes.
+
+Timing logs use the same explicitly opted-in, bounded private diagnostics policy as `--diagnostics`. Missing or truncated logs fail the run. The JSON report includes raw numeric samples for audit and percentile recalculation; temporary homes and their diagnostic files are retired after each run. Compare Classic and Next with identical instrumentation, provider setup, binary profile, hardware, terminal dimensions and workload, and record quiet-host variance. A debug smoke measurement is not reference-machine release qualification.
+
+```bash
+python3 scripts/tui-tests/perf_baseline.py --bin src-rust/target/release/coven-code \
+  --render-timing --stream --ui next --history-lines 100000 \
+  --runs 20 --keys 20 --size 80x24 --size 120x40 --json measured-next.json
+```

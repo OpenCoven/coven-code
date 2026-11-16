@@ -5,6 +5,7 @@ use claurst_api::{
     provider_types::{ProviderRequest, StopReason},
     providers::ClaudeCliProvider,
 };
+use claurst_core::config::PermissionMode;
 use claurst_core::types::{ContentBlock, Message};
 use std::{
     fs,
@@ -26,6 +27,19 @@ if case == 'resume':
         sys.exit(1)
 (root / 'pid.tmp').write_text(str(os.getpid()))
 os.replace(root / 'pid.tmp', root / 'pid')
+# A read-only turn gets the policy's read-only settings file, any other its full one.
+full = case == 'policy-full'
+policy = ['--add-dir', str(root / 'granted'), '--mcp-config', str(root / 'mcp.json'),
+          '--setting-sources', 'project',
+          '--settings', str(root / ('policy.json' if full else 'policy-read-only.json'))]
+# The turn's own mode, once, with or without a policy.
+modes = [sys.argv[i + 1] for i, arg in enumerate(sys.argv) if arg == '--permission-mode']
+assert modes == ['bypassPermissions' if full else 'plan'], sys.argv
+if case in ('policy', 'policy-full'):
+    assert sys.argv[-len(policy):] == policy, sys.argv
+    (root / 'policy-verified').write_text('yes')
+else:
+    assert not set(policy) & set(sys.argv), sys.argv
 def emit(value):
     print(json.dumps(value), flush=True)
 if case == 'startup-drop':
@@ -93,6 +107,27 @@ impl Drop for OwnedCase {
     }
 }
 
+/// Coven's permission policy for the CLI, as Coven hands it to the engine.
+fn policy_environment(case: &str, root: &Path) -> Vec<(&'static str, String)> {
+    let policy = match case {
+        "policy" | "policy-full" => {
+            fs::write(root.join("policy.json"), "{}").unwrap();
+            fs::write(root.join("policy-read-only.json"), "{}").unwrap();
+            serde_json::json!({
+                "version": 1,
+                "settingsFile": root.join("policy.json"),
+                "readOnlySettingsFile": root.join("policy-read-only.json"),
+                "settingSources": "project",
+                "addDirs": [root.join("granted")],
+                "mcpConfigFile": root.join("mcp.json"),
+            })
+        }
+        "policy-unusable" => serde_json::json!({"version": 2}),
+        _ => return Vec::new(),
+    };
+    vec![("COVEN_CLAUDE_POLICY", policy.to_string())]
+}
+
 fn run_case(case: &str) {
     let python = ["/opt/homebrew/bin/python3", "/usr/bin/python3"]
         .into_iter()
@@ -130,6 +165,7 @@ fn run_case(case: &str) {
         .env("CLI_FIXTURE_ROOT", &root)
         .env("CLI_FIXTURE_CASE", case)
         .env("CLI_FIXTURE_PYTHON", &python)
+        .envs(policy_environment(case, &root))
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
@@ -155,7 +191,25 @@ fn run_case(case: &str) {
     let log = fs::read_to_string(owned.root.join("worker.log")).unwrap();
     owned.cleanup().expect("owned process-group cleanup failed");
     assert_eq!(complete.as_deref(), Some("complete"), "{case}: {log}");
-    assert!(started, "fake executable was not reached");
+    // A policy the engine cannot apply must stop the launch, not weaken it.
+    assert_eq!(
+        started,
+        case != "policy-unusable",
+        "{case}: fake executable started={started}"
+    );
+}
+
+#[test]
+fn covens_policy_reaches_the_cli_arguments() {
+    run_case("policy");
+}
+#[test]
+fn a_full_access_turn_gets_the_full_policy_file() {
+    run_case("policy-full");
+}
+#[test]
+fn an_unusable_policy_refuses_the_launch() {
+    run_case("policy-unusable");
 }
 
 #[test]
@@ -231,9 +285,15 @@ fn cli_fixture_worker() {
             model: "fixture".into(), messages: vec![Message::user("p".repeat(2 * 1024 * 1024))],
             system_prompt: None, tools: Vec::new(), max_tokens: 16,
             temperature: None, top_p: None, top_k: None, stop_sequences: Vec::new(),
-            thinking: None, provider_options: serde_json::json!({}),
+            thinking: None, provider_options: serde_json::json!({}), permission_mode: None,
         };
-        if case == "startup-drop" {
+        if case == "policy-full" {
+            request.permission_mode = Some(PermissionMode::BypassPermissions);
+        }
+        if case == "policy-unusable" {
+            let error = provider.create_message(request).await.unwrap_err().to_string();
+            assert!(error.contains("COVEN_CLAUDE_POLICY") && error.contains("version 2"), "{error}");
+        } else if case == "startup-drop" {
             {
                 let startup = provider.create_message_stream(request);
                 tokio::pin!(startup);
@@ -263,6 +323,7 @@ fn cli_fixture_worker() {
                 assert_eq!(fs::read_to_string(root.join("invocations")).unwrap(), "fresh\nresume\nfresh\n");
             }
             if case != "early-close" { assert_eq!(fs::read_to_string(root.join("input-verified")).unwrap(), "yes"); }
+            if case == "policy" || case == "policy-full" { assert_eq!(fs::read_to_string(root.join("policy-verified")).unwrap(), "yes"); }
         }
     })
     }));

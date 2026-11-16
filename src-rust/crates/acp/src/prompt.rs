@@ -7,10 +7,10 @@ use std::sync::Arc;
 use agent_client_protocol_schema as acp;
 use claurst_api::streaming::{AnthropicStreamEvent, ContentDelta};
 use claurst_core::types::Message;
-use claurst_query::{QueryEvent, QueryOutcome};
+use claurst_query::{BoundedEventReceiver, QueryEvent, QueryEventSink, QueryOutcome};
 use claurst_tools::ToolContext;
+#[cfg(test)]
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::connection::Connection;
@@ -49,7 +49,12 @@ pub async fn handle(
 
     // Build per-session ToolContext.
     let permission_handler: Arc<dyn claurst_core::PermissionHandler> =
-        Arc::new(AcpPermissionHandler);
+        Arc::new(AcpPermissionHandler {
+            connection: connection.clone(),
+            session_id: session.session_id.clone(),
+            cancel: cancel.clone(),
+            next_permission_id: session.next_permission_id.clone(),
+        });
     let tool_ctx = ToolContext {
         working_dir: session.cwd.clone(),
         permission_mode: runtime.config.permission_mode.clone(),
@@ -64,32 +69,30 @@ pub async fn handle(
         config: runtime.config.clone(),
         managed_agent_config: runtime.config.managed_agents.clone(),
         completion_notifier: None,
-        pending_permissions: Some(session.pending_permissions.clone()),
+        pending_permissions: None,
         permission_manager: Some(runtime.permission_manager.clone()),
         user_question_tx: None,
     };
     let mut query_config = runtime.query_config.clone();
     query_config.working_directory = session.cwd.to_str().map(str::to_owned);
 
-    // Spawn the permission drainer for this turn.
-    let drainer_cancel = CancellationToken::new();
-    let drainer = crate::permission::spawn_drainer(
-        connection.clone(),
-        session.session_id.clone(),
-        session.pending_permissions.clone(),
-        drainer_cancel.clone(),
-    );
-
     // Event channel + forwarder.
-    let (ev_tx, ev_rx) = mpsc::unbounded_channel::<QueryEvent>();
-    let forwarder = tokio::spawn(forward_events(
+    let (ev_tx, ev_rx) = QueryEventSink::bounded(
+        256,
+        connection.event_budget(),
+        8 * 1024 * 1024,
+        cancel.clone(),
+    );
+    let overload = ev_tx.clone();
+    let mut forwarder = tokio::task::JoinSet::new();
+    forwarder.spawn(forward_events(
         connection.clone(),
         session.session_id.clone(),
         ev_rx,
     ));
 
     // Run the query loop.
-    let outcome = claurst_query::run_query_loop(
+    let outcome = claurst_query::run_query_loop_with_events(
         runtime.api_client.as_ref(),
         &mut messages,
         runtime.tools.as_slice(),
@@ -97,16 +100,15 @@ pub async fn handle(
         &query_config,
         runtime.cost_tracker.clone(),
         Some(ev_tx),
-        cancel,
+        cancel.clone(),
         None,
     )
     .await;
 
-    // Tear down forwarder + drainer.
-    drainer_cancel.cancel();
-    let _ = drainer.await;
-    // Forwarder finishes when ev_tx is dropped at end of run_query_loop.
-    let _ = forwarder.await;
+    let overloaded = overload.is_overloaded();
+    drop(overload);
+    // Release the final sender before joining the receiver's drain.
+    let _ = forwarder.join_next().await;
 
     // Persist the updated transcript.
     {
@@ -114,6 +116,19 @@ pub async fn handle(
         *guard = messages;
     }
 
+    if overloaded {
+        // Capacity cancellation belongs to this generation. Retained tool
+        // contexts keep its cancelled token, while a later prompt gets a fresh
+        // one. A concurrent explicit cancel may already have re-armed it.
+        let mut token = session.cancel_token.lock();
+        if *token == cancel {
+            *token = tokio_util::sync::CancellationToken::new();
+        }
+        return Err(acp::Error::new(
+            -32000,
+            "ACP output capacity exceeded; streamed output is incomplete",
+        ));
+    }
     let stop_reason = match outcome {
         QueryOutcome::EndTurn { .. } => acp::StopReason::EndTurn,
         QueryOutcome::MaxTokens { .. } => acp::StopReason::MaxTokens,
@@ -165,7 +180,7 @@ fn render_prompt_blocks(blocks: &[acp::ContentBlock]) -> String {
 async fn forward_events(
     connection: Arc<Connection>,
     session_id: acp::SessionId,
-    mut rx: mpsc::UnboundedReceiver<QueryEvent>,
+    mut rx: BoundedEventReceiver,
 ) {
     while let Some(event) = rx.recv().await {
         match event {
@@ -316,7 +331,12 @@ mod tests {
     async fn interleaved_tool_events_preserve_notification_payloads() {
         let (mut reader, writer) = tokio::io::duplex(8192);
         let connection = Connection::new(writer);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = QueryEventSink::bounded(
+            256,
+            Arc::new(tokio::sync::Semaphore::new(8 * 1024 * 1024)),
+            8 * 1024 * 1024,
+            tokio_util::sync::CancellationToken::new(),
+        );
         for event in [
             QueryEvent::ToolStart {
                 tool_name: "Read".into(),
@@ -375,3 +395,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 }
+
+#[cfg(test)]
+#[path = "turn_permission_tests.rs"]
+mod turn_permission_tests;

@@ -17,8 +17,32 @@ use crate::{
 };
 
 impl From<reqwest::Error> for StreamableHttpError<reqwest::Error> {
-    fn from(e: reqwest::Error) -> Self {
-        StreamableHttpError::Client(e)
+    fn from(error: reqwest::Error) -> Self {
+        // A transport diagnostic must never retain the endpoint or an opaque
+        // source chain: request URLs can contain credentials in any component.
+        // Classify before discarding the error, using typed reqwest metadata.
+        let category = if error.is_timeout() {
+            "timeout"
+        } else if error.is_connect() {
+            "connection"
+        } else if error.is_redirect() {
+            "redirect"
+        } else if error.is_builder() {
+            "builder"
+        } else if error.is_decode() {
+            "decode"
+        } else if error.is_body() {
+            "body"
+        } else if error.is_request() {
+            "request"
+        } else {
+            "transport"
+        };
+        let diagnostic = match error.status() {
+            Some(status) => format!("HTTP {status}: {category} failure"),
+            None => format!("HTTP {category} failure"),
+        };
+        StreamableHttpError::UnexpectedServerResponse(Cow::Owned(diagnostic))
     }
 }
 
@@ -203,8 +227,10 @@ impl StreamableHttpClient for reqwest::Client {
                     ),
                 }
             }
+            // A parsed JSON-RPC error above is protocol data. An unparsed
+            // response body is an opaque diagnostic and may contain secrets.
             return Err(StreamableHttpError::UnexpectedServerResponse(Cow::Owned(
-                format!("HTTP {status}: {body}"),
+                format!("HTTP {status}: invalid server response"),
             )));
         }
         match content_type.as_deref() {
@@ -218,9 +244,9 @@ impl StreamableHttpClient for reqwest::Client {
                 // an `id` field), treat it as accepted rather than failing.
                 match response.json::<ServerJsonRpcMessage>().await {
                     Ok(message) => Ok(StreamableHttpPostResponse::Json(message, session_id)),
-                    Err(e) => {
+                    Err(_) => {
                         tracing::warn!(
-                            "could not parse JSON response as ServerJsonRpcMessage, treating as accepted: {e}"
+                            "could not parse JSON response as ServerJsonRpcMessage, treating as accepted"
                         );
                         Ok(StreamableHttpPostResponse::Accepted)
                     }

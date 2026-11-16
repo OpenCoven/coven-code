@@ -417,6 +417,42 @@ pub struct ToolUseBlock {
     pub output_preview: Option<String>,
     /// JSON-serialised input for the tool call (populated from the API stream).
     pub input_json: String,
+    pub run: ToolRun,
+}
+
+/// What the query loop has reported about a tool's own work, ahead of the
+/// `ToolEnd` that waits for every tool in its response. Only Next shows this.
+#[derive(Debug, Clone, Default)]
+pub struct ToolRun {
+    /// The order its row opened in, which keeps its place among the other
+    /// rows; 0 for a row built outside the runtime's events.
+    pub opened: u64,
+    /// When its own work began, or the moment it was last approved if it
+    /// asked. Unset while hooks run or it waits for its turn: that time is not
+    /// its.
+    pub started_at: Option<std::time::Instant>,
+    /// Waiting for another tool in its response to finish first.
+    pub queued: bool,
+    /// How long its work took and whether it failed, once it ended.
+    pub finished: Option<(std::time::Duration, bool)>,
+}
+
+impl ToolRun {
+    /// A run for a row opening now, after every row opened before it.
+    fn opening() -> Self {
+        static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
+    fn finish(&mut self, is_error: bool) {
+        if self.finished.is_none() {
+            let took = self.started_at.map(|at| at.elapsed()).unwrap_or_default();
+            self.finished = Some((took, is_error));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -612,6 +648,11 @@ pub struct App {
     pub display_messages: Vec<DisplayMessage>,
     /// Synthetic system annotations interleaved between real messages at render time.
     pub system_annotations: Vec<SystemAnnotation>,
+    /// Reachable session diagnostics in renderers that omit system annotations.
+    pub diagnostic_log_path: Option<std::path::PathBuf>,
+    /// Bounded process-local diagnostics, separate from messages and session JSON.
+    pub diagnostic_buffer: Option<String>,
+    external_openers: Vec<claurst_core::child_diagnostics::ExternalOpener>,
     pub input: String,
     pub prompt_input: PromptInputState,
     pub input_history: Vec<String>,
@@ -685,6 +726,9 @@ pub struct App {
     /// Permission decisions by tool use id (true = allowed).
     pub permission_decisions:
         crate::next::tracked::Tracked<std::collections::HashMap<String, bool>>,
+    /// Calls whose approval requests wait behind the prompt on screen, by
+    /// model call id (or request id when the call is unknown).
+    pub queued_approvals: crate::next::tracked::Tracked<Vec<String>>,
     /// Tool rows of a cancelled turn, kept as evidence until the next user
     /// turn; the live list is cleared on cancel.
     pub interrupted_tools: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
@@ -964,6 +1008,12 @@ pub struct App {
     /// Snapshot of the engine-local work stores for the Next Work page,
     /// refreshed by the interactive loop. Display only; it grants nothing.
     pub work_sources: crate::application::work::WorkSources,
+    /// Typed live retrieval facts keyed by assistant-message position and call
+    /// id. Result carriers are not inserted into the human-turn transcript.
+    pub(crate) research_retrievals: std::collections::HashMap<
+        usize,
+        std::collections::HashMap<String, claurst_tools::web_fetch::Retrieval>,
+    >,
     /// Familiar memory read for the Next Memory page; cleared when the page
     /// closes so private reads are not kept.
     pub memory_snapshot: crate::application::memory::MemorySnapshot,
@@ -988,7 +1038,7 @@ pub struct App {
     /// Total message lines from the last render (used for virtual row mapping).
     pub total_message_lines: Cell<usize>,
     /// Scroll offset from the last render frame (used for selection validation).
-    pub last_render_scroll_offset: Cell<u16>,
+    pub last_render_scroll_offset: Cell<usize>,
 
     // ---- Text selection state --------------------------------------------
     /// Selection drag anchor (col, row) — set on mouse-down.
@@ -1252,6 +1302,9 @@ impl App {
             messages: Vec::new().into(),
             display_messages: Vec::new(),
             system_annotations: Vec::new(),
+            diagnostic_log_path: None,
+            diagnostic_buffer: None,
+            external_openers: Vec::new(),
             input: String::new(),
             prompt_input: PromptInputState::new(),
             input_history: Vec::new(),
@@ -1292,6 +1345,7 @@ impl App {
             pending_resume: None,
             resume_saved_view: false,
             permission_decisions: std::collections::HashMap::new().into(),
+            queued_approvals: Vec::new().into(),
             interrupted_tools: Vec::new().into(),
             resolved_keybinding: None,
             cursor_pos: 0,
@@ -1429,6 +1483,7 @@ impl App {
             agent_type_badge: None,
             active_goal_badge: None,
             work_sources: Default::default(),
+            research_retrievals: Default::default(),
             memory_snapshot: Default::default(),
             thinking_expanded: std::collections::HashSet::new(),
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
@@ -1684,7 +1739,7 @@ impl App {
         }
     }
 
-    fn current_user_turn_index(&self) -> Option<usize> {
+    pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
         self.messages
             .iter()
             .filter(|msg| msg.role == Role::User)
@@ -2166,6 +2221,14 @@ impl App {
             None => (args_trimmed, ""),
         };
         match (cmd, sub, sub_rest) {
+            ("status", "logs", "") => {
+                let text = self
+                    .diagnostic_buffer
+                    .as_deref()
+                    .unwrap_or("No diagnostics available.");
+                self.response_reader.open_local(text, self.scroll_offset);
+                return true;
+            }
             ("session" | "remote", "resume", "") => return self.intercept_slash_command("resume"),
             ("usage", "cost", "") => return self.intercept_slash_command("cost"),
             ("usage", "context", "") => return self.intercept_slash_command("context"),
@@ -2336,6 +2399,7 @@ impl App {
             "clear" => {
                 self.close_response_reader();
                 self.messages.clear();
+                self.research_retrievals.clear();
                 self.selected_transcript_message = None;
                 self.system_annotations.clear();
                 self.display_messages.clear();
@@ -2494,8 +2558,17 @@ impl App {
         self.close_secondary_views();
         self.dismiss_error_notifications();
         let keybindings_path = Settings::config_dir().join("keybindings.json");
-        if let Err(error) = open_file_externally(&keybindings_path) {
-            eprintln!("Failed to open keybindings file: {error}");
+        self.external_openers.retain(|opener| !opener.is_finished());
+        match open_file_externally(&keybindings_path) {
+            Ok(opener) => self.external_openers.push(opener),
+            Err(error) => {
+                tracing::warn!(target: "claurst_core::child_diagnostics", kind = ?error.kind(), "Failed to start external opener");
+                self.push_notification(
+                    NotificationKind::Error,
+                    format!("Failed to open keybindings file: {error}"),
+                    None,
+                );
+            }
         }
         true
     }
@@ -2921,6 +2994,7 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages.into();
+        self.research_retrievals.clear();
         // Resume, rewind and clear replace the conversation; interruption
         // evidence from the old one no longer describes what is shown.
         self.interrupted_tools.clear();
@@ -2984,10 +3058,12 @@ impl App {
     }
 
     fn response_reader_text(&self) -> Option<String> {
-        self.response_reader
-            .message_index
-            .and_then(|index| self.messages.get(index))
-            .map(response_reader_text)
+        self.response_reader.local_text.clone().or_else(|| {
+            self.response_reader
+                .message_index
+                .and_then(|index| self.messages.get(index))
+                .map(response_reader_text)
+        })
     }
 
     fn response_reader_match(&self, start: usize) -> Option<usize> {
@@ -2999,7 +3075,7 @@ impl App {
         let area = self.last_selectable_area.get();
         let content_width = area.width.saturating_sub(6);
         let text = self.response_reader_text()?;
-        let lines = crate::messages::render_markdown(&text, content_width);
+        let lines = self.response_reader.render_lines(&text, content_width);
         let line_matches = |line: &ratatui::text::Line<'_>| {
             line.spans
                 .iter()
@@ -3061,7 +3137,11 @@ impl App {
         let content_width = area.width.saturating_sub(6);
         let line_count = self
             .response_reader_text()
-            .map(|text| crate::messages::render_markdown(&text, content_width).len())
+            .map(|text| {
+                self.response_reader
+                    .render_lines(&text, content_width)
+                    .len()
+            })
             .unwrap_or(0);
 
         match key.code {
@@ -3387,6 +3467,7 @@ impl App {
             self.next_shell.reset_transcript_for_session();
             // Work read for the old session does not describe this one.
             self.work_sources = Default::default();
+            self.research_retrievals.clear();
             self.session_id = Some(id.to_string());
             self.restore_scope_view(id);
         }
@@ -3411,6 +3492,40 @@ impl App {
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
         self.permission_decisions
             .insert(tool_use_id.to_string(), allowed);
+        self.restart_tool_time(tool_use_id);
+    }
+
+    /// Restarts a tool's work time when its wait on the user ends. Time spent
+    /// waiting on the user is not time the tool spent working. Tools ask at
+    /// different points, some before any work and some after a first step,
+    /// so a row times from its latest approval.
+    pub fn restart_tool_time(&mut self, tool_use_id: &str) {
+        if let Some(run) = self.tool_run_mut(tool_use_id) {
+            run.started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Records which calls' approval requests wait behind the prompt on
+    /// screen; their rows await approval too.
+    pub fn set_queued_approvals(&mut self, calls: Vec<String>) {
+        if *self.queued_approvals != calls {
+            *self.queued_approvals = calls;
+        }
+    }
+
+    /// The row of a call: its live row, or the row a cancel moved to the
+    /// interrupted list, which keeps receiving what the call reports.
+    fn tool_row_mut(&mut self, tool_id: &str) -> Option<&mut ToolUseBlock> {
+        let rows = if self.tool_use_blocks.iter().any(|block| block.id == tool_id) {
+            &mut self.tool_use_blocks
+        } else {
+            &mut self.interrupted_tools
+        };
+        rows.iter_mut().find(|block| block.id == tool_id)
+    }
+
+    fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
+        self.tool_row_mut(tool_id).map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -3424,25 +3539,32 @@ impl App {
             .retain(|id, _| shown.contains(id.as_str()));
     }
 
-    /// Clear the live tool rows of a turn being cancelled, keeping the ones
-    /// still running as evidence of what the cancel interrupted.
+    /// Move the tools a cancel interrupts to their own list, as evidence of
+    /// what it cut off. A tool that ended, or reported finishing before its
+    /// result arrived, did its work and keeps its row.
     pub fn interrupt_tool_rows(&mut self) {
         if self.renderer == crate::application::UiRenderer::Classic {
             // Classic clears its tool rows on cancel, as it always has.
             self.tool_use_blocks.clear();
             return;
         }
-        let running = self
+        let (interrupted, kept): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .filter(|block| block.status == ToolStatus::Running);
-        self.interrupted_tools.extend(running);
+            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_none());
+        self.interrupted_tools.extend(interrupted);
+        *self.tool_use_blocks = kept;
     }
 
-    /// Record a cancellation the loop performed without a key request
-    /// (remote control), so it is shown pending until the worker stops.
-    pub fn note_cancellation_sent(&mut self) {
-        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    /// Show a cancellation the loop performed without a key request (remote
+    /// control). A running turn is shown pending until its worker stops.
+    pub fn note_cancellation_sent(&mut self, turn_running: bool) {
+        if turn_running {
+            self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+            self.interrupt_tool_rows();
+        }
+        self.is_streaming = false;
+        self.status_message = Some("Cancelled by remote control.".to_string());
     }
 
     /// The loop calls this once no turn worker is running any more. A
@@ -3450,21 +3572,32 @@ impl App {
     pub fn settle_cancellation(&mut self) {
         if self.cancellation != crate::application::TurnCancellation::Idle {
             self.status_message = Some("Cancelled.".to_string());
+            // A row still running was started by the backlog after the
+            // request, and the worker is gone without finishing it. Rows
+            // that finished, or reported finishing, keep their place, as
+            // `interrupt_tool_rows` keeps them.
+            let (running, finished): (Vec<_>, Vec<_>) =
+                self.tool_use_blocks.drain(..).partition(|block| {
+                    block.status == ToolStatus::Running && block.run.finished.is_none()
+                });
+            *self.tool_use_blocks = finished;
+            self.interrupted_tools.extend(running);
+            // A completion that arrived while the cancel was pending does not
+            // make this a finished turn: Classic shows "Cancelled.", not its
+            // done marker.
+            self.last_turn_verb = None;
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Ask the loop to cancel the running turn through its token.
+    fn request_turn_cancellation(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::Requested;
     }
 
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
-    /// Ask the loop to cancel the running turn through its token. Next only:
-    /// Classic keeps its existing cancel behavior unchanged.
-    fn request_turn_cancellation(&mut self) {
-        if self.renderer == crate::application::UiRenderer::Next {
-            self.cancellation = crate::application::TurnCancellation::Requested;
-        }
-    }
-
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -3996,6 +4129,66 @@ impl App {
     // -----------------------------------------------------------------------
     // Voice PTT helpers
     // -----------------------------------------------------------------------
+
+    /// Drain recorder events without blocking, updating the prompt and notices.
+    /// Called before drawing by both interactive event loops.
+    pub fn poll_voice_events(&mut self) {
+        use claurst_core::voice::VoiceEvent;
+        let mut events = Vec::new();
+        if let Some(ref mut rx) = self.voice_event_rx {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            match ev {
+                VoiceEvent::RecordingStarted => {
+                    self.voice_recording = true;
+                    self.status_message =
+                        Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
+                }
+                VoiceEvent::RecordingStopped => {
+                    self.voice_recording = false;
+                    self.status_message = Some("Transcribing\u{2026}".to_string());
+                }
+                VoiceEvent::TranscriptReady(text) => {
+                    if !text.is_empty() {
+                        // Append to existing prompt text with a space separator
+                        // so the user can combine voice + typed input.
+                        if !self.prompt_input.text.is_empty()
+                            && !self.prompt_input.text.ends_with(' ')
+                        {
+                            self.prompt_input.paste(" ");
+                        }
+                        self.prompt_input.paste(&text);
+                        self.refresh_prompt_input();
+                        let preview_end = text
+                            .char_indices()
+                            .nth(60)
+                            .map_or(text.len(), |(index, _)| index);
+                        self.status_message =
+                            Some(format!("Transcribed: {}", &text[..preview_end]));
+                    }
+                    // Clear the channel once we have the result.
+                    self.voice_event_rx = None;
+                }
+                VoiceEvent::Error(msg) => {
+                    self.voice_recording = false;
+                    self.voice_event_rx = None;
+                    // Keep the operation and diagnostic visible in the compact
+                    // warning row; the Warning severity already signals failure.
+                    let detail = msg
+                        .strip_prefix("Transcription failed ")
+                        .or_else(|| msg.strip_prefix("Transcription API returned "));
+                    let message = match detail {
+                        Some(detail) => format!("Voice: Transcription {detail}"),
+                        None => format!("Voice: {msg}"),
+                    };
+                    self.push_notification(NotificationKind::Warning, message, Some(8));
+                }
+            }
+        }
+    }
 
     /// Start PTT recording: open the microphone capture stream and signal the
     /// UI.  No-op when no voice recorder is attached or recording is already
@@ -5115,6 +5308,30 @@ impl App {
         }
 
         if self.mcp_view.visible {
+            if self.mcp_view.active_pane == crate::mcp_view::McpViewPane::ErrorDetail {
+                match &binding {
+                    KeybindingResult::Action(action)
+                        if matches!(action.as_str(), "prev" | "next" | "pageUp" | "pageDown") =>
+                    {
+                        // Select's existing configurable navigation owns the
+                        // focused diagnostic; raw keys must not bypass it.
+                        let page = isize::try_from(self.mcp_view.error_viewport_rows.get())
+                            .unwrap_or(isize::MAX);
+                        let rows = match action.as_str() {
+                            "prev" => -1,
+                            "next" => 1,
+                            "pageUp" => -page,
+                            "pageDown" => page,
+                            _ => 0,
+                        };
+                        self.mcp_view.scroll_error(rows);
+                        return false;
+                    }
+                    KeybindingResult::Pending | KeybindingResult::Unbound => return false,
+                    KeybindingResult::NoMatch if had_pending_chord => return false,
+                    _ => {}
+                }
+            }
             return self.handle_mcp_view_key(key);
         }
 
@@ -5151,7 +5368,7 @@ impl App {
 
         // Help overlay intercepts keys next
         if self.help_overlay.visible {
-            return self.handle_help_overlay_key(key);
+            return self.handle_help_overlay_key(key, binding, had_pending_chord);
         }
 
         // New history-search overlay
@@ -5877,9 +6094,21 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.mcp_view.close(),
             KeyCode::Tab | KeyCode::Left | KeyCode::Right => self.mcp_view.switch_pane(),
-            KeyCode::Up => self.mcp_view.select_prev(),
-            KeyCode::Down => self.mcp_view.select_next(),
-            KeyCode::Backspace => self.mcp_view.pop_search_char(),
+            KeyCode::Up
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.select_prev()
+            }
+            KeyCode::Down
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.select_next()
+            }
+            KeyCode::Backspace
+                if self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ErrorDetail =>
+            {
+                self.mcp_view.pop_search_char()
+            }
             KeyCode::Char('e') => self.mcp_view.toggle_error_detail(),
             KeyCode::Char('a')
                 if self.mcp_view.active_pane == crate::mcp_view::McpViewPane::ServerList =>
@@ -5901,7 +6130,11 @@ impl App {
             }
             KeyCode::Char(c)
                 if key.modifiers.is_empty()
-                    && self.mcp_view.active_pane != crate::mcp_view::McpViewPane::ServerList =>
+                    && matches!(
+                        self.mcp_view.active_pane,
+                        crate::mcp_view::McpViewPane::ToolList
+                            | crate::mcp_view::McpViewPane::ToolDetail
+                    ) =>
             {
                 self.mcp_view.push_search_char(c);
             }
@@ -6078,7 +6311,30 @@ impl App {
         }
     }
 
-    fn handle_help_overlay_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_help_overlay_key(
+        &mut self,
+        key: KeyEvent,
+        binding: KeybindingResult,
+        had_pending_chord: bool,
+    ) -> bool {
+        match binding {
+            KeybindingResult::Action(action) => {
+                match action.as_str() {
+                    "close" | "openHelp" => self.help_overlay.close(),
+                    "scrollUp" => self.help_overlay.scroll_up(),
+                    "scrollDown" => self.help_overlay.scroll_down(),
+                    "pageUp" => self.help_overlay.page_up(),
+                    "pageDown" => self.help_overlay.page_down(),
+                    "goStart" => self.help_overlay.scroll_to_top(),
+                    "goEnd" => self.help_overlay.scroll_to_bottom(),
+                    _ => {}
+                }
+                return false;
+            }
+            KeybindingResult::Pending | KeybindingResult::Unbound => return false,
+            KeybindingResult::NoMatch if had_pending_chord => return false,
+            KeybindingResult::NoMatch => {}
+        }
         match key.code {
             KeyCode::Esc | KeyCode::F(1) => {
                 self.help_overlay.close();
@@ -6089,13 +6345,6 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
                 self.help_overlay.close();
-            }
-            KeyCode::Up => {
-                self.help_overlay.scroll_up();
-            }
-            KeyCode::Down => {
-                let max = 50u16; // generous upper bound; renderer will clamp
-                self.help_overlay.scroll_down(max);
             }
             KeyCode::Backspace => {
                 self.help_overlay.pop_filter_char();
@@ -6174,6 +6423,7 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
+                        self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
                         self.push_notification(
@@ -6681,47 +6931,11 @@ impl App {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
             {
-                if !Self::bash_command_has_shell_control(prefix) {
+                if !claurst_core::permissions::bash_command_has_shell_control(prefix) {
                     self.bash_prefix_allowlist.insert(prefix.to_string());
                 }
             }
         }
-    }
-
-    fn bash_command_has_shell_control(command: &str) -> bool {
-        let mut chars = command.chars().peekable();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escaped = false;
-
-        while let Some(c) = chars.next() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-
-            // In bash, backslash does not escape characters inside single quotes.
-            if c == '\\' && !in_single_quote {
-                escaped = true;
-                continue;
-            }
-
-            match c {
-                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-                '"' if !in_single_quote => in_double_quote = !in_double_quote,
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r'
-                    if !in_single_quote && !in_double_quote =>
-                {
-                    return true;
-                }
-                '`' if !in_single_quote => return true,
-                '$' if !in_single_quote && chars.peek() == Some(&'(') => return true,
-                _ => {}
-            }
-        }
-
-        // Treat unterminated quotes / dangling escapes as unsafe.
-        escaped || in_single_quote || in_double_quote
     }
 
     fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
@@ -6744,7 +6958,7 @@ impl App {
     /// prefix allowlist.  Shell compound commands are never allowed by prefix;
     /// they must go through the normal permission dialog.
     pub fn bash_command_allowed_by_prefix(&self, command: &str) -> bool {
-        !Self::bash_command_has_shell_control(command)
+        !claurst_core::permissions::bash_command_has_shell_control(command)
             && self
                 .bash_prefix_allowlist
                 .iter()
@@ -7653,6 +7867,37 @@ impl App {
             else {
                 continue;
             };
+            let fetch_owner = self
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, message)| message.role == Role::Assistant)
+                .find_map(|(index, message)| {
+                    message
+                        .get_tool_use_blocks()
+                        .iter()
+                        .find_map(|block| match block {
+                            ContentBlock::ToolUse { id, name, .. } if id == &tool_use_id => {
+                                Some((index, name == claurst_core::constants::TOOL_NAME_WEB_FETCH))
+                            }
+                            _ => None,
+                        })
+                });
+            if let Some((index, true)) = fetch_owner {
+                let records = self.research_retrievals.entry(index).or_default();
+                if !is_error.unwrap_or(false) {
+                    if let Some(record) =
+                        claurst_tools::web_fetch::Retrieval::from_content(&content)
+                    {
+                        records.insert(tool_use_id.clone(), record);
+                    } else {
+                        records.remove(&tool_use_id);
+                    }
+                } else {
+                    records.remove(&tool_use_id);
+                }
+            }
             let result = match content {
                 claurst_core::types::ToolResultContent::Text(text) => text,
                 claurst_core::types::ToolResultContent::Blocks(blocks) => blocks
@@ -7713,6 +7958,7 @@ impl App {
                         input_json,
                         status: ToolStatus::Running,
                         output_preview: None,
+                        run: ToolRun::opening(),
                     });
                     self.tool_use_blocks.len() - 1
                 }
@@ -7744,13 +7990,12 @@ impl App {
     ) -> Vec<crate::application::PresentationEffect> {
         let mut effects = Vec::new();
         // A cancelled turn's backlog keeps arriving until the runtime settles.
-        // Its live output must not restart the turn on screen, or further
-        // interrupts would cancel again instead of reaching the exit sequence.
-        // The worker's durable messages and terminal events still apply.
-        if matches!(event, QueryEvent::Stream(_))
-            && self.renderer == crate::application::UiRenderer::Next
-            && self.cancellation != crate::application::TurnCancellation::Idle
-        {
+        // Its live output and tool starts must not restart the turn on screen,
+        // or further interrupts would cancel again instead of reaching the exit
+        // sequence. Tool starts are still recorded, and the worker's tool
+        // results, durable messages and terminal events still apply.
+        let cancelling = self.cancellation != crate::application::TurnCancellation::Idle;
+        if cancelling && matches!(event, QueryEvent::Stream(_)) {
             return effects;
         }
         // Auto-dismiss error modal when assistant responds
@@ -7763,7 +8008,9 @@ impl App {
 
         match event {
             QueryEvent::Stream(stream_evt) => {
-                self.close_response_reader();
+                if self.response_reader.local_text.is_none() {
+                    self.close_response_reader();
+                }
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
@@ -7816,19 +8063,32 @@ impl App {
                 tool_id,
                 input_json,
             } => {
-                if !self.is_streaming && self.spinner_verb.is_none() {
-                    let seed = self.frame_count as usize ^ (self.messages.len() * 17);
-                    self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                if !cancelling {
+                    if !self.is_streaming && self.spinner_verb.is_none() {
+                        let seed = self.frame_count as usize ^ (self.messages.len() * 17);
+                        self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                    }
+                    self.is_streaming = true;
+                    self.status_message = Some(format!("Running {}…", tool_name));
                 }
-                self.is_streaming = true;
-                self.status_message = Some(format!("Running {}…", tool_name));
                 let turn_index = self.current_user_turn_index();
+                // A call the cancel already interrupted keeps its row there; a
+                // repeated start must not add a live one beside it.
+                let interrupted = cancelling
+                    && self
+                        .interrupted_tools
+                        .iter()
+                        .any(|block| block.id == tool_id);
                 if let Some(existing) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
-                } else {
+                    existing.run = ToolRun {
+                        opened: existing.run.opened,
+                        ..ToolRun::default()
+                    };
+                } else if !interrupted {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
                         name: tool_name,
@@ -7836,6 +8096,7 @@ impl App {
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
+                        run: ToolRun::opening(),
                     });
                 }
                 self.invalidate_transcript();
@@ -7849,13 +8110,14 @@ impl App {
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
                 let preview = Self::tool_result_preview(&result);
-                if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
+                if let Some(block) = self.tool_row_mut(&tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
                     } else {
                         ToolStatus::Done
                     };
                     block.output_preview = Some(preview);
+                    block.run.finish(is_error);
                 }
                 self.invalidate_transcript();
                 if is_error {
@@ -7864,6 +8126,27 @@ impl App {
                     self.status_message = None;
                 }
                 self.refresh_turn_diff_from_history();
+            }
+
+            QueryEvent::ToolQueued { tool_id } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.queued = true;
+                    run.started_at = None;
+                }
+            }
+
+            QueryEvent::ToolRunning { tool_id } => {
+                // Its time starts now, not when the batch began with its hooks.
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.queued = false;
+                    run.started_at = Some(std::time::Instant::now());
+                }
+            }
+
+            QueryEvent::ToolFinished { tool_id, is_error } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.finish(is_error);
+                }
             }
 
             QueryEvent::TurnComplete {
@@ -7908,8 +8191,11 @@ impl App {
 
                 // Surface a clear "turn done" signal for long-running turns the
                 // user might have stepped away from. The faint "✽ Worked for Ns"
-                // status line is too quiet on its own.
-                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                // status line is too quiet on its own. A turn the user is
+                // cancelling gets none: they are here, and it settles as
+                // cancelled.
+                if !cancelled && !cancelling && turn_elapsed_secs >= self.completion_toast_min_secs
+                {
                     if self.completion_toast_enabled {
                         self.push_notification(
                             NotificationKind::Success,
@@ -8000,58 +8286,7 @@ impl App {
 
             self.poll_session_list();
 
-            // Drain voice transcription events (non-blocking).
-            // When the background recording/transcription task emits a
-            // TranscriptReady event we insert the text directly into the
-            // prompt so the user can review and submit it.
-            {
-                use claurst_core::voice::VoiceEvent;
-                let mut events = Vec::new();
-                if let Some(ref mut rx) = self.voice_event_rx {
-                    while let Ok(ev) = rx.try_recv() {
-                        events.push(ev);
-                    }
-                }
-                for ev in events {
-                    match ev {
-                        VoiceEvent::RecordingStarted => {
-                            self.voice_recording = true;
-                            self.status_message =
-                                Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
-                        }
-                        VoiceEvent::RecordingStopped => {
-                            self.voice_recording = false;
-                            self.status_message = Some("Transcribing\u{2026}".to_string());
-                        }
-                        VoiceEvent::TranscriptReady(text) => {
-                            if !text.is_empty() {
-                                // Append to existing prompt text with a space separator
-                                // so the user can combine voice + typed input.
-                                if !self.prompt_input.text.is_empty()
-                                    && !self.prompt_input.text.ends_with(' ')
-                                {
-                                    self.prompt_input.paste(" ");
-                                }
-                                self.prompt_input.paste(&text);
-                                self.refresh_prompt_input();
-                                self.status_message =
-                                    Some(format!("Transcribed: {}", &text[..text.len().min(60)]));
-                            }
-                            // Clear the channel once we have the result.
-                            self.voice_event_rx = None;
-                        }
-                        VoiceEvent::Error(msg) => {
-                            self.voice_recording = false;
-                            self.voice_event_rx = None;
-                            self.push_notification(
-                                NotificationKind::Warning,
-                                format!("Voice: {}", msg),
-                                Some(8),
-                            );
-                        }
-                    }
-                }
-            }
+            self.poll_voice_events();
 
             // Draw the frame, and immediately scan the *just-rendered*
             // buffer for URL runs. ratatui swaps its two buffers at the
@@ -8227,26 +8462,29 @@ impl App {
 }
 
 // Helper function to open a file in the user's external editor
-fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
+fn open_file_externally(
+    path: &std::path::Path,
+) -> std::io::Result<claurst_core::child_diagnostics::ExternalOpener> {
+    use claurst_core::child_diagnostics::ExternalOpener;
     // Try to open with the system's default application
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("/usr/bin/open")
-            .arg(path)
-            .spawn()?;
-        Ok(())
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg(path);
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open").arg(path).spawn()?;
-        Ok(())
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(path);
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = std::process::Command::new(
+        let mut command = tokio::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
@@ -8258,16 +8496,17 @@ fn open_file_externally(path: &std::path::Path) -> std::io::Result<()> {
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        command.spawn()?;
-        Ok(())
+        ExternalOpener::spawn(command)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         // Fallback for other systems: try common editors in order
         for editor in &["nano", "vi", "vim", "emacs"] {
-            match std::process::Command::new(editor).arg(path).spawn() {
-                Ok(_) => return Ok(()),
+            let mut command = tokio::process::Command::new(editor);
+            command.arg(path);
+            match ExternalOpener::spawn(command) {
+                Ok(opener) => return Ok(opener),
                 Err(_) => continue,
             }
         }
@@ -8305,6 +8544,27 @@ fn windows_system_root() -> std::ffi::OsString {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_reader_is_ephemeral_and_does_not_change_conversation() {
+        let mut app = make_app();
+        app.push_message(claurst_core::types::Message::user("ordinary transcript"));
+        let before = serde_json::to_string(&*app.messages).unwrap();
+        app.diagnostic_buffer = Some("Diagnostics (memory only)\nprivate-marker".into());
+        assert!(app.intercept_slash_command_with_args("status", "logs"));
+        assert!(app.response_reader.visible && app.response_reader.message_index.is_none());
+        assert!(app
+            .response_reader_text()
+            .unwrap()
+            .contains("private-marker"));
+        assert_eq!(serde_json::to_string(&*app.messages).unwrap(), before);
+        app.apply_query_event(QueryEvent::Stream(
+            claurst_api::AnthropicStreamEvent::MessageStop,
+        ));
+        assert!(app.response_reader.visible && app.response_reader.local_text.is_some());
+        app.close_response_reader();
+        assert!(app.response_reader.local_text.is_none());
+    }
+
     use super::test_env::EnvGuard;
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -10146,6 +10406,24 @@ role = "Research"
         assert!(!app.bash_command_allowed_by_prefix("git status"));
         assert!(!app.bash_command_allowed_by_prefix("ls -la"));
         assert!(!app.bash_command_allowed_by_prefix(""));
+    }
+
+    #[test]
+    fn test_bash_prefix_allowlist_refuses_commands_it_cannot_read() {
+        let mut app = make_app();
+        app.bash_prefix_allowlist.insert("cargo build".to_string());
+        assert!(app.bash_command_allowed_by_prefix("cargo build --release"));
+        for hostile in [
+            "cargo build # '\ntouch x # '",
+            "cargo build $'\\'' ; touch x ; echo \\'",
+            "cargo build $\\\n(touch x)",
+            r"cargo build ${x:=a\[\$\(touch\ x\)\]} $[x]",
+        ] {
+            assert!(
+                !app.bash_command_allowed_by_prefix(hostile),
+                "{hostile:?} needs its own approval"
+            );
+        }
     }
 
     #[test]

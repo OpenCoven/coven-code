@@ -107,5 +107,49 @@ class StreamingProfileTests(unittest.TestCase):
         self.assertEqual(perf.paint_gaps_ms([1.0]), [])
 
 
+class RenderTimingTests(unittest.TestCase):
+    def test_opt_in_sets_only_the_timing_trace(self):
+        self.assertEqual(perf.session_env("/h", "classic", render_timing=True)["RUST_LOG"],
+                         "warn,coven_code::render_timing=trace")
+        self.assertNotIn("RUST_LOG", perf.session_env("/h", "classic"))
+
+    def test_filters_renderer_dimensions_and_active_phase(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as home:
+            logs = Path(home) / ".coven-code/logs"
+            logs.mkdir(parents=True)
+            text = "TUI frame timing renderer=Next cols=80 rows=24 active=true render_ns=1250000 draw_ns=2000000\n"
+            (logs / "session-fixture.log").write_text(text + text.replace("active=true", "active=false"))
+            samples, errors = perf.read_render_timings(home, "next", 80, 24, True)
+            self.assertEqual(errors, [])
+            self.assertEqual(samples, [{"render_ms": 1.25, "draw_ms": 2.0}])
+            self.assertTrue(perf.read_render_timings(home, "classic", 80, 24, True)[1])
+            self.assertTrue(perf.read_render_timings(home, "next", 120, 40, True)[1])
+            (logs / "session-fixture.log").write_text("Earlier diagnostics discarded at the 1 MiB limit.\n" + text)
+            self.assertEqual(perf.read_render_timings(home, "next", 80, 24, True)[0], [])
+            self.assertIn("truncated", perf.read_render_timings(home, "next", 80, 24, True)[1][0])
+
+    def test_completed_frame_matches_only_new_input_and_dimensions(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as home:
+            session = perf.Session.__new__(perf.Session)
+            session.timing_dir = Path(home)
+            session.proc = type("Alive", (), {"poll": lambda self: None})()
+            session.read = lambda timeout: (b"", None)
+            path = Path(home) / "session-fixture.log"
+            row = "TUI frame timing renderer=Next cols=80 rows=24 active=true render_ns=1 draw_ns=2 input_chars={}\n"
+            path.write_text(row.format(1))
+            checkpoint = session.timing_checkpoint()
+            with path.open("a") as log:
+                log.write(row.format(2))
+            self.assertIsNotNone(session.wait_completed_frame(checkpoint, .02, input_chars=2, size=(80, 24), active=True))
+            self.assertIsNone(session.wait_completed_frame(checkpoint, .002, input_chars=1))
+            self.assertIsNone(session.wait_completed_frame(checkpoint, .002, input_chars=2, size=(120, 40)))
+
+    def test_missing_measurements_are_a_failure(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertTrue(perf.read_render_timings(home, "next", 80, 24, True)[1])
+
+
 if __name__ == "__main__":
     unittest.main()

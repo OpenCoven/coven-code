@@ -176,6 +176,10 @@ struct Cli {
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
 
+    /// Save bounded private diagnostic logs for this interactive session
+    #[arg(long = "diagnostics", action = ArgAction::SetTrue)]
+    diagnostics: bool,
+
     /// API key for the active provider (overrides provider-specific env vars)
     #[arg(long = "api-key")]
     api_key: Option<String>,
@@ -585,25 +589,30 @@ async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(log_filter)
         .with_target(false);
-    let diagnostic_log = if !is_headless
-        && !cli.dump_system_prompt
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        let directory = claurst_core::config::config_home().join("logs");
-        let log = diagnostics::DiagnosticLog::open(&directory).with_context(|| {
-            format!(
-                "Could not open private diagnostics in {}",
-                directory.display()
-            )
-        })?;
-        subscriber
-            .with_ansi(false)
-            .log_internal_errors(false)
-            .with_writer(log.clone())
-            .init();
+    let diagnostic_log = if !is_headless && !cli.dump_system_prompt {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let log = if cli.diagnostics {
+            let directory = claurst_core::config::config_home().join("logs");
+            diagnostics::DiagnosticLog::open(&directory).with_context(|| {
+                format!(
+                    "Could not open private diagnostics in {}",
+                    directory.display()
+                )
+            })?
+        } else {
+            diagnostics::DiagnosticLog::memory()
+        };
+        let subscriber = subscriber.with_ansi(false).log_internal_errors(false);
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            subscriber.with_writer(log.clone()).init();
+        } else {
+            // Explicit stderr redirection remains under the caller's control.
+            subscriber
+                .with_writer(log.clone().and(std::io::stderr))
+                .init();
+        }
         Some(log)
     } else {
-        // Keep headless stdout protocol-safe and respect explicit stderr redirection.
         subscriber
             .without_time()
             .with_writer(std::io::stderr)
@@ -1010,20 +1019,9 @@ async fn main() -> anyhow::Result<()> {
     apply_headless_review_query_defaults(&mut query_config, github_context.as_ref());
     let tools = filter_tools_for_hosted_review(tools, &config);
 
-    // Spawn the background cron scheduler (fires cron tasks at scheduled times).
-    // Cancelled automatically when the process exits since we use a shared token.
-    let cron_cancel = tokio_util::sync::CancellationToken::new();
-    if scoped_workspace.is_none() {
-        claurst_query::start_cron_scheduler(
-            client.clone(),
-            tools.clone(),
-            tool_ctx.clone(),
-            query_config.clone(),
-            cron_cancel.clone(),
-        );
-    }
-
-    // --print / headless mode
+    // --print / headless mode. No scheduled prompt runs here: a headless run is
+    // one turn under that turn's permission, and nothing a scheduled prompt did
+    // would reach the output stream.
     if is_headless {
         // Long-lived stream-json mode: the Coven runtime stream protocol.
         // Turns arrive as stdin JSON frames; the process exits on stdin EOF.
@@ -1046,7 +1044,6 @@ async fn main() -> anyhow::Result<()> {
                 resume_id: cli.resume.clone(),
             })
             .await;
-            cron_cancel.cancel();
             return run;
         }
 
@@ -1083,8 +1080,6 @@ async fn main() -> anyhow::Result<()> {
             cost_tracker,
         )
         .await;
-
-        cron_cancel.cancel();
 
         // If --output was requested, write the coven-github result envelope and,
         // for a real GitHub run, honor the exit-code contract
@@ -1155,6 +1150,16 @@ async fn main() -> anyhow::Result<()> {
         // Keyless Claude runs through the local `claude` CLI runtime.
         || claurst_api::providers::claude_cli::resolve_claude_binary().is_some()
         || config.provider.as_deref().is_some_and(|p| p != "anthropic");
+
+    // Interactive sessions fire scheduled prompts in the background.
+    let cron_cancel = tokio_util::sync::CancellationToken::new();
+    claurst_query::start_cron_scheduler(
+        client.clone(),
+        tools.clone(),
+        tool_ctx.clone(),
+        query_config.clone(),
+        cron_cancel.clone(),
+    );
     let result = run_interactive(
         config,
         settings,
@@ -2104,6 +2109,37 @@ async fn run_headless(
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
+/// The model call an approval request belongs to, or the request's own id
+/// when the call is unknown.
+fn permission_call_id(pending: &claurst_tools::PendingPermissionRequest) -> &str {
+    pending.call_id.as_deref().unwrap_or(&pending.tool_use_id)
+}
+
+/// The calls whose approval requests wait in the queue, behind the prompt on
+/// screen.
+fn queued_approval_calls(store: &claurst_tools::PendingPermissionStore) -> Vec<String> {
+    store
+        .queue
+        .iter()
+        .map(|pending| permission_call_id(pending).to_string())
+        .collect()
+}
+
+/// Settles a queued approval request that a rule now decides, often one an
+/// answer to an earlier prompt just made. Its row's wait on the user ends,
+/// but no answer is recorded beside it: a rule decided, as for requests a
+/// rule settles before they are queued.
+fn settle_queued_permission(
+    app: &mut claurst_tui::app::App,
+    mut pending: claurst_tools::PendingPermissionRequest,
+    decision: claurst_core::permissions::PermissionDecision,
+) {
+    app.restart_tool_time(permission_call_id(&pending));
+    if let Some(tx) = pending.decision_tx.take() {
+        let _ = tx.send(decision);
+    }
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -2136,6 +2172,37 @@ fn handle_bridge_permission_response(
     Some((pending.call_id.unwrap_or(pending.tool_use_id), allowed))
 }
 
+/// The command that reopens `session_id` from a fresh shell. A session kept
+/// anywhere but the standalone home names its home: the variables that chose
+/// it may not be set where the command is run.
+fn resume_command(
+    session_id: &str,
+    home: &std::path::Path,
+    standalone: Option<&std::path::Path>,
+) -> String {
+    let resume = format!("coven-code --resume {session_id}");
+    if standalone == Some(home) {
+        return resume;
+    }
+    let shown =
+        claurst_tui::application::view::terminal_safe(&home.to_string_lossy()).replace('\n', "^J");
+    format!("COVEN_CODE_HOME={} {resume}", shell_word(&shown))
+}
+
+/// `word` as one POSIX shell word: as it is when nothing in it is special,
+/// otherwise in single quotes.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@,%=".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
 fn permission_request_from_core(
     pending: &claurst_tools::PendingPermissionRequest,
 ) -> claurst_tui::dialogs::PermissionRequest {
@@ -2143,7 +2210,7 @@ fn permission_request_from_core(
     let tool_name = pending.request.tool_name.clone();
     let tool_use_id = pending.tool_use_id.clone();
 
-    match (tool_name.as_str(), pending.request.path.clone()) {
+    let mut request = match (tool_name.as_str(), pending.request.path.clone()) {
         ("Bash", Some(command)) => {
             let suggested_prefix = if command
                 .chars()
@@ -2189,7 +2256,9 @@ fn permission_request_from_core(
             reason,
             pending.request.path.clone(),
         ),
-    }
+    };
+    request.call_id = pending.call_id.clone();
+    request
 }
 
 /// One submitted logical turn, retained through failures and model-switch retries.
@@ -2428,7 +2497,7 @@ async fn settle_abandoned_turn(
             session,
             command_messages,
         ) {
-            persist_interactive_session(session, owner.as_ref()).await;
+            persist_interactive_session(session, owner.as_ref(), &mut app.notifications).await;
         }
         // Keep authority until the cancelled task has drained its partial output.
         if !query_running {
@@ -2458,6 +2527,39 @@ async fn stop_turn_for_exit(
         handle.abort();
     }
     messages.lock().await.clone()
+}
+
+/// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
+/// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
+/// it delivered, removing a goal continuation's synthetic prompt if no request
+/// for it was sent. The caller saves the session. Returns the report on the turn, taken before the
+/// stop, which can still deliver results; Next prints it from what was saved.
+async fn stop_turn_and_keep_it(
+    (handle, messages): (
+        tokio::task::JoinHandle<claurst_query::QueryOutcome>,
+        MessagesArc,
+    ),
+    queue: tokio::sync::mpsc::Receiver<claurst_tui::application::ScopedQueryEvent>,
+    goal_turn: &mut Option<InteractiveTurn>,
+    app: &mut claurst_tui::App,
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+    session: &mut claurst_core::history::ConversationSession,
+    command_messages: &mut Vec<claurst_core::types::Message>,
+) -> claurst_tui::next::TurnExitReport {
+    let exit_report = claurst_tui::next::TurnExitReport::capture(app);
+    abandon_interactive_turn(goal_turn, app, cancel);
+    let mut kept = stop_turn_for_exit(handle, &messages, queue, TURN_EXIT_WAIT).await;
+    session.messages = kept.clone();
+    session.updated_at = chrono::Utc::now();
+    rollback_unattempted_turn(
+        goal_turn.as_ref(),
+        false,
+        &mut kept,
+        app,
+        session,
+        command_messages,
+    );
+    exit_report
 }
 
 /// Tag one turn's events with its session generation and deliver them to the
@@ -2524,10 +2626,41 @@ impl InteractiveQuery {
     }
 }
 
+const SESSION_SAVE_WARNING: &str = "Session not saved; retry before exit.";
+
+async fn save_session_with_warning(
+    session: &claurst_core::history::ConversationSession,
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
+    operation: &str,
+) -> bool {
+    use claurst_tui::notifications::NotificationKind;
+    match claurst_core::history::save_session(session).await {
+        Ok(()) => {
+            notifications.notifications.retain(|notification| {
+                notification.kind != NotificationKind::Warning
+                    || notification.message != SESSION_SAVE_WARNING
+            });
+            true
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, operation, %error, "Failed to persist session");
+            notifications.push(
+                NotificationKind::Warning,
+                SESSION_SAVE_WARNING.to_owned(),
+                None,
+            );
+            false
+        }
+    }
+}
+
+/// Saves the transcript and indexes it for search. Returns whether the
+/// transcript was saved; indexing is best effort.
 async fn persist_interactive_session(
     session: &claurst_core::history::ConversationSession,
     owner: Option<&InteractiveTurn>,
-) {
+    notifications: &mut claurst_tui::notifications::NotificationQueue,
+) -> bool {
     // A recoverable preparation/auth failure can finish without an attempt.
     // Delay indexing its synthetic UUID until attempted; a later stale retry
     // can then roll it back without leaving an immutable search-index entry.
@@ -2540,7 +2673,7 @@ async fn persist_interactive_session(
         })
         .and_then(|owner| owner.synthetic_uuid.as_deref());
     // JSON is primary storage; index only the finalized transcript.
-    let _ = claurst_core::history::save_session(session).await;
+    let saved = save_session_with_warning(session, notifications, "transcript update").await;
 
     // Also index into SQLite for /search support
     {
@@ -2574,6 +2707,7 @@ async fn persist_interactive_session(
             }
         }
     }
+    saved
 }
 
 fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
@@ -3120,8 +3254,14 @@ async fn run_interactive(
         None => claurst_tui::application::SessionOwnership::EngineLocal,
     };
     if let Some(log) = &diagnostic_log {
+        app.diagnostic_log_path = log.path().map(std::path::Path::to_path_buf);
+        app.diagnostic_buffer = log.take_snapshot();
+        let location = log
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "memory only; not saved".into());
         app.push_system_message(
-            format!("Diagnostics: {}", log.path().display()),
+            format!("Diagnostics: {location} · /status logs"),
             claurst_tui::app::SystemMessageStyle::Info,
         );
     }
@@ -3384,11 +3524,16 @@ async fn run_interactive(
     let mut memory_poll = MemoryPoll::default();
     'main: loop {
         if let Some(log) = &diagnostic_log {
+            if let Some(snapshot) = log.take_snapshot() {
+                app.diagnostic_buffer = Some(snapshot);
+            }
             if let Some(error) = log.take_error() {
                 app.push_system_message(
                     format!(
                         "Diagnostic logging stopped: {error}. File: {}",
-                        log.path().display()
+                        log.path()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "memory only".into())
                     ),
                     claurst_tui::app::SystemMessageStyle::Warning,
                 );
@@ -3402,6 +3547,7 @@ async fn run_interactive(
             app.poll_session_list();
         }
         app.notifications.tick();
+        app.poll_voice_events();
 
         if handle_file_preparation(&mut app, &mut goal_turn) {
             continue;
@@ -3433,11 +3579,37 @@ async fn run_interactive(
             suspend_job(&mut terminal, &mut app, renderer)?;
         }
 
-        // Draw the UI
-        terminal.draw(|f| match renderer {
-            claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
-            claurst_tui::application::UiRenderer::Next => claurst_tui::next::render_next(f, &app),
+        // Opt-in trace timing separates widget/layout work from completed draw
+        // (including backend diff and terminal writes). No content is recorded.
+        let measure_frame =
+            tracing::enabled!(target: "coven_code::render_timing", tracing::Level::TRACE);
+        let draw_started = measure_frame.then(std::time::Instant::now);
+        let mut render_elapsed = None;
+        let mut cells = (0, 0);
+        terminal.draw(|f| {
+            let render_started = measure_frame.then(std::time::Instant::now);
+            let area = f.area();
+            cells = (area.width, area.height);
+            match renderer {
+                claurst_tui::application::UiRenderer::Classic => render_app(f, &app),
+                claurst_tui::application::UiRenderer::Next => {
+                    claurst_tui::next::render_next(f, &app)
+                }
+            }
+            render_elapsed = render_started.map(|start| start.elapsed());
         })?;
+        if let (Some(draw_started), Some(render_elapsed)) = (draw_started, render_elapsed) {
+            let draw_elapsed = draw_started.elapsed();
+            tracing::trace!(
+                target: "coven_code::render_timing",
+                renderer = ?renderer, cols = cells.0, rows = cells.1,
+                active = app.is_streaming,
+                render_ns = render_elapsed.as_nanos(), draw_ns = draw_elapsed.as_nanos(),
+                input_chars = app.prompt_input.text.chars().count(),
+                scroll_offset = app.scroll_offset, follow = app.auto_scroll,
+                "TUI frame timing"
+            );
+        }
         app.settle_scroll_anchor();
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
@@ -3546,6 +3718,11 @@ async fn run_interactive(
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
+                        let (name, args) = claurst_tui::input::parse_slash_command(&input);
+                        if name.eq_ignore_ascii_case("status") && args.trim() == "logs" {
+                            app.intercept_slash_command_with_args("status", "logs");
+                            continue;
+                        }
                         if !input.is_empty() {
                             let preview: String = input.chars().take(40).collect();
                             app.queued_messages.push_back(input);
@@ -3721,8 +3898,9 @@ async fn run_interactive(
                             // Always runs — some commands need BOTH (e.g. /clear clears
                             // app state via TUI AND the messages vec via CLI).
                             cmd_ctx.messages = messages.clone();
-                            let picker_only = canonical_path.as_deref() == Some("session resume")
-                                && cmd_args.split_whitespace().count() == 1;
+                            let picker_only = (canonical_path.as_deref() == Some("session resume")
+                                && cmd_args.split_whitespace().count() == 1)
+                                || canonical_path.as_deref() == Some("status logs");
                             let cli_result = if handled_by_tui && (canonical_path.is_none() || picker_only) {
                                 None
                             } else {
@@ -3839,13 +4017,21 @@ async fn run_interactive(
                                     session.updated_at = chrono::Utc::now();
                                     cmd_ctx.session_title = session.title.clone();
                                     if app.renderer == claurst_tui::application::UiRenderer::Next {
-            app.session_title = session.title.clone();
-        }
-                                    let _ = claurst_core::history::save_session(&session).await;
+                                        app.session_title = session.title.clone();
+                                    }
+                                    let saved = save_session_with_warning(
+                                        &session,
+                                        &mut app.notifications,
+                                        "rename",
+                                    )
+                                    .await;
                                     let shown = claurst_tui::terminal_title_topic(renderer, &title);
                                     claurst_tui::update_terminal_title(Some(&shown));
-                                    app.status_message =
-                                        Some(format!("Session renamed to \"{}\".", title));
+                                    app.status_message = Some(if saved {
+                                        format!("Session renamed to \"{}\".", title)
+                                    } else {
+                                        "Session renamed in memory; not saved.".to_owned()
+                                    });
                                 }
                                 Some(CommandResult::RefreshProviderState) => {
                                     if app.is_streaming || current_query.is_some() {
@@ -4155,7 +4341,7 @@ async fn run_interactive(
 
                         if rollback_unattempted_turn(goal_turn.as_ref(), true, &mut messages,
                             &mut app, &mut session, &mut cmd_ctx.messages) {
-                            persist_interactive_session(&session, goal_turn.as_ref()).await;
+                            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
                         }
                         app.rate_limit_recovery.dismiss();
                         app.rate_limit_recovery.take_abandoned();
@@ -4503,10 +4689,9 @@ async fn run_interactive(
                                                     claurst_core::config::Settings::load_sync(
                                                     ).unwrap_or_default();
                                                 if let Some(path) = selected_path.as_deref() {
-                                                    let pattern = format!("{}*", path);
                                                     let _ = manager.add_persistent_allow_path(
                                                         &pending.request.tool_name,
-                                                        &pattern,
+                                                        path,
                                                         &mut settings,
                                                     );
                                                 } else {
@@ -4603,7 +4788,7 @@ async fn run_interactive(
         if app.permission_request.is_none() {
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
-                let Some(mut pending) = next_pending else {
+                let Some(pending) = next_pending else {
                     break;
                 };
 
@@ -4652,14 +4837,20 @@ async fn run_interactive(
                             .insert(tool_use_id, pending);
                         break;
                     }
-                    Some(decision) => {
-                        if let Some(tx) = pending.decision_tx.take() {
-                            let _ = tx.send(decision);
-                        }
-                    }
+                    Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
         }
+        app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
+
+        // A worker joins its forwarder before it finishes, so one seen finished
+        // here has queued every event it produced, and the drain below takes
+        // them all. Checked after the drain instead, a worker could finish in
+        // between and leave events queued; once its cancel is settled they
+        // would restart the turn on screen.
+        let task_finished = current_query
+            .as_ref()
+            .is_some_and(|(handle, _)| handle.is_finished());
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
         while let Ok(scoped) = event_rx.try_recv() {
@@ -4852,7 +5043,12 @@ async fn run_interactive(
                         // Persist the session URL into the saved session record.
                         session.remote_session_url = Some(session_url.clone());
                         session.updated_at = chrono::Utc::now();
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote connection",
+                        )
+                        .await;
 
                         // Wire the BridgeSessionInfo relay so live tool/text events reach
                         // the web UI via /api/bridge/sessions. This runs alongside
@@ -4934,14 +5130,7 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-                        if current_query.is_some()
-                            && app.renderer == claurst_tui::application::UiRenderer::Next
-                        {
-                            app.note_cancellation_sent();
-                            app.interrupt_tool_rows();
-                        }
-                        app.is_streaming = false;
-                        app.status_message = Some("Cancelled by remote control.".to_string());
+                        app.note_cancellation_sent(current_query.is_some());
                     }
                     Ok(TuiBridgeEvent::PermissionResponse {
                         tool_use_id,
@@ -4962,7 +5151,12 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                         cmd_ctx.session_title = Some(title.clone());
                         app.session_title = Some(title);
-                        let _ = claurst_core::history::save_session(&session).await;
+                        save_session_with_warning(
+                            &session,
+                            &mut app.notifications,
+                            "remote rename",
+                        )
+                        .await;
                     }
                     Ok(TuiBridgeEvent::Error(msg)) => {
                         app.bridge_state = BridgeConnectionState::Failed {
@@ -5028,7 +5222,8 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             ) {
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
             }
             app.rate_limit_recovery.dismiss();
             app.rate_limit_recovery.take_abandoned();
@@ -5447,12 +5642,7 @@ async fn run_interactive(
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
         }
 
-        // Check if query task is done; sync messages from the task
-        let task_finished = current_query
-            .as_ref()
-            .map(|(h, _)| h.is_finished())
-            .unwrap_or(false);
-
+        // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
                 // Get the outcome and handle errors
@@ -5541,7 +5731,8 @@ async fn run_interactive(
                     &mut cmd_ctx.messages,
                 );
                 *msgs_arc.lock().await = messages.clone();
-                persist_interactive_session(&session, goal_turn.as_ref()).await;
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
 
                 // --- Goal continuation ---
                 // After every completed turn check if there is an active goal.
@@ -5763,26 +5954,45 @@ async fn run_interactive(
     // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
     // Still join the worker if restoration fails, then report that error below.
     let terminal_result = restore_terminal(&mut terminal);
-    // Quitting mid-turn stops the worker and keeps what it delivered. Next only:
-    // Classic keeps its existing exit.
-    if app.renderer == claurst_tui::application::UiRenderer::Next {
-        if let Some((handle, msgs_arc)) = current_query.take() {
-            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-            messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
-            session.messages = messages.clone();
-            session.updated_at = chrono::Utc::now();
-            session.model =
-                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
-            session.working_dir = Some(tool_ctx.working_dir.display().to_string());
-            rollback_unattempted_turn(
-                goal_turn.as_ref(),
-                false,
-                &mut messages,
-                &mut app,
-                &mut session,
-                &mut cmd_ctx.messages,
-            );
-            persist_interactive_session(&session, goal_turn.as_ref()).await;
+    // Quitting mid-turn stops the worker and saves what it delivered, in both
+    // renderers. Only Next reports on the turn afterwards (#408).
+    if let Some(query) = current_query.take() {
+        session.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+        session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+        let exit_report = stop_turn_and_keep_it(
+            query,
+            event_rx,
+            &mut goal_turn,
+            &mut app,
+            &cancel,
+            &mut session,
+            &mut cmd_ctx.messages,
+        )
+        .await;
+        let saved =
+            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+        if app.renderer == claurst_tui::application::UiRenderer::Next {
+            for line in exit_report.lines(&session.messages) {
+                println!("{line}");
+            }
+            // The in-app warning is gone once the terminal is restored, and an
+            // earlier save on disk would lack this turn. Stopping compaction
+            // leaves the copy saved when the last turn ended complete.
+            if !saved && exit_report.is_turn() {
+                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
+            } else if !saved {
+                eprintln!("Session not saved.");
+            } else if !session.messages.is_empty() {
+                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+                println!(
+                    "Pick it up with: {}",
+                    resume_command(
+                        &session.id,
+                        &claurst_core::config::Settings::config_dir(),
+                        standalone.as_deref(),
+                    )
+                );
+            }
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -6518,6 +6728,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_worker_seen_finished_before_a_drain_leaves_no_event_behind() {
+        // A model of the interactive loop's order each pass, around the real
+        // forwarder (`run_interactive` itself is out of reach of a unit
+        // test): check whether the worker has finished, drain the queue, do
+        // other awaited work, and only then handle a finished worker and
+        // settle its cancel. A worker finishes only once its forwarder has
+        // queued everything, so after a pass that saw it finished nothing of
+        // its turn can arrive any more.
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut queue) = tokio::sync::mpsc::channel(1);
+        for n in 0..3 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let handle = tokio::spawn(async move {
+            forward_scoped_events(turn_rx, events, Default::default()).await;
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let mut drained = 0;
+        loop {
+            let task_finished = handle.is_finished();
+            while queue.try_recv().is_ok() {
+                drained += 1;
+            }
+            // The awaited work between the drain and the settle lets the
+            // forwarder deliver more and the worker finish.
+            tokio::task::yield_now().await;
+            if task_finished {
+                break;
+            }
+        }
+        assert_eq!(drained, 3, "every event was applied before the settle");
+        assert!(queue.try_recv().is_err(), "nothing is left to arrive later");
+    }
+
+    #[tokio::test]
     async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
         let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events, queue) = tokio::sync::mpsc::channel(1);
@@ -6546,6 +6794,224 @@ mod tests {
         .await
         .expect("a closed queue must free the worker, not run out the wait");
         assert_eq!(kept.len(), 1);
+    }
+
+    /// #408: quitting during a turn stops it and keeps the prompt and the
+    /// output it delivered. The exit block calls `stop_turn_and_keep_it` in
+    /// either renderer, and it does not read the renderer; case 27 checks
+    /// that Classic's exit reaches it.
+    #[tokio::test]
+    async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (worker_messages, worker_token) = (messages.clone(), token.clone());
+        // Delivers its partial answer once cancelled, and not before.
+        let handle = tokio::spawn(async move {
+            worker_token.cancelled().await;
+            worker_messages
+                .lock()
+                .await
+                .push(claurst_core::types::Message::assistant(
+                    "partial answer".to_string(),
+                ));
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(token.clone()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert!(token.is_cancelled(), "the turn is cancelled");
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a turn that stops is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| (message.role.clone(), message.get_all_text()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (claurst_core::types::Role::User, "the prompt".to_string()),
+                (
+                    claurst_core::types::Role::Assistant,
+                    "partial answer".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// #408: quitting waits up to `TURN_EXIT_WAIT` for a turn that ignores
+    /// the stop, then keeps its prompt.
+    #[tokio::test]
+    async fn quitting_mid_turn_waits_out_a_turn_that_ignores_the_stop_then_keeps_its_prompt() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let handle = tokio::spawn(std::future::pending::<claurst_query::QueryOutcome>());
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut None,
+                &mut app,
+                &Some(tokio_util::sync::CancellationToken::new()),
+                &mut session,
+                &mut Vec::new(),
+            ),
+        )
+        .await
+        .expect("quitting waits for the turn only up to its bound");
+
+        assert!(
+            started.elapsed() >= TURN_EXIT_WAIT,
+            "the turn gets its full chance to stop"
+        );
+        assert_eq!(session.messages.len(), 1, "the prompt is kept");
+    }
+
+    /// #408: a worker that does not watch the token, as auto-compaction does
+    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. This models the compaction
+    /// worker's shape, not `compact_conversation` itself.
+    #[tokio::test]
+    async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        app.auto_compact_running = true;
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let worker_messages = messages.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let summary = claurst_core::types::Message::assistant("the summary".to_string());
+            *worker_messages.lock().await = vec![summary.clone()];
+            claurst_query::QueryOutcome::EndTurn {
+                message: summary,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        let report = stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(tokio_util::sync::CancellationToken::new()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert!(!report.is_turn(), "compaction gets no turn report");
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a worker that finishes is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| message.get_all_text())
+            .collect();
+        assert_eq!(kept, ["the summary"]);
+    }
+
+    /// #408: quitting during a goal continuation that never sent a request
+    /// removes its synthetic prompt from what is saved, and keeps it once a
+    /// request was sent.
+    #[tokio::test]
+    async fn quitting_drops_a_goal_continuations_prompt_only_if_no_request_was_sent() {
+        for sent in [false, true] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let store = claurst_core::GoalStore::open(&dir.path().join("goals.sqlite"))
+                .expect("goal store");
+            let mut session = claurst_core::history::ConversationSession::new("model".into());
+            store
+                .set_goal(&session.id, "the objective", None)
+                .expect("goal");
+            let turn = store
+                .capture_active_goal(&session.id)
+                .expect("capture")
+                .expect("active goal");
+            if sent {
+                turn.mark_request_attempted();
+            }
+            let mut goal_turn = Some(InteractiveTurn::from_goal(turn, 0));
+            let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+            app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+            let mut conversation = vec![claurst_core::types::Message::user("earlier".to_string())];
+            goal_turn
+                .as_mut()
+                .expect("goal turn")
+                .inject(
+                    "continue the goal".to_string(),
+                    &mut conversation,
+                    &mut app,
+                    &mut session,
+                )
+                .expect("inject");
+            let mut command_messages = conversation.clone();
+            let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(conversation));
+            let token = tokio_util::sync::CancellationToken::new();
+            let worker_token = token.clone();
+            let handle = tokio::spawn(async move {
+                worker_token.cancelled().await;
+                claurst_query::QueryOutcome::Cancelled
+            });
+            let (_events, queue) = tokio::sync::mpsc::channel(1);
+
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut goal_turn,
+                &mut app,
+                &Some(token),
+                &mut session,
+                &mut command_messages,
+            )
+            .await;
+
+            let saved: Vec<_> = session
+                .messages
+                .iter()
+                .map(|message| message.get_all_text())
+                .collect();
+            let expected: &[&str] = if sent {
+                &["earlier", "continue the goal"]
+            } else {
+                &["earlier"]
+            };
+            assert_eq!(saved, expected, "request sent: {sent}");
+            assert_eq!(
+                command_messages.len(),
+                expected.len(),
+                "request sent: {sent}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6642,6 +7108,67 @@ mod tests {
     }
 
     #[test]
+    fn next_shows_the_call_that_asked_for_approval_as_awaiting_it() {
+        // The request's own id is synthetic; the model's call id is what the
+        // tool row is keyed by.
+        let (mut pending, _decision) = bridge_permission_fixture("perm-session-0");
+        pending.call_id = Some("call-1".into());
+        let mut app = claurst_tui::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        app.renderer = claurst_tui::application::UiRenderer::Next;
+        let scope = claurst_tui::application::SessionScope::default();
+        scope.apply(
+            &mut app,
+            claurst_tui::application::ScopedQueryEvent {
+                generation: scope.current(),
+                event: claurst_query::QueryEvent::ToolStart {
+                    tool_name: "Write".into(),
+                    tool_id: "call-1".into(),
+                    input_json: r#"{"file_path":"example.txt"}"#.into(),
+                },
+            },
+        );
+        app.permission_request = Some(permission_request_from_core(&pending).guarded());
+
+        let view = claurst_tui::application::view::TranscriptView::project(&app);
+        assert_eq!(
+            view.tools[0].state,
+            claurst_tui::application::view::ToolActivityState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn the_way_back_names_any_home_but_the_standalone_one() {
+        let standalone = std::path::Path::new("/home/me/.coven-code");
+        assert_eq!(
+            resume_command("s-1", standalone, Some(standalone)),
+            "coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/home/me/.coven/code"),
+                Some(standalone)
+            ),
+            "COVEN_CODE_HOME=/home/me/.coven/code coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command("s-1", std::path::Path::new("/tmp/it's here"), None),
+            r"COVEN_CODE_HOME='/tmp/it'\''s here' coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/tmp/a\u{1b}]0;x\u{7}\nb"),
+                None
+            ),
+            "COVEN_CODE_HOME='/tmp/a^[]0;x^G^Jb' coven-code --resume s-1"
+        );
+    }
+
+    #[test]
     fn bridge_permission_response_delivers_decision() {
         use claurst_bridge::PermissionResponseKind as Response;
         use claurst_core::permissions::PermissionDecision as Decision;
@@ -6683,6 +7210,53 @@ mod tests {
                 handle_bridge_permission_response(&mut dialog, &mut store, "perm-1", response);
 
             assert_eq!(decided, Some((expected.0.to_string(), expected.1)));
+        }
+    }
+
+    #[test]
+    fn a_queued_request_a_rule_decides_ends_its_rows_wait_without_an_answer() {
+        use claurst_core::permissions::PermissionDecision as Decision;
+
+        for (call_id, decision, row) in [
+            (Some("toolu_model"), Decision::Allow, "toolu_model"),
+            (Some("toolu_model"), Decision::Deny, "toolu_model"),
+            (None, Decision::AllowPermanently, "perm-1"),
+            (None, Decision::DenyPermanently, "perm-1"),
+        ] {
+            let mut app = claurst_tui::app::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            for event in [
+                claurst_query::QueryEvent::ToolStart {
+                    tool_name: "WebFetch".to_string(),
+                    tool_id: row.to_string(),
+                    input_json: "{}".to_string(),
+                },
+                claurst_query::QueryEvent::ToolRunning {
+                    tool_id: row.to_string(),
+                },
+            ] {
+                app.handle_query_event(event);
+            }
+            let waited = std::time::Duration::from_secs(60);
+            app.tool_use_blocks[0].run.started_at = Some(std::time::Instant::now() - waited);
+            let (mut pending, mut rx) = bridge_permission_fixture("perm-1");
+            pending.call_id = call_id.map(str::to_string);
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.queue.push_back(pending);
+            assert_eq!(queued_approval_calls(&store), [row]);
+
+            settle_queued_permission(&mut app, store.queue.pop_front().unwrap(), decision.clone());
+
+            assert_eq!(rx.try_recv(), Ok(decision));
+            let started = app.tool_use_blocks[0].run.started_at.unwrap();
+            assert!(started.elapsed() < waited, "its wait is not its work");
+            assert!(
+                app.permission_decisions.is_empty(),
+                "a rule decided, not an answer"
+            );
+            assert!(queued_approval_calls(&store).is_empty());
         }
     }
 
@@ -7739,3 +8313,6 @@ mod tests {
 
 #[cfg(test)]
 mod goal_dispatch_tests;
+
+#[cfg(test)]
+mod session_save_tests;

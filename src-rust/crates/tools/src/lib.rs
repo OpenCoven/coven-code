@@ -193,6 +193,8 @@ pub enum PermissionLevel {
     None,
     /// Read-only access to the filesystem or network.
     ReadOnly,
+    /// Network access requiring authority, separate from unrestricted reads.
+    Network,
     /// Write access to the filesystem.
     Write,
     /// Arbitrary command execution.

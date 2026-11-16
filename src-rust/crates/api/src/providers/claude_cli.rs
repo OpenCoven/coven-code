@@ -8,11 +8,21 @@
 // clients, so auth stays inside the CLI that owns it.
 //
 // Delegation model: the CLI runs its own agent loop (tools, permissions,
-// context) in the current working directory. This provider forwards the
+// context) in the current working directory. When Coven starts the
+// engine it supplies the permission policy for that loop
+// (`claude_cli_policy.rs`). This provider forwards the
 // user's prompt (with any pasted images as standard Anthropic image blocks),
 // streams Claude's text back, and renders the CLI's tool activity as
 // one-line notices. It never emits `ToolUse` blocks, so the
 // query loop treats every turn as self-contained (`end_turn`).
+//
+// Liveness: the CLI prints nothing while one of its tools runs or while it
+// waits on a long reply, and those silences routinely outlast the query
+// loop's stream stall timeout. A stalled HTTP stream is retried; a "stalled"
+// CLI turn would be killed mid-tool and its prompt run again. So while the
+// CLI process is alive and quiet, the stream sends `StreamEvent::Ping`, the
+// same keepalive the HTTP transport forwards, and the stall timeout is left
+// to mean what it says: nothing is there to answer.
 //
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
 // cached per process and replayed via `--resume` on follow-up turns. A fresh
@@ -24,15 +34,15 @@ use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use async_stream::stream;
 use async_trait::async_trait;
+use claurst_core::config::PermissionMode;
 use claurst_core::provider_id::ProviderId;
 use claurst_core::types::{ContentBlock, Message, MessageContent, Role, UsageInfo};
 use futures::Stream;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
@@ -44,10 +54,18 @@ use crate::provider_types::{
     StreamEvent, SystemPromptStyle,
 };
 
+mod stderr;
+use stderr::StderrDrain;
+
 /// Env var overriding the `claude` binary location.
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
 
 const INSTALL_HINT: &str = "claude CLI not found — install with `npm install -g @anthropic-ai/claude-code`, sign in by running `claude`, and ensure it is on PATH (or set COVEN_CODE_CLAUDE_BIN)";
+
+/// How often a quiet, running CLI turn tells the consumer it is still alive.
+/// Well inside the query loop's 45-second stall timeout, so a late tick
+/// cannot let it fire.
+const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The `claude` session id carried across turns within this process.
 static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -107,25 +125,71 @@ fn last_user_text(request: &ProviderRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Image blocks from the latest user message, forwarded to the CLI alongside
-/// the text prompt. Images from earlier turns are not re-sent: on a resumed
-/// session the CLI already has them, and on a flattened restart they are gone
-/// with the rest of the non-text content.
-fn last_user_images(request: &ProviderRequest) -> Vec<ContentBlock> {
-    request
+/// Preserve the latest turn's text/image order. A resumed CLI already owns
+/// earlier images; a restart retains the existing text-only history fallback.
+fn current_turn_content(request: &ProviderRequest, include_history: bool) -> Vec<ContentBlock> {
+    let Some(index) = request
         .messages
         .iter()
-        .rev()
-        .find(|message| matches!(message.role, Role::User))
-        .map(|message| match &message.content {
-            MessageContent::Blocks(blocks) => blocks
+        .rposition(|message| matches!(message.role, Role::User))
+    else {
+        return vec![ContentBlock::Text {
+            text: String::new(),
+        }];
+    };
+    let current = &request.messages[index];
+    let blocks = match &current.content {
+        MessageContent::Blocks(blocks)
+            if blocks
                 .iter()
-                .filter(|block| matches!(block, ContentBlock::Image { .. }))
-                .cloned()
-                .collect(),
-            MessageContent::Text(_) => Vec::new(),
-        })
-        .unwrap_or_default()
+                .any(|block| matches!(block, ContentBlock::Image { .. })) =>
+        {
+            blocks
+        }
+        _ => {
+            return vec![ContentBlock::Text {
+                text: if include_history {
+                    flattened_transcript(request)
+                } else {
+                    last_user_text(request)
+                },
+            }]
+        }
+    };
+    let mut content = Vec::new();
+    if include_history {
+        let earlier = request.messages[..index]
+            .iter()
+            .filter_map(|message| {
+                let text = message_text(message);
+                if text.is_empty() {
+                    return None;
+                }
+                let role = match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                Some(format!("{role}: {text}"))
+            })
+            .collect::<Vec<_>>();
+        if !earlier.is_empty() {
+            content.push(ContentBlock::Text { text: format!(
+                "<conversation-so-far>\nThe session was restarted; this is the conversation before the current message.\n{}\n</conversation-so-far>\n\n",
+                earlier.join("\n")) });
+        }
+    }
+    content.extend(
+        blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { .. } | ContentBlock::Image { .. }
+                )
+            })
+            .cloned(),
+    );
+    content
 }
 
 /// Flatten the whole transcript into one prompt for sessions that cannot be
@@ -170,7 +234,16 @@ fn flattened_transcript(request: &ProviderRequest) -> String {
 
 /// Argv after the binary, mirroring the coven-runtimes adapter manifest
 /// contract for Claude Code.
-fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
+///
+/// The CLI runs its own tools, so the turn's permission mode must reach it as
+/// the CLI's own `--permission-mode`; without one, the CLI's settings decide
+/// and can widen a read-only turn. A request that names no mode runs as `plan`.
+fn build_args(
+    model: &str,
+    resume: Option<&str>,
+    permission: Option<&PermissionMode>,
+) -> Vec<String> {
+    let permission_mode = cli_permission_mode(permission);
     let mut args = vec![
         "-p".to_string(),
         "--input-format".to_string(),
@@ -178,6 +251,8 @@ fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        permission_mode.to_string(),
     ];
     if !model.is_empty() {
         args.push("--model".to_string());
@@ -190,23 +265,25 @@ fn build_args(model: &str, resume: Option<&str>) -> Vec<String> {
     args
 }
 
-/// The single stream-json stdin line carrying the user prompt. Image blocks
-/// ride along in the same Anthropic wire shape the API takes, placed before
-/// the text to match the direct `anthropic.rs` path.
-fn stdin_line(prompt: &str, images: &[ContentBlock]) -> String {
-    let mut content: Vec<Value> = images
-        .iter()
-        .filter_map(|block| serde_json::to_value(block).ok())
-        .collect();
-    if !prompt.is_empty() || content.is_empty() {
-        content.push(json!({"type": "text", "text": prompt}));
+/// The CLI's name for a turn's permission mode. A request that names no mode
+/// runs as `plan`.
+fn cli_permission_mode(permission: Option<&PermissionMode>) -> &'static str {
+    match permission {
+        Some(PermissionMode::BypassPermissions) => "bypassPermissions",
+        Some(PermissionMode::AcceptEdits) => "acceptEdits",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::Plan) | None => READ_ONLY_CLI_MODE,
     }
+}
+
+/// The CLI mode a read-only turn runs in.
+const READ_ONLY_CLI_MODE: &str = "plan";
+
+/// The single stream-json stdin line carrying ordered current-turn blocks.
+fn stdin_line(content: &[ContentBlock]) -> String {
     let envelope = json!({
         "type": "user",
-        "message": {
-            "role": "user",
-            "content": content,
-        },
+        "message": { "role": "user", "content": content },
     });
     format!("{}\n", envelope)
 }
@@ -439,14 +516,13 @@ impl EnvelopeMapper {
 
 /// A spawned CLI turn: the child process, its buffered stdout, the first
 /// stdout line (already consumed during the init handshake), and the shared
-/// stderr accumulator, plus the owned stdin writer and stderr reader tasks.
+/// bounded stderr drain, plus the owned stdin writer.
 struct CliTurn {
     child: Child,
     stdin_writer: JoinSet<()>,
     stdout: BufReader<ChildStdout>,
     first_line: String,
-    stderr: Arc<Mutex<String>>,
-    stderr_tasks: JoinSet<()>,
+    stderr: StderrDrain,
 }
 
 /// Result of launching one CLI turn. `CliTurn` is boxed to keep the variant
@@ -456,16 +532,8 @@ enum SpawnOutcome {
     /// The process exited before emitting any stdout — a stale `--resume`
     /// session or a startup failure; stderr explains which.
     ExitedEarly {
-        stderr: Arc<Mutex<String>>,
-        stderr_tasks: JoinSet<()>,
+        stderr: String,
     },
-}
-
-/// Give the background stderr drain a beat to finish after the child exits,
-/// then take whatever it collected.
-async fn collect_stderr(stderr: &Arc<Mutex<String>>) -> String {
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    stderr.lock().trim().to_string()
 }
 
 pub struct ClaudeCliProvider {
@@ -473,6 +541,8 @@ pub struct ClaudeCliProvider {
     /// Resolved lazily so construction never fails; a missing binary
     /// surfaces the install hint when a turn is actually attempted.
     binary: Option<PathBuf>,
+    /// See [`HEARTBEAT_PERIOD`]. A field so tests need not wait for it.
+    heartbeat: std::time::Duration,
     goal_authority: Option<(
         claurst_core::goal::GoalTurn,
         claurst_core::goal::GoalTurnPermission,
@@ -490,6 +560,7 @@ impl ClaudeCliProvider {
         Self {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: resolve_claude_binary(),
+            heartbeat: HEARTBEAT_PERIOD,
             goal_authority: None,
         }
     }
@@ -520,13 +591,30 @@ impl ClaudeCliProvider {
     async fn spawn_turn(
         &self,
         model: &str,
-        prompt: &str,
-        images: &[ContentBlock],
+        content: &[ContentBlock],
         resume: Option<&str>,
+        permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
+        // Coven's permission policy, when Coven started this engine. Without
+        // it the CLI would run under whatever the operator's and the
+        // workspace's own settings files allow. The policy never names a
+        // permission mode: `build_args` passes the turn's own. A read-only
+        // turn gets the policy without its allow rules, which the CLI would
+        // otherwise apply in plan mode as well.
+        let read_only = cli_permission_mode(permission) == READ_ONLY_CLI_MODE;
+        let policy_args =
+            super::claude_cli_policy::args_from_environment(read_only).map_err(|message| {
+                ProviderError::Other {
+                    provider: self.id.clone(),
+                    message,
+                    status: None,
+                    body: None,
+                }
+            })?;
         let mut command = Command::new(self.binary_or_default());
         command
-            .args(build_args(model, resume))
+            .args(build_args(model, resume, permission))
+            .args(policy_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -571,7 +659,7 @@ impl ClaudeCliProvider {
             status: None,
             body: None,
         })?;
-        let payload = stdin_line(prompt, images);
+        let payload = stdin_line(content);
         let mut stdin_writer = JoinSet::new();
         stdin_writer.spawn(async move {
             if let Err(e) = stdin.write_all(payload.as_bytes()).await {
@@ -580,17 +668,7 @@ impl ClaudeCliProvider {
             drop(stdin); // EOF tells the CLI no more input is coming.
         });
 
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let mut stderr_tasks = JoinSet::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let sink = Arc::clone(&stderr_buf);
-            stderr_tasks.spawn(async move {
-                let mut collected = String::new();
-                if stderr.read_to_string(&mut collected).await.is_ok() {
-                    *sink.lock() = collected;
-                }
-            });
-        }
+        let mut stderr = StderrDrain::new(child.stderr.take());
 
         let stdout = child.stdout.take().ok_or_else(|| ProviderError::Other {
             provider: self.id.clone(),
@@ -618,8 +696,7 @@ impl ClaudeCliProvider {
                 "claude CLI exited before emitting output"
             );
             return Ok(SpawnOutcome::ExitedEarly {
-                stderr: stderr_buf,
-                stderr_tasks,
+                stderr: stderr.finish().await,
             });
         }
 
@@ -628,8 +705,7 @@ impl ClaudeCliProvider {
             stdin_writer,
             stdout: reader,
             first_line,
-            stderr: stderr_buf,
-            stderr_tasks,
+            stderr,
         })))
     }
 
@@ -647,14 +723,14 @@ impl ClaudeCliProvider {
             None
         };
 
-        let images = last_user_images(request);
+        let permission = request.permission_mode.as_ref();
         if let Some(session_id) = resume_session {
             match self
                 .spawn_turn(
                     &request.model,
-                    &last_user_text(request),
-                    &images,
+                    &current_turn_content(request, false),
                     Some(&session_id),
+                    permission,
                 )
                 .await?
             {
@@ -667,35 +743,25 @@ impl ClaudeCliProvider {
             }
         }
 
-        let prompt = if has_assistant_turns {
-            flattened_transcript(request)
-        } else {
-            last_user_text(request)
-        };
+        let content = current_turn_content(request, has_assistant_turns);
         match self
-            .spawn_turn(&request.model, &prompt, &images, None)
+            .spawn_turn(&request.model, &content, None, permission)
             .await?
         {
             SpawnOutcome::Turn(turn) => Ok(*turn),
-            SpawnOutcome::ExitedEarly {
-                stderr,
-                stderr_tasks: _stderr_tasks,
-            } => {
-                let detail = collect_stderr(&stderr).await;
-                Err(ProviderError::Other {
-                    provider: self.id.clone(),
-                    message: format!(
-                        "claude CLI exited without producing output{}",
-                        if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", detail)
-                        }
-                    ),
-                    status: None,
-                    body: None,
-                })
-            }
+            SpawnOutcome::ExitedEarly { stderr: detail } => Err(ProviderError::Other {
+                provider: self.id.clone(),
+                message: format!(
+                    "claude CLI exited without producing output{}",
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", detail)
+                    }
+                ),
+                status: None,
+                body: None,
+            }),
         }
     }
 }
@@ -783,15 +849,19 @@ impl LlmProvider for ClaudeCliProvider {
         let mut turn = self.start_turn(&request).await?;
         let provider_id = self.id.clone();
         let fallback_model = request.model.clone();
+        let heartbeat_period = self.heartbeat;
 
         let s = stream! {
             // Retain ownership even before the stream is first polled; dropping
             // the stream aborts a writer still blocked on the child's stdin.
             let _stdin_writer = turn.stdin_writer;
-            // Retain the stderr reader even before the stream is polled.
-            let _stderr_tasks = turn.stderr_tasks;
             let mut mapper = EnvelopeMapper::new(&fallback_model);
             let mut line = std::mem::take(&mut turn.first_line);
+            let mut heartbeat = tokio::time::interval_at(
+                tokio::time::Instant::now() + heartbeat_period,
+                heartbeat_period,
+            );
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let outcome = mapper.map_line(&line);
                 if let Some(session_id) = mapper.session_id.as_deref() {
@@ -799,6 +869,11 @@ impl LlmProvider for ClaudeCliProvider {
                     if cached.as_deref() != Some(session_id) {
                         *cached = Some(session_id.to_string());
                     }
+                }
+                if outcome.done {
+                    // Complete the owned drain before publishing MessageStop:
+                    // callers may drop the stream as soon as they see it.
+                    let _ = turn.stderr.finish().await;
                 }
                 for event in outcome.events {
                     yield Ok(event);
@@ -810,9 +885,35 @@ impl LlmProvider for ClaudeCliProvider {
                 }
 
                 line.clear();
-                match turn.stdout.read_line(&mut line).await {
+                let read = {
+                    // `read_line` loses what it has read if it is dropped, so
+                    // one read stays pinned across the heartbeats.
+                    let read_line = turn.stdout.read_line(&mut line);
+                    tokio::pin!(read_line);
+                    loop {
+                        let finished = tokio::select! {
+                            result = &mut read_line => Some(result),
+                            _ = heartbeat.tick() => None,
+                        };
+                        match finished {
+                            Some(result) => break result,
+                            // Quiet, and still running: a tool is at work or
+                            // a reply is on its way. A process that has gone
+                            // sends no keepalive, so the consumer's stall
+                            // timeout still covers a pipe left open behind it.
+                            None => {
+                                if matches!(turn.child.try_wait(), Ok(None)) {
+                                    yield Ok(StreamEvent::Ping);
+                                }
+                            }
+                        }
+                    }
+                };
+                // Keepalives are for silence only.
+                heartbeat.reset();
+                match read {
                     Ok(0) => {
-                        let stderr = collect_stderr(&turn.stderr).await;
+                        let stderr = turn.stderr.finish().await;
                         let detail = if stderr.is_empty() {
                             String::new()
                         } else {
@@ -827,9 +928,15 @@ impl LlmProvider for ClaudeCliProvider {
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        let stderr = turn.stderr.finish().await;
+                        let detail = if stderr.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", stderr)
+                        };
                         yield Err(ProviderError::StreamError {
                             provider: provider_id.clone(),
-                            message: format!("failed reading claude CLI output: {}", e),
+                            message: format!("failed reading claude CLI output: {}{}", e, detail),
                             partial_response: None,
                         });
                         return;
@@ -853,6 +960,7 @@ impl LlmProvider for ClaudeCliProvider {
                 Self {
                     id: self.id.clone(),
                     binary: self.binary.clone(),
+                    heartbeat: self.heartbeat,
                     goal_authority: Some((turn.clone(), permission)),
                 }
                 .create_message_stream(request)
@@ -916,12 +1024,131 @@ mod tests {
             stop_sequences: Vec::new(),
             thinking: None,
             provider_options: json!({}),
+            permission_mode: None,
         }
+    }
+
+    #[tokio::test]
+    async fn missing_binary_reports_startup_failure() {
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(
+                std::env::temp_dir().join(format!("missing-claude-{}", uuid::Uuid::new_v4())),
+            ),
+            heartbeat: HEARTBEAT_PERIOD,
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let error = match provider.create_message_stream(request).await {
+            Ok(_) => panic!("nonexistent binary unexpectedly started"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ProviderError::Other { message, .. } if message == INSTALL_HINT));
+    }
+
+    /// A stand-in `claude` that starts a turn, stays quiet for `quiet`
+    /// seconds the way a long tool call does, then finishes the turn.
+    #[cfg(unix)]
+    fn quiet_cli(quiet: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("quiet-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let binary = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\n\
+             echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n\
+             sleep {quiet}\n\
+             echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}'\n\
+             echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (dir, binary)
+    }
+
+    /// The query loop gives up on a stream that is silent for 45 seconds,
+    /// kills the CLI and runs the prompt again. A CLI that is busy must not
+    /// look like that: it has to send keepalives for as long as it is quiet.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_quiet_running_cli_sends_keepalives_until_it_answers() {
+        use futures::StreamExt;
+        let (dir, binary) = quiet_cli("1");
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_millis(100),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let mut stream = provider.create_message_stream(request).await.unwrap();
+
+        let mut events = Vec::new();
+        let mut longest_gap = std::time::Duration::ZERO;
+        let mut last = std::time::Instant::now();
+        while let Some(event) = stream.next().await {
+            longest_gap = longest_gap.max(last.elapsed());
+            last = std::time::Instant::now();
+            events.push(event.unwrap());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+
+        let pings = events
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::Ping))
+            .count();
+        // One second of silence at a 100 ms heartbeat. Fewer than a handful
+        // would mean the keepalive stopped while the CLI was still working.
+        assert!(pings >= 5, "{pings} keepalives in one quiet second");
+        assert!(
+            longest_gap < std::time::Duration::from_millis(700),
+            "the stream was silent for {longest_gap:?}"
+        );
+        // The turn itself is untouched: its text arrives and it completes.
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "after the wait")
+        ));
+        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
+        // Keepalives are for silence only: none trails the answer.
+        let last_ping = events
+            .iter()
+            .rposition(|event| matches!(event, StreamEvent::Ping))
+            .unwrap();
+        let first_text = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::TextDelta { .. }))
+            .unwrap();
+        assert!(last_ping < first_text, "a keepalive followed the answer");
+    }
+
+    /// A CLI that answers at once is not padded with keepalives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prompt_cli_sends_no_keepalive() {
+        use futures::StreamExt;
+        let (dir, binary) = quiet_cli("0");
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_secs(30),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let mut stream = provider.create_message_stream(request).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Ping)));
+        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
     #[test]
     fn build_args_matches_adapter_manifest_contract() {
-        let args = build_args("claude-opus-4-8", None);
+        let args = build_args("claude-opus-4-8", None, Some(&PermissionMode::Plan));
         assert_eq!(
             args,
             vec![
@@ -931,18 +1158,54 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--permission-mode",
+                "plan",
                 "--model",
                 "claude-opus-4-8",
             ]
         );
 
-        let resumed = build_args("claude-opus-4-8", Some("sess-1"));
+        let resumed = build_args(
+            "claude-opus-4-8",
+            Some("sess-1"),
+            Some(&PermissionMode::Plan),
+        );
         assert!(resumed.ends_with(&["--resume".to_string(), "sess-1".to_string()]));
+    }
+
+    fn permission_modes(args: &[String]) -> Vec<&str> {
+        args.windows(2)
+            .filter(|pair| pair[0] == "--permission-mode")
+            .map(|pair| pair[1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn build_args_passes_the_turn_mode_as_the_cli_mode() {
+        for (mode, cli_mode) in [
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::Default, "default"),
+        ] {
+            for resume in [None, Some("sess-1")] {
+                let args = build_args("claude-opus-4-8", resume, Some(&mode));
+                assert_eq!(permission_modes(&args), [cli_mode], "{mode:?}: {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_args_runs_a_request_without_a_mode_read_only() {
+        let args = build_args("claude-opus-4-8", None, None);
+        assert_eq!(permission_modes(&args), ["plan"], "{args:?}");
     }
 
     #[test]
     fn stdin_line_is_a_stream_json_user_envelope() {
-        let line = stdin_line("hello", &[]);
+        let line = stdin_line(&[ContentBlock::Text {
+            text: "hello".into(),
+        }]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         assert_eq!(parsed["type"], "user");
         assert_eq!(parsed["message"]["content"][0]["text"], "hello");
@@ -961,8 +1224,13 @@ mod tests {
     }
 
     #[test]
-    fn stdin_line_places_image_blocks_before_the_text() {
-        let line = stdin_line("what is this?", &[png_block("aGk=")]);
+    fn stdin_line_keeps_the_supplied_image_then_text_order() {
+        let line = stdin_line(&[
+            png_block("aGk="),
+            ContentBlock::Text {
+                text: "what is this?".into(),
+            },
+        ]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         let content = parsed["message"]["content"]
             .as_array()
@@ -978,7 +1246,7 @@ mod tests {
 
     #[test]
     fn stdin_line_omits_the_text_block_for_image_only_prompts() {
-        let line = stdin_line("", &[png_block("aGk=")]);
+        let line = stdin_line(&[png_block("aGk=")]);
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         let content = parsed["message"]["content"]
             .as_array()
@@ -988,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn last_user_images_reads_only_the_latest_user_message() {
+    fn current_turn_content_reads_only_the_latest_user_message() {
         let request = request_with(vec![
             Message::user_blocks(vec![
                 png_block("b2xk"),
@@ -1010,15 +1278,62 @@ mod tests {
                 },
             ]),
         ]);
-        let images = last_user_images(&request);
-        assert_eq!(images.len(), 1);
+        let images = current_turn_content(&request, false);
+        assert_eq!(images.len(), 2);
         assert!(matches!(
             &images[0],
             ContentBlock::Image { source } if source.data.as_deref() == Some("bmV3")
         ));
 
         let text_only = request_with(vec![Message::user("no images")]);
-        assert!(last_user_images(&text_only).is_empty());
+        assert!(
+            matches!(current_turn_content(&text_only, false).as_slice(), [ContentBlock::Text { text }] if text == "no images")
+        );
+    }
+
+    #[test]
+    fn mixed_content_keeps_order_on_resume_and_restart() {
+        let latest = vec![
+            ContentBlock::Text {
+                text: "caption A".into(),
+            },
+            png_block("first"),
+            ContentBlock::Text {
+                text: "caption B".into(),
+            },
+            png_block("second"),
+        ];
+        let request = request_with(vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::user_blocks(latest.clone()),
+        ]);
+        let expected = serde_json::to_value(&latest).unwrap();
+        let resumed: Value =
+            serde_json::from_str(&stdin_line(&current_turn_content(&request, false))).unwrap();
+        assert_eq!(resumed["message"]["content"], expected);
+        let restarted: Value =
+            serde_json::from_str(&stdin_line(&current_turn_content(&request, true))).unwrap();
+        let blocks = restarted["message"]["content"].as_array().unwrap();
+        assert_eq!(serde_json::to_value(&blocks[1..]).unwrap(), expected);
+        let prefix = blocks[0]["text"].as_str().unwrap();
+        assert!(prefix.contains("user: old question"));
+        assert!(prefix.contains("assistant: old answer"));
+        assert!(!prefix.contains("caption A"));
+        assert!(prefix.ends_with("</conversation-so-far>\n\n"));
+    }
+
+    #[test]
+    fn image_only_restart_keeps_history_before_the_current_image() {
+        let request = request_with(vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::user_blocks(vec![png_block("current")]),
+        ]);
+        let content = current_turn_content(&request, true);
+        assert!(
+            matches!(content.as_slice(), [ContentBlock::Text { text }, ContentBlock::Image { source }] if text.contains("old answer") && source.data.as_deref() == Some("current"))
+        );
     }
 
     #[test]

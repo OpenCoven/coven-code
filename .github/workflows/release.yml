@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      advance_coven_engine:
+        description: 'After publishing, ask OpenCoven/coven to propose this release as its pinned engine. Needs the COVEN_ENGINE_BUMP_TOKEN secret; without it the release still succeeds and Coven finds the release on its own schedule.'
+        required: false
+        type: boolean
+        default: true
 
 # Serialize all release versions and asset replacement, not just one tag.
 # Preflight rechecks remote versions after acquiring this shared group.
@@ -69,120 +74,14 @@ jobs:
       - name: Verify forward version and canonical stamps
         run: python scripts/check-release-version.py "$RELEASE_VERSION"
 
-  # ── Build matrix ────────────────────────────────────────────────────
+  # ── Build: the five targets, in release-build.yml ──────────────────
   build:
     needs: preflight
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact: coven-code-windows-x86_64
-            ext: .exe
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: coven-code-linux-x86_64
-            ext: ""
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: coven-code-linux-aarch64
-            ext: ""
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: coven-code-macos-x86_64
-            ext: ""
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: coven-code-macos-aarch64
-            ext: ""
-
-    runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.artifact }}
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # Linux native: install system libraries for ALSA (voice feature).
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux' && !matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config
-
-      # Linux ARM64: use cross for reliable cross-compilation (handles
-      # sysroot, pkg-config, ALSA automatically via Docker).
-      - name: Install cross (aarch64-linux)
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-rust/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
-
-      - name: Build release binary (native)
-        if: ${{ !matrix.cross }}
-        working-directory: src-rust
-        run: cargo build --release --locked --package claurst --target ${{ matrix.target }}
-
-      - name: Create Cross.toml for cross-compilation
-        if: matrix.cross
-        working-directory: src-rust
-        run: |
-          cat > Cross.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          pre-build = [
-            "dpkg --add-architecture $CROSS_DEB_ARCH",
-            "apt-get update",
-            "apt-get install -y pkg-config libasound2-dev:$CROSS_DEB_ARCH"
-          ]
-          EOF
-
-      - name: Build release binary (cross)
-        if: matrix.cross
-        working-directory: src-rust
-        run: cross build --release --locked --package claurst --target ${{ matrix.target }}
-
-      - name: Verify binary exists
-        shell: bash
-        run: |
-          BINARY="src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}"
-          if [[ ! -f "$BINARY" ]]; then
-            echo "::error::Binary not found at $BINARY"
-            exit 1
-          fi
-          ls -lh "$BINARY"
-
-      # Stage the binary into a per-archive directory using the canonical
-      # name "coven-code" (or "coven-code.exe").  The install scripts assume this
-      # name inside the archive — do not change without updating install.sh
-      # and install.ps1.
-      - name: Stage binary for packaging
-        shell: bash
-        run: |
-          mkdir -p "stage/${{ matrix.artifact }}"
-          cp "src-rust/target/${{ matrix.target }}/release/coven-code${{ matrix.ext }}" \
-             "stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: stage/${{ matrix.artifact }}/coven-code${{ matrix.ext }}
+    uses: ./.github/workflows/release-build.yml
+    with:
+      persist-credentials: false
+      openssl: false
+      cargo-term-color: always
 
   # ── Create GitHub release ───────────────────────────────────────────
   release:
@@ -359,3 +258,31 @@ jobs:
             --ref main \
             -f version="$RELEASE_VERSION"
           echo "Dispatched npm-publish.yml for $RELEASE_VERSION."
+
+  # ── Ask Coven to pin the engine just published ──────────────────────
+  # Coven installs the engine its `crates/coven-cli/engine.lock` names, so a
+  # release reaches Coven users only after that pin moves. Coven's
+  # engine-bump workflow regenerates the pin from the latest release here and
+  # opens a pull request for a person to review and merge; this job starts it
+  # as soon as the release exists. GITHUB_TOKEN cannot reach another
+  # repository, so the dispatch needs a token that can run workflows in
+  # OpenCoven/coven. Without one this job warns and passes: the release is
+  # already published and Coven's scheduled run proposes the pin later.
+  advance-coven-engine:
+    needs: release
+    if: ${{ inputs.advance_coven_engine }}
+    runs-on: ubuntu-latest
+    name: Propose Coven engine pin
+    permissions: {}
+    steps:
+      - name: Dispatch Coven's engine-bump workflow
+        env:
+          GH_TOKEN: ${{ secrets.COVEN_ENGINE_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::COVEN_ENGINE_BUMP_TOKEN is not set, so OpenCoven/coven was not asked to pin $RELEASE_VERSION. Its scheduled engine-bump run will propose the pin."
+            exit 0
+          fi
+          gh workflow run engine-bump.yml --repo OpenCoven/coven --ref main
+          echo "Asked OpenCoven/coven to propose pinning $RELEASE_VERSION."

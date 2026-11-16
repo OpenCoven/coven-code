@@ -16,34 +16,6 @@ _flood_saved_count() { # home
     | wc -l | tr -d ' '
 }
 
-# Wall-clock time in tenths of a second.
-_flood_now_tenths() { python3 -c 'import time; print(int(time.time() * 10))'; }
-
-# Press the quit keys, wait for the TUI to exit, then check it gave the terminal back.
-# Sets FLOOD_QUIT_TENTHS to how long the exit took after the last key, in tenths
-# of a second by the wall clock. Each pass of the wait also runs tmux, so the
-# pass count gives up later than 30 s; it only stops a hung exit.
-_flood_quit() { # how, keys...
-  local how="$1" key passes=0 running start
-  shift
-  # The running process's name, whatever the binary under test is called.
-  running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
-  for key in "$@"; do tui_keys "$key"; start="$(_flood_now_tenths)"; sleep 0.25; done
-  while [ "$passes" -lt 300 ] && \
-    [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
-    sleep 0.1; passes=$((passes + 1))
-  done
-  FLOOD_QUIT_TENTHS=$(($(_flood_now_tenths) - start))
-  if [ "$passes" -lt 300 ]; then _pass "$how exits (after about $((FLOOD_QUIT_TENTHS / 10))s)"
-  else _fail "$how exits" "$(tui_capture)"; fi
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{alternate_on}')" "0" \
-    "$how leaves the alternate screen"
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{cursor_flag}')" "1" \
-    "$how restores the cursor"
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{mouse_any_flag}')" "0" \
-    "$how turns mouse reporting off"
-}
-
 _flood_wait_saved() { # home, count
   local waited=0
   while [ "$waited" -lt 100 ] && [ "$(_flood_saved_count "$1")" -lt "$2" ]; do
@@ -127,7 +99,7 @@ _next_event_flood_journey() {
   tui_type "flood: 300001"; sleep 0.3; tui_keys Enter
   wait_for "working" 20 >/dev/null
   wait_for "flood line" 20 >/dev/null
-  _flood_quit "Ctrl+D twice during a burst" C-d C-d
+  tui_quit_and_check "Ctrl+D twice during a burst" C-d C-d
   local saved
   saved="$(find "$home" -type f -path '*/sessions/*.json' -exec grep -l 'flood: 300001' {} + 2>/dev/null)"
   if [ -n "$saved" ]; then _pass "quitting during a burst keeps the prompt"
@@ -145,7 +117,7 @@ _next_event_flood_journey() {
   # A fast build may have settled by the first look, hence "cancelling" or "Cancelled".
   if wait_for "ancel" 5; then _pass "Ctrl+C cancels during the burst"
   else _fail "Ctrl+C cancels during the burst" "$(tui_capture)"; fi
-  _flood_quit "Ctrl+C twice more during a burst" C-c C-c
+  tui_quit_and_check "Ctrl+C twice more during a burst" C-c C-c
 
   # ---- quitting while a tool ignores the stop still exits within the bound.
   # Quitting waits up to 2 s for the turn; 8 s leaves room for a loaded host and
@@ -157,11 +129,11 @@ _next_event_flood_journey() {
   tui_type "run: sleep 20"; sleep 0.3; tui_keys Enter
   if wait_for "Approve Bash" 15; then
     sleep 0.7; tui_keys y; sleep 1.5
-    _flood_quit "Ctrl+D twice while a tool ignores the stop" C-d C-d
-    if [ "$FLOOD_QUIT_TENTHS" -lt 80 ]; then
+    tui_quit_and_check "Ctrl+D twice while a tool ignores the stop" C-d C-d
+    if [ "$TUI_QUIT_TENTHS" -lt 80 ]; then
       _pass "quitting exits within 8 s while a turn does not stop"
     else
-      _fail "quitting exits within 8 s while a turn does not stop" "took about $((FLOOD_QUIT_TENTHS / 10))s"
+      _fail "quitting exits within 8 s while a turn does not stop" "took about $((TUI_QUIT_TENTHS / 10))s"
     fi
     saved="$(find "$home" -type f -path '*/sessions/*.json' -exec grep -l 'run: sleep 20' {} + 2>/dev/null)"
     if [ -n "$saved" ]; then _pass "a turn that did not stop in time keeps its prompt"

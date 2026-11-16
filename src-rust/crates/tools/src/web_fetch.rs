@@ -3,11 +3,17 @@
 
 use crate::{PermissionLevel, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs;
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 use tracing::{debug, warn};
+
+mod cache;
+mod network;
+
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: usize = 100_000;
 
 pub struct WebFetchTool;
 
@@ -28,47 +34,132 @@ fn url_hash(url: &str) -> String {
     format!("{:x}", hasher.finish())
 }
 
-/// Get the cache directory for web_fetch content.
-fn get_cache_dir() -> PathBuf {
-    let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push(".coven-code");
-    dir.push("web_cache");
-    dir
+/// Retrieval records describe this HTTP response, never a cached retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Extraction {
+    PlainText,
+    HtmlToText,
+    ClaudeHaiku,
 }
 
-/// Attempt to load cached extracted content for a URL.
-fn load_cached_extraction(url: &str) -> Option<String> {
-    let cache_dir = get_cache_dir();
-    let cache_file = cache_dir.join(format!("{}.txt", url_hash(url)));
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Retrieval {
+    pub schema_version: u8,
+    pub requested_url: String,
+    pub final_url: String,
+    pub url_credentials_redacted: bool,
+    pub url_fragments_omitted: bool,
+    pub http_status: u16,
+    pub content_type: Option<String>,
+    pub retrieved_at: String,
+    pub body_sha256: String,
+    pub body_bytes: usize,
+    pub utf8_replacements: bool,
+    pub extraction: Extraction,
+    pub extraction_cached: bool,
+    pub text_truncated: bool,
+    pub original_text_bytes: usize,
+}
 
-    if cache_file.exists() {
-        match fs::read_to_string(&cache_file) {
-            Ok(content) => {
-                debug!(file = ?cache_file, "Loaded cached web content");
-                return Some(content);
-            }
-            Err(e) => {
-                debug!(file = ?cache_file, error = %e, "Failed to load cache");
-            }
+const RETRIEVAL_MARKER: &str = "[coven.web_fetch.retrieval.v1]\n";
+
+impl Retrieval {
+    /// The dispatcher creates this separate record block; page text is never
+    /// searched for a marker. Existing core/session content types carry it.
+    pub fn with_body(
+        &self,
+        body: String,
+    ) -> Result<claurst_core::types::ToolResultContent, serde_json::Error> {
+        use claurst_core::types::{ContentBlock, ToolResultContent};
+        let record = format!("{RETRIEVAL_MARKER}{}", serde_json::to_string(self)?);
+        Ok(ToolResultContent::Blocks(vec![
+            ContentBlock::Text { text: body },
+            ContentBlock::Text { text: record },
+        ]))
+    }
+
+    /// Read only the producer's two-block envelope. Old text-only results,
+    /// page text containing a marker, and unknown schemas remain unknown.
+    pub fn from_content(content: &claurst_core::types::ToolResultContent) -> Option<Self> {
+        use claurst_core::types::{ContentBlock, ToolResultContent};
+        let ToolResultContent::Blocks(blocks) = content else {
+            return None;
+        };
+        let [ContentBlock::Text { .. }, ContentBlock::Text { text }] = blocks.as_slice() else {
+            return None;
+        };
+        let record: Self = serde_json::from_str(text.strip_prefix(RETRIEVAL_MARKER)?).ok()?;
+        record.is_supported().then_some(record)
+    }
+
+    pub fn is_supported(&self) -> bool {
+        self.schema_version == 1
+            && (200..300).contains(&self.http_status)
+            && self.body_bytes <= MAX_BODY_BYTES
+            && self.body_sha256.len() == 64
+            && self
+                .body_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && chrono::DateTime::parse_from_rfc3339(&self.retrieved_at).is_ok()
+            && [&self.requested_url, &self.final_url].iter().all(|raw| {
+                reqwest::Url::parse(raw).is_ok_and(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.fragment().is_none()
+                })
+            })
+    }
+}
+
+fn utf8_prefix(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn provenance_url(url: &reqwest::Url) -> Result<String, &'static str> {
+    // An owned copy is required to remove authentication without altering the
+    // real request target or its Basic-auth behavior.
+    let mut redacted = url.clone();
+    if redacted.set_username("").is_err() || redacted.set_password(None).is_err() {
+        return Err("invalid HTTP provenance URL");
+    }
+    redacted.set_fragment(None);
+    Ok(redacted.into())
+}
+
+fn request_error(error: &reqwest::Error) -> String {
+    use std::error::Error;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(policy) = cause.downcast_ref::<network::DestinationError>() {
+            return format!("WebFetch: {policy}");
         }
+        source = cause.source();
     }
-    None
-}
-
-/// Save extracted content to cache.
-fn save_cached_extraction(url: &str, content: &str) {
-    let cache_dir = get_cache_dir();
-    if let Err(e) = fs::create_dir_all(&cache_dir) {
-        warn!(dir = ?cache_dir, error = %e, "Failed to create cache directory");
-        return;
-    }
-
-    let cache_file = cache_dir.join(format!("{}.txt", url_hash(url)));
-    if let Err(e) = fs::write(&cache_file, content) {
-        warn!(file = ?cache_file, error = %e, "Failed to write cache file");
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "response body"
+    } else if error.is_decode() {
+        "response decoding"
+    } else if error.is_builder() {
+        "request construction"
     } else {
-        debug!(file = ?cache_file, "Cached extracted web content");
-    }
+        "request"
+    };
+    format!("WebFetch {category} failed")
 }
 
 /// Detect if HTML is likely a JS-heavy page with minimal semantic content.
@@ -81,7 +172,7 @@ fn is_edge_case_html(html: &str, extracted_text: &str) -> bool {
     }
 
     // Check for semantic HTML tags
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let has_semantic =
         lower.contains("<article") || lower.contains("<main") || lower.contains("<body");
 
@@ -98,15 +189,15 @@ async fn semantic_extraction(html: &str, ctx: &ToolContext) -> Option<String> {
     // Try to create an Anthropic client from the config
     let client = match claurst_api::AnthropicClient::from_config(&ctx.config) {
         Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "Failed to create Anthropic client for semantic extraction");
+        Err(_) => {
+            warn!("Failed to create Anthropic client for semantic extraction");
             return None;
         }
     };
 
     // Truncate HTML to avoid exceeding token limits
     let html_excerpt = if html.len() > 20000 {
-        format!("{}...", &html[..20000])
+        format!("{}...", utf8_prefix(html, 20000))
     } else {
         html.to_string()
     };
@@ -151,8 +242,8 @@ async fn semantic_extraction(html: &str, ctx: &ToolContext) -> Option<String> {
             warn!("No text block in semantic extraction response");
             None
         }
-        Err(e) => {
-            warn!(error = %e, "Semantic extraction API call failed");
+        Err(_) => {
+            warn!("Semantic extraction API call failed");
             None
         }
     }
@@ -165,7 +256,7 @@ fn strip_html(html: &str) -> String {
     let mut in_script = false;
     let mut in_style = false;
 
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let chars: Vec<char> = html.chars().collect();
     let lower_chars: Vec<char> = lower.chars().collect();
     let len = chars.len();
@@ -279,7 +370,7 @@ impl Tool for WebFetchTool {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::ReadOnly
+        PermissionLevel::Network
     }
 
     fn input_schema(&self) -> Value {
@@ -309,87 +400,171 @@ impl Tool for WebFetchTool {
         if let Err(e) = ctx.check_permission(
             self.name(),
             &format!("Fetch {}", params.url),
-            true, // read-only
+            false, // network authority is required even though this is a GET
         ) {
             return ToolResult::error(e.to_string());
         }
 
-        debug!(url = %params.url, "Fetching web page");
+        debug!("Fetching web page");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build();
+        let url = match network::parse_url(&params.url) {
+            Ok(url) => url,
+            Err(error) => return ToolResult::error(format!("WebFetch: {error}")),
+        };
+        let client = network::client_builder().build();
 
         let client = match client {
             Ok(c) => c,
-            Err(e) => return ToolResult::error(format!("Failed to create HTTP client: {}", e)),
+            Err(_) => return ToolResult::error("Failed to create WebFetch HTTP client"),
         };
 
-        let resp = match client
-            .get(&params.url)
-            .header("User-Agent", "Coven/1.0")
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return ToolResult::error(format!("Failed to fetch {}: {}", params.url, e)),
-        };
-
-        let status = resp.status();
-        if !status.is_success() {
-            return ToolResult::error(format!("HTTP {} when fetching {}", status, params.url));
-        }
-
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-
-        let body = match resp.text().await {
-            Ok(b) => b,
-            Err(e) => return ToolResult::error(format!("Failed to read response body: {}", e)),
-        };
-
-        // Try to load from cache first
-        if let Some(cached) = load_cached_extraction(&params.url) {
-            return ToolResult::success(cached);
-        }
-
-        // Convert HTML to text if applicable
-        let mut text = if content_type.contains("html") {
-            strip_html(&body)
-        } else {
-            body.clone()
-        };
-
-        // Detect and handle edge cases with semantic extraction
-        if content_type.contains("html") && is_edge_case_html(&body, &text) {
-            debug!(url = %params.url, "Attempting semantic extraction for edge case");
-            if let Some(extracted) = semantic_extraction(&body, ctx).await {
-                text = extracted;
-            } else {
-                debug!("Semantic extraction failed, using basic HTML stripping");
-            }
-        }
-
-        // Truncate very long content
-        const MAX_LEN: usize = 100_000;
-        let text = if text.len() > MAX_LEN {
-            format!(
-                "{}\n\n... (truncated, {} total characters)",
-                &text[..MAX_LEN],
-                text.len()
-            )
-        } else {
-            text
-        };
-
-        // Cache the final result
-        save_cached_extraction(&params.url, &text);
-
-        ToolResult::success(text)
+        let cache_dir = claurst_core::config::config_home().join("web_cache");
+        fetch_page(&params, ctx, &url, &client, &cache_dir).await
     }
 }
+
+// The production caller always supplies the restricted client above. Tests in
+// this module can bind a public fixture name to a local HTTP server without
+// exposing a private-network option in configuration or the tool API.
+async fn fetch_page(
+    params: &WebFetchInput,
+    ctx: &ToolContext,
+    url: &reqwest::Url,
+    client: &reqwest::Client,
+    cache_dir: &Path,
+) -> ToolResult {
+    let mut resp = match client
+        .get(url.as_str())
+        .header("User-Agent", "Coven/1.0")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return ToolResult::error(request_error(&error)),
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        return ToolResult::error(format!("HTTP {status} when fetching public web content"));
+    }
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+    {
+        return ToolResult::error("WebFetch response body exceeds the 2 MiB limit");
+    }
+    let requested_url = match provenance_url(url) {
+        Ok(url) => url,
+        Err(error) => return ToolResult::error(error),
+    };
+    let final_url = match provenance_url(resp.url()) {
+        Ok(url) => url,
+        Err(error) => return ToolResult::error(error),
+    };
+    let credentials_redacted = !url.username().is_empty()
+        || url.password().is_some()
+        || !resp.url().username().is_empty()
+        || resp.url().password().is_some();
+    let fragments_omitted = url.fragment().is_some() || resp.url().fragment().is_some();
+    let mut bytes = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if chunk.len() > MAX_BODY_BYTES.saturating_sub(bytes.len()) {
+                    return ToolResult::error("WebFetch response body exceeds the 2 MiB limit");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(error) => return ToolResult::error(request_error(&error)),
+        }
+    }
+    let retrieved_at = chrono::Utc::now().to_rfc3339();
+    let body_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let body = String::from_utf8_lossy(&bytes);
+    let utf8_replacements = matches!(&body, std::borrow::Cow::Owned(_));
+    let mime = content_type.as_deref().unwrap_or("");
+    let cached = cache::load(cache_dir, &params.url, &body_sha256, mime);
+    let extraction_cached = cached.is_some();
+    let extracted = match cached {
+        Some(extracted) => extracted,
+        None => {
+            let is_html = mime.split(';').next().is_some_and(|mime| {
+                mime.trim().eq_ignore_ascii_case("text/html")
+                    || mime.trim().eq_ignore_ascii_case("application/xhtml+xml")
+            });
+            let (mut text, method) = if is_html {
+                let stripped = strip_html(&body);
+                if is_edge_case_html(&body, &stripped) {
+                    match semantic_extraction(&body, ctx).await {
+                        Some(semantic) => (semantic, Extraction::ClaudeHaiku),
+                        None => (stripped, Extraction::HtmlToText),
+                    }
+                } else {
+                    (stripped, Extraction::HtmlToText)
+                }
+            } else {
+                (body.into_owned(), Extraction::PlainText)
+            };
+            let original_text_bytes = text.len();
+            let text_truncated = original_text_bytes > MAX_OUTPUT_BYTES;
+            if text_truncated {
+                text.truncate(utf8_prefix(&text, MAX_OUTPUT_BYTES).len());
+            }
+            let extracted = cache::Extracted {
+                text,
+                method,
+                original_text_bytes,
+                text_truncated,
+            };
+            if cache::save(cache_dir, &params.url, &body_sha256, mime, &extracted).is_err() {
+                warn!("Could not persist WebFetch extraction cache");
+            }
+            extracted
+        }
+    };
+    let retrieval = Retrieval {
+        schema_version: 1,
+        requested_url,
+        final_url,
+        url_credentials_redacted: credentials_redacted,
+        url_fragments_omitted: fragments_omitted,
+        http_status: status.as_u16(),
+        content_type,
+        retrieved_at,
+        body_sha256,
+        body_bytes: bytes.len(),
+        utf8_replacements,
+        extraction: extracted.method,
+        extraction_cached,
+        text_truncated: extracted.text_truncated,
+        original_text_bytes: extracted.original_text_bytes,
+    };
+    let mut text = extracted.text;
+    if retrieval.text_truncated {
+        text.push_str(&format!(
+            "\n\n... (truncated, {} total UTF-8 bytes)",
+            retrieval.original_text_bytes
+        ));
+    }
+    if retrieval.extraction == Extraction::ClaudeHaiku {
+        text.insert_str(
+            0,
+            "[Model-extracted content: Claude Haiku; not verbatim page text]\n\n",
+        );
+    }
+    match serde_json::to_value(&retrieval) {
+        Ok(metadata) => ToolResult::success(text).with_metadata(metadata),
+        Err(_) => ToolResult::error("Could not serialize WebFetch retrieval provenance"),
+    }
+}
+
+#[cfg(test)]
+mod retrieval_tests;
+
+#[cfg(test)]
+mod provenance_tests;

@@ -106,8 +106,10 @@ pub fn render_image(source: &ImageSource) -> Option<String> {
 
         match protocol {
             ImageProtocol::Kitty => {
-                emit_kitty_apc(data, source.media_type.as_deref());
-                return None; // successfully emitted — caller skips text line
+                if emit_kitty_apc(data, source.media_type.as_deref()) {
+                    return None; // successfully emitted — caller skips text line
+                }
+                // Invalid base64 is display text, never raw terminal protocol.
             }
             ImageProtocol::Sixel => {
                 if emit_sixel(data, source.media_type.as_deref()) {
@@ -150,13 +152,22 @@ fn kitty_format(_media_type: Option<&str>) -> u8 {
 /// The base64 string is split into `KITTY_CHUNK_SIZE`-byte chunks and each
 /// chunk is wrapped in the appropriate APC escape.  Everything is written
 /// directly to `stdout`; the caller must flush.
-fn emit_kitty_apc(base64_data: &str, media_type: Option<&str>) {
+fn emit_kitty_apc(base64_data: &str, media_type: Option<&str>) -> bool {
+    use base64::Engine;
     let fmt = kitty_format(media_type);
     let mut stdout = std::io::stdout();
 
     // Strip any whitespace/newlines that may have been inserted into the
     // base64 string (the API sometimes line-wraps it).
     let clean: String = base64_data.chars().filter(|c| !c.is_whitespace()).collect();
+    // Provider/session payloads are untrusted. Validate before the first raw
+    // write so a payload cannot terminate APC and inject another command.
+    if base64::engine::general_purpose::STANDARD
+        .decode(&clean)
+        .is_err()
+    {
+        return false;
+    }
 
     let chunks: Vec<&str> = clean
         .as_bytes()
@@ -165,7 +176,7 @@ fn emit_kitty_apc(base64_data: &str, media_type: Option<&str>) {
         .collect();
 
     if chunks.is_empty() {
-        return;
+        return false;
     }
 
     let total = chunks.len();
@@ -187,6 +198,7 @@ fn emit_kitty_apc(base64_data: &str, media_type: Option<&str>) {
     // Move to a new line so subsequent ratatui output begins cleanly.
     let _ = write!(stdout, "\r\n");
     let _ = stdout.flush();
+    true
 }
 
 // ---------------------------------------------------------------------------
