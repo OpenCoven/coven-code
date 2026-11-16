@@ -3513,11 +3513,19 @@ impl App {
         }
     }
 
+    /// The row of a call: its live row, or the row a cancel moved to the
+    /// interrupted list, which keeps receiving what the call reports.
+    fn tool_row_mut(&mut self, tool_id: &str) -> Option<&mut ToolUseBlock> {
+        let rows = if self.tool_use_blocks.iter().any(|block| block.id == tool_id) {
+            &mut self.tool_use_blocks
+        } else {
+            &mut self.interrupted_tools
+        };
+        rows.iter_mut().find(|block| block.id == tool_id)
+    }
+
     fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
-        self.tool_use_blocks
-            .iter_mut()
-            .find(|block| block.id == tool_id)
-            .map(|block| &mut block.run)
+        self.tool_row_mut(tool_id).map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -3548,10 +3556,15 @@ impl App {
         *self.tool_use_blocks = kept;
     }
 
-    /// Record a cancellation the loop performed without a key request
-    /// (remote control), so it is shown pending until the worker stops.
-    pub fn note_cancellation_sent(&mut self) {
-        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    /// Show a cancellation the loop performed without a key request (remote
+    /// control). A running turn is shown pending until its worker stops.
+    pub fn note_cancellation_sent(&mut self, turn_running: bool) {
+        if turn_running {
+            self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+            self.interrupt_tool_rows();
+        }
+        self.is_streaming = false;
+        self.status_message = Some("Cancelled by remote control.".to_string());
     }
 
     /// The loop calls this once no turn worker is running any more. A
@@ -3559,21 +3572,32 @@ impl App {
     pub fn settle_cancellation(&mut self) {
         if self.cancellation != crate::application::TurnCancellation::Idle {
             self.status_message = Some("Cancelled.".to_string());
+            // A row still running was started by the backlog after the
+            // request, and the worker is gone without finishing it. Rows
+            // that finished, or reported finishing, keep their place, as
+            // `interrupt_tool_rows` keeps them.
+            let (running, finished): (Vec<_>, Vec<_>) =
+                self.tool_use_blocks.drain(..).partition(|block| {
+                    block.status == ToolStatus::Running && block.run.finished.is_none()
+                });
+            *self.tool_use_blocks = finished;
+            self.interrupted_tools.extend(running);
+            // A completion that arrived while the cancel was pending does not
+            // make this a finished turn: Classic shows "Cancelled.", not its
+            // done marker.
+            self.last_turn_verb = None;
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Ask the loop to cancel the running turn through its token.
+    fn request_turn_cancellation(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::Requested;
     }
 
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
-    /// Ask the loop to cancel the running turn through its token. Next only:
-    /// Classic keeps its existing cancel behavior unchanged.
-    fn request_turn_cancellation(&mut self) {
-        if self.renderer == crate::application::UiRenderer::Next {
-            self.cancellation = crate::application::TurnCancellation::Requested;
-        }
-    }
-
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -7966,13 +7990,12 @@ impl App {
     ) -> Vec<crate::application::PresentationEffect> {
         let mut effects = Vec::new();
         // A cancelled turn's backlog keeps arriving until the runtime settles.
-        // Its live output must not restart the turn on screen, or further
-        // interrupts would cancel again instead of reaching the exit sequence.
-        // The worker's durable messages and terminal events still apply.
-        if matches!(event, QueryEvent::Stream(_))
-            && self.renderer == crate::application::UiRenderer::Next
-            && self.cancellation != crate::application::TurnCancellation::Idle
-        {
+        // Its live output and tool starts must not restart the turn on screen,
+        // or further interrupts would cancel again instead of reaching the exit
+        // sequence. Tool starts are still recorded, and the worker's tool
+        // results, durable messages and terminal events still apply.
+        let cancelling = self.cancellation != crate::application::TurnCancellation::Idle;
+        if cancelling && matches!(event, QueryEvent::Stream(_)) {
             return effects;
         }
         // Auto-dismiss error modal when assistant responds
@@ -8040,13 +8063,22 @@ impl App {
                 tool_id,
                 input_json,
             } => {
-                if !self.is_streaming && self.spinner_verb.is_none() {
-                    let seed = self.frame_count as usize ^ (self.messages.len() * 17);
-                    self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                if !cancelling {
+                    if !self.is_streaming && self.spinner_verb.is_none() {
+                        let seed = self.frame_count as usize ^ (self.messages.len() * 17);
+                        self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                    }
+                    self.is_streaming = true;
+                    self.status_message = Some(format!("Running {}…", tool_name));
                 }
-                self.is_streaming = true;
-                self.status_message = Some(format!("Running {}…", tool_name));
                 let turn_index = self.current_user_turn_index();
+                // A call the cancel already interrupted keeps its row there; a
+                // repeated start must not add a live one beside it.
+                let interrupted = cancelling
+                    && self
+                        .interrupted_tools
+                        .iter()
+                        .any(|block| block.id == tool_id);
                 if let Some(existing) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
@@ -8056,7 +8088,7 @@ impl App {
                         opened: existing.run.opened,
                         ..ToolRun::default()
                     };
-                } else {
+                } else if !interrupted {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
                         name: tool_name,
@@ -8078,7 +8110,7 @@ impl App {
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
                 let preview = Self::tool_result_preview(&result);
-                if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
+                if let Some(block) = self.tool_row_mut(&tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
                     } else {
@@ -8159,8 +8191,11 @@ impl App {
 
                 // Surface a clear "turn done" signal for long-running turns the
                 // user might have stepped away from. The faint "✽ Worked for Ns"
-                // status line is too quiet on its own.
-                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                // status line is too quiet on its own. A turn the user is
+                // cancelling gets none: they are here, and it settles as
+                // cancelled.
+                if !cancelled && !cancelling && turn_elapsed_secs >= self.completion_toast_min_secs
+                {
                     if self.completion_toast_enabled {
                         self.push_notification(
                             NotificationKind::Success,
