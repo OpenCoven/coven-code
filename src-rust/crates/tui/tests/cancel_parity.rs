@@ -6,7 +6,8 @@
 //! replayed into an App per renderer, drawn with that renderer after every
 //! step the way the interactive loop draws, and both must reach the same
 //! semantic state after every step: the durable messages, tool observations
-//! by id (name, input, result, is_error), `is_streaming`, the cancellation
+//! by id (name, input, the result preview the row holds, and status, which
+//! tells running, done and error apart), `is_streaming`, the cancellation
 //! phase, the presentation effects and the cancel requests handed to the loop.
 //!
 //! Presentation-only, so not compared: tool rows on interrupt (Classic clears
@@ -78,8 +79,9 @@ enum Step {
 struct ToolObservation {
     name: String,
     input: String,
+    /// The preview the row holds; the full result is in the durable messages.
     result: Option<String>,
-    is_error: bool,
+    status: ToolStatus,
 }
 
 /// The state both renderers must agree on after a step.
@@ -132,6 +134,11 @@ impl Replay {
         let mut app = App::new(config, CostTracker::new());
         app.has_credentials = true;
         app.select_renderer(renderer);
+        // Without this the comparison would hold trivially: two Classic Apps.
+        assert_eq!(
+            app.renderer, renderer,
+            "the replay runs the renderer under test"
+        );
         app.push_message(Message::user("Run the slow command.".to_string()));
         Self {
             renderer,
@@ -178,7 +185,7 @@ impl Replay {
                         name: block.name.clone(),
                         input: block.input_json.clone(),
                         result: block.output_preview.clone(),
-                        is_error: block.status == ToolStatus::Error,
+                        status: block.status.clone(),
                     },
                 );
             }
@@ -238,7 +245,8 @@ fn ctrl_c_during_a_tool() -> Vec<Step> {
     ]
 }
 
-/// A remote-control cancel while a tool runs, then the backlog.
+/// A remote-control cancel while a tool runs, then the backlog: text, a tool
+/// that never ends and one that does.
 fn remote_cancel_during_a_tool() -> Vec<Step> {
     vec![
         Step::Event(delta("running it ")),
@@ -246,13 +254,15 @@ fn remote_cancel_during_a_tool() -> Vec<Step> {
         Step::RemoteCancel,
         Step::Event(delta("late text")),
         Step::Event(tool_start("toolu-cancel-remote-backlog")),
+        Step::Event(tool_start("toolu-cancel-remote-done")),
+        Step::Event(tool_end("toolu-cancel-remote-done")),
         Step::Settle,
     ]
 }
 
 #[test]
 fn escape_cancels_the_turn_and_its_backlog_cannot_restart_it_in_either_renderer() {
-    let (classic, _) = assert_parity("escape then backlog", escape_then_backlog());
+    let (classic, next) = assert_parity("escape then backlog", escape_then_backlog());
     let steps = &classic.steps;
     assert!(steps[1].cancel_requested, "Escape asks the loop to cancel");
     for (index, step) in steps.iter().enumerate().take(6).skip(1) {
@@ -274,7 +284,14 @@ fn escape_cancels_the_turn_and_its_backlog_cannot_restart_it_in_either_renderer(
     assert_eq!(steps[6].cancellation, TurnCancellation::Idle);
     // Settled, the next Ctrl+C starts the exit sequence instead of cancelling.
     assert!(!steps[7].cancel_requested);
-    assert_eq!(classic.app.exit_key_sequence_start, Some('c'));
+    for replay in [&classic, &next] {
+        assert_eq!(
+            replay.app.exit_key_sequence_start,
+            Some('c'),
+            "{:?}",
+            replay.renderer
+        );
+    }
 }
 
 #[test]
@@ -330,18 +347,27 @@ fn a_remote_cancel_follows_the_same_model_in_either_renderer() {
     let (classic, next) = assert_parity("remote cancel", remote_cancel_during_a_tool());
     // The loop already cancelled the token, so nothing is requested.
     assert!(classic.steps.iter().all(|step| !step.cancel_requested));
-    assert!(classic.steps[2..5]
+    assert!(classic.steps[2..7]
         .iter()
         .all(|step| !step.is_streaming && step.cancellation == TurnCancellation::AwaitingRuntime));
     assert!(classic.steps[4]
         .tools
         .contains_key("toolu-cancel-remote-backlog"));
-    assert_eq!(classic.steps[5].cancellation, TurnCancellation::Idle);
+    assert_eq!(classic.steps[7].cancellation, TurnCancellation::Idle);
+    // Settling interrupts the backlog tool that never ended; the one that
+    // ended keeps its row.
     for replay in [&classic, &next] {
-        assert!(replay
+        let rows: Vec<_> = replay
             .app
             .tool_use_blocks
             .iter()
-            .all(|block| block.status != ToolStatus::Running));
+            .map(|block| (block.id.as_str(), block.status.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("toolu-cancel-remote-done", ToolStatus::Error)],
+            "{:?}",
+            replay.renderer
+        );
     }
 }

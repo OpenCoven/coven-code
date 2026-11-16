@@ -3497,14 +3497,14 @@ impl App {
         if self.cancellation != crate::application::TurnCancellation::Idle {
             self.status_message = Some("Cancelled.".to_string());
             // A row still running was started by the backlog after the
-            // request, and the worker is gone without finishing it.
-            if self
+            // request, and the worker is gone without finishing it. Rows
+            // that did finish keep their place.
+            let (running, finished): (Vec<_>, Vec<_>) = self
                 .tool_use_blocks
-                .iter()
-                .any(|block| block.status == ToolStatus::Running)
-            {
-                self.interrupt_tool_rows();
-            }
+                .drain(..)
+                .partition(|block| block.status == ToolStatus::Running);
+            *self.tool_use_blocks = finished;
+            self.interrupted_tools.extend(running);
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
     }
