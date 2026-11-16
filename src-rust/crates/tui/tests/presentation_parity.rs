@@ -698,20 +698,35 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
             "coven text",
             false,
         )),
+        // Reported finished, its result not yet delivered.
+        Step::Event(tool_start(
+            "toolu-parity-backlog-reported",
+            "Grep",
+            r#"{"pattern":"contract"}"#,
+        )),
+        Step::Event(QueryEvent::ToolFinished {
+            tool_id: "toolu-parity-backlog-reported".to_string(),
+            is_error: false,
+        }),
         Step::Settle,
     ]);
     let kept: Vec<_> = unfinished
         .app
         .tool_use_blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.status.clone()))
+        .map(|block| block.id.as_str())
         .collect();
-    assert_eq!(kept, [("toolu-parity-backlog-done", ToolStatus::Done)]);
+    assert_eq!(
+        kept,
+        ["toolu-parity-backlog-done", "toolu-parity-backlog-reported"]
+    );
+    // None is left shown as running: the one that reported finishing is
+    // shown as done until its result arrives.
     assert!(unfinished
         .app
         .tool_use_blocks
         .iter()
-        .all(|block| block.status != ToolStatus::Running));
+        .all(|block| block.status != ToolStatus::Running || block.run.finished.is_some()));
     assert!(
         unfinished
             .last()

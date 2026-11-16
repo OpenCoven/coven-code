@@ -3561,11 +3561,12 @@ impl App {
             self.status_message = Some("Cancelled.".to_string());
             // A row still running was started by the backlog after the
             // request, and the worker is gone without finishing it. Rows
-            // that did finish keep their place.
-            let (running, finished): (Vec<_>, Vec<_>) = self
-                .tool_use_blocks
-                .drain(..)
-                .partition(|block| block.status == ToolStatus::Running);
+            // that finished, or reported finishing, keep their place, as
+            // `interrupt_tool_rows` keeps them.
+            let (running, finished): (Vec<_>, Vec<_>) =
+                self.tool_use_blocks.drain(..).partition(|block| {
+                    block.status == ToolStatus::Running && block.run.finished.is_none()
+                });
             *self.tool_use_blocks = finished;
             self.interrupted_tools.extend(running);
         }
