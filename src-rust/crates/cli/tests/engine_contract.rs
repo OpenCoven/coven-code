@@ -5,7 +5,8 @@
 //! Surfaces already covered elsewhere and deliberately not duplicated here:
 //!
 //! - surface 1 (bare launch exits 0 on quit): `scripts/tui-tests/cases/06_quit.sh`
-//! - surface 10 (`acp` JSON-RPC server): `tests/acp_smoke.rs`
+//! - surface 10 (`acp` JSON-RPC server): `tests/acp_smoke.rs`; only `initialize`
+//!   runs here, to show it ignores the renderer selector
 //! - headless session-brief / result envelope: `tests/headless_contract/`
 //!
 //! Every test runs the real binary (`CARGO_BIN_EXE_coven-code`) in a scratch
@@ -29,7 +30,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BIN: &str = env!("CARGO_BIN_EXE_coven-code");
@@ -78,16 +79,32 @@ impl Scratch {
             .tempdir()
             .expect("create scratch dir");
         let scratch = Self { root };
-        for dir in [
-            scratch.home(),
-            scratch.coven_home(),
-            scratch.cwd(),
-            scratch.bin_dir(),
-        ] {
+        scratch.lay_out();
+        scratch
+    }
+
+    fn lay_out(&self) {
+        for dir in [self.home(), self.coven_home(), self.cwd(), self.bin_dir()] {
             fs::create_dir_all(&dir).expect("create scratch subdir");
         }
-        scratch.write_fake_claude();
-        scratch
+        self.write_fake_claude();
+    }
+
+    /// Empty the scratch and lay it out again at the same paths, so runs
+    /// compared byte for byte see identical paths and no state from an
+    /// earlier run.
+    fn reset(&self) {
+        for entry in fs::read_dir(self.root.path()).expect("list scratch") {
+            let entry = entry.expect("scratch entry");
+            let path = entry.path();
+            if entry.file_type().expect("scratch entry type").is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            }
+            .unwrap_or_else(|e| panic!("clear {}: {e}", path.display()));
+        }
+        self.lay_out();
     }
 
     fn home(&self) -> PathBuf {
@@ -189,6 +206,16 @@ impl Run {
     }
 }
 
+impl From<&Output> for Run {
+    fn from(output: &Output) -> Self {
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+}
+
 impl std::fmt::Display for Run {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -202,6 +229,11 @@ impl std::fmt::Display for Run {
 /// Spawn `cmd`, feed `stdin` (then close it so EOF is delivered), and wait
 /// at most `RUN_TIMEOUT`.
 fn run_engine(cmd: &mut Command, stdin: &str) -> Run {
+    Run::from(&run_engine_output(cmd, stdin))
+}
+
+/// [`run_engine`], keeping the exact exit status and output bytes.
+fn run_engine_output(cmd: &mut Command, stdin: &str) -> Output {
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -223,12 +255,7 @@ fn run_engine(cmd: &mut Command, stdin: &str) -> Run {
             None => std::thread::sleep(Duration::from_millis(25)),
         }
     }
-    let output = child.wait_with_output().expect("wait_with_output");
-    Run {
-        code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+    child.wait_with_output().expect("wait_with_output")
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -721,74 +748,248 @@ fn contract_stream_json_turn_matches_golden_frames() {
 // ---------------------------------------------------------------------------
 // Renderer selector: interactive-only (`COVEN_CODE_UI`)
 // ---------------------------------------------------------------------------
+//
+// `COVEN_CODE_UI` picks the interactive renderer. Only the interactive route
+// reads it: an unsupported value makes that route warn on stderr, and the
+// chosen renderer then takes over the terminal (alternate screen, hidden
+// cursor). Every machine route must behave exactly as if it were unset.
+
+/// The selector states each machine route runs under: unset (the baseline),
+/// both renderers, and an unsupported value.
+const SELECTOR_STATES: [Option<&str>; 4] =
+    [None, Some("classic"), Some("next"), Some("not-a-renderer")];
+
+/// The `initialize` request `tests/acp_smoke.rs` sends.
+const ACP_INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":false},"clientInfo":{"name":"smoke","version":"0.0.0"}}}"#;
+
+/// Replace every `"duration_ms":<digits>` value with 0. A stream-json turn's
+/// wall time is the only output that differs between two runs of the same
+/// input.
+fn mask_duration_ms(bytes: &[u8]) -> Vec<u8> {
+    let key = br#""duration_ms":"#;
+    let mut masked = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some(at) = rest.windows(key.len()).position(|window| window == key) {
+        let value = at + key.len();
+        masked.extend_from_slice(&rest[..value]);
+        masked.push(b'0');
+        let digits = rest[value..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        rest = &rest[value + digits..];
+    }
+    masked.extend_from_slice(rest);
+    masked
+}
+
+/// Exit status and both streams of one run, with ESC shown as `\x1b` so a
+/// failure report cannot itself drive the terminal.
+fn describe(output: &Output) -> String {
+    format!(
+        "--- {}\n--- stdout:\n{}\n--- stderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).replace('\x1b', "\\x1b"),
+        String::from_utf8_lossy(&output.stderr).replace('\x1b', "\\x1b"),
+    )
+}
+
+/// Run one machine-route probe under every [`SELECTOR_STATES`] value and
+/// require each run to match the unset run exactly: the same exit status,
+/// the same stdout bytes (only `duration_ms` masked) and the same stderr
+/// bytes. No run may write an escape byte (ESC, 0x1b) to either stream, so
+/// renderer setup such as ESC[?1049h or ESC[?25l cannot slip through.
+///
+/// Each run starts from a clean scratch at the same paths, so no path or
+/// earlier state can differ between runs. `configure` adds the probe's
+/// arguments and env; the selector is set after it, so a probe cannot
+/// override it. Returns the unset run for route-specific checks, so four
+/// identical wrong answers still fail.
+fn assert_ignores_renderer_selector(
+    probe: &str,
+    stdin: &str,
+    configure: impl Fn(&mut Command),
+) -> Run {
+    let scratch = Scratch::new();
+    let runs: Vec<(Option<&str>, Output)> = SELECTOR_STATES
+        .iter()
+        .map(|&state| {
+            scratch.reset();
+            let mut cmd = scratch.engine();
+            configure(&mut cmd);
+            match state {
+                Some(value) => cmd.env("COVEN_CODE_UI", value),
+                None => cmd.env_remove("COVEN_CODE_UI"),
+            };
+            (state, run_engine_output(&mut cmd, stdin))
+        })
+        .collect();
+    let baseline = &runs[0].1;
+    let mut failures = Vec::new();
+    for (state, output) in &runs {
+        let mut problems = Vec::new();
+        if output.stdout.contains(&0x1b) {
+            problems.push("escape byte on stdout");
+        }
+        if output.stderr.contains(&0x1b) {
+            problems.push("escape byte on stderr");
+        }
+        if String::from_utf8_lossy(&output.stderr).contains("COVEN_CODE_UI") {
+            problems.push("stderr names the selector");
+        }
+        if output.status != baseline.status {
+            problems.push("exit status differs from unset");
+        }
+        if mask_duration_ms(&output.stdout) != mask_duration_ms(&baseline.stdout) {
+            problems.push("stdout differs from unset");
+        }
+        if output.stderr != baseline.stderr {
+            problems.push("stderr differs from unset");
+        }
+        if !problems.is_empty() {
+            failures.push(format!(
+                "COVEN_CODE_UI={}: {}\n{}",
+                state.unwrap_or("(unset)"),
+                problems.join("; "),
+                describe(output)
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{probe} must ignore the renderer selector\n{}\n=== unset run ===\n{}",
+        failures.join("\n"),
+        describe(baseline)
+    );
+    Run::from(baseline)
+}
 
 #[test]
-fn contract_machine_routes_ignore_renderer_selector() {
-    let baseline_scratch = Scratch::new();
-    let baseline_version = run_engine(baseline_scratch.engine().arg("--version"), "");
-    let baseline_print = run_engine(
-        baseline_scratch
-            .engine()
-            .args(["--print", "ping", "--model", FAKE_MODEL]),
-        "",
+fn contract_version_ignores_renderer_selector() {
+    let run = assert_ignores_renderer_selector("--version", "", |cmd| {
+        cmd.arg("--version");
+    });
+    assert_eq!(run.code, 0, "{run}");
+    assert_eq!(
+        run.stdout,
+        format!("coven-code {ENGINE_VERSION}\n"),
+        "{run}"
     );
-    let baseline_stream = run_engine(
-        baseline_scratch.engine().args(stream_json_args()).args([
+}
+
+#[test]
+fn contract_print_ignores_renderer_selector() {
+    let text = assert_ignores_renderer_selector("--print", "", |cmd| {
+        cmd.args(["--print", "ping", "--model", FAKE_MODEL]);
+    });
+    assert_eq!(text.code, 0, "{text}");
+    assert_eq!(text.stdout, format!("{FAKE_REPLY}\n"), "{text}");
+    assert_eq!(text.stderr, "", "{text}");
+
+    let json = assert_ignores_renderer_selector("--print --output-format json", "", |cmd| {
+        cmd.args(["--print", "--output-format", "json", "ping"])
+            .args(["--model", FAKE_MODEL]);
+    });
+    assert_eq!(json.code, 0, "{json}");
+    let frames = json.stdout_frames();
+    assert_eq!(frames.len(), 1, "{json}");
+    assert_eq!(frames[0]["type"], "result", "{json}");
+    assert_eq!(frames[0]["result"], FAKE_REPLY, "{json}");
+
+    let streamed =
+        assert_ignores_renderer_selector("--print --output-format stream-json", "", |cmd| {
+            cmd.args(["--print", "--output-format", "stream-json", "ping"])
+                .args(["--model", FAKE_MODEL]);
+        });
+    assert_eq!(streamed.code, 0, "{streamed}");
+    let frames = streamed.stdout_frames();
+    let kinds: Vec<&str> = frames
+        .iter()
+        .map(|f| f["type"].as_str().unwrap_or("<missing type>"))
+        .collect();
+    assert_eq!(kinds, ["text_delta", "result"], "{streamed}");
+    assert_eq!(frames[0]["text"], FAKE_REPLY, "{streamed}");
+
+    // The error path: exit 1 with a message on stderr.
+    let missing = assert_ignores_renderer_selector("--print without a prompt", "", |cmd| {
+        cmd.arg("--print");
+    });
+    assert_eq!(missing.code, 1, "{missing}");
+    assert!(
+        missing.stderr.contains("No prompt provided"),
+        "expected the no-prompt error on stderr\n{missing}"
+    );
+}
+
+#[test]
+fn contract_stream_json_ignores_renderer_selector() {
+    // The refused frame puts a warning on stderr, so the comparison covers a
+    // non-empty stderr as well as a full turn.
+    let stdin = format!("not json\n{}", user_frame("ping"));
+    let run = assert_ignores_renderer_selector("stream-json", &stdin, |cmd| {
+        cmd.args(stream_json_args()).args([
             "--session-id",
             CONTRACT_SESSION,
             "--model",
             FAKE_MODEL,
-        ]),
-        &user_frame("ping"),
+        ]);
+    });
+    assert_eq!(run.code, 0, "{run}");
+    let frames = run.stdout_frames();
+    let kinds: Vec<&str> = frames
+        .iter()
+        .map(|f| f["type"].as_str().unwrap_or("<missing type>"))
+        .collect();
+    assert_eq!(kinds, ["system", "result", "assistant", "result"], "{run}");
+    assert_eq!(frames[1]["subtype"], "error_during_execution", "{run}");
+    assert_eq!(
+        frames[2]["message"]["content"][0]["text"], FAKE_REPLY,
+        "{run}"
     );
-    let normalized = |run: &Run| -> Vec<serde_json::Value> {
-        run.stdout_frames().iter().map(normalize_frame).collect()
-    };
+    assert_eq!(frames[3]["subtype"], "success", "{run}");
+    assert!(
+        run.stderr
+            .starts_with("Warning: refusing input frame: malformed JSON frame"),
+        "{run}"
+    );
+}
 
-    for value in ["next", "classic", "not-a-renderer"] {
-        let scratch = Scratch::new();
-        let version = run_engine(
-            scratch
-                .engine()
-                .env("COVEN_CODE_UI", value)
-                .arg("--version"),
-            "",
-        );
-        assert_eq!(version.code, baseline_version.code, "{version}");
-        assert_eq!(version.stdout, baseline_version.stdout, "{version}");
+#[test]
+fn contract_auth_status_json_ignores_renderer_selector() {
+    let logged_out = assert_ignores_renderer_selector("auth status --json", "", |cmd| {
+        cmd.args(["auth", "status", "--json"]);
+    });
+    assert_eq!(logged_out.code, 1, "{logged_out}");
+    let status: serde_json::Value = serde_json::from_str(&logged_out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{logged_out}"));
+    assert_eq!(status["loggedIn"], false, "{logged_out}");
 
-        let print = run_engine(
-            scratch
-                .engine()
-                .env("COVEN_CODE_UI", value)
-                .args(["--print", "ping", "--model", FAKE_MODEL]),
-            "",
-        );
-        assert_eq!(print.code, baseline_print.code, "{print}");
-        assert_eq!(print.stdout, baseline_print.stdout, "{print}");
+    let logged_in =
+        assert_ignores_renderer_selector("auth status --json with an env key", "", |cmd| {
+            cmd.env("ANTHROPIC_API_KEY", "contract-fixture-key")
+                .args(["auth", "status", "--json"]);
+        });
+    assert_eq!(logged_in.code, 0, "{logged_in}");
+    let status: serde_json::Value = serde_json::from_str(&logged_in.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{logged_in}"));
+    assert_eq!(status["loggedIn"], true, "{logged_in}");
+}
 
-        let stream = run_engine(
-            scratch
-                .engine()
-                .env("COVEN_CODE_UI", value)
-                .args(stream_json_args())
-                .args(["--session-id", CONTRACT_SESSION, "--model", FAKE_MODEL]),
-            &user_frame("ping"),
-        );
-        assert_eq!(stream.code, baseline_stream.code, "{stream}");
-        assert_eq!(
-            normalized(&stream),
-            normalized(&baseline_stream),
-            "{stream}"
-        );
-
-        for run in [&version, &print, &stream] {
-            assert!(
-                !run.stderr.contains("COVEN_CODE_UI"),
-                "machine routes must not read the renderer selector ({value})\n{run}"
-            );
-        }
-    }
+#[test]
+fn contract_acp_initialize_ignores_renderer_selector() {
+    let run =
+        assert_ignores_renderer_selector("acp initialize", &format!("{ACP_INITIALIZE}\n"), |cmd| {
+            cmd.arg("acp");
+        });
+    assert_eq!(run.code, 0, "{run}");
+    let frames = run.stdout_frames();
+    assert_eq!(frames.len(), 1, "only the initialize response\n{run}");
+    assert_eq!(frames[0]["id"], 1, "{run}");
+    assert_eq!(frames[0]["result"]["protocolVersion"], 1, "{run}");
+    assert_eq!(
+        frames[0]["result"]["agentInfo"]["name"], "coven-code",
+        "{run}"
+    );
 }
 
 #[test]
