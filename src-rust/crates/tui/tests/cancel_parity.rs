@@ -17,12 +17,13 @@
 //! Presentation-only, so not compared:
 //! - Rows of the calls a cancel interrupts, and anything later shown for
 //!   those calls. Classic drops the rows; Next keeps them in its interrupted
-//!   list. They are compared only as what each App observed: every row it has
-//!   shown, live or not. Rows the backlog starts afterwards are live rows like
-//!   any other and are compared.
+//!   list, where what the call reports later still reaches them. They are
+//!   compared only as the calls each App has shown a row for, live or not.
+//!   Rows the backlog starts afterwards are live rows like any other and are
+//!   compared.
 //! - Status wording and the spinner verb.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use claurst_api::streaming::ContentDelta;
 use claurst_api::AnthropicStreamEvent;
@@ -78,8 +79,11 @@ enum Step {
     /// A key, routed the way the interactive loop routes it: the interrupt and
     /// exit keys first, then the App's own handling.
     Key(KeyEvent),
-    /// Remote control cancelled the turn; the loop has cancelled its token.
-    RemoteCancel,
+    /// Remote control cancelled; the loop has cancelled the token of the turn
+    /// running, if one is.
+    RemoteCancel {
+        turn_running: bool,
+    },
     /// No worker is running any more, so the loop settles a pending cancel.
     Settle,
 }
@@ -100,8 +104,9 @@ struct Semantic {
     messages: String,
     /// Live tool rows by id, except those of calls a cancel interrupted.
     tools: BTreeMap<String, ToolObservation>,
-    /// Every row the App has shown so far, live, interrupted or dropped.
-    observed: BTreeMap<String, ToolObservation>,
+    /// Every call the App has shown a row for so far, live, interrupted or
+    /// dropped.
+    observed: BTreeSet<String>,
     is_streaming: bool,
     cancellation: TurnCancellation,
     /// Operations the interactive loop performs after this step.
@@ -132,9 +137,9 @@ struct Replay {
     renderer: UiRenderer,
     app: App,
     scope: SessionScope,
-    observed: BTreeMap<String, ToolObservation>,
+    observed: BTreeSet<String>,
     /// Calls whose rows were live when a cancel was asked for.
-    interrupted: std::collections::BTreeSet<String>,
+    interrupted: BTreeSet<String>,
     steps: Vec<Semantic>,
     /// The frame drawn after each step.
     frames: Vec<String>,
@@ -160,7 +165,7 @@ impl Replay {
             renderer,
             app,
             scope: SessionScope::default(),
-            observed: BTreeMap::new(),
+            observed: BTreeSet::new(),
             interrupted: Default::default(),
             steps: Vec::new(),
             frames: Vec::new(),
@@ -196,7 +201,9 @@ impl Replay {
                         self.app.handle_key_event(key);
                     }
                 },
-                Step::RemoteCancel => self.app.note_cancellation_sent(true),
+                Step::RemoteCancel { turn_running } => {
+                    self.app.note_cancellation_sent(turn_running)
+                }
                 Step::Settle => self.app.settle_cancellation(),
             }
             self.frames.push(draw(&self.app, self.renderer));
@@ -216,9 +223,13 @@ impl Replay {
                 )
             };
             let live: BTreeMap<_, _> = self.app.tool_use_blocks.iter().map(observe).collect();
-            self.observed.extend(live.clone());
-            self.observed
-                .extend(self.app.interrupted_tools.iter().map(observe));
+            self.observed.extend(
+                self.app
+                    .tool_use_blocks
+                    .iter()
+                    .chain(self.app.interrupted_tools.iter())
+                    .map(|block| block.id.clone()),
+            );
             self.steps.push(Semantic {
                 messages: serde_json::to_string(&*self.app.messages).expect("messages serialize"),
                 tools: live
@@ -240,8 +251,16 @@ impl Replay {
 /// Replay `steps` for both renderers; the semantic state must match after
 /// every step.
 fn assert_parity(name: &str, steps: Vec<Step>) -> (Replay, Replay) {
-    let classic = Replay::new(UiRenderer::Classic).run(steps.clone());
-    let next = Replay::new(UiRenderer::Next).run(steps);
+    compare(
+        name,
+        Replay::new(UiRenderer::Classic).run(steps.clone()),
+        Replay::new(UiRenderer::Next).run(steps),
+    )
+}
+
+/// The semantic state of two finished replays must match after every step.
+fn compare(name: &str, classic: Replay, next: Replay) -> (Replay, Replay) {
+    assert_eq!(classic.steps.len(), next.steps.len(), "{name}");
     for (index, (classic_step, next_step)) in classic.steps.iter().zip(&next.steps).enumerate() {
         assert_eq!(
             classic_step, next_step,
@@ -281,28 +300,64 @@ fn ctrl_c_during_a_tool() -> Vec<Step> {
 }
 
 /// A remote-control cancel while a tool runs, then the backlog: text, a tool
-/// that never ends and one that does.
+/// that never ends, one that does, and one that reports finishing before its
+/// result arrives.
 fn remote_cancel_during_a_tool() -> Vec<Step> {
     vec![
         Step::Event(delta("running it ")),
         Step::Event(tool_start("toolu-cancel-remote")),
-        Step::RemoteCancel,
+        Step::RemoteCancel { turn_running: true },
         Step::Event(delta("late text")),
         Step::Event(tool_start("toolu-cancel-remote-backlog")),
         Step::Event(tool_start("toolu-cancel-remote-done")),
         Step::Event(tool_end("toolu-cancel-remote-done")),
+        Step::Event(tool_start("toolu-cancel-remote-reported")),
+        Step::Event(QueryEvent::ToolFinished {
+            tool_id: "toolu-cancel-remote-reported".to_string(),
+            is_error: false,
+        }),
         Step::Settle,
     ]
 }
 
-/// Ctrl+C while a tool runs, then the backlog repeats that call's start.
+/// Ctrl+C while a tool runs, then the backlog repeats that call's start and
+/// reports how it ended.
 fn ctrl_c_then_a_repeated_start() -> Vec<Step> {
     vec![
         Step::Event(tool_start("toolu-cancel-repeated")),
         Step::Key(ctrl_c()),
         Step::Event(tool_start("toolu-cancel-repeated")),
+        Step::Event(QueryEvent::ToolFinished {
+            tool_id: "toolu-cancel-repeated".to_string(),
+            is_error: true,
+        }),
+        Step::Event(tool_end("toolu-cancel-repeated")),
         Step::Settle,
     ]
+}
+
+/// The turn completes in the backlog: the runtime had finished before the
+/// cancel reached it.
+fn escape_then_a_completed_turn() -> Vec<Step> {
+    vec![
+        Step::Event(delta("the whole answer")),
+        Step::Key(escape()),
+        Step::Event(QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".to_string(),
+            usage: None,
+        }),
+        Step::Settle,
+    ]
+}
+
+/// A replay whose App rings and toasts on every completed turn, however short.
+fn announcing(renderer: UiRenderer) -> Replay {
+    let mut replay = Replay::new(renderer);
+    replay.app.completion_toast_enabled = true;
+    replay.app.completion_toast_min_secs = 0;
+    replay.app.bell_on_complete = true;
+    replay
 }
 
 #[test]
@@ -398,23 +453,109 @@ fn a_remote_cancel_follows_the_same_model_in_either_renderer() {
     assert!(classic.steps[4]
         .tools
         .contains_key("toolu-cancel-remote-backlog"));
-    assert_eq!(classic.steps[7].cancellation, TurnCancellation::Idle);
+    assert_eq!(classic.steps[9].cancellation, TurnCancellation::Idle);
     // Settling interrupts the backlog tool that never ended; the one that
-    // ended keeps its row.
+    // ended and the one that reported finishing keep their rows.
     for replay in [&classic, &next] {
         let rows: Vec<_> = replay
             .app
             .tool_use_blocks
             .iter()
-            .map(|block| (block.id.as_str(), block.status.clone()))
+            .map(|block| (block.id.as_str(), block.run.finished.is_some()))
             .collect();
         assert_eq!(
             rows,
-            [("toolu-cancel-remote-done", ToolStatus::Error)],
+            [
+                ("toolu-cancel-remote-done", true),
+                ("toolu-cancel-remote-reported", true)
+            ],
+            "{:?}",
+            replay.renderer
+        );
+        assert!(replay
+            .app
+            .interrupted_tools
+            .iter()
+            .any(|block| block.id == "toolu-cancel-remote-backlog"));
+    }
+}
+
+#[test]
+fn a_remote_cancel_with_no_turn_running_only_reports_it() {
+    let (classic, next) = assert_parity(
+        "remote cancel while idle",
+        vec![Step::RemoteCancel {
+            turn_running: false,
+        }],
+    );
+    let step = &classic.steps[0];
+    assert_eq!(step.cancellation, TurnCancellation::Idle);
+    assert!(!step.is_streaming && !step.cancel_requested);
+    for replay in [&classic, &next] {
+        assert_eq!(
+            replay.app.status_message.as_deref(),
+            Some("Cancelled by remote control."),
             "{:?}",
             replay.renderer
         );
     }
+    assert!(
+        !classic.frames[0].contains("Cancelling"),
+        "{}",
+        classic.frames[0]
+    );
+}
+
+#[test]
+fn a_turn_completed_in_the_backlog_still_settles_as_cancelled() {
+    let (classic, next) = compare(
+        "completed in the backlog",
+        announcing(UiRenderer::Classic).run(escape_then_a_completed_turn()),
+        announcing(UiRenderer::Next).run(escape_then_a_completed_turn()),
+    );
+    assert!(classic.steps[1].cancel_requested);
+    assert!(
+        classic.steps[2].effects.is_empty(),
+        "a cancelled turn rings no bell"
+    );
+    for replay in [&classic, &next] {
+        assert!(
+            replay
+                .app
+                .notifications
+                .notifications
+                .iter()
+                .all(|notification| !notification.message.starts_with("Turn done")),
+            "{:?}: a cancelled turn shows no completion toast",
+            replay.renderer
+        );
+        let settled = &replay.frames[3];
+        assert!(
+            settled.contains("Cancelled"),
+            "{:?}:\n{settled}",
+            replay.renderer
+        );
+    }
+    assert!(
+        !classic.frames[3].contains("· done"),
+        "{}",
+        classic.frames[3]
+    );
+    // Without the cancel, the same completion rings and toasts.
+    let completed = announcing(UiRenderer::Classic).run(vec![
+        Step::Event(delta("the whole answer")),
+        Step::Event(QueryEvent::TurnComplete {
+            turn: 1,
+            stop_reason: "end_turn".to_string(),
+            usage: None,
+        }),
+    ]);
+    assert_eq!(completed.steps[1].effects, [PresentationEffect::RingBell]);
+    assert!(
+        completed.frames[1].contains("· done"),
+        "{}",
+        completed.frames[1]
+    );
 }
 
 #[test]
@@ -429,7 +570,7 @@ fn a_repeated_start_of_an_interrupted_call_cannot_restart_the_turn() {
         !classic.steps[2].is_streaming,
         "the repeat restarted the turn"
     );
-    assert_eq!(classic.steps[3].cancellation, TurnCancellation::Idle);
+    assert_eq!(classic.steps[5].cancellation, TurnCancellation::Idle);
     for replay in [&classic, &next] {
         assert!(
             replay
@@ -441,7 +582,8 @@ fn a_repeated_start_of_an_interrupted_call_cannot_restart_the_turn() {
             replay.renderer
         );
     }
-    // Next keeps the call's one interrupted row.
+    // Next keeps the call's one interrupted row, and what the call reports
+    // afterwards reaches it.
     let rows: Vec<_> = next
         .app
         .interrupted_tools
@@ -449,4 +591,7 @@ fn a_repeated_start_of_an_interrupted_call_cannot_restart_the_turn() {
         .map(|block| block.id.as_str())
         .collect();
     assert_eq!(rows, ["toolu-cancel-repeated"]);
+    let row = &next.app.interrupted_tools[0];
+    assert_eq!(row.output_preview.as_deref(), Some("cancelled"));
+    assert!(row.run.finished.is_some_and(|(_, is_error)| is_error));
 }

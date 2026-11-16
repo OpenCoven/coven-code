@@ -5,9 +5,11 @@
 # API drives real turns through the real client and query loop:
 #   J1  Escape while an approved Bash command appends a line to a file every
 #       second: once the cancel settles, the file stops growing.
-#   J2  Escape during a burst of text deltas: the backlog that is still
-#       arriving does not restart the turn on screen, and the status settles
-#       to cancelled.
+#   J2  Escape while text is still arriving: the fake sends a burst of text
+#       deltas and then holds the stream open, so the turn is still running in
+#       the runtime when Escape lands. The backlog does not restart the turn on
+#       screen, and the status settles to cancelled, which it can only do once
+#       the cancel has stopped the runtime.
 # Classic runs with COVEN_CODE_UI unset; Next with COVEN_CODE_UI=next. Time
 # limits are generous because this also runs on debug builds and loaded hosts.
 
@@ -66,7 +68,7 @@ _cq_j1() { # renderer
 
 _cq_j2() { # renderer
   local r="$1" n=0 restarted="" s
-  tui_type "flood: 200000"; sleep 0.3; tui_keys Enter
+  tui_type "flood: 200000 hold"; sleep 0.3; tui_keys Enter
   if ! wait_for "flood line" 30; then
     _fail "J2 $r: the burst starts" "$(tui_capture)"; return 0
   fi

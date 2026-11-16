@@ -3513,11 +3513,19 @@ impl App {
         }
     }
 
+    /// The row of a call: its live row, or the row a cancel moved to the
+    /// interrupted list, which keeps receiving what the call reports.
+    fn tool_row_mut(&mut self, tool_id: &str) -> Option<&mut ToolUseBlock> {
+        let rows = if self.tool_use_blocks.iter().any(|block| block.id == tool_id) {
+            &mut self.tool_use_blocks
+        } else {
+            &mut self.interrupted_tools
+        };
+        rows.iter_mut().find(|block| block.id == tool_id)
+    }
+
     fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
-        self.tool_use_blocks
-            .iter_mut()
-            .find(|block| block.id == tool_id)
-            .map(|block| &mut block.run)
+        self.tool_row_mut(tool_id).map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -3566,13 +3574,18 @@ impl App {
             self.status_message = Some("Cancelled.".to_string());
             // A row still running was started by the backlog after the
             // request, and the worker is gone without finishing it. Rows
-            // that did finish keep their place.
-            let (running, finished): (Vec<_>, Vec<_>) = self
-                .tool_use_blocks
-                .drain(..)
-                .partition(|block| block.status == ToolStatus::Running);
+            // that finished, or reported finishing, keep their place, as
+            // `interrupt_tool_rows` keeps them.
+            let (running, finished): (Vec<_>, Vec<_>) =
+                self.tool_use_blocks.drain(..).partition(|block| {
+                    block.status == ToolStatus::Running && block.run.finished.is_none()
+                });
             *self.tool_use_blocks = finished;
             self.interrupted_tools.extend(running);
+            // A completion that arrived while the cancel was pending does not
+            // make this a finished turn: Classic shows "Cancelled.", not its
+            // done marker.
+            self.last_turn_verb = None;
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
     }
@@ -8097,7 +8110,7 @@ impl App {
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
                 let preview = Self::tool_result_preview(&result);
-                if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
+                if let Some(block) = self.tool_row_mut(&tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
                     } else {
@@ -8178,8 +8191,11 @@ impl App {
 
                 // Surface a clear "turn done" signal for long-running turns the
                 // user might have stepped away from. The faint "✽ Worked for Ns"
-                // status line is too quiet on its own.
-                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                // status line is too quiet on its own. A turn the user is
+                // cancelling gets none: they are here, and it settles as
+                // cancelled.
+                if !cancelled && !cancelling && turn_elapsed_secs >= self.completion_toast_min_secs
+                {
                     if self.completion_toast_enabled {
                         self.push_notification(
                             NotificationKind::Success,
