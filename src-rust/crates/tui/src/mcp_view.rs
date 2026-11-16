@@ -280,8 +280,12 @@ pub fn render_mcp_view(state: &McpViewState, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    let w = (area.width * 9 / 10).max(50).min(area.width);
-    let h = (area.height * 4 / 5).max(15).min(area.height);
+    let w = ((u32::from(area.width) * 9 / 10) as u16)
+        .max(50)
+        .min(area.width);
+    let h = ((u32::from(area.height) * 4 / 5) as u16)
+        .max(15)
+        .min(area.height);
     let dialog = centered_rect(w, h, area);
     render_dark_overlay_buf(buf, area);
     render_dialog_bg_buf(buf, dialog);

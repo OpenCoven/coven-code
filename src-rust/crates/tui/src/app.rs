@@ -417,6 +417,42 @@ pub struct ToolUseBlock {
     pub output_preview: Option<String>,
     /// JSON-serialised input for the tool call (populated from the API stream).
     pub input_json: String,
+    pub run: ToolRun,
+}
+
+/// What the query loop has reported about a tool's own work, ahead of the
+/// `ToolEnd` that waits for every tool in its response. Only Next shows this.
+#[derive(Debug, Clone, Default)]
+pub struct ToolRun {
+    /// The order its row opened in, which keeps its place among the other
+    /// rows; 0 for a row built outside the runtime's events.
+    pub opened: u64,
+    /// When its own work began, or the moment it was last approved if it
+    /// asked. Unset while hooks run or it waits for its turn: that time is not
+    /// its.
+    pub started_at: Option<std::time::Instant>,
+    /// Waiting for another tool in its response to finish first.
+    pub queued: bool,
+    /// How long its work took and whether it failed, once it ended.
+    pub finished: Option<(std::time::Duration, bool)>,
+}
+
+impl ToolRun {
+    /// A run for a row opening now, after every row opened before it.
+    fn opening() -> Self {
+        static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
+    fn finish(&mut self, is_error: bool) {
+        if self.finished.is_none() {
+            let took = self.started_at.map(|at| at.elapsed()).unwrap_or_default();
+            self.finished = Some((took, is_error));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -690,6 +726,9 @@ pub struct App {
     /// Permission decisions by tool use id (true = allowed).
     pub permission_decisions:
         crate::next::tracked::Tracked<std::collections::HashMap<String, bool>>,
+    /// Calls whose approval requests wait behind the prompt on screen, by
+    /// model call id (or request id when the call is unknown).
+    pub queued_approvals: crate::next::tracked::Tracked<Vec<String>>,
     /// Tool rows of a cancelled turn, kept as evidence until the next user
     /// turn; the live list is cleared on cancel.
     pub interrupted_tools: crate::next::tracked::Tracked<Vec<ToolUseBlock>>,
@@ -1306,6 +1345,7 @@ impl App {
             pending_resume: None,
             resume_saved_view: false,
             permission_decisions: std::collections::HashMap::new().into(),
+            queued_approvals: Vec::new().into(),
             interrupted_tools: Vec::new().into(),
             resolved_keybinding: None,
             cursor_pos: 0,
@@ -1699,7 +1739,7 @@ impl App {
         }
     }
 
-    fn current_user_turn_index(&self) -> Option<usize> {
+    pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
         self.messages
             .iter()
             .filter(|msg| msg.role == Role::User)
@@ -3452,6 +3492,32 @@ impl App {
     pub fn record_permission_decision(&mut self, tool_use_id: &str, allowed: bool) {
         self.permission_decisions
             .insert(tool_use_id.to_string(), allowed);
+        self.restart_tool_time(tool_use_id);
+    }
+
+    /// Restarts a tool's work time when its wait on the user ends. Time spent
+    /// waiting on the user is not time the tool spent working. Tools ask at
+    /// different points, some before any work and some after a first step,
+    /// so a row times from its latest approval.
+    pub fn restart_tool_time(&mut self, tool_use_id: &str) {
+        if let Some(run) = self.tool_run_mut(tool_use_id) {
+            run.started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Records which calls' approval requests wait behind the prompt on
+    /// screen; their rows await approval too.
+    pub fn set_queued_approvals(&mut self, calls: Vec<String>) {
+        if *self.queued_approvals != calls {
+            *self.queued_approvals = calls;
+        }
+    }
+
+    fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
+        self.tool_use_blocks
+            .iter_mut()
+            .find(|block| block.id == tool_id)
+            .map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -3465,19 +3531,21 @@ impl App {
             .retain(|id, _| shown.contains(id.as_str()));
     }
 
-    /// Clear the live tool rows of a turn being cancelled, keeping the ones
-    /// still running as evidence of what the cancel interrupted.
+    /// Move the tools a cancel interrupts to their own list, as evidence of
+    /// what it cut off. A tool that ended, or reported finishing before its
+    /// result arrived, did its work and keeps its row.
     pub fn interrupt_tool_rows(&mut self) {
         if self.renderer == crate::application::UiRenderer::Classic {
             // Classic clears its tool rows on cancel, as it always has.
             self.tool_use_blocks.clear();
             return;
         }
-        let running = self
+        let (interrupted, kept): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .filter(|block| block.status == ToolStatus::Running);
-        self.interrupted_tools.extend(running);
+            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_none());
+        self.interrupted_tools.extend(interrupted);
+        *self.tool_use_blocks = kept;
     }
 
     /// Record a cancellation the loop performed without a key request
@@ -4037,6 +4105,66 @@ impl App {
     // -----------------------------------------------------------------------
     // Voice PTT helpers
     // -----------------------------------------------------------------------
+
+    /// Drain recorder events without blocking, updating the prompt and notices.
+    /// Called before drawing by both interactive event loops.
+    pub fn poll_voice_events(&mut self) {
+        use claurst_core::voice::VoiceEvent;
+        let mut events = Vec::new();
+        if let Some(ref mut rx) = self.voice_event_rx {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            match ev {
+                VoiceEvent::RecordingStarted => {
+                    self.voice_recording = true;
+                    self.status_message =
+                        Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
+                }
+                VoiceEvent::RecordingStopped => {
+                    self.voice_recording = false;
+                    self.status_message = Some("Transcribing\u{2026}".to_string());
+                }
+                VoiceEvent::TranscriptReady(text) => {
+                    if !text.is_empty() {
+                        // Append to existing prompt text with a space separator
+                        // so the user can combine voice + typed input.
+                        if !self.prompt_input.text.is_empty()
+                            && !self.prompt_input.text.ends_with(' ')
+                        {
+                            self.prompt_input.paste(" ");
+                        }
+                        self.prompt_input.paste(&text);
+                        self.refresh_prompt_input();
+                        let preview_end = text
+                            .char_indices()
+                            .nth(60)
+                            .map_or(text.len(), |(index, _)| index);
+                        self.status_message =
+                            Some(format!("Transcribed: {}", &text[..preview_end]));
+                    }
+                    // Clear the channel once we have the result.
+                    self.voice_event_rx = None;
+                }
+                VoiceEvent::Error(msg) => {
+                    self.voice_recording = false;
+                    self.voice_event_rx = None;
+                    // Keep the operation and diagnostic visible in the compact
+                    // warning row; the Warning severity already signals failure.
+                    let detail = msg
+                        .strip_prefix("Transcription failed ")
+                        .or_else(|| msg.strip_prefix("Transcription API returned "));
+                    let message = match detail {
+                        Some(detail) => format!("Voice: Transcription {detail}"),
+                        None => format!("Voice: {msg}"),
+                    };
+                    self.push_notification(NotificationKind::Warning, message, Some(8));
+                }
+            }
+        }
+    }
 
     /// Start PTT recording: open the microphone capture stream and signal the
     /// UI.  No-op when no voice recorder is attached or recording is already
@@ -6779,47 +6907,11 @@ impl App {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
             {
-                if !Self::bash_command_has_shell_control(prefix) {
+                if !claurst_core::permissions::bash_command_has_shell_control(prefix) {
                     self.bash_prefix_allowlist.insert(prefix.to_string());
                 }
             }
         }
-    }
-
-    fn bash_command_has_shell_control(command: &str) -> bool {
-        let mut chars = command.chars().peekable();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escaped = false;
-
-        while let Some(c) = chars.next() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-
-            // In bash, backslash does not escape characters inside single quotes.
-            if c == '\\' && !in_single_quote {
-                escaped = true;
-                continue;
-            }
-
-            match c {
-                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-                '"' if !in_single_quote => in_double_quote = !in_double_quote,
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r'
-                    if !in_single_quote && !in_double_quote =>
-                {
-                    return true;
-                }
-                '`' if !in_single_quote => return true,
-                '$' if !in_single_quote && chars.peek() == Some(&'(') => return true,
-                _ => {}
-            }
-        }
-
-        // Treat unterminated quotes / dangling escapes as unsafe.
-        escaped || in_single_quote || in_double_quote
     }
 
     fn bash_prefix_matches_command(prefix: &str, command: &str) -> bool {
@@ -6842,7 +6934,7 @@ impl App {
     /// prefix allowlist.  Shell compound commands are never allowed by prefix;
     /// they must go through the normal permission dialog.
     pub fn bash_command_allowed_by_prefix(&self, command: &str) -> bool {
-        !Self::bash_command_has_shell_control(command)
+        !claurst_core::permissions::bash_command_has_shell_control(command)
             && self
                 .bash_prefix_allowlist
                 .iter()
@@ -7842,6 +7934,7 @@ impl App {
                         input_json,
                         status: ToolStatus::Running,
                         output_preview: None,
+                        run: ToolRun::opening(),
                     });
                     self.tool_use_blocks.len() - 1
                 }
@@ -7959,6 +8052,10 @@ impl App {
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
+                    existing.run = ToolRun {
+                        opened: existing.run.opened,
+                        ..ToolRun::default()
+                    };
                 } else {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
@@ -7967,6 +8064,7 @@ impl App {
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
+                        run: ToolRun::opening(),
                     });
                 }
                 self.invalidate_transcript();
@@ -7987,6 +8085,7 @@ impl App {
                         ToolStatus::Done
                     };
                     block.output_preview = Some(preview);
+                    block.run.finish(is_error);
                 }
                 self.invalidate_transcript();
                 if is_error {
@@ -7995,6 +8094,27 @@ impl App {
                     self.status_message = None;
                 }
                 self.refresh_turn_diff_from_history();
+            }
+
+            QueryEvent::ToolQueued { tool_id } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.queued = true;
+                    run.started_at = None;
+                }
+            }
+
+            QueryEvent::ToolRunning { tool_id } => {
+                // Its time starts now, not when the batch began with its hooks.
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.queued = false;
+                    run.started_at = Some(std::time::Instant::now());
+                }
+            }
+
+            QueryEvent::ToolFinished { tool_id, is_error } => {
+                if let Some(run) = self.tool_run_mut(&tool_id) {
+                    run.finish(is_error);
+                }
             }
 
             QueryEvent::TurnComplete {
@@ -8131,58 +8251,7 @@ impl App {
 
             self.poll_session_list();
 
-            // Drain voice transcription events (non-blocking).
-            // When the background recording/transcription task emits a
-            // TranscriptReady event we insert the text directly into the
-            // prompt so the user can review and submit it.
-            {
-                use claurst_core::voice::VoiceEvent;
-                let mut events = Vec::new();
-                if let Some(ref mut rx) = self.voice_event_rx {
-                    while let Ok(ev) = rx.try_recv() {
-                        events.push(ev);
-                    }
-                }
-                for ev in events {
-                    match ev {
-                        VoiceEvent::RecordingStarted => {
-                            self.voice_recording = true;
-                            self.status_message =
-                                Some("Recording\u{2026} (Alt+V or Esc to stop)".to_string());
-                        }
-                        VoiceEvent::RecordingStopped => {
-                            self.voice_recording = false;
-                            self.status_message = Some("Transcribing\u{2026}".to_string());
-                        }
-                        VoiceEvent::TranscriptReady(text) => {
-                            if !text.is_empty() {
-                                // Append to existing prompt text with a space separator
-                                // so the user can combine voice + typed input.
-                                if !self.prompt_input.text.is_empty()
-                                    && !self.prompt_input.text.ends_with(' ')
-                                {
-                                    self.prompt_input.paste(" ");
-                                }
-                                self.prompt_input.paste(&text);
-                                self.refresh_prompt_input();
-                                self.status_message =
-                                    Some(format!("Transcribed: {}", &text[..text.len().min(60)]));
-                            }
-                            // Clear the channel once we have the result.
-                            self.voice_event_rx = None;
-                        }
-                        VoiceEvent::Error(msg) => {
-                            self.voice_recording = false;
-                            self.voice_event_rx = None;
-                            self.push_notification(
-                                NotificationKind::Warning,
-                                format!("Voice: {}", msg),
-                                Some(8),
-                            );
-                        }
-                    }
-                }
-            }
+            self.poll_voice_events();
 
             // Draw the frame, and immediately scan the *just-rendered*
             // buffer for URL runs. ratatui swaps its two buffers at the
@@ -10302,6 +10371,24 @@ role = "Research"
         assert!(!app.bash_command_allowed_by_prefix("git status"));
         assert!(!app.bash_command_allowed_by_prefix("ls -la"));
         assert!(!app.bash_command_allowed_by_prefix(""));
+    }
+
+    #[test]
+    fn test_bash_prefix_allowlist_refuses_commands_it_cannot_read() {
+        let mut app = make_app();
+        app.bash_prefix_allowlist.insert("cargo build".to_string());
+        assert!(app.bash_command_allowed_by_prefix("cargo build --release"));
+        for hostile in [
+            "cargo build # '\ntouch x # '",
+            "cargo build $'\\'' ; touch x ; echo \\'",
+            "cargo build $\\\n(touch x)",
+            r"cargo build ${x:=a\[\$\(touch\ x\)\]} $[x]",
+        ] {
+            assert!(
+                !app.bash_command_allowed_by_prefix(hostile),
+                "{hostile:?} needs its own approval"
+            );
+        }
     }
 
     #[test]

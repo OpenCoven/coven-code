@@ -1359,7 +1359,7 @@ mod goal_tests {
                 });
                 let mut provider = CodexProvider::new(CodexTokens { access_token: "fake-expired".into(), refresh_token: Some("fake-refresh".into()), expires_at: Some(1), account_id: None }).unwrap();
                 provider.test_endpoints = Some((format!("{base}/refresh"), format!("{base}/responses")));
-                let request = ProviderRequest { model: "local-codex".into(), messages: vec![], system_prompt: None, tools: vec![], max_tokens: 10, temperature: None, top_p: None, top_k: None, stop_sequences: vec![], thinking: None, provider_options: json!({}) };
+                let request = ProviderRequest { model: "local-codex".into(), messages: vec![], system_prompt: None, tools: vec![], max_tokens: 10, temperature: None, top_p: None, top_k: None, stop_sequences: vec![], thinking: None, provider_options: json!({}), permission_mode: None };
                 let result = if streaming {
                     provider.create_message_stream_for_goal(request, Some(&turn), GoalTurnPermission::Work).await.map(|_| ())
                 } else {

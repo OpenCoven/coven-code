@@ -443,6 +443,7 @@ mod tests {
                     stop_sequences: Vec::new(),
                     thinking,
                     provider_options: serde_json::json!({}),
+                    permission_mode: None,
                 };
                 let wire = serde_json::to_value(AnthropicProvider::build_request(&request))
                     .expect("request serializes");

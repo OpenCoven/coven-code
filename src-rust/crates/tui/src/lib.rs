@@ -1672,6 +1672,7 @@ mod tests {
             status: ToolStatus::Running,
             output_preview: None,
             input_json: r#"{"file_path":"foo.rs"}"#.to_string(),
+            run: Default::default(),
         });
         app.handle_query_event(claurst_query::QueryEvent::ToolEnd {
             tool_name: "Read".to_string(),

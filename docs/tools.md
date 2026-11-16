@@ -33,7 +33,7 @@ Every tool in Coven Code implements the Rust `Tool` trait in `src-rust/crates/to
 - **Identity** — the tool name the model uses to call it
 - **Description** — instructions shown to the model
 - **Input schema** — a JSON Schema object validating the input the model must provide
-- **Permission level** — `None`, `ReadOnly`, `Write`, `Execute`, `Dangerous`, or `Forbidden`
+- **Permission level** — `None`, `ReadOnly`, `Network`, `Write`, `Execute`, `Dangerous`, or `Forbidden`
 - **Execution** — `execute()` performs the operation after permission resolution
 - **Tool definition** — `to_definition()` serializes the name, description, and schema for providers
 
@@ -47,6 +47,8 @@ A writer keeps its turn while its approval prompt is open, so when writers and o
 
 Writers outside the response are not covered. Two subagents or `TeamCreate` teammates running at the same time, a subagent and an `Edit` in its parent's response, or a scheduled query loop can still overwrite each other's change to the same file. A configured formatter that runs past its 30-second limit is not stopped, so its late write can replace a change made after it.
 
+The Next renderer reports each tool as it goes: `waiting for its turn` while another writing tool runs, `awaiting approval` while it asks you or its request waits behind another tool's, and `running`, `done` or `error` with how long its work took, once that passes a second. The time starts when the tool's own work begins, so the response's `PreToolUse` hooks and its wait for a turn are not counted. Your answer to an approval is not counted either: the time restarts once the approval is settled, by your answer or by a rule, because some tools ask before any work and others after a first step. A foreground `Agent` row's time includes any approvals its subagent waits on. A result can still arrive later than its `done`, because results are returned to the model together. Classic and headless output are unchanged.
+
 ---
 
 ## Permission System
@@ -58,7 +60,8 @@ Each tool is assigned a conceptual permission level based on what it can do:
 | Level | Description | Examples |
 |-------|-------------|---------|
 | **None** | No external effects; purely passive | `SleepTool` |
-| **ReadOnly** | Reads data; no writes or execution | `FileReadTool`, `GlobTool`, `WebFetchTool` |
+| **ReadOnly** | Reads data; no writes or execution | `FileReadTool`, `GlobTool` |
+| **Network** | Makes an outbound network request; handled like writes and execution: asks in `default` and `acceptEdits`, denied in `plan` and in headless runs unless a rule allows it, allowed in `bypassPermissions` | `WebFetchTool` |
 | **Write** | Creates or modifies data | `FileWriteTool`, `FileEditTool`, `ConfigTool` |
 | **Execute** | Runs code or spawns processes | `BashTool`, `TaskCreateTool`, `SendMessageTool` |
 | **Dangerous** | Broad system access; high blast radius | `ComputerUseTool` |
@@ -96,8 +99,29 @@ settings; project-local settings cannot inject them. Each rule contains:
 - An allow or deny action.
 
 Except in bypass mode, any matching deny wins over matching allows. Rules are
-evaluated before mode defaults, including plan mode. Manage rules with
-`/permissions`. See [configuration](configuration.md#permission-modes) for more.
+evaluated before mode defaults, including plan mode. See
+[configuration](configuration.md#permission-modes) for more. To change or remove
+a saved rule, edit `permissionRules` in your user settings.
+
+For `Bash`, `PowerShell`, and `REPL`, the rule's path is the command or code:
+
+- Approving it for the session or always covers that exact text only. `REPL`
+  approvals don't record the language, so the same text is also covered in another
+  language.
+- In a saved allow rule, a `*` glued to the end of the pattern, as in `git status*`,
+  means exactly `git status`. Earlier versions saved "always allow" in that form.
+- Any other wildcard is a glob over the whole text and can match spaces, so `*.sh`
+  also covers `rm -rf ~ x.sh`. Put a wildcard last, after a space, as in `git *`.
+- A wildcard covers one plain command: ordinary words and simple quotes. Anything
+  else asks for its own approval, including chaining, pipes, redirection,
+  substitution, variables, comments, and backslashes.
+- A wildcard trusts everything the named command can do. `git *` allows git to run
+  other programs through options such as `-c`, and `*` allows any plain command.
+- `PowerShell`, and `Bash` on Windows, also ask for anything containing quotes.
+  No wildcard covers `REPL` code.
+- A deny rule's wildcard is matched against the whole text, so `rm *` catches
+  `rm x; touch y` but not `touch y; rm x`. Don't rely on a deny rule alone to keep
+  a command from running.
 
 ### File target checks
 
@@ -345,16 +369,24 @@ Search available tools by name or keyword to retrieve their full parameter schem
 
 ### WebFetchTool
 
-**Permission level:** ReadOnly
+**Permission level:** Network
 
-Fetch the content of a URL. Returns the page content, typically converted to Markdown for readability. Supports HTML pages, plain text, JSON, and PDF documents.
+Fetch a public `http` or `https` URL and return its content as text. HTML (`text/html` or `application/xhtml+xml`) is converted to plain text; any other response is decoded as UTF-8 text, with invalid bytes replaced. Binary formats such as PDF are not parsed. Text output is capped at 100,000 bytes, cut at a character boundary, with a note giving the full size.
+
+When converted HTML has fewer than 100 words, or the page has no `<article>`, `<main>` or `<body>` element, the first 20,000 bytes of its HTML are sent to a small Claude model with the configured Anthropic credentials, and the result is labelled as model-extracted. If that call is unavailable or fails, the plain conversion is used.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | yes | URL to fetch |
-| `prompt` | string | no | Optional extraction prompt to focus content |
+| `prompt` | string | no | Accepted, but not used to filter the content |
 
-Network requests are subject to the host's firewall and proxy settings.
+Fetch rules:
+
+- Only public destinations are fetched. Every address the host name resolves to must be public; loopback, private, link-local and similar addresses are refused. Each redirect is checked the same way, and at most 9 redirects are followed.
+- Proxy settings from the environment are not used.
+- A response body over 2 MiB fails the fetch, and a fetch times out after 30 seconds.
+- Each successful fetch records the requested and final URL (with credentials removed and fragments dropped), HTTP status, content type, retrieval time, the body's SHA-256 and how the text was extracted. The Next Research page reads this record.
+- A stored extraction is reused only when a new fetch returns the same body hash and content type.
 
 ---
 
@@ -730,7 +762,7 @@ Cron tools manage scheduled agent triggers.
 
 ### CronCreateTool
 
-**Permission level:** Write
+**Permission level:** Execute. A scheduled prompt runs tools later, so scheduling one needs the permission a command needs: plan mode refuses it, and so does a headless run that isn't in bypass mode. Scheduled prompts fire only in interactive sessions, never inside a headless run.
 
 Create a new scheduled trigger. The trigger fires at the specified cron schedule and executes the configured agent or command.
 

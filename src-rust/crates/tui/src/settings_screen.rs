@@ -492,10 +492,10 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
     render_dark_overlay(frame, area);
 
     // 80% width, 90% height, centred
-    let w = (area.width * 4 / 5)
+    let w = ((u32::from(area.width) * 4 / 5) as u16)
         .max(60)
         .min(area.width.saturating_sub(2));
-    let h = (area.height * 9 / 10)
+    let h = ((u32::from(area.height) * 9 / 10) as u16)
         .max(20)
         .min(area.height.saturating_sub(2));
     let popup = centered_rect(w, h, area);
