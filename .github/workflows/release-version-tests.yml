@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/check-release-version.py'
       - 'scripts/test-release-version.py'
+      - 'scripts/test-release-engine-pin.py'
       - 'scripts/bump-version.py'
       - '.github/workflows/release.yml'
       - '.github/workflows/auto-release.yml'
@@ -27,3 +28,5 @@ jobs:
           python-version: '3.12'
       - name: Verify release preflight and forward-only ordering
         run: python3 -B scripts/test-release-version.py -v
+      - name: Verify the Coven engine pin request
+        run: python3 -B scripts/test-release-engine-pin.py -v
