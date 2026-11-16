@@ -153,21 +153,24 @@ jobs:
 
       # USERPROFILE and TEMP point at a throwaway directory. -NoModifyPath
       # keeps the runner's user PATH, and dropping GITHUB_PATH keeps later
-      # steps' PATH, as they were.
+      # steps' PATH, as they were. The user PATH is read unexpanded: it
+      # holds %USERPROFILE% references, which this step changes.
       - name: Install with the published install.ps1
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'install-ps1'
           $tempDir = Join-Path $root 'temp'
           New-Item -ItemType Directory -Path (Join-Path $root 'home'), $tempDir | Out-Null
-          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $userPath = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
           $env:USERPROFILE = Join-Path $root 'home'
           $env:TEMP = $tempDir
           $env:TMP = $tempDir
           Remove-Item Env:GITHUB_PATH
           pwsh -NoLogo -NoProfile -File published/install.ps1 -Version $env:TAG -NoModifyPath
           if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited with $LASTEXITCODE" }
-          if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $userPath) { throw 'install.ps1 changed the user PATH' }
+          $after = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($after -ne $userPath) { throw "install.ps1 changed the user PATH from '$userPath' to '$after'" }
+          Write-Host "User PATH unchanged: $userPath"
           if (Get-ChildItem -Force $tempDir) { throw 'install.ps1 left files in TEMP' }
 
       - name: Check the installed binary against SHA256SUMS and run it
