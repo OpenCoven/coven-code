@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published release tag to check
+        description: Published release tag to check, v0.9.2 or later
         required: true
         default: v0.9.2
   pull_request:
@@ -18,14 +18,16 @@ on:
 permissions:
   contents: read
 
-# A pull request has no inputs, so it checks the dispatch default.
+# A pull request has no inputs, so it checks this fallback. Keep it equal to
+# the dispatch default above.
 env:
   TAG: ${{ inputs.tag || 'v0.9.2' }}
+  TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
 
 jobs:
-  # ── Every asset against SHA256SUMS and GitHub's recorded digest ─────
-  # patch-release.yml can replace assets under an existing tag. Print every
-  # digest compared, and flag any asset uploaded after publication.
+  # ── Every asset against SHA256SUMS and GitHub's digest ──────────────
+  # patch-release.yml replaces assets under an existing tag and moves the
+  # tag. Coven pins digests per version, so either counts as a failure here.
   checksums:
     name: Published assets match SHA256SUMS
     runs-on: ubuntu-latest
@@ -39,18 +41,28 @@ jobs:
           persist-credentials: false
 
       - name: Download every published asset
-        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published
+        run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published
 
       - name: Compare every digest
         run: |
           set -euo pipefail
           release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
           published_at="$(jq -r .published_at <<<"$release")"
-          echo "$TAG published $published_at at commit $(git rev-parse HEAD)"
+          target="$(jq -r .target_commitish <<<"$release")"
+          head="$(git rev-parse HEAD)"
+          echo "$TAG published $published_at from $target; the tag is now at $head"
+          failures=()
+          # release.yml publishes from a commit SHA; patch-release.yml moves
+          # the tag but leaves target_commitish alone.
+          if [[ "$target" =~ ^[0-9a-f]{40}$ && "$target" != "$head" ]]; then
+            failures+=("$TAG moved to $head after it was published from $target")
+          fi
+          [[ -f published/SHA256SUMS ]] || { echo "::error::$TAG has no SHA256SUMS"; exit 1; }
           echo "Published SHA256SUMS:"
           cat published/SHA256SUMS
           echo
-          failures=()
           archives='coven-code-linux-aarch64.tar.gz coven-code-linux-x86_64.tar.gz coven-code-macos-aarch64.tar.gz coven-code-macos-x86_64.tar.gz coven-code-windows-x86_64.zip'
           listed="$(awk '{print $2}' published/SHA256SUMS | xargs)"
           [[ "$listed" == "$archives" ]] || failures+=("SHA256SUMS lists [$listed], expected [$archives]")
@@ -58,15 +70,19 @@ jobs:
           expected="$(tr ' ' '\n' <<<"$archives SHA256SUMS install.ps1 install.sh" | LC_ALL=C sort | xargs)"
           [[ "$assets" == "$expected" ]] || failures+=("release assets are [$assets], expected [$expected]")
           for name in $expected; do
+            if [[ ! -f "published/$name" ]]; then
+              failures+=("$name: not downloaded")
+              continue
+            fi
             downloaded="$(sha256sum "published/$name" | cut -d' ' -f1)"
             github="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest | sub("^sha256:"; "")' <<<"$release")"
-            updated="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .updated_at' <<<"$release")"
+            uploaded="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .created_at' <<<"$release")"
             echo "$name"
             echo "  downloaded  $downloaded"
-            echo "  GitHub      $github (uploaded $updated)"
+            echo "  GitHub      $github (computed at upload, $uploaded)"
             [[ "$downloaded" == "$github" ]] || failures+=("$name: downloaded digest differs from GitHub's")
-            if [[ "$updated" > "$published_at" ]]; then
-              echo "::warning::$name was uploaded at $updated, after the release was published at $published_at"
+            if [[ "$uploaded" > "$published_at" ]]; then
+              failures+=("$name: uploaded at $uploaded, after the release was published at $published_at")
             fi
             if [[ "$name" == install.* ]]; then
               if cmp -s "published/$name" "$name"; then
@@ -85,7 +101,7 @@ jobs:
             printf '::error::%s\n' "${failures[@]}"
             exit 1
           fi
-          echo "All five archives match SHA256SUMS; every asset matches GitHub's recorded digest."
+          echo "All five archives match SHA256SUMS, every download matches GitHub's digest, and nothing was uploaded or moved after publication."
 
   # ── Each published archive on its own platform ──────────────────────
   archive:
@@ -105,8 +121,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: Run published ${{ matrix.artifact }}
     timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       # The smoke script expects the version stamped in its own checkout.
       - uses: actions/checkout@v5
@@ -125,9 +139,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
 
+      # Only the download gets the token; coven-code reads GH_TOKEN.
       - name: Download the published archive and SHA256SUMS
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          [[ -f scripts/smoke-release-archive.py ]] || { echo "::error::$TAG predates scripts/smoke-release-archive.py"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published \
             --pattern '${{ matrix.archive }}' --pattern SHA256SUMS
           echo "Runner: $RUNNER_OS $RUNNER_ARCH ($(uname -srm)); source $(git rev-parse HEAD)"
@@ -142,12 +161,15 @@ jobs:
     name: Run published install.ps1
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
+      # Only the download gets the token: install.ps1 and coven-code run
+      # in the steps below, and coven-code reads GH_TOKEN.
       - name: Download the published install.ps1, Windows archive and SHA256SUMS
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published \
             --pattern install.ps1 --pattern coven-code-windows-x86_64.zip --pattern SHA256SUMS
 
@@ -197,9 +219,9 @@ jobs:
           }
           $env:Path = "$bin;$env:Path"
           $resolved = (Get-Command coven-code).Source
-          $printed = coven-code --version
+          $printed = (coven-code --version | Out-String).Trim()
           if ($LASTEXITCODE -ne 0) { throw "coven-code --version exited with $LASTEXITCODE" }
           Write-Host "$resolved --version: $printed"
           $expected = 'coven-code ' + ($env:TAG -replace '^v', '')
           if ($resolved -ne (Join-Path $bin 'coven-code.exe')) { throw "coven-code resolved to $resolved" }
-          if ($printed -ne $expected) { throw "expected '$expected', got '$printed'" }
+          if ($printed -cne $expected) { throw "expected '$expected', got '$printed'" }
