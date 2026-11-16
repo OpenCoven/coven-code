@@ -6,26 +6,39 @@
 //! Both must reach the same semantic state and send the same operations, and
 //! both renderers must show the semantic content of that state.
 //!
-//! Semantic, compared after every step of a trace: the durable
-//! `App::messages`; tool observations by id (name, input, the result preview
-//! the row holds, and status, which tells running, done and error apart; full
-//! results reach the durable messages); `is_streaming`; the cancellation
-//! phase; the `PresentationEffect` list; and the `take_cancellation_request`
-//! result. A key sequence is compared once at its end: the `take_input`
-//! submission, the permission decision and the whole projected
-//! `TranscriptView`, which on that path includes status and tool rows.
+//! Semantic, compared after every step of a trace:
+//! - the durable `App::messages`;
+//! - the live tool rows by id: name, input, the result preview the row holds,
+//!   and status, which tells running, done and error apart (full results
+//!   reach the durable messages);
+//! - `is_streaming` and the cancellation phase;
+//! - the operations the loop performs next: the `PresentationEffect` list,
+//!   the `take_cancellation_request` result, and whether a key took the
+//!   loop's interrupt path, which cancels the turn's token.
 //!
-//! Presentation-only, so allowed to differ and not compared across a trace:
-//! tool rows on interrupt (Classic clears them, Next keeps the interrupted
-//! ones), status wording, the spinner verb, and Next's shell and inspector
-//! state. Tool observations therefore collect every row an App has shown, so
-//! a renderer that clears rows on interrupt still reports what it observed.
+//! A key sequence is compared once at its end: the `take_input` submission,
+//! the permission decisions and the whole projected `TranscriptView`, which on
+//! that path includes status and tool rows.
+//!
+//! Presentation-only, so allowed to differ:
+//! - Rows a cancel interrupts. Classic drops them; Next keeps them in its
+//!   interrupted list. They are compared only as what each App observed: every
+//!   row it has shown, live or not.
+//! - Status wording, the spinner verb, and Next's shell and inspector state.
+//! - How a permission request opens (#411). Next focuses deny and ignores
+//!   keys other than Escape until `PERMISSION_ARM_DELAY` of quiet has passed;
+//!   Classic opens on the first option and takes keys at once. Decisions are
+//!   compared for keys that choose an option explicitly, once the request is
+//!   armed, and the difference itself is pinned by
+//!   `permission_requests_open_differently_by_design`.
 //!
 //! Cancelling is not among the compared traces. On this base Classic's Escape
-//! and Ctrl+C do not ask the loop to cancel the turn, so a cancel trace
-//! differs in `cancel_requested`, the cancellation phase and `is_streaming`.
-//! That is #408 decision D1, which moves Classic to Next's cancel model; the
-//! Next side is covered by `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
+//! does not ask the loop to cancel the turn, and Classic records no pending
+//! cancel for Ctrl+C either, although the loop's interrupt path cancels the
+//! token. So a cancel trace differs in `cancel_requested`, the cancellation
+//! phase and `is_streaming`. That is #408 decision D1, which moves Classic to
+//! Next's cancel model; the Next side is covered by
+//! `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
 
 use std::collections::BTreeMap;
 
@@ -35,13 +48,13 @@ use claurst_core::config::Config;
 use claurst_core::cost::CostTracker;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent};
 use claurst_query::QueryEvent;
-use claurst_tui::app::{App, ToolStatus};
+use claurst_tui::app::{App, ToolStatus, ToolUseBlock};
 use claurst_tui::application::view::TranscriptView;
 use claurst_tui::application::{
     PresentationEffect, ScopedQueryEvent, SessionGeneration, SessionScope, TurnCancellation,
     UiRenderer,
 };
-use claurst_tui::dialogs::{handle_permission_key, PermissionRequest};
+use claurst_tui::dialogs::{handle_permission_key_at, PermissionRequest, PERMISSION_ARM_DELAY};
 use claurst_tui::NotificationKind;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
@@ -108,6 +121,8 @@ enum Step {
     Advance,
     /// An observation from a worker of the generation before the current one.
     Stale(QueryEvent),
+    /// A key, routed the way the interactive loop routes it: the interrupt and
+    /// exit keys first, then the App's own handling.
     Key(KeyEvent),
     /// No worker is running any more, so the loop settles a pending cancel.
     Settle,
@@ -128,12 +143,17 @@ struct ToolObservation {
 struct Semantic {
     /// The durable conversation, serialized.
     messages: String,
+    /// Live tool rows by id.
     tools: BTreeMap<String, ToolObservation>,
+    /// Every row the App has shown so far, live, interrupted or dropped.
+    observed: BTreeMap<String, ToolObservation>,
     is_streaming: bool,
     cancellation: TurnCancellation,
     /// Operations the interactive loop performs after this step.
     effects: Vec<PresentationEffect>,
     cancel_requested: bool,
+    /// The key took the loop's interrupt path, which cancels the turn's token.
+    interrupt_key: bool,
 }
 
 /// Replays steps into one App the way the interactive loop does: apply the
@@ -143,7 +163,7 @@ struct Replay {
     app: App,
     scope: SessionScope,
     previous: SessionGeneration,
-    tools: BTreeMap<String, ToolObservation>,
+    observed: BTreeMap<String, ToolObservation>,
     steps: Vec<Semantic>,
 }
 
@@ -164,7 +184,7 @@ impl Replay {
             app,
             scope,
             previous,
-            tools: BTreeMap::new(),
+            observed: BTreeMap::new(),
             steps: Vec::new(),
         }
     }
@@ -172,6 +192,7 @@ impl Replay {
     fn run(mut self, steps: impl IntoIterator<Item = Step>) -> Self {
         for step in steps {
             let mut effects = Vec::new();
+            let mut interrupt_key = false;
             match step {
                 Step::Event(event) => {
                     effects = self.scope.apply(
@@ -195,20 +216,18 @@ impl Replay {
                         },
                     );
                 }
-                Step::Key(key) => {
-                    self.app.handle_key_event(key);
-                }
+                Step::Key(key) => match self.app.handle_control_key(key) {
+                    Some(interrupt) => interrupt_key = interrupt,
+                    None => {
+                        self.app.handle_key_event(key);
+                    }
+                },
                 Step::Settle => self.app.settle_cancellation(),
             }
             draw(&self.app, self.renderer, 120, 40);
             let cancel_requested = self.app.take_cancellation_request();
-            for block in self
-                .app
-                .tool_use_blocks
-                .iter()
-                .chain(self.app.interrupted_tools.iter())
-            {
-                self.tools.insert(
+            let observe = |block: &ToolUseBlock| {
+                (
                     block.id.clone(),
                     ToolObservation {
                         name: block.name.clone(),
@@ -216,15 +235,21 @@ impl Replay {
                         result: block.output_preview.clone(),
                         status: block.status.clone(),
                     },
-                );
-            }
+                )
+            };
+            let tools: BTreeMap<_, _> = self.app.tool_use_blocks.iter().map(observe).collect();
+            self.observed.extend(tools.clone());
+            self.observed
+                .extend(self.app.interrupted_tools.iter().map(observe));
             self.steps.push(Semantic {
                 messages: serde_json::to_string(&*self.app.messages).expect("messages serialize"),
-                tools: self.tools.clone(),
+                tools,
+                observed: self.observed.clone(),
                 is_streaming: self.app.is_streaming,
                 cancellation: self.app.cancellation,
                 effects,
                 cancel_requested,
+                interrupt_key,
             });
         }
         self
@@ -463,17 +488,42 @@ fn bash_request(id: &str) -> PermissionRequest {
     )
 }
 
+/// A permission request opened the way the interactive loop opens it: Next
+/// guards it against stray keys (#411); Classic keeps its dialog as it was.
+fn opened_request(renderer: UiRenderer, id: &str) -> PermissionRequest {
+    let request = bash_request(id);
+    if renderer == UiRenderer::Next {
+        request.guarded()
+    } else {
+        request
+    }
+}
+
+/// Answer the open request with `codes`, pressed once it is armed, and
+/// return (tool use id, chosen option, confirmed).
+fn decide(app: &mut App, renderer: UiRenderer, codes: &[KeyCode]) -> (String, usize, bool) {
+    let mut confirmed = false;
+    for &code in codes {
+        draw(app, renderer, 120, 40);
+        let request = app.permission_request.as_mut().expect("pending request");
+        let armed = request.quiet_since + PERMISSION_ARM_DELAY;
+        confirmed = handle_permission_key_at(request, key(code), armed);
+    }
+    let request = app.permission_request.take().expect("pending request");
+    (request.tool_use_id, request.selected_option, confirmed)
+}
+
 /// What the interactive loop would submit or decide after a key sequence.
 #[derive(Debug, PartialEq, Eq)]
 struct Outgoing {
     submitted: String,
-    permission: Option<(String, usize, bool)>,
+    decisions: Vec<(String, usize, bool)>,
     view: TranscriptView,
 }
 
-/// Drive an App with `renderer` selected through typing, a permission
-/// decision and a second draft, drawing between every key the way the
-/// interactive loop does, and record the operations the loop would send.
+/// Drive an App with `renderer` selected through typing, permission decisions
+/// and a second draft, drawing between every key the way the interactive loop
+/// does, and record the operations the loop would send.
 fn drive(renderer: UiRenderer) -> Outgoing {
     let mut app = Replay::new(renderer).run(plain_turn()).app;
     for ch in "run the tests".chars() {
@@ -483,17 +533,27 @@ fn drive(renderer: UiRenderer) -> Outgoing {
     draw(&app, renderer, 120, 40);
     let submitted = app.take_input();
 
-    app.permission_request = Some(bash_request("toolu-parity-2"));
-    let mut confirmed = false;
-    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
-        draw(&app, renderer, 120, 40);
-        let request = app.permission_request.as_mut().expect("pending request");
-        confirmed = handle_permission_key(request, key(code));
+    // Keys that choose explicitly: allow once, deny, and moving to the top
+    // before stepping down one, which ends on the same option from wherever
+    // the request opened.
+    let choices: [&[KeyCode]; 3] = [
+        &[KeyCode::Char('y')],
+        &[KeyCode::Esc],
+        &[
+            KeyCode::Up,
+            KeyCode::Up,
+            KeyCode::Up,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Enter,
+        ],
+    ];
+    let mut decisions = Vec::new();
+    for (index, codes) in choices.into_iter().enumerate() {
+        let id = format!("toolu-parity-decide-{index}");
+        app.permission_request = Some(opened_request(renderer, &id));
+        decisions.push(decide(&mut app, renderer, codes));
     }
-    let permission = app
-        .permission_request
-        .take()
-        .map(|request| (request.tool_use_id, request.selected_option, confirmed));
 
     for ch in "next draft".chars() {
         draw(&app, renderer, 120, 40);
@@ -502,7 +562,7 @@ fn drive(renderer: UiRenderer) -> Outgoing {
     draw(&app, renderer, 120, 40);
     Outgoing {
         submitted,
-        permission,
+        decisions,
         view: TranscriptView::project(&app),
     }
 }
@@ -513,11 +573,53 @@ fn renderers_produce_identical_outgoing_operations_for_the_same_input() {
     let next = drive(UiRenderer::Next);
     assert_eq!(classic, next);
     assert_eq!(classic.submitted, "run the tests");
-    assert_eq!(
-        classic.permission,
-        Some(("toolu-parity-2".to_string(), 1, true))
-    );
+    let deny = bash_request("toolu-parity-options")
+        .options
+        .iter()
+        .position(|option| option.key == 'n')
+        .expect("a deny option");
+    let chosen: Vec<_> = classic
+        .decisions
+        .iter()
+        .map(|(_, option, confirmed)| (*option, *confirmed))
+        .collect();
+    assert_eq!(chosen, [(0, true), (deny, true), (1, true)]);
     assert_eq!(classic.view.draft, "next draft");
+}
+
+/// The intended difference (#411): Next opens a request on deny and ignores
+/// keys until it is armed; Classic opens on the first option.
+#[test]
+fn permission_requests_open_differently_by_design() {
+    let deny = bash_request("toolu-parity-options")
+        .options
+        .iter()
+        .position(|option| option.key == 'n')
+        .expect("a deny option");
+    for (renderer, opened_on, early_key_applies) in [
+        (UiRenderer::Classic, 0, true),
+        (UiRenderer::Next, deny, false),
+    ] {
+        let mut app = fixture_app(renderer);
+        app.permission_request = Some(opened_request(renderer, "toolu-parity-open"));
+        let request = app.permission_request.as_mut().expect("pending request");
+        assert_eq!(request.selected_option, opened_on, "{renderer:?}");
+        let early = request.quiet_since;
+        assert_eq!(
+            handle_permission_key_at(request, key(KeyCode::Char('y')), early),
+            early_key_applies,
+            "{renderer:?}: a key pressed as the request opens"
+        );
+        // Enter on a request just opened, once armed, takes its focus.
+        let mut fresh = opened_request(renderer, "toolu-parity-enter");
+        let armed = fresh.quiet_since + PERMISSION_ARM_DELAY;
+        assert!(handle_permission_key_at(
+            &mut fresh,
+            key(KeyCode::Enter),
+            armed
+        ));
+        assert_eq!(fresh.selected_option, opened_on, "{renderer:?}");
+    }
 }
 
 /// #408: while a cancel is pending, a tool start still queued from the
@@ -611,7 +713,10 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         .iter()
         .all(|block| block.status != ToolStatus::Running));
     assert!(
-        unfinished.last().tools.contains_key("toolu-parity-backlog"),
+        unfinished
+            .last()
+            .observed
+            .contains_key("toolu-parity-backlog"),
         "the backlog tool is still recorded"
     );
     assert!(unfinished
@@ -619,6 +724,40 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         .interrupted_tools
         .iter()
         .any(|block| block.id == "toolu-parity-backlog"));
+
+    // The backlog repeats the start of the call Escape interrupted: that call
+    // keeps its one interrupted row.
+    let sleep = || {
+        tool_start(
+            "toolu-parity-at-escape",
+            "Bash",
+            r#"{"command":"sleep 30"}"#,
+        )
+    };
+    let repeated = Replay::new(UiRenderer::Next).run([
+        Step::Event(sleep()),
+        Step::Key(key(KeyCode::Esc)),
+        Step::Event(sleep()),
+        Step::Settle,
+    ]);
+    assert!(
+        !repeated.steps[2].is_streaming,
+        "the repeat restarted the turn"
+    );
+    let rows: Vec<_> = repeated
+        .app
+        .tool_use_blocks
+        .iter()
+        .map(|block| ("live", block.id.as_str()))
+        .chain(
+            repeated
+                .app
+                .interrupted_tools
+                .iter()
+                .map(|block| ("interrupted", block.id.as_str())),
+        )
+        .collect();
+    assert_eq!(rows, [("interrupted", "toolu-parity-at-escape")]);
 }
 
 #[test]

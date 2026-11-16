@@ -6620,11 +6620,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_worker_seen_finished_before_a_drain_leaves_no_event_behind() {
-        // The interactive loop's order each pass: check whether the worker
-        // has finished, drain the queue, do other awaited work, and only then
-        // handle a finished worker and settle its cancel. A worker finishes
-        // only once its forwarder has queued everything, so after a pass that
-        // saw it finished nothing of its turn can arrive any more.
+        // A model of the interactive loop's order each pass, around the real
+        // forwarder (`run_interactive` itself is out of reach of a unit
+        // test): check whether the worker has finished, drain the queue, do
+        // other awaited work, and only then handle a finished worker and
+        // settle its cancel. A worker finishes only once its forwarder has
+        // queued everything, so after a pass that saw it finished nothing of
+        // its turn can arrive any more.
         let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events, mut queue) = tokio::sync::mpsc::channel(1);
         for n in 0..3 {
