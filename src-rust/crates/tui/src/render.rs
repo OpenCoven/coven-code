@@ -3871,6 +3871,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Running,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         assert_eq!(streaming_status_label(&app), "Running Bash");
     }
@@ -3898,6 +3899,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Running,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         // Adapter-set message wins even when a tool is running.
         app.status_message = Some("Compacting context".to_string());
@@ -3925,6 +3927,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Done,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         assert_eq!(streaming_status_label(&app), "Waiting on network");
     }

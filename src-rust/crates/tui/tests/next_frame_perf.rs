@@ -70,6 +70,7 @@ fn app(lines: usize, tools: bool) -> App {
                 status: ToolStatus::Done,
                 output_preview: Some("safe output".repeat(10)),
                 input_json: "{\"path\":\"/synthetic/file\"}".into(),
+                run: Default::default(),
             });
         }
     }

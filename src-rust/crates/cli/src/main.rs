@@ -2109,6 +2109,37 @@ async fn run_headless(
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
+/// The model call an approval request belongs to, or the request's own id
+/// when the call is unknown.
+fn permission_call_id(pending: &claurst_tools::PendingPermissionRequest) -> &str {
+    pending.call_id.as_deref().unwrap_or(&pending.tool_use_id)
+}
+
+/// The calls whose approval requests wait in the queue, behind the prompt on
+/// screen.
+fn queued_approval_calls(store: &claurst_tools::PendingPermissionStore) -> Vec<String> {
+    store
+        .queue
+        .iter()
+        .map(|pending| permission_call_id(pending).to_string())
+        .collect()
+}
+
+/// Settles a queued approval request that a rule now decides, often one an
+/// answer to an earlier prompt just made. Its row's wait on the user ends,
+/// but no answer is recorded beside it: a rule decided, as for requests a
+/// rule settles before they are queued.
+fn settle_queued_permission(
+    app: &mut claurst_tui::app::App,
+    mut pending: claurst_tools::PendingPermissionRequest,
+    decision: claurst_core::permissions::PermissionDecision,
+) {
+    app.restart_tool_time(permission_call_id(&pending));
+    if let Some(tx) = pending.decision_tx.take() {
+        let _ = tx.send(decision);
+    }
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -2141,6 +2172,37 @@ fn handle_bridge_permission_response(
     Some((pending.call_id.unwrap_or(pending.tool_use_id), allowed))
 }
 
+/// The command that reopens `session_id` from a fresh shell. A session kept
+/// anywhere but the standalone home names its home: the variables that chose
+/// it may not be set where the command is run.
+fn resume_command(
+    session_id: &str,
+    home: &std::path::Path,
+    standalone: Option<&std::path::Path>,
+) -> String {
+    let resume = format!("coven-code --resume {session_id}");
+    if standalone == Some(home) {
+        return resume;
+    }
+    let shown =
+        claurst_tui::application::view::terminal_safe(&home.to_string_lossy()).replace('\n', "^J");
+    format!("COVEN_CODE_HOME={} {resume}", shell_word(&shown))
+}
+
+/// `word` as one POSIX shell word: as it is when nothing in it is special,
+/// otherwise in single quotes.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@,%=".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
 fn permission_request_from_core(
     pending: &claurst_tools::PendingPermissionRequest,
 ) -> claurst_tui::dialogs::PermissionRequest {
@@ -2148,7 +2210,7 @@ fn permission_request_from_core(
     let tool_name = pending.request.tool_name.clone();
     let tool_use_id = pending.tool_use_id.clone();
 
-    match (tool_name.as_str(), pending.request.path.clone()) {
+    let mut request = match (tool_name.as_str(), pending.request.path.clone()) {
         ("Bash", Some(command)) => {
             let suggested_prefix = if command
                 .chars()
@@ -2194,7 +2256,9 @@ fn permission_request_from_core(
             reason,
             pending.request.path.clone(),
         ),
-    }
+    };
+    request.call_id = pending.call_id.clone();
+    request
 }
 
 /// One submitted logical turn, retained through failures and model-switch retries.
@@ -2557,11 +2621,13 @@ async fn save_session_with_warning(
     }
 }
 
+/// Saves the transcript and indexes it for search. Returns whether the
+/// transcript was saved; indexing is best effort.
 async fn persist_interactive_session(
     session: &claurst_core::history::ConversationSession,
     owner: Option<&InteractiveTurn>,
     notifications: &mut claurst_tui::notifications::NotificationQueue,
-) {
+) -> bool {
     // A recoverable preparation/auth failure can finish without an attempt.
     // Delay indexing its synthetic UUID until attempted; a later stale retry
     // can then roll it back without leaving an immutable search-index entry.
@@ -2574,7 +2640,7 @@ async fn persist_interactive_session(
         })
         .and_then(|owner| owner.synthetic_uuid.as_deref());
     // JSON is primary storage; index only the finalized transcript.
-    save_session_with_warning(session, notifications, "transcript update").await;
+    let saved = save_session_with_warning(session, notifications, "transcript update").await;
 
     // Also index into SQLite for /search support
     {
@@ -2608,6 +2674,7 @@ async fn persist_interactive_session(
             }
         }
     }
+    saved
 }
 
 fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option<u64> {
@@ -4688,7 +4755,7 @@ async fn run_interactive(
         if app.permission_request.is_none() {
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
-                let Some(mut pending) = next_pending else {
+                let Some(pending) = next_pending else {
                     break;
                 };
 
@@ -4737,14 +4804,11 @@ async fn run_interactive(
                             .insert(tool_use_id, pending);
                         break;
                     }
-                    Some(decision) => {
-                        if let Some(tx) = pending.decision_tx.take() {
-                            let _ = tx.send(decision);
-                        }
-                    }
+                    Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
         }
+        app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
         while let Ok(scoped) = event_rx.try_recv() {
@@ -5864,6 +5928,9 @@ async fn run_interactive(
     // Classic keeps its existing exit.
     if app.renderer == claurst_tui::application::UiRenderer::Next {
         if let Some((handle, msgs_arc)) = current_query.take() {
+            // Taken before the stop, which can still deliver results; the
+            // lines are chosen from what was saved.
+            let exit_report = claurst_tui::next::TurnExitReport::capture(&app);
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
             messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
             session.messages = messages.clone();
@@ -5879,7 +5946,30 @@ async fn run_interactive(
                 &mut session,
                 &mut cmd_ctx.messages,
             );
-            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+            let saved =
+                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
+                    .await;
+            for line in exit_report.lines(&session.messages) {
+                println!("{line}");
+            }
+            // The in-app warning is gone once the terminal is restored, and an
+            // earlier save on disk would lack this turn. Stopping compaction
+            // leaves the copy saved when the last turn ended complete.
+            if !saved && exit_report.is_turn() {
+                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
+            } else if !saved {
+                eprintln!("Session not saved.");
+            } else if !session.messages.is_empty() {
+                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+                println!(
+                    "Pick it up with: {}",
+                    resume_command(
+                        &session.id,
+                        &claurst_core::config::Settings::config_dir(),
+                        standalone.as_deref(),
+                    )
+                );
+            }
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -6739,6 +6829,67 @@ mod tests {
     }
 
     #[test]
+    fn next_shows_the_call_that_asked_for_approval_as_awaiting_it() {
+        // The request's own id is synthetic; the model's call id is what the
+        // tool row is keyed by.
+        let (mut pending, _decision) = bridge_permission_fixture("perm-session-0");
+        pending.call_id = Some("call-1".into());
+        let mut app = claurst_tui::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        app.renderer = claurst_tui::application::UiRenderer::Next;
+        let scope = claurst_tui::application::SessionScope::default();
+        scope.apply(
+            &mut app,
+            claurst_tui::application::ScopedQueryEvent {
+                generation: scope.current(),
+                event: claurst_query::QueryEvent::ToolStart {
+                    tool_name: "Write".into(),
+                    tool_id: "call-1".into(),
+                    input_json: r#"{"file_path":"example.txt"}"#.into(),
+                },
+            },
+        );
+        app.permission_request = Some(permission_request_from_core(&pending).guarded());
+
+        let view = claurst_tui::application::view::TranscriptView::project(&app);
+        assert_eq!(
+            view.tools[0].state,
+            claurst_tui::application::view::ToolActivityState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn the_way_back_names_any_home_but_the_standalone_one() {
+        let standalone = std::path::Path::new("/home/me/.coven-code");
+        assert_eq!(
+            resume_command("s-1", standalone, Some(standalone)),
+            "coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/home/me/.coven/code"),
+                Some(standalone)
+            ),
+            "COVEN_CODE_HOME=/home/me/.coven/code coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command("s-1", std::path::Path::new("/tmp/it's here"), None),
+            r"COVEN_CODE_HOME='/tmp/it'\''s here' coven-code --resume s-1"
+        );
+        assert_eq!(
+            resume_command(
+                "s-1",
+                std::path::Path::new("/tmp/a\u{1b}]0;x\u{7}\nb"),
+                None
+            ),
+            "COVEN_CODE_HOME='/tmp/a^[]0;x^G^Jb' coven-code --resume s-1"
+        );
+    }
+
+    #[test]
     fn bridge_permission_response_delivers_decision() {
         use claurst_bridge::PermissionResponseKind as Response;
         use claurst_core::permissions::PermissionDecision as Decision;
@@ -6780,6 +6931,53 @@ mod tests {
                 handle_bridge_permission_response(&mut dialog, &mut store, "perm-1", response);
 
             assert_eq!(decided, Some((expected.0.to_string(), expected.1)));
+        }
+    }
+
+    #[test]
+    fn a_queued_request_a_rule_decides_ends_its_rows_wait_without_an_answer() {
+        use claurst_core::permissions::PermissionDecision as Decision;
+
+        for (call_id, decision, row) in [
+            (Some("toolu_model"), Decision::Allow, "toolu_model"),
+            (Some("toolu_model"), Decision::Deny, "toolu_model"),
+            (None, Decision::AllowPermanently, "perm-1"),
+            (None, Decision::DenyPermanently, "perm-1"),
+        ] {
+            let mut app = claurst_tui::app::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            for event in [
+                claurst_query::QueryEvent::ToolStart {
+                    tool_name: "WebFetch".to_string(),
+                    tool_id: row.to_string(),
+                    input_json: "{}".to_string(),
+                },
+                claurst_query::QueryEvent::ToolRunning {
+                    tool_id: row.to_string(),
+                },
+            ] {
+                app.handle_query_event(event);
+            }
+            let waited = std::time::Duration::from_secs(60);
+            app.tool_use_blocks[0].run.started_at = Some(std::time::Instant::now() - waited);
+            let (mut pending, mut rx) = bridge_permission_fixture("perm-1");
+            pending.call_id = call_id.map(str::to_string);
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            store.queue.push_back(pending);
+            assert_eq!(queued_approval_calls(&store), [row]);
+
+            settle_queued_permission(&mut app, store.queue.pop_front().unwrap(), decision.clone());
+
+            assert_eq!(rx.try_recv(), Ok(decision));
+            let started = app.tool_use_blocks[0].run.started_at.unwrap();
+            assert!(started.elapsed() < waited, "its wait is not its work");
+            assert!(
+                app.permission_decisions.is_empty(),
+                "a rule decided, not an answer"
+            );
+            assert!(queued_approval_calls(&store).is_empty());
         }
     }
 
