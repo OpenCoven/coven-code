@@ -13,12 +13,10 @@
 //! records, and no effect for the loop.
 //!
 //! In the loop neither replacement overlaps a running worker: `/clear` runs
-//! only once no worker is running (input is queued while one is), an open
-//! rewind holds every turn the loop would start, and a rewind is adopted
-//! only after a running turn's join
-//! (`a_rewind_holds_new_turns_and_waits_for_the_running_one`). These tests
-//! build the overlap anyway, so the generation filter, the second guard, is
-//! checked on its own.
+//! only once no worker is running (input is queued while one is), and the
+//! rewind overlay opens only through `/rewind`, after which no turn starts
+//! until it closes. These tests build the overlap anyway, so the generation
+//! filter, the second guard, is checked on its own.
 
 use super::*;
 use claurst_core::types::{ContentBlock, Message, ToolResultContent, UsageInfo};
@@ -251,9 +249,9 @@ enum Replacement {
     /// `/clear`: the App's own clear, then the CLI's
     /// `CommandResult::ClearConversation` arm.
     Clear,
-    /// The rewind overlay, opened while no turn ran, confirmed once the App
-    /// stopped streaming; then the loop's adoption, which runs after every
-    /// key, as if the turn had been joined.
+    /// The rewind overlay, opened while no turn ran and confirmed once the
+    /// App stopped streaming; then the loop's adoption of the confirmed
+    /// rewind, which runs after every key.
     Rewind,
 }
 
@@ -330,8 +328,7 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
             press(&mut cli.app, crossterm::event::KeyCode::Char('y'));
             adopt_in_app_rewind(
                 &mut cli.scope,
-                &cli.app,
-                false,
+                &mut cli.app,
                 &mut cli.messages,
                 &mut cli.session,
             );
@@ -403,57 +400,158 @@ async fn replace_while_the_old_worker_delivers(renderer: UiRenderer, replacement
     assert_eq!(cli.app.streaming_text.as_str(), "fresh answer", "{case}");
 }
 
-/// An open rewind holds every turn the loop would start on its own: remote
-/// prompts and rate-limit retries (both by `rewind_flow.visible` at their
-/// start sites) and idle compaction (here). A rewind confirmed while a turn
-/// still runs is adopted only after that turn's join, so the join cannot
-/// replace the adopted conversation with the worker's.
-#[test]
-fn a_rewind_holds_new_turns_and_waits_for_the_running_one() {
+/// Run a turn that calls a tool and gets its result, through to the join,
+/// which takes the worker's transcript: the call, the message carrying its
+/// result, and the answer.
+async fn run_a_tool_turn(cli: &mut Interactive) {
+    let (worker, worker_task) = cli.submit("Run the tests.");
+    let mut call = Message::assistant_blocks(vec![ContentBlock::ToolUse {
+        id: "toolu-1".to_string(),
+        name: "Bash".to_string(),
+        input: serde_json::json!({ "command": "cargo test" }),
+    }]);
+    call.uuid = Some("msg-call".to_string());
+    let result = Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: "toolu-1".to_string(),
+        content: ToolResultContent::Text("ok".to_string()),
+        is_error: None,
+    }]);
+    let mut answer = Message::assistant("The tests pass.".to_string());
+    answer.uuid = Some("msg-answer".to_string());
+    cli.deliver(
+        &worker,
+        vec![
+            QueryEvent::ToolStart {
+                tool_name: "Bash".to_string(),
+                tool_id: "toolu-1".to_string(),
+                input_json: r#"{"command":"cargo test"}"#.to_string(),
+            },
+            QueryEvent::ToolEnd {
+                tool_name: "Bash".to_string(),
+                tool_id: "toolu-1".to_string(),
+                result: "ok".to_string(),
+                is_error: false,
+            },
+            QueryEvent::DurableMessage {
+                message: call.clone(),
+            },
+            QueryEvent::DurableMessage {
+                message: result.clone(),
+            },
+            QueryEvent::DurableMessage {
+                message: answer.clone(),
+            },
+            QueryEvent::TurnComplete {
+                turn: 1,
+                stop_reason: "end_turn".to_string(),
+                usage: None,
+            },
+        ],
+    )
+    .await;
+    drop(worker);
+    worker_task.await.expect("worker");
+    cli.drain();
+    assert!(!cli.app.is_streaming);
+    cli.messages.extend([call, result, answer]);
+    cli.session.messages = cli.messages.clone();
+}
+
+fn holds_the_tool_result(conversation: &[Message]) -> bool {
+    conversation
+        .iter()
+        .any(|message| !message.get_tool_result_blocks().is_empty())
+}
+
+/// A turn that called a tool leaves the loop's conversation longer than the
+/// App's: the App shows the result on the call's card instead of storing
+/// the message that carries it. That is not a rewind, and the loop keeps
+/// the result it must send back with the call.
+#[tokio::test]
+async fn a_turn_that_called_a_tool_is_not_taken_for_a_rewind() {
     for renderer in [UiRenderer::Classic, UiRenderer::Next] {
         let case = format!("{renderer:?}");
         let mut cli = Interactive::resumed(renderer, history());
+        run_a_tool_turn(&mut cli).await;
+        assert!(cli.app.messages.len() < cli.messages.len(), "{case}");
+
+        let generation = cli.scope.current();
+        // The loop runs the adoption after every key.
+        adopt_in_app_rewind(
+            &mut cli.scope,
+            &mut cli.app,
+            &mut cli.messages,
+            &mut cli.session,
+        );
+
+        assert!(cli.scope.admits(generation), "{case}: taken for a rewind");
+        for (what, conversation) in [("sent", &cli.messages), ("saved", &cli.session.messages)] {
+            assert_eq!(conversation.len(), 8, "{case}: {what}");
+            assert!(
+                holds_the_tool_result(conversation),
+                "{case}: the {what} conversation lost the tool result"
+            );
+        }
+    }
+}
+
+/// An open rewind holds idle compaction (checked here). Remote prompts and
+/// rate-limit retries check `rewind_flow.visible` inline at their start
+/// sites, which no test reaches. A confirmed rewind cuts the conversation
+/// the loop sends and saves at the message the user chose, once.
+#[tokio::test]
+async fn an_open_rewind_holds_compaction_and_cuts_at_the_chosen_message() {
+    for renderer in [UiRenderer::Classic, UiRenderer::Next] {
+        let case = format!("{renderer:?}");
+        let mut cli = Interactive::resumed(renderer, history());
+        run_a_tool_turn(&mut cli).await;
         cli.app.auto_compact_enabled = true;
         cli.app.context_window_size = 100;
         cli.app.context_used_tokens = 99;
         cli.app.auto_compact_threshold = 90;
         assert_eq!(select_idle_compaction(&cli.app, false), Some(99), "{case}");
 
+        // `/rewind`, as the loop runs it: the App's intercept, then the
+        // `CommandResult::OpenRewindOverlay` arm.
         assert!(cli.app.intercept_slash_command_with_args("rewind", ""));
+        cli.app.replace_messages(cli.messages.clone());
+        cli.app.open_rewind_flow();
         assert_eq!(
             select_idle_compaction(&cli.app, false),
             None,
             "{case}: compaction started under the rewind"
         );
-        press(&mut cli.app, crossterm::event::KeyCode::Up);
+
+        // Rewind to the answer: the call and its result stay.
+        let generation = cli.scope.current();
         press(&mut cli.app, crossterm::event::KeyCode::Enter);
         press(&mut cli.app, crossterm::event::KeyCode::Char('y'));
         assert!(!cli.app.rewind_flow.visible, "{case}");
-
-        let generation = cli.scope.current();
-        let before = texts(&cli.messages);
         adopt_in_app_rewind(
             &mut cli.scope,
-            &cli.app,
-            true,
+            &mut cli.app,
             &mut cli.messages,
             &mut cli.session,
         );
-        assert!(cli.scope.admits(generation), "{case}: adopted under a turn");
-        assert_eq!(texts(&cli.messages), before, "{case}");
-        assert_eq!(texts(&cli.session.messages), before, "{case}");
+        assert!(!cli.scope.admits(generation), "{case}: a new generation");
+        assert_eq!(cli.messages.len(), 7, "{case}");
+        assert_eq!(
+            serde_json::to_string(&cli.messages).expect("messages serialize"),
+            serde_json::to_string(&*cli.app.messages).expect("messages serialize"),
+            "{case}: the loop and the App keep the same messages"
+        );
+        assert_eq!(cli.session.messages.len(), 7, "{case}");
+        assert!(holds_the_tool_result(&cli.messages), "{case}");
 
-        // After the join, the next key adopts it.
+        // The next key finds no rewind left to adopt.
+        let adopted = cli.scope.current();
         adopt_in_app_rewind(
             &mut cli.scope,
-            &cli.app,
-            false,
+            &mut cli.app,
             &mut cli.messages,
             &mut cli.session,
         );
-        assert!(!cli.scope.admits(generation), "{case}");
-        let kept = ["First question.", "First answer."];
-        assert_eq!(texts(&cli.messages), kept, "{case}");
-        assert_eq!(texts(&cli.session.messages), kept, "{case}");
+        assert!(cli.scope.admits(adopted), "{case}: adopted twice");
+        assert_eq!(cli.messages.len(), 7, "{case}");
     }
 }

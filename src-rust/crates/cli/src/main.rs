@@ -2579,20 +2579,25 @@ fn replace_conversation(
     session.updated_at = chrono::Utc::now();
 }
 
-/// Once no turn runs, adopt the shorter conversation an in-App rewind left
-/// and start a new session generation, so nothing still queued from before
-/// the rewind reaches it (#408). While a turn runs, its join would replace
-/// the adopted conversation with the worker's, so adoption waits for it.
+/// Adopt a rewind the user confirmed in the App's overlay: cut the
+/// conversation the loop sends and saves at the same message, and start a
+/// new session generation, so nothing still queued from before the rewind
+/// reaches it (#408).
+///
+/// The overlay opens over the loop's conversation
+/// (`CommandResult::OpenRewindOverlay`), and no turn starts while it is
+/// open, so the index names the same message in both. A shorter App
+/// conversation is no sign of a rewind: the App shows tool results on their
+/// calls' cards instead of storing the messages that carry them.
 fn adopt_in_app_rewind(
     scope: &mut claurst_tui::application::SessionScope,
-    app: &claurst_tui::App,
-    turn_running: bool,
+    app: &mut claurst_tui::App,
     messages: &mut Vec<claurst_core::types::Message>,
     session: &mut claurst_core::history::ConversationSession,
 ) {
-    if !turn_running && !app.is_streaming && app.messages.len() < messages.len() {
+    if let Some(kept) = app.rewind_confirmed_at.take() {
         scope.advance();
-        *messages = app.messages.clone();
+        messages.truncate(kept);
         session.messages = messages.clone();
         session.updated_at = chrono::Utc::now();
     }
@@ -4792,13 +4797,7 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
-                    adopt_in_app_rewind(
-                        &mut session_scope,
-                        &app,
-                        current_query.is_some(),
-                        &mut messages,
-                        &mut session,
-                    );
+                    adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
                 Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
