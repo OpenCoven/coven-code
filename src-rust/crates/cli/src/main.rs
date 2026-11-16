@@ -2529,6 +2529,39 @@ async fn stop_turn_for_exit(
     messages.lock().await.clone()
 }
 
+/// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
+/// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
+/// it delivered, rolling back a prompt that never reached the provider. The
+/// caller saves the session. Returns the report on the turn, taken before the
+/// stop, which can still deliver results; Next prints it from what was saved.
+async fn stop_turn_and_keep_it(
+    (handle, messages): (
+        tokio::task::JoinHandle<claurst_query::QueryOutcome>,
+        MessagesArc,
+    ),
+    queue: tokio::sync::mpsc::Receiver<claurst_tui::application::ScopedQueryEvent>,
+    goal_turn: &mut Option<InteractiveTurn>,
+    app: &mut claurst_tui::App,
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+    session: &mut claurst_core::history::ConversationSession,
+    command_messages: &mut Vec<claurst_core::types::Message>,
+) -> claurst_tui::next::TurnExitReport {
+    let exit_report = claurst_tui::next::TurnExitReport::capture(app);
+    abandon_interactive_turn(goal_turn, app, cancel);
+    let mut kept = stop_turn_for_exit(handle, &messages, queue, TURN_EXIT_WAIT).await;
+    session.messages = kept.clone();
+    session.updated_at = chrono::Utc::now();
+    rollback_unattempted_turn(
+        goal_turn.as_ref(),
+        false,
+        &mut kept,
+        app,
+        session,
+        command_messages,
+    );
+    exit_report
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -5924,31 +5957,24 @@ async fn run_interactive(
     // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
     // Still join the worker if restoration fails, then report that error below.
     let terminal_result = restore_terminal(&mut terminal);
-    // Quitting mid-turn stops the worker and keeps what it delivered. Next only:
-    // Classic keeps its existing exit.
-    if app.renderer == claurst_tui::application::UiRenderer::Next {
-        if let Some((handle, msgs_arc)) = current_query.take() {
-            // Taken before the stop, which can still deliver results; the
-            // lines are chosen from what was saved.
-            let exit_report = claurst_tui::next::TurnExitReport::capture(&app);
-            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-            messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
-            session.messages = messages.clone();
-            session.updated_at = chrono::Utc::now();
-            session.model =
-                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
-            session.working_dir = Some(tool_ctx.working_dir.display().to_string());
-            rollback_unattempted_turn(
-                goal_turn.as_ref(),
-                false,
-                &mut messages,
-                &mut app,
-                &mut session,
-                &mut cmd_ctx.messages,
-            );
-            let saved =
-                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
-                    .await;
+    // Quitting mid-turn stops the worker and saves what it delivered, in both
+    // renderers. Only Next reports on the turn afterwards (#408).
+    if let Some(query) = current_query.take() {
+        session.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+        session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+        let exit_report = stop_turn_and_keep_it(
+            query,
+            event_rx,
+            &mut goal_turn,
+            &mut app,
+            &cancel,
+            &mut session,
+            &mut cmd_ctx.messages,
+        )
+        .await;
+        let saved =
+            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+        if app.renderer == claurst_tui::application::UiRenderer::Next {
             for line in exit_report.lines(&session.messages) {
                 println!("{line}");
             }
@@ -6733,6 +6759,71 @@ mod tests {
         .await
         .expect("a closed queue must free the worker, not run out the wait");
         assert_eq!(kept.len(), 1);
+    }
+
+    /// #408: quitting during a turn stops it and keeps the prompt and the
+    /// output it delivered, in Classic as in Next.
+    #[tokio::test]
+    async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered_in_either_renderer() {
+        for renderer in [
+            claurst_tui::application::UiRenderer::Classic,
+            claurst_tui::application::UiRenderer::Next,
+        ] {
+            let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+            app.select_renderer(renderer);
+            assert_eq!(app.renderer, renderer);
+            let prompt = claurst_core::types::Message::user("the prompt".to_string());
+            let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+            let token = tokio_util::sync::CancellationToken::new();
+            let (worker_messages, worker_token) = (messages.clone(), token.clone());
+            // Delivers its partial answer once cancelled, and not before.
+            let handle = tokio::spawn(async move {
+                worker_token.cancelled().await;
+                worker_messages
+                    .lock()
+                    .await
+                    .push(claurst_core::types::Message::assistant(
+                        "partial answer".to_string(),
+                    ));
+                claurst_query::QueryOutcome::Cancelled
+            });
+            let (_events, queue) = tokio::sync::mpsc::channel(1);
+            let mut session = claurst_core::history::ConversationSession::new("model".into());
+            let started = std::time::Instant::now();
+
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut None,
+                &mut app,
+                &Some(token.clone()),
+                &mut session,
+                &mut Vec::new(),
+            )
+            .await;
+
+            assert!(token.is_cancelled(), "{renderer:?}: the turn is cancelled");
+            assert!(
+                started.elapsed() < TURN_EXIT_WAIT,
+                "{renderer:?}: a turn that stops is not waited out"
+            );
+            let kept: Vec<_> = session
+                .messages
+                .iter()
+                .map(|message| (message.role.clone(), message.get_all_text()))
+                .collect();
+            assert_eq!(
+                kept,
+                [
+                    (claurst_core::types::Role::User, "the prompt".to_string()),
+                    (
+                        claurst_core::types::Role::Assistant,
+                        "partial answer".to_string()
+                    ),
+                ],
+                "{renderer:?}"
+            );
+        }
     }
 
     #[tokio::test]
