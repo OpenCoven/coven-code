@@ -454,6 +454,15 @@ fn a_remote_cancel_follows_the_same_model_in_either_renderer() {
         .tools
         .contains_key("toolu-cancel-remote-backlog"));
     assert_eq!(classic.steps[9].cancellation, TurnCancellation::Idle);
+    // Classic shows the remote cancel as pending until the settle.
+    for (index, frame) in classic.frames.iter().enumerate().take(9).skip(2) {
+        assert!(frame.contains("Cancelling…"), "step {index}:\n{frame}");
+    }
+    assert!(
+        classic.frames[9].contains("Cancelled."),
+        "{}",
+        classic.frames[9]
+    );
     // Settling interrupts the backlog tool that never ended; the one that
     // ended and the one that reported finishing keep their rows.
     for replay in [&classic, &next] {
@@ -536,6 +545,12 @@ fn a_turn_completed_in_the_backlog_still_settles_as_cancelled() {
             replay.renderer
         );
     }
+    // Pending, Classic says so over the done marker the completion set.
+    assert!(
+        classic.frames[2].contains("Cancelling…") && !classic.frames[2].contains("· done"),
+        "{}",
+        classic.frames[2]
+    );
     assert!(
         !classic.frames[3].contains("· done"),
         "{}",
