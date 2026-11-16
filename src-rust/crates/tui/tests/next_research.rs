@@ -190,6 +190,7 @@ fn an_interrupted_call_is_not_shown_as_pending() {
         status: claurst_tui::app::ToolStatus::Error,
         output_preview: None,
         input_json: String::new(),
+        run: Default::default(),
     });
     let text = draw(&app, 80, 24);
     assert!(text.contains("interrupted"), "{text}");
