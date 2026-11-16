@@ -73,6 +73,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/06_quit.sh` | Shutdown | `Ctrl+C` twice exits cleanly back to the shell |
 | `cases/07_paste_burst.sh` | Paste burst | a line delivered in one write still submits; interior newlines coalesce without submitting |
 | `cases/23_classic_zero_size.sh` | Zero and tiny sizes | Classic starts at 0x0, 0x40 and 120x0 and survives 120x0 with the exit toast, 0x40, 0x0, 1x1 and 20x6, then draws a full frame at 120x40, exits 0 and restores the terminal; tmux cannot make a zero-sized window, so `zero_size_pty.py` drives a raw PTY and needs `python3` |
+| `cases/26_classic_cancel.sh` | Cancelling a turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Escape while an approved Bash command appends a line every second: once the status no longer says cancelling, the file stops growing. Escape during a burst of 200,000 text deltas: the status acknowledges it, the backlog still arriving does not bring the running turn back within 10 s, and the status settles to `Cancelled`; needs `python3` |
 
 ## Configuration
 

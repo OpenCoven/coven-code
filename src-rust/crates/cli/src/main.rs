@@ -5024,14 +5024,7 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-                        if current_query.is_some()
-                            && app.renderer == claurst_tui::application::UiRenderer::Next
-                        {
-                            app.note_cancellation_sent();
-                            app.interrupt_tool_rows();
-                        }
-                        app.is_streaming = false;
-                        app.status_message = Some("Cancelled by remote control.".to_string());
+                        app.note_cancellation_sent(current_query.is_some());
                     }
                     Ok(TuiBridgeEvent::PermissionResponse {
                         tool_use_id,
