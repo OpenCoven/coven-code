@@ -95,7 +95,7 @@ fn session_save_worker() {
             notifications.push(NotificationKind::Warning, "unrelated warning".into(), None);
             for _ in 0..2 {
                 if *operation == "transcript update" {
-                    persist_interactive_session(&session, None, &mut notifications).await;
+                    assert!(!persist_interactive_session(&session, None, &mut notifications).await);
                 } else {
                     assert!(
                         !save_session_with_warning(&session, &mut notifications, operation).await
@@ -122,7 +122,7 @@ fn session_save_worker() {
             std::fs::remove_file(path.join("sentinel")).unwrap();
             std::fs::remove_dir(&path).unwrap();
             if *operation == "transcript update" {
-                persist_interactive_session(&session, None, &mut notifications).await;
+                assert!(persist_interactive_session(&session, None, &mut notifications).await);
             } else {
                 assert!(save_session_with_warning(&session, &mut notifications, operation).await);
             }
