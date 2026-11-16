@@ -8,7 +8,9 @@
 // clients, so auth stays inside the CLI that owns it.
 //
 // Delegation model: the CLI runs its own agent loop (tools, permissions,
-// context) in the current working directory. This provider forwards the
+// context) in the current working directory. When Coven starts the
+// engine it supplies the permission policy for that loop
+// (`claude_cli_policy.rs`). This provider forwards the
 // user's prompt (with any pasted images as standard Anthropic image blocks),
 // streams Claude's text back, and renders the CLI's tool activity as
 // one-line notices. It never emits `ToolUse` blocks, so the
@@ -228,12 +230,7 @@ fn build_args(
     resume: Option<&str>,
     permission: Option<&PermissionMode>,
 ) -> Vec<String> {
-    let permission_mode = match permission {
-        Some(PermissionMode::BypassPermissions) => "bypassPermissions",
-        Some(PermissionMode::AcceptEdits) => "acceptEdits",
-        Some(PermissionMode::Default) => "default",
-        Some(PermissionMode::Plan) | None => "plan",
-    };
+    let permission_mode = cli_permission_mode(permission);
     let mut args = vec![
         "-p".to_string(),
         "--input-format".to_string(),
@@ -254,6 +251,20 @@ fn build_args(
     }
     args
 }
+
+/// The CLI's name for a turn's permission mode. A request that names no mode
+/// runs as `plan`.
+fn cli_permission_mode(permission: Option<&PermissionMode>) -> &'static str {
+    match permission {
+        Some(PermissionMode::BypassPermissions) => "bypassPermissions",
+        Some(PermissionMode::AcceptEdits) => "acceptEdits",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::Plan) | None => READ_ONLY_CLI_MODE,
+    }
+}
+
+/// The CLI mode a read-only turn runs in.
+const READ_ONLY_CLI_MODE: &str = "plan";
 
 /// The single stream-json stdin line carrying ordered current-turn blocks.
 fn stdin_line(content: &[ContentBlock]) -> String {
@@ -568,9 +579,26 @@ impl ClaudeCliProvider {
         resume: Option<&str>,
         permission: Option<&PermissionMode>,
     ) -> Result<SpawnOutcome, ProviderError> {
+        // Coven's permission policy, when Coven started this engine. Without
+        // it the CLI would run under whatever the operator's and the
+        // workspace's own settings files allow. The policy never names a
+        // permission mode: `build_args` passes the turn's own. A read-only
+        // turn gets the policy without its allow rules, which the CLI would
+        // otherwise apply in plan mode as well.
+        let read_only = cli_permission_mode(permission) == READ_ONLY_CLI_MODE;
+        let policy_args =
+            super::claude_cli_policy::args_from_environment(read_only).map_err(|message| {
+                ProviderError::Other {
+                    provider: self.id.clone(),
+                    message,
+                    status: None,
+                    body: None,
+                }
+            })?;
         let mut command = Command::new(self.binary_or_default());
         command
             .args(build_args(model, resume, permission))
+            .args(policy_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

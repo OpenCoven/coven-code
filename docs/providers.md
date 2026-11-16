@@ -36,6 +36,20 @@ to the Anthropic Messages API. Without an API key, turns run through the local
 `claude` binary. That CLI owns its authentication; Coven Code does not import or
 replay Claude CLI OAuth tokens.
 
+The CLI also runs its own tools under its own permission settings. Each turn's
+permission mode reaches it as `--permission-mode`. Started on its own, the
+engine otherwise leaves the CLI to whatever the user's and the workspace's
+Claude settings files allow. When Coven starts the engine for a headless run it
+sets `COVEN_CLAUDE_POLICY`, a JSON object naming Coven's settings file, the
+settings files the CLI may still read, extra directories and the user's MCP
+config. The engine adds those to every CLI launch. The object does not name a
+permission mode, so the turn's own stays the only one. It names two settings
+files: a read-only (`plan`) turn gets the one without Coven's allow rules,
+because the CLI applies allow rules in plan mode too. If the engine cannot
+apply the object in full (an unknown field counts), the turn fails with a
+message to update Coven and the engine together; the CLI is not started
+without the policy.
+
 Set `ANTHROPIC_API_KEY` or configure an engine-owned key. Use `/account connect`
 for provider setup and `/account` for account management. The separate
 `coven-code auth login` flow requires a configured
