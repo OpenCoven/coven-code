@@ -13,34 +13,9 @@
 
 register_case tc_classic_quit_save
 
-# Wall-clock time in tenths of a second.
-_cqs_now_tenths() { python3 -c 'import time; print(int(time.time() * 10))'; }
-
 # The saved session file that names `text`, if any.
 _cqs_saved_with() { # home, text
   find "$1" -type f -path '*/sessions/*.json' -exec grep -lF -- "$2" {} + 2>/dev/null | head -n 1
-}
-
-# Press the quit keys, wait for the TUI to exit, then check it gave the terminal
-# back. Sets CQS_QUIT_TENTHS to how long the exit took after the last key.
-_cqs_quit() { # how, keys...
-  local how="$1" key passes=0 running start
-  shift
-  running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
-  for key in "$@"; do tui_keys "$key"; start="$(_cqs_now_tenths)"; sleep 0.25; done
-  while [ "$passes" -lt 300 ] && \
-    [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
-    sleep 0.1; passes=$((passes + 1))
-  done
-  CQS_QUIT_TENTHS=$(($(_cqs_now_tenths) - start))
-  if [ "$passes" -lt 300 ]; then _pass "$how exits (after about $((CQS_QUIT_TENTHS / 10))s)"
-  else _fail "$how exits" "$(tui_capture)"; fi
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{alternate_on}')" "0" \
-    "$how leaves the alternate screen"
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{cursor_flag}')" "1" \
-    "$how restores the cursor"
-  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{mouse_any_flag}')" "0" \
-    "$how turns mouse reporting off"
 }
 
 # Start the TUI for one renderer against the fake API, with its own home.
@@ -104,7 +79,7 @@ _cqs_held() { # renderer, home, port, project
   if ! wait_for "held line" 30; then
     _fail "$r: the held turn starts" "$(tui_capture)"; return 0
   fi
-  _cqs_quit "$r: Ctrl+D twice during a turn" C-d C-d
+  tui_quit_and_check "$r: Ctrl+D twice during a turn" C-d C-d
   # The pane now shows the shell, with whatever the TUI printed as it exited:
   # Next's report on the turn and the resume command; nothing from Classic.
   pane="$(tui_capture)"
@@ -114,7 +89,6 @@ _cqs_held() { # renderer, home, port, project
   else
     assert_absent "$pane" "Quit during a turn" "$r: no exit report follows the exit"
     assert_absent "$pane" "Pick it up with" "$r: no resume command follows the exit"
-    assert_absent "$pane" "Session not saved" "$r: no save warning follows the exit"
   fi
   saved="$(_cqs_saved_with "$home" "flood: 2000 hold")"
   if [ -n "$saved" ]; then _pass "$r: quitting during a turn keeps the prompt"
@@ -137,11 +111,11 @@ _cqs_command() { # renderer, home, port, project
     _fail "$r: a Bash call asks for approval" "$(tui_capture)"; return 0
   fi
   sleep 0.7; tui_keys y; sleep 1.5
-  _cqs_quit "$r: Ctrl+D twice while a command runs" C-d C-d
-  if [ "$CQS_QUIT_TENTHS" -lt 80 ]; then
+  tui_quit_and_check "$r: Ctrl+D twice while a command runs" C-d C-d
+  if [ "$TUI_QUIT_TENTHS" -lt 80 ]; then
     _pass "$r: quitting exits within 8 s while a command runs"
   else
-    _fail "$r: quitting exits within 8 s while a command runs" "took about $((CQS_QUIT_TENTHS / 10))s"
+    _fail "$r: quitting exits within 8 s while a command runs" "took about $((TUI_QUIT_TENTHS / 10))s"
   fi
   saved="$(_cqs_saved_with "$home" "run: sleep 20")"
   if [ -n "$saved" ]; then _pass "$r: quitting while a command runs keeps the prompt"

@@ -2531,8 +2531,8 @@ async fn stop_turn_for_exit(
 
 /// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
 /// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
-/// it delivered, rolling back a prompt that never reached the provider. The
-/// caller saves the session. Returns the report on the turn, taken before the
+/// it delivered, removing a goal continuation's synthetic prompt if no request
+/// for it was sent. The caller saves the session. Returns the report on the turn, taken before the
 /// stop, which can still deliver results; Next prints it from what was saved.
 async fn stop_turn_and_keep_it(
     (handle, messages): (
@@ -6762,9 +6762,9 @@ mod tests {
     }
 
     /// #408: quitting during a turn stops it and keeps the prompt and the
-    /// output it delivered. Both renderers' exit blocks call
-    /// `stop_turn_and_keep_it`, which does not read the renderer; case 27
-    /// checks that Classic's exit reaches it.
+    /// output it delivered. The exit block calls `stop_turn_and_keep_it` in
+    /// either renderer, and it does not read the renderer; case 27 checks
+    /// that Classic's exit reaches it.
     #[tokio::test]
     async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
@@ -6856,13 +6856,15 @@ mod tests {
         assert_eq!(session.messages.len(), 1, "the prompt is kept");
     }
 
-    /// #408: auto-compaction does not watch the token, so quitting waits for
-    /// it. If it finishes within `TURN_EXIT_WAIT`, its compacted conversation
-    /// is what is kept.
+    /// #408: a worker that does not watch the token, as auto-compaction does
+    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. This models the compaction
+    /// worker's shape, not `compact_conversation` itself.
     #[tokio::test]
-    async fn quitting_during_auto_compaction_keeps_the_compacted_conversation_if_it_finishes() {
+    async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
         app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        app.auto_compact_running = true;
         let prompt = claurst_core::types::Message::user("the prompt".to_string());
         let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
         let worker_messages = messages.clone();
@@ -6879,7 +6881,7 @@ mod tests {
         let mut session = claurst_core::history::ConversationSession::new("model".into());
         let started = std::time::Instant::now();
 
-        stop_turn_and_keep_it(
+        let report = stop_turn_and_keep_it(
             (handle, messages),
             queue,
             &mut None,
@@ -6890,9 +6892,10 @@ mod tests {
         )
         .await;
 
+        assert!(!report.is_turn(), "compaction gets no turn report");
         assert!(
             started.elapsed() < TURN_EXIT_WAIT,
-            "a compaction that finishes is not waited out"
+            "a worker that finishes is not waited out"
         );
         let kept: Vec<_> = session
             .messages
@@ -6900,6 +6903,80 @@ mod tests {
             .map(|message| message.get_all_text())
             .collect();
         assert_eq!(kept, ["the summary"]);
+    }
+
+    /// #408: quitting during a goal continuation that never sent a request
+    /// removes its synthetic prompt from what is saved, and keeps it once a
+    /// request was sent.
+    #[tokio::test]
+    async fn quitting_drops_a_goal_continuations_prompt_only_if_no_request_was_sent() {
+        for sent in [false, true] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let store = claurst_core::GoalStore::open(&dir.path().join("goals.sqlite"))
+                .expect("goal store");
+            let mut session = claurst_core::history::ConversationSession::new("model".into());
+            store
+                .set_goal(&session.id, "the objective", None)
+                .expect("goal");
+            let turn = store
+                .capture_active_goal(&session.id)
+                .expect("capture")
+                .expect("active goal");
+            if sent {
+                turn.mark_request_attempted();
+            }
+            let mut goal_turn = Some(InteractiveTurn::from_goal(turn, 0));
+            let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+            app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+            let mut conversation = vec![claurst_core::types::Message::user("earlier".to_string())];
+            goal_turn
+                .as_mut()
+                .expect("goal turn")
+                .inject(
+                    "continue the goal".to_string(),
+                    &mut conversation,
+                    &mut app,
+                    &mut session,
+                )
+                .expect("inject");
+            let mut command_messages = conversation.clone();
+            let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(conversation));
+            let token = tokio_util::sync::CancellationToken::new();
+            let worker_token = token.clone();
+            let handle = tokio::spawn(async move {
+                worker_token.cancelled().await;
+                claurst_query::QueryOutcome::Cancelled
+            });
+            let (_events, queue) = tokio::sync::mpsc::channel(1);
+
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut goal_turn,
+                &mut app,
+                &Some(token),
+                &mut session,
+                &mut command_messages,
+            )
+            .await;
+
+            let saved: Vec<_> = session
+                .messages
+                .iter()
+                .map(|message| message.get_all_text())
+                .collect();
+            let expected: &[&str] = if sent {
+                &["earlier", "continue the goal"]
+            } else {
+                &["earlier"]
+            };
+            assert_eq!(saved, expected, "request sent: {sent}");
+            assert_eq!(
+                command_messages.len(),
+                expected.len(),
+                "request sent: {sent}"
+            );
+        }
     }
 
     #[tokio::test]

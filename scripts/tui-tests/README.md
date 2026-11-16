@@ -122,7 +122,9 @@ paste. The distinction matters: only the second shape engages the TUI's
 paste-burst detector.
 
 Helpers from [`lib.sh`](lib.sh): `tui_start` / `tui_stop`, `tui_keys`,
-`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`, and the assertions
+`tui_type`, `tui_paste`, `tui_settle`, `tui_capture`, `wait_for`,
+`tui_quit_and_check` (press quit keys, then check the exit and the terminal
+restore), and the assertions
 `assert_contains` / `assert_absent` / `assert_matches` / `assert_eq`. For
 headless checks, call `run_bin <args...>` and read `$RUN_OUT` / `$RUN_RC`.
 
