@@ -90,6 +90,17 @@ impl QueryEventSink {
                 overloaded,
                 max_bytes,
             } => {
+                // Queue and finish progress only drives a local display. A
+                // bounded consumer relays to a remote client, where these would
+                // take slots and budget meant for events it must deliver.
+                if matches!(
+                    event,
+                    QueryEvent::ToolQueued { .. }
+                        | QueryEvent::ToolRunning { .. }
+                        | QueryEvent::ToolFinished { .. }
+                ) {
+                    return Ok(());
+                }
                 if overloaded.load(Ordering::Acquire) {
                     return Err(EventSendError::Capacity);
                 }
@@ -179,6 +190,34 @@ mod tests {
         assert!(second.is_overloaded());
         drop(receiver);
         assert_eq!(budget.available_permits(), 1024);
+    }
+
+    #[tokio::test]
+    async fn display_progress_never_takes_a_bounded_slot() {
+        let budget = Arc::new(Semaphore::new(4096));
+        let cancel = CancellationToken::new();
+        let (sink, mut receiver) = QueryEventSink::bounded(1, budget.clone(), 4096, cancel.clone());
+        for _ in 0..8 {
+            let tool_id = "toolu_1".to_string();
+            sink.send(QueryEvent::ToolQueued {
+                tool_id: tool_id.clone(),
+            })
+            .unwrap();
+            sink.send(QueryEvent::ToolRunning {
+                tool_id: tool_id.clone(),
+            })
+            .unwrap();
+            sink.send(QueryEvent::ToolFinished {
+                tool_id,
+                is_error: false,
+            })
+            .unwrap();
+        }
+        sink.send(QueryEvent::Status("delivered".into())).unwrap();
+        assert!(!sink.is_overloaded() && !cancel.is_cancelled());
+        assert!(
+            matches!(receiver.recv().await, Some(QueryEvent::Status(value)) if value == "delivered")
+        );
     }
 
     #[test]

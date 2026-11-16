@@ -192,7 +192,13 @@ tag; use a new version for fixes rather than replacing published assets.
    Each contains `coven-code` (Windows: `coven-code.exe`). Require the final
    checksum manifest and verify archive contents and native smoke tests before
    declaring the candidate ready. Do not infer platform support from compilation
-   alone.
+   alone. The
+   [release-candidate workflow](.github/workflows/release-candidate.yml) does
+   this without publishing: it runs on a version-stamp pull request or by
+   manual dispatch on any ref, repeats the release build and packaging, keeps
+   the archives and manifest as run artifacts, and runs each archive on its own
+   platform. Its archives are not the published ones; the release workflow
+   builds those again.
 6. After authorized Git delivery and passing exact-commit CI, dispatch
    `.github/workflows/release.yml` from the approved main commit with the chosen
    version. The workflow publishes a GitHub Release; it is not a dry run.
