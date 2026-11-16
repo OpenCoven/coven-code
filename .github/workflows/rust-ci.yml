@@ -224,3 +224,31 @@ jobs:
           python scripts/run-coven-contract.py \
             --engine "$GITHUB_WORKSPACE/src-rust/target/debug/coven-code" \
             --cargo-artifacts "$RUNNER_TEMP/coven-test-artifacts.jsonl"
+
+  windows-foreground:
+    name: Windows foreground command cleanup
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: rust-ci-windows-foreground-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: rust-ci-windows-foreground-
+
+      # No other job runs Rust tests on Windows; these cover the cmd.exe
+      # fallbacks that both Bash tools use there (#373).
+      - name: Test cancelled, timed-out and finished foreground commands
+        working-directory: src-rust
+        run: cargo test -p claurst-tools --locked --test foreground_windows
