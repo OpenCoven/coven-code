@@ -11,13 +11,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget},
+    widgets::{Paragraph, Widget, Wrap},
 };
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::overlays::{
     begin_modal_buf, modal_header_line_area, render_modal_title_buf, COVEN_CODE_ACCENT,
@@ -81,8 +82,10 @@ pub enum DiffLineKind {
 /// Stats for a single file in the diff.
 #[derive(Debug, Clone)]
 pub struct FileDiffStats {
-    /// File path (relative to project root).
+    /// File path (relative to project root). For a rename, the new path.
     pub path: String,
+    /// The path before a rename, when git reported one.
+    pub renamed_from: Option<String>,
     /// Number of added lines.
     pub added: u32,
     /// Number of removed lines.
@@ -315,6 +318,7 @@ pub fn build_turn_diff(
             if snapshot.binary {
                 return FileDiffStats {
                     path,
+                    renamed_from: None,
                     added: 0,
                     removed: 0,
                     binary: true,
@@ -412,6 +416,7 @@ fn build_file_diff_from_snapshots(path: String, before: &str, after: &str) -> Fi
 
     FileDiffStats {
         path,
+        renamed_from: None,
         added,
         removed,
         binary: false,
@@ -462,6 +467,7 @@ pub fn parse_unified_diff(text: &str) -> Vec<FileDiffStats> {
                 .unwrap_or_else(|| "unknown".to_string());
             current_file = Some(FileDiffStats {
                 path,
+                renamed_from: None,
                 added: 0,
                 removed: 0,
                 binary: false,
@@ -471,6 +477,17 @@ pub fn parse_unified_diff(text: &str) -> Vec<FileDiffStats> {
         } else if raw_line.starts_with("new file mode") {
             if let Some(f) = current_file.as_mut() {
                 f.is_new_file = true;
+            }
+        } else if let (Some(from), None) = (raw_line.strip_prefix("rename from "), &current_hunk) {
+            // A rename's header names both paths in full, so these win over
+            // the `diff --git` line, which cannot tell a space in a path from
+            // the gap between the two paths.
+            if let Some(f) = current_file.as_mut() {
+                f.renamed_from = Some(from.to_string());
+            }
+        } else if let (Some(to), None) = (raw_line.strip_prefix("rename to "), &current_hunk) {
+            if let Some(f) = current_file.as_mut() {
+                f.path = to.to_string();
             }
         } else if raw_line.starts_with("Binary files ") {
             if let Some(f) = current_file.as_mut() {
@@ -695,26 +712,29 @@ fn render_file_list(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
         let abs_idx = start + i;
         let selected = abs_idx == state.selected_file;
 
-        // Truncate path to fit
-        let avail = inner.width.saturating_sub(10) as usize;
-        let path = if file.path.len() > avail {
-            format!("…{}", &file.path[file.path.len() - avail..])
-        } else {
-            file.path.clone()
-        };
-
         let is_collapsed = *state.collapsed.get(abs_idx).unwrap_or(&false);
         let collapse_char = if is_collapsed { "\u{25b8}" } else { "\u{25be}" }; // ▸ / ▾
         let (stats, stats_color) = if file.binary {
             ("binary".to_string(), COVEN_CODE_MUTED)
         } else if file.is_new_file {
             (format!("new  +{}", file.added), Color::Yellow)
+        } else if file.renamed_from.is_some() {
+            // Short, so a narrow list keeps the file's name; the detail
+            // header names both paths and counts the lines.
+            ("renamed".to_string(), Color::Yellow)
         } else {
             (
                 format!("+{} -{}", file.added, file.removed),
                 COVEN_CODE_MUTED,
             )
         };
+        let stats_text = format!(" {stats}");
+        let stats_width = UnicodeWidthStr::width(stats_text.as_str());
+
+        // The path gets what the collapse mark and the stats leave, and keeps
+        // its end, which names the file.
+        let avail = usize::from(inner.width).saturating_sub(3 + stats_width);
+        let path = keep_end(&file.path, avail);
 
         let bg = if selected {
             COVEN_CODE_ACCENT
@@ -735,10 +755,9 @@ fn render_file_list(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
             break;
         }
 
-        let stats_text = format!(" {}", stats);
         let prefix = format!(" {} {}", collapse_char, path);
-        let used = prefix.len() + stats_text.len();
-        let pad = inner.width.saturating_sub(used as u16) as usize;
+        let used = UnicodeWidthStr::width(prefix.as_str()) + stats_width;
+        let pad = usize::from(inner.width).saturating_sub(used);
         let line = Line::from(vec![
             Span::styled(prefix, base_style),
             Span::styled(" ".repeat(pad), Style::default().bg(bg)),
@@ -771,9 +790,18 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
         None => return,
     };
 
+    let name = match &file.renamed_from {
+        Some(from) => format!(" {from} \u{2192} {}", file.path),
+        None => format!(" {}", file.path),
+    };
+    let stats = if file.binary {
+        "  binary".to_string()
+    } else {
+        format!("  +{} -{}", file.added, file.removed)
+    };
     let header = Line::from(vec![
         Span::styled(
-            format!(" {}", file.path),
+            name,
             Style::default()
                 .fg(if focused {
                     COVEN_CODE_ACCENT
@@ -782,10 +810,7 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
                 })
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("  +{} -{}", file.added, file.removed),
-            Style::default().fg(COVEN_CODE_MUTED),
-        ),
+        Span::styled(stats, Style::default().fg(COVEN_CODE_MUTED)),
     ]);
     Paragraph::new(header)
         .style(Style::default().bg(COVEN_CODE_PANEL_BG))
@@ -823,6 +848,13 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
     if file.binary {
         Paragraph::new("Binary file — no diff available")
             .style(Style::default().fg(COVEN_CODE_MUTED))
+            .render(inner, buf);
+        return;
+    }
+    if let (Some(from), true) = (&file.renamed_from, file.hunks.is_empty()) {
+        Paragraph::new(format!("Renamed from {from}; the content is unchanged"))
+            .style(Style::default().fg(COVEN_CODE_MUTED))
+            .wrap(Wrap { trim: false })
             .render(inner, buf);
         return;
     }
@@ -903,6 +935,27 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
 
 /// How much of a line is compared word by word, unless a row shows more.
 const WORD_DIFF_MAX_CHARS: usize = 2_000;
+
+/// `text` in at most `max_width` columns: whole if it fits, otherwise an
+/// ellipsis and as much of its end as fits after it.
+fn keep_end(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut width = 1; // the ellipsis
+    let mut start = text.len();
+    for (at, ch) in text.char_indices().rev() {
+        width += ch.width().unwrap_or(0);
+        if width > max_width {
+            break;
+        }
+        start = at;
+    }
+    format!("\u{2026}{}", &text[start..])
+}
 
 /// Format a 10-char line-number gutter.
 fn format_gutter(old_no: Option<u32>, new_no: Option<u32>) -> String {
@@ -1285,6 +1338,7 @@ mod tests {
     fn make_file(path: &str, added: u32, removed: u32, is_new: bool) -> FileDiffStats {
         FileDiffStats {
             path: path.to_string(),
+            renamed_from: None,
             added,
             removed,
             binary: false,
@@ -1408,6 +1462,7 @@ mod tests {
         use DiffLineKind::{Added, Context, Header, Removed};
         FileDiffStats {
             path: "mixed.rs".to_string(),
+            renamed_from: None,
             added: 0,
             removed: 0,
             binary: false,
@@ -1599,6 +1654,7 @@ mod tests {
     fn build_diff_lines_inline_diff_for_adjacent_pair() {
         let file = FileDiffStats {
             path: "test.rs".to_string(),
+            renamed_from: None,
             added: 1,
             removed: 1,
             binary: false,
@@ -1678,6 +1734,7 @@ mod tests {
         // Verify the binary badge logic in render_file_list: binary=true → "[binary]"
         let file = FileDiffStats {
             path: "image.png".to_string(),
+            renamed_from: None,
             added: 0,
             removed: 0,
             binary: true,
