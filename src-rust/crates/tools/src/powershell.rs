@@ -238,7 +238,7 @@ impl Tool for PowerShellTool {
         #[cfg(windows)]
         let (mut child, job) = match crate::windows_job::spawn(&mut command) {
             Ok(spawned) => spawned,
-            Err(e) => return ToolResult::error(format!("Failed to spawn PowerShell: {}", e)),
+            Err(e) => return ToolResult::error(e.report("Failed to spawn PowerShell")),
         };
         #[cfg(not(windows))]
         let mut child = match command.spawn() {

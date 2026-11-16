@@ -355,7 +355,7 @@ async fn run_windows_fallback(
             .kill_on_drop(true),
     ) {
         Ok(spawned) => spawned,
-        Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+        Err(e) => return ToolResult::error(e.report("Failed to spawn command")),
     };
 
     let stdout_handle = child.stdout.take();

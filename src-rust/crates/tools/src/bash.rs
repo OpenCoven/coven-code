@@ -571,7 +571,7 @@ impl BashTool {
         #[cfg(windows)]
         let (mut child, job) = match crate::windows_job::spawn(&mut shell) {
             Ok(spawned) => spawned,
-            Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+            Err(e) => return ToolResult::error(e.report("Failed to spawn command")),
         };
         #[cfg(not(windows))]
         let mut child = match shell.spawn() {

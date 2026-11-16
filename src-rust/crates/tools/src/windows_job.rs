@@ -99,6 +99,32 @@ enum Resumed {
     Partly(io::Error),
 }
 
+/// Why [`spawn`] returned no shell.
+#[derive(Debug)]
+pub(crate) enum SpawnError {
+    /// The shell did not start, so nothing ran.
+    NotStarted(io::Error),
+    /// The shell started but could not be fully resumed, so it was stopped.
+    /// The command may have run in part.
+    Stopped(io::Error),
+}
+
+impl SpawnError {
+    /// The tool's error text. `not_started` is the tool's usual text for a
+    /// shell that did not start, such as "Failed to spawn command". A stopped
+    /// command is not reported that way: running it again could repeat what
+    /// it already did.
+    pub(crate) fn report(&self, not_started: &str) -> String {
+        match self {
+            Self::NotStarted(error) => format!("{not_started}: {error}"),
+            Self::Stopped(error) => format!(
+                "The command may have started, and was stopped: its shell could not be fully resumed ({error}). \
+                 Check what it changed before running it again."
+            ),
+        }
+    }
+}
+
 /// Spawn `command` with its whole process tree in a new job.
 ///
 /// The shell is created suspended and resumed only once it is in the job, so
@@ -110,19 +136,26 @@ enum Resumed {
 /// does not allow nesting, the command still runs, and cancel and timeout stop
 /// only the shell, as before. It is an error only if the shell cannot start,
 /// or if it started and could not be fully resumed. Then the shell is stopped,
-/// never started a second time.
-pub(crate) fn spawn(command: &mut Command) -> io::Result<(Child, Option<Job>)> {
+/// never started a second time, and the error says so.
+pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), SpawnError> {
     let job = match Job::new() {
         Ok(job) => job,
         Err(error) => {
             tracing::warn!(%error, "No job for a foreground command; only its shell will be stopped");
-            return Ok((command.spawn()?, None));
+            let child = command.spawn().map_err(SpawnError::NotStarted)?;
+            return Ok((child, None));
         }
     };
-    let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
+    let mut child = command
+        .creation_flags(CREATE_SUSPENDED)
+        .spawn()
+        .map_err(SpawnError::NotStarted)?;
     let (Some(process), Some(id)) = (child.raw_handle(), child.id()) else {
-        // Only a child that has been waited on has neither.
-        return Err(io::Error::other("the new shell has no process handle"));
+        // Only a child that has been waited on, so has already exited, has
+        // neither.
+        return Err(SpawnError::NotStarted(io::Error::other(
+            "the new shell has no process handle",
+        )));
     };
     // SAFETY: both handles are open: `job` owns one and `child` the other.
     let job = if unsafe { AssignProcessToJobObject(job.0.as_raw_handle(), process) } != 0 {
@@ -143,18 +176,20 @@ pub(crate) fn spawn(command: &mut Command) -> io::Result<(Child, Option<Job>)> {
             // the command twice.
             tracing::warn!(%error, "Could not resume a foreground command's shell; starting it again without a job");
             let _ = child.start_kill();
-            Ok((command.creation_flags(0).spawn()?, None))
+            let child = command
+                .creation_flags(0)
+                .spawn()
+                .map_err(SpawnError::NotStarted)?;
+            Ok((child, None))
         }
         Resumed::Partly(error) => {
             // The command may have started, so stop it rather than run it again.
+            tracing::warn!(%error, "A foreground command's shell started but could not be fully resumed; stopping it");
             if let Some(job) = &job {
                 job.terminate();
             }
             let _ = child.start_kill();
-            Err(io::Error::new(
-                error.kind(),
-                format!("the shell started but could not be fully resumed: {error}"),
-            ))
+            Err(SpawnError::Stopped(error))
         }
     }
 }
@@ -242,7 +277,7 @@ fn resume_thread(process_id: u32, thread_id: u32) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resume_all, Resumed};
+    use super::{resume_all, Resumed, SpawnError};
     use std::io;
 
     fn refused() -> io::Error {
@@ -288,5 +323,21 @@ mod tests {
         });
         assert!(matches!(resumed, Resumed::Partly(_)));
         assert_eq!(tried, [7, 8], "resuming stops at the first failure");
+    }
+
+    #[test]
+    fn a_stopped_command_is_not_reported_as_one_that_never_ran() {
+        let not_started = SpawnError::NotStarted(refused()).report("Failed to spawn command");
+        assert!(
+            not_started.starts_with("Failed to spawn command: "),
+            "{not_started}"
+        );
+
+        let stopped = SpawnError::Stopped(refused()).report("Failed to spawn command");
+        assert!(!stopped.contains("Failed to spawn"), "{stopped}");
+        assert!(
+            stopped.contains("may have started") && stopped.contains("was stopped"),
+            "{stopped}"
+        );
     }
 }

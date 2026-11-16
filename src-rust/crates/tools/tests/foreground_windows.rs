@@ -12,12 +12,15 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+};
 
 /// Holds, for the copy that `nested_job_stops_the_grandchild` runs, the value
 /// of the job handle the copy inherits.
@@ -38,12 +41,13 @@ const PS_TICKER: &str =
 const GRANDCHILD: &str = "cmd /D /C cmd /D /C ticker.cmd";
 
 /// Starts `ticker.cmd` through `Start-Process`, which neither waits for it nor
-/// hands it the shell's pipes, prints its process ID, then exits with code 3.
-const PS_DETACH: &str =
-    "(Start-Process -WindowStyle Hidden cmd -ArgumentList '/D /C ticker.cmd' -PassThru).Id; exit 3";
+/// hands it the shell's pipes, then exits with code 3. It prints the started
+/// process's ID and creation time (a FILETIME), which together name that
+/// process even after its ID is reused.
+const PS_DETACH: &str = "$p = Start-Process -WindowStyle Hidden cmd -ArgumentList '/D /C ticker.cmd' -PassThru; '{0} {1}' -f $p.Id, $p.StartTime.ToFileTimeUtc(); exit 3";
 
 /// The same from `cmd.exe`, which has no such command of its own.
-const DETACH: &str = "powershell -NoProfile -NonInteractive -Command (Start-Process -WindowStyle Hidden cmd -ArgumentList '/D /C ticker.cmd' -PassThru).Id& exit 3";
+const DETACH: &str = "powershell -NoProfile -NonInteractive -Command $p = Start-Process -WindowStyle Hidden cmd -ArgumentList '/D /C ticker.cmd' -PassThru; '{0} {1}' -f $p.Id, $p.StartTime.ToFileTimeUtc()& exit 3";
 
 fn context(directory: &Path) -> ToolContext {
     ToolContext {
@@ -215,15 +219,60 @@ async fn check_completion(shell: Shell) {
     );
 }
 
-/// Stops a detached loop, and what it started, when the test ends, even if an
-/// assertion failed first.
-struct Detached(u32);
+/// A detached loop, held open by handle so that its process ID cannot be
+/// reused while the test runs. Dropping the guard ends the loop, even after a
+/// failed assertion. The `ping` it may be running ends by itself within a
+/// second.
+struct Detached(OwnedHandle);
+
+impl Detached {
+    /// Open process `pid` only if it is the one created at `created`, so a
+    /// process that was given the ID of a loop that already ended is never
+    /// touched.
+    fn open(pid: u32, created: u64) -> Option<Self> {
+        // SAFETY: takes no pointers.
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            return None;
+        }
+        // SAFETY: `process` is a new, open handle that nothing else owns.
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
+        let [mut creation, mut exit, mut kernel, mut user] = [FILETIME::default(); 4];
+        // SAFETY: the handle has PROCESS_QUERY_LIMITED_INFORMATION, and each
+        // pointer is to a FILETIME that outlives the call.
+        let read = unsafe {
+            GetProcessTimes(
+                process.as_raw_handle(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        let creation =
+            (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        (read != 0 && creation == created).then_some(Self(process))
+    }
+}
 
 impl Drop for Detached {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &self.0.to_string(), "/T", "/F"])
-            .output();
+        let process = self.0.as_raw_handle();
+        // SAFETY: the handle has SYNCHRONIZE. Only a process still running is
+        // ended.
+        if unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT {
+            // SAFETY: the handle has PROCESS_TERMINATE and SYNCHRONIZE.
+            unsafe {
+                TerminateProcess(process, 1);
+                WaitForSingleObject(process, 5_000);
+            }
+        }
     }
 }
 
@@ -245,18 +294,25 @@ async fn check_detached(shell: Shell) {
         "{}",
         result.content
     );
-    let _detached = Detached(
-        result
-            .content
-            .lines()
-            .find_map(|line| line.trim().parse().ok())
-            .unwrap_or_else(|| panic!("no process ID in {}", result.content)),
-    );
+    let (pid, created) = result
+        .content
+        .lines()
+        .find_map(|line| {
+            let (pid, created) = line.trim().split_once(' ')?;
+            Some((pid.parse::<u32>().ok()?, created.parse::<u64>().ok()?))
+        })
+        .unwrap_or_else(|| panic!("no process ID and creation time in {}", result.content));
+    // `None` if the loop has already ended.
+    let detached = Detached::open(pid, created);
     let returned = ticks(directory.path());
     assert!(
         reaches_ticks(directory.path(), returned + 2).await,
         "the detached loop stopped when the call ended ({shell:?}): {returned} ticks then, {} now",
         ticks(directory.path())
+    );
+    assert!(
+        detached.is_some(),
+        "the detached loop is running, but could not be opened as process {pid} created at {created}"
     );
 }
 
