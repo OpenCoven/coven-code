@@ -2176,8 +2176,126 @@ mod tests {
         assert_eq!(second_task.await.unwrap().unwrap(), "second-code");
     }
 
+    #[test]
+    fn callback_overall_timeout_releases_listener() {
+        use std::io::Read;
+        use std::process::{Child, Command, Stdio};
+
+        struct OwnedWorker(Child);
+        impl Drop for OwnedWorker {
+            fn drop(&mut self) {
+                if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+
+        const WORKER: &str = "oauth::tests::callback_overall_timeout_releases_listener_worker";
+        let scratch = tempfile::tempdir().unwrap();
+        let stdout_path = scratch.path().join("stdout");
+        let stderr_path = scratch.path().join("stderr");
+        // Regular files avoid waiting for EOF from pipe writers that a sibling
+        // fixture might temporarily inherit while forking before its exec.
+        let stdout = std::fs::File::create(&stdout_path).unwrap();
+        let stderr = std::fs::File::create(&stderr_path).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", WORKER, "--ignored", "--nocapture"])
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("USERPROFILE", scratch.path())
+            .env("COVEN_CODE_HOME", scratch.path().join("code"))
+            .env("COVEN_HOME", scratch.path().join("coven"))
+            .env("COVEN_CAVE_HOME", scratch.path().join("cave"))
+            .current_dir(scratch.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        // Windows may need its system directory to load runtime libraries.
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        // The listener is created only after re-exec, so sibling fixtures cannot
+        // fork-inherit it while testing whether the callback releases ownership.
+        let mut child = OwnedWorker(command.spawn().unwrap());
+        let worker_pid = child.0.id();
+        // This bounds process startup and supervision, not the unchanged 20ms
+        // callback deadline exercised inside the worker.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            match child.0.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => {
+                    let killed = child.0.kill();
+                    let reaped = child.0.wait();
+                    panic!(
+                        "bounded callback worker failed: {other:?}; kill={killed:?}; reap={reaped:?}"
+                    );
+                }
+            }
+        };
+        let read_output = |path: &Path| {
+            let mut output = Vec::new();
+            std::fs::File::open(path)
+                .unwrap()
+                .take(4097)
+                .read_to_end(&mut output)
+                .unwrap();
+            output
+        };
+        let stdout = read_output(&stdout_path);
+        let stderr = read_output(&stderr_path);
+        assert!(
+            stdout.len() <= 4096 && stderr.len() <= 4096,
+            "callback worker output exceeded cap"
+        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(
+            status.success(),
+            "callback worker {status}: {stdout} {stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("test {WORKER} ... ok")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "worker must execute exactly one test: {stdout}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("completed")).unwrap(),
+            worker_pid.to_string(),
+            "completion must come from the owned re-executed worker"
+        );
+        println!("{stdout}");
+    }
+
     #[tokio::test]
-    async fn callback_overall_timeout_releases_listener() {
+    #[ignore = "exact worker executed by callback_overall_timeout_releases_listener"]
+    async fn callback_overall_timeout_releases_listener_worker() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert!(
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+                == home.canonicalize().unwrap(),
+            "worker must use its scratch home"
+        );
+        for (name, directory) in [
+            ("COVEN_CODE_HOME", "code"),
+            ("COVEN_HOME", "coven"),
+            ("COVEN_CAVE_HOME", "cave"),
+        ] {
+            assert!(
+                std::env::var_os(name)
+                    .is_some_and(|value| Path::new(&value) == home.join(directory)),
+                "worker must use scratch Coven homes"
+            );
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let result = wait_for_authorization_code_with_limits(
@@ -2193,7 +2311,12 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("Timeout"));
-        assert!(TcpListener::bind(address).await.is_ok());
+        let rebound = TcpListener::bind(address).await;
+        assert!(
+            rebound.is_ok(),
+            "immediate rebind of {address} failed: {rebound:?}"
+        );
+        std::fs::write("completed", std::process::id().to_string()).unwrap();
     }
 
     #[tokio::test]

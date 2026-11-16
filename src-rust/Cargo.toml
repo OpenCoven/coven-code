@@ -20,7 +20,7 @@ exclude = ["vendor/rmcp-1.7.0"]
 rmcp = { path = "vendor/rmcp-1.7.0" }
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 authors = ["OpenCoven (based on Claurst by Kuber Mehta)"]
 license = "GPL-3.0"
