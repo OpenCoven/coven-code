@@ -11,7 +11,7 @@
 # The probe is built from source, so it is looked up in COVEN_BIN's cargo
 # output (examples/panic_restore next to it), or set COVEN_PANIC_PROBE. When
 # COVEN_BIN is a cargo build, a missing probe fails, and so does one older
-# than the tui crate's sources (a plain `cargo build` does not rebuild it);
+# than a file cargo built it from (a plain `cargo build` does not rebuild it);
 # for an installed binary there is nothing to check it against, so the case
 # is skipped.
 
@@ -29,20 +29,29 @@ tc_panic_restore() {
       return 0
     fi
   fi
-  local profile="" build newer tui="${BASH_SOURCE[0]%/*}/../../../src-rust/crates/tui"
+  local profile="" build
   [ "${dir##*/}" = "release" ] && profile=" --release"
   build="(cd src-rust && cargo build$profile -p claurst -p claurst-tui --bins --example panic_restore)"
   if [ ! -x "$probe" ]; then
     _fail "panic probe is built" "no $probe; build it with: $build"
     return 0
   fi
-  # An explicit COVEN_PANIC_PROBE is used as given.
-  if [ -z "${COVEN_PANIC_PROBE:-}" ] && [ -d "$tui/src" ]; then
-    newer="$(find "$tui/src" "$tui/examples" -name '*.rs' -newer "$probe" -print -quit 2>/dev/null)"
-    if [ -n "$newer" ]; then
-      _fail "panic probe is current" "$newer is newer than $probe; rebuild it with: $build"
-      return 0
-    fi
+  # Compare the probe with the files cargo built it from, as listed in its
+  # dep-info: one line, "target: dep dep ...", with spaces in paths escaped as
+  # "\ ". An explicit COVEN_PANIC_PROBE is used as given.
+  if [ -z "${COVEN_PANIC_PROBE:-}" ] && [ -f "$probe.d" ]; then
+    local deps dep
+    local -a files
+    IFS= read -r deps <"$probe.d"
+    deps="${deps#*: }"
+    read -ra files <<<"${deps//\\ /$'\037'}"
+    for dep in ${files[@]+"${files[@]}"}; do
+      dep="${dep//$'\037'/ }"
+      if [ "$dep" -nt "$probe" ]; then
+        _fail "panic probe is current" "$dep is newer than $probe; rebuild it with: $build"
+        return 0
+      fi
+    done
   fi
   log "  probe: $probe"
 
@@ -52,6 +61,7 @@ tc_panic_restore() {
   while IFS= read -r line; do
     case "$line" in
       "ok "*) _pass "${line#ok }" ;;
+      "FAIL "*" :: "*) line="${line#FAIL }"; _fail "${line%% :: *}" "${line#* :: }" ;;
       "FAIL "*) _fail "${line#FAIL }" ;;
     esac
   done <<<"$out"

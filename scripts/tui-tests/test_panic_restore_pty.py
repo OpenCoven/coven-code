@@ -54,7 +54,10 @@ setups = 1
 if sys.argv[2] == "worker":
     if BEHAVIOUR == "worker-restores":
         restore()
-    message(b"<unnamed>", b"panic-restore: deliberate worker-thread panic")
+    if BEHAVIOUR != "worker-silent":
+        message(b"<unnamed>", b"panic-restore: deliberate worker-thread panic")
+    if BEHAVIOUR == "worker-dies":
+        sys.exit(101)
     write(sys.stdout, b"\x1b[1;1Hpanic-restore: worker panicked")
     os.read(fd, 64)
 elif sys.argv[2] == "resume":
@@ -111,6 +114,11 @@ class PanicRestoreDriverTests(unittest.TestCase):
     def test_restore_on_a_worker_panic_fails(self):
         self.assert_fails("worker-restores", "a worker-thread panic does not restore the terminal")
 
+    def test_worker_panic_that_ends_the_probe_fails(self):
+        check = "the probe keeps running and drawing after a worker-thread panic"
+        _, failed = self.assert_fails("worker-dies", check)
+        self.assertEqual([line for line in failed if check not in line], [])
+
     def test_restore_after_the_message_fails(self):
         result, _ = self.assert_fails("message-first", "termios is restored before the panic message",
                                       "leaves the alternate screen before the panic message")
@@ -132,6 +140,7 @@ class PanicRestoreDriverTests(unittest.TestCase):
             ("no-unpushed-pop", "current behaviour: a keyboard pop is sent though none was pushed"),
             ("title-reset", "current behaviour: the hook leaves the title set at startup"),
             ("single-restore", "current behaviour: the hook restores once per setup_terminal call"),
+            ("worker-silent", "current behaviour: a worker-thread panic prints its message onto the live screen"),
         ):
             with self.subTest(behaviour):
                 _, failed = self.assert_fails(behaviour, check)

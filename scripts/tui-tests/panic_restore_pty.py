@@ -96,9 +96,10 @@ class Probe:
         )
 
     def pump(self, seconds, condition):
-        """Read output until `condition()` holds or `seconds` pass. Once it
-        holds, keep reading until the PTY is briefly quiet, so a snapshot of
-        the terminal state is not taken in the middle of one frame."""
+        """Read output until `condition()` holds, `seconds` pass or the probe
+        has exited and its output is read. Once it holds, keep reading until
+        the PTY is briefly quiet, so a snapshot of the terminal state is not
+        taken in the middle of one frame."""
         deadline = time.monotonic() + seconds
         quiet_at = None
         while time.monotonic() < deadline:
@@ -116,6 +117,8 @@ class Probe:
                 self.observer.feed(data)
                 if quiet_at is not None:
                     quiet_at = time.monotonic() + 0.15
+            elif self.proc.poll() is not None:
+                break
         return condition()
 
     def drain(self):
@@ -142,8 +145,9 @@ class Probe:
 
     def send(self):
         # One byte wakes the probe in raw mode. If the terminal was already
-        # wrongly given back, canonical mode holds input until a newline.
-        os.write(self.master, b"x" if self.raw() else b"x\n")
+        # wrongly given back, canonical mode holds input until a newline, so
+        # send just that: one byte either way, none left over for a later read.
+        os.write(self.master, b"x" if self.raw() else b"\n")
 
     def raw(self):
         return not termios.tcgetattr(self.slave)[3] & COOKED
@@ -169,7 +173,8 @@ def check_tui_mode(report, label, probe, keyboard):
     now = termios.tcgetattr(probe.slave)
     before = probe.termios_before
     report.check(probe.raw() and not now[1] & termios.OPOST
-                 and before[3] & COOKED == COOKED and before[1] & termios.OPOST,
+                 and before[3] & COOKED == COOKED
+                 and before[1] & (termios.OPOST | termios.ONLCR) == termios.OPOST | termios.ONLCR,
                  f"{label}: the probe puts the PTY in raw mode",
                  f"lflag {before[3]} -> {now[3]}, oflag {before[1]} -> {now[1]}")
     missing = [name for name, on in (
@@ -232,7 +237,7 @@ def check_main_panic(report, label, probe, keyboard, setups):
         report.check(pop is not None,
                      f"{label}: current behaviour: a keyboard pop is sent though none was pushed",
                      text(after[:300]))
-    report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(hook) is None,
+    report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(after) is None,
                  f"{label}: current behaviour: the hook leaves the title set at startup", text(after[:300]))
     if setups > 1:
         report.check(hook.count(LEAVE_ALT) == setups,
