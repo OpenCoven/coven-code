@@ -3513,11 +3513,19 @@ impl App {
         }
     }
 
+    /// The row of a call: its live row, or the row a cancel moved to the
+    /// interrupted list, which keeps receiving what the call reports.
+    fn tool_row_mut(&mut self, tool_id: &str) -> Option<&mut ToolUseBlock> {
+        let rows = if self.tool_use_blocks.iter().any(|block| block.id == tool_id) {
+            &mut self.tool_use_blocks
+        } else {
+            &mut self.interrupted_tools
+        };
+        rows.iter_mut().find(|block| block.id == tool_id)
+    }
+
     fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
-        self.tool_use_blocks
-            .iter_mut()
-            .find(|block| block.id == tool_id)
-            .map(|block| &mut block.run)
+        self.tool_row_mut(tool_id).map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -8097,7 +8105,7 @@ impl App {
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
                 let preview = Self::tool_result_preview(&result);
-                if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
+                if let Some(block) = self.tool_row_mut(&tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
                     } else {

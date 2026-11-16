@@ -25,12 +25,15 @@
 //!   interrupted list. They are compared only as what each App observed: every
 //!   row it has shown, live or not.
 //! - Status wording, the spinner verb, and Next's shell and inspector state.
-//! - How a permission request opens (#411). Next focuses deny and ignores
-//!   keys other than Escape until `PERMISSION_ARM_DELAY` of quiet has passed;
-//!   Classic opens on the first option and takes keys at once. Decisions are
-//!   compared for keys that choose an option explicitly, once the request is
-//!   armed, and the difference itself is pinned by
-//!   `permission_requests_open_differently_by_design`.
+//!
+//! Semantic, but different by design (#411): how a permission request opens.
+//! Next focuses deny and ignores keys other than Escape until
+//! `PERMISSION_ARM_DELAY` of quiet has passed; Classic opens on the first
+//! option and takes keys at once. So the same relative keys (Up, Down, Enter)
+//! decide differently, and on Next keys pressed as the request opens decide
+//! nothing. `permission_requests_open_differently_by_design` pins those
+//! outcomes; the outgoing-operations comparison uses keys that choose an
+//! option explicitly, pressed once the request is armed.
 //!
 //! Cancelling is not among the compared traces. On this base Classic's Escape
 //! does not ask the loop to cancel the turn, and Classic records no pending
@@ -620,6 +623,31 @@ fn permission_requests_open_differently_by_design() {
         ));
         assert_eq!(fresh.selected_option, opened_on, "{renderer:?}");
     }
+    // So relative keys decide differently. The sequence this comparison used
+    // before #411 allows option 1 on Classic, the option above deny on Next
+    // once armed, and nothing on Next pressed as the request opens.
+    for (renderer, armed, decided) in [
+        (UiRenderer::Classic, false, (1, true)),
+        (UiRenderer::Classic, true, (1, true)),
+        (UiRenderer::Next, false, (deny, false)),
+        (UiRenderer::Next, true, (deny - 1, true)),
+    ] {
+        let mut request = opened_request(renderer, "toolu-parity-relative");
+        let at = if armed {
+            request.quiet_since + PERMISSION_ARM_DELAY
+        } else {
+            request.quiet_since
+        };
+        let mut confirmed = false;
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Up, KeyCode::Enter] {
+            confirmed = handle_permission_key_at(&mut request, key(code), at);
+        }
+        assert_eq!(
+            (request.selected_option, confirmed),
+            decided,
+            "{renderer:?}, armed: {armed}"
+        );
+    }
 }
 
 /// #408: while a cancel is pending, a tool start still queued from the
@@ -741,7 +769,8 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         .any(|block| block.id == "toolu-parity-backlog"));
 
     // The backlog repeats the start of the call Escape interrupted: that call
-    // keeps its one interrupted row.
+    // keeps its one interrupted row, and what it reports afterwards reaches
+    // that row.
     let sleep = || {
         tool_start(
             "toolu-parity-at-escape",
@@ -753,6 +782,11 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         Step::Event(sleep()),
         Step::Key(key(KeyCode::Esc)),
         Step::Event(sleep()),
+        Step::Event(QueryEvent::ToolFinished {
+            tool_id: "toolu-parity-at-escape".to_string(),
+            is_error: true,
+        }),
+        Step::Event(tool_end("toolu-parity-at-escape", "Bash", "stopped", true)),
         Step::Settle,
     ]);
     assert!(
@@ -773,6 +807,10 @@ fn next_backlog_tool_start_does_not_restart_a_cancelled_turn() {
         )
         .collect();
     assert_eq!(rows, [("interrupted", "toolu-parity-at-escape")]);
+    let row = &repeated.app.interrupted_tools[0];
+    assert_eq!(row.output_preview.as_deref(), Some("stopped"));
+    assert_eq!(row.status, ToolStatus::Error);
+    assert!(row.run.finished.is_some_and(|(_, is_error)| is_error));
 }
 
 #[test]
