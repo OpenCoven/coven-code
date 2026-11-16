@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      advance_coven_engine:
+        description: 'After publishing, ask OpenCoven/coven to propose this release as its pinned engine. Needs the COVEN_ENGINE_BUMP_TOKEN secret; without it the release still succeeds and Coven finds the release on its own schedule.'
+        required: false
+        type: boolean
+        default: true
 
 # Serialize all release versions and asset replacement, not just one tag.
 # Preflight rechecks remote versions after acquiring this shared group.
@@ -359,3 +364,31 @@ jobs:
             --ref main \
             -f version="$RELEASE_VERSION"
           echo "Dispatched npm-publish.yml for $RELEASE_VERSION."
+
+  # ── Ask Coven to pin the engine just published ──────────────────────
+  # Coven installs the engine its `crates/coven-cli/engine.lock` names, so a
+  # release reaches Coven users only after that pin moves. Coven's
+  # engine-bump workflow regenerates the pin from the latest release here and
+  # opens a pull request for a person to review and merge; this job starts it
+  # as soon as the release exists. GITHUB_TOKEN cannot reach another
+  # repository, so the dispatch needs a token that can run workflows in
+  # OpenCoven/coven. Without one this job warns and passes: the release is
+  # already published and Coven's scheduled run proposes the pin later.
+  advance-coven-engine:
+    needs: release
+    if: ${{ inputs.advance_coven_engine }}
+    runs-on: ubuntu-latest
+    name: Propose Coven engine pin
+    permissions: {}
+    steps:
+      - name: Dispatch Coven's engine-bump workflow
+        env:
+          GH_TOKEN: ${{ secrets.COVEN_ENGINE_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::COVEN_ENGINE_BUMP_TOKEN is not set, so OpenCoven/coven was not asked to pin $RELEASE_VERSION. Its scheduled engine-bump run will propose the pin."
+            exit 0
+          fi
+          gh workflow run engine-bump.yml --repo OpenCoven/coven --ref main
+          echo "Asked OpenCoven/coven to propose pinning $RELEASE_VERSION."
