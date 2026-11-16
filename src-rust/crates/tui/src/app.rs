@@ -6444,6 +6444,7 @@ impl App {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
                         self.rewind_confirmed_at = Some(idx);
+                        self.research_retrievals.retain(|index, _| *index < idx);
                         // Each kept user turn keeps its own record and tool
                         // rows; the next prompt's follow them. A removed
                         // turn's row would otherwise count as the next
@@ -6459,7 +6460,6 @@ impl App {
                         };
                         self.tool_use_blocks.retain(kept_row);
                         self.interrupted_tools.retain(kept_row);
-                        self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
                         self.push_notification(

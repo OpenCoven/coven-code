@@ -2562,33 +2562,16 @@ async fn stop_turn_and_keep_it(
     exit_report
 }
 
-/// Replace the conversation with `replacement` and start a new session
-/// generation, so nothing still queued from the replaced conversation's
-/// worker is admitted to it (#408).
-fn replace_conversation(
-    scope: &mut claurst_tui::application::SessionScope,
-    replacement: Vec<claurst_core::types::Message>,
-    messages: &mut Vec<claurst_core::types::Message>,
-    app: &mut claurst_tui::App,
-    session: &mut claurst_core::history::ConversationSession,
-) {
-    scope.advance();
-    app.replace_messages(replacement.clone());
-    session.messages = replacement.clone();
-    *messages = replacement;
-    session.updated_at = chrono::Utc::now();
-}
-
 /// Adopt a rewind the user confirmed in the App's overlay: cut the
 /// conversation the loop sends and saves at the same message, and start a
 /// new session generation, so nothing still queued from before the rewind
 /// reaches it (#408).
 ///
 /// The overlay opens over the loop's conversation
-/// (`CommandResult::OpenRewindOverlay`), and no turn starts while it is
-/// open, so the index names the same message in both. A shorter App
-/// conversation is no sign of a rewind: the App shows tool results on their
-/// calls' cards instead of storing the messages that carry them.
+/// (`CommandResult::OpenRewindOverlay`), so the index names the same message
+/// in both. A shorter App conversation is no sign of a rewind: the App shows
+/// tool results on their calls' cards instead of storing the messages that
+/// carry them.
 fn adopt_in_app_rewind(
     scope: &mut claurst_tui::application::SessionScope,
     app: &mut claurst_tui::App,
@@ -2617,6 +2600,23 @@ async fn forward_scoped_events(
             break;
         }
     }
+}
+
+/// Replace the conversation with `replacement` and start a new session
+/// generation, so nothing still queued from the replaced conversation's
+/// worker is admitted to it (#408).
+fn replace_conversation(
+    scope: &mut claurst_tui::application::SessionScope,
+    replacement: Vec<claurst_core::types::Message>,
+    messages: &mut Vec<claurst_core::types::Message>,
+    app: &mut claurst_tui::App,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    scope.advance();
+    app.replace_messages(replacement.clone());
+    session.messages = replacement.clone();
+    *messages = replacement;
+    session.updated_at = chrono::Utc::now();
 }
 
 struct InteractiveQuery {
