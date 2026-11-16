@@ -2,29 +2,38 @@
 
 Usage: python3 -B panic_restore_pty.py PROBE
 
-PROBE is the tui crate's `panic_restore` example
-(`cargo build -p claurst-tui --example panic_restore`). It takes the terminal
-with the real `claurst_tui::setup_terminal`, the call the interactive binary
-makes, and panics when this driver sends it a byte, so no deliberately broken
-build of the product is needed. Each run gets its own raw PTY.
+PROBE is the tui crate's `panic_restore` example (from `src-rust`:
+`cargo build -p claurst -p claurst-tui --bins --example panic_restore`). It
+takes the terminal with the real `claurst_tui::setup_terminal`, the call the
+interactive binary makes, and panics when this driver sends it a byte, so no
+deliberately broken build of the product is needed. Each run gets its own
+raw PTY.
 
 Checks, per run:
 - Before the panic the probe is really in TUI mode: raw termios, alternate
   screen, mouse capture, bracketed paste, hidden cursor and, unless opted
   out, pushed keyboard flags. Without this the restore checks prove nothing.
-- A panic on the main thread restores every termios field, then leaves the
-  alternate screen, turns mouse capture and bracketed paste off, pops the
-  keyboard flags and shows the cursor, all before the panic message. The
+- A panic on the main thread restores every termios field and leaves the
+  alternate screen, turns mouse capture and bracketed paste off, sends a
+  keyboard pop and shows the cursor, all before the panic message. The
   message is printed and the process exits 101. Termios is shown restored
   before the message by its newlines arriving translated to CRLF, which raw
   mode does not do.
-- Two keyboard details are pinned as current behaviour, not endorsed, so a
-  change to them is deliberate: the pop is sent after leaving the alternate
-  screen the flags were pushed on (case 13 requires suspend to pop on the
-  alternate screen), and a pop is sent even when nothing was pushed.
-- A panic on a spawned thread changes none of that (the hook only restores
-  on the thread that set the terminal up). The probe keeps running, and its
-  later main-thread panic still restores.
+- A panic on a spawned thread does not restore anything (the hook only
+  restores on the thread that set the terminal up). The probe keeps running,
+  and its later main-thread panic still restores.
+- After a suspend and resume through the real `suspend_terminal`, a
+  main-thread panic still restores.
+
+Some details are pinned as current behaviour, not endorsed, so a change to
+them is deliberate; their check lines start with "current behaviour":
+- the keyboard pop is sent after leaving the alternate screen the flags were
+  pushed on (case 13 requires suspend to pop on the alternate screen);
+- a keyboard pop is sent even when nothing was pushed;
+- the title set at startup is not cleared;
+- every `setup_terminal` call chains another hook, so after a resume the
+  restore is written twice;
+- a worker-thread panic prints its message onto the live screen.
 
 Prints one line per check, `ok <message>` or `FAIL <message> :: <evidence>`,
 for cases/30_panic_restore.sh to report. Exits 0 when every check passed.
@@ -47,6 +56,7 @@ from zero_size_pty import Report, TerminalObserver, termios_restored
 SIZE = (80, 24)
 READY = "panic-restore: ready"
 WORKER_DONE = "panic-restore: worker panicked"
+RESUMED = "panic-restore: resumed"
 # Newer toolchains print the thread id: `thread 'main' (1234) panicked at`.
 MAIN_PANIC = re.compile(rb"thread 'main'(?: \(\d+\))? panicked at")
 MAIN_MESSAGE = b"panic-restore: deliberate main-thread panic"
@@ -57,6 +67,7 @@ WORKER_MESSAGE = b"panic-restore: deliberate worker-thread panic"
 LEAVE_ALT = b"\x1b[?1049l"
 KEYBOARD_PUSH = re.compile(rb"\x1b\[>\d*u")
 KEYBOARD_POP = re.compile(rb"\x1b\[<\d*u")
+TITLE = re.compile(rb"\x1b\][02];")
 # Any of these after a worker panic means the hook restored on the wrong thread.
 RESTORE_BYTES = (LEAVE_ALT, b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?25h", b"\x1b[<")
 MOUSE_MODES = (1000, 1002, 1003, 1006, 1015)
@@ -155,13 +166,13 @@ def check_tui_mode(report, label, probe, keyboard):
     pushed = KEYBOARD_PUSH.search(probe.out) is not None
     if keyboard:
         report.check(pushed and probe.observer.keyboard_depth == 1,
-                     f"{label}: keyboard flags are pushed once", text(probe.out[-300:]))
+                     f"{label}: keyboard flags are pushed, one level deep", text(probe.out[-300:]))
     else:
         report.check(not pushed, f"{label}: keyboard flags are not pushed when opted out",
                      text(probe.out[-300:]))
 
 
-def check_main_panic(report, label, probe, keyboard):
+def check_main_panic(report, label, probe, keyboard, setups):
     """Trigger the main-thread panic and check what was written after it."""
     # The TUI state at the trigger. Replaying only what the hook wrote before
     # the message on top of it means each mode must be switched off by the
@@ -174,8 +185,9 @@ def check_main_panic(report, label, probe, keyboard):
     report.check(probe.proc.returncode == 101, f"{label}: exits with the panic status 101",
                  f"exit {probe.proc.returncode}: {text(after[-300:])}")
     match = MAIN_PANIC.search(after)
-    hook = after[:match.start()] if match else after
-    report.check(match is not None and MAIN_MESSAGE in after[len(hook):],
+    # Without a message there is no "before the message"; those checks fail.
+    hook = after[:match.start()] if match else b""
+    report.check(match is not None and MAIN_MESSAGE in after[match.start():],
                  f"{label}: the panic message is printed", text(after[-300:]))
     report.check(termios_restored(probe.termios_before, termios.tcgetattr(probe.slave)),
                  f"{label}: every termios field is restored",
@@ -185,27 +197,31 @@ def check_main_panic(report, label, probe, keyboard):
     observer.feed(hook)
     modes = observer.modes
     for ok, what in (
-        (not modes.get(1049, False), "leaves the alternate screen"),
-        (not any(modes.get(mode, False) for mode in MOUSE_MODES), "turns mouse capture off"),
-        (not modes.get(2004, False), "turns bracketed paste off"),
-        (modes[25], "shows the cursor"),
+        (match and not modes.get(1049, False), "leaves the alternate screen"),
+        (match and not any(modes.get(mode, False) for mode in MOUSE_MODES), "turns mouse capture off"),
+        (match and not modes.get(2004, False), "turns bracketed paste off"),
+        (match and modes[25], "shows the cursor"),
     ):
-        report.check(ok, f"{label}: {what} before the panic message", text(after[:300]))
+        report.check(bool(ok), f"{label}: {what} before the panic message", text(after[:300]))
     pop = KEYBOARD_POP.search(hook)
     if keyboard:
-        report.check(observer.keyboard_depth == 0,
-                     f"{label}: pops the keyboard flags before the panic message", text(after[:300]))
-        # Pinned, not endorsed: the flags were pushed on the alternate screen,
-        # and the pop is sent after leaving it.
+        # One stack is modelled; see the pinned order below for per-screen stacks.
+        report.check(bool(match) and observer.keyboard_depth == 0,
+                     f"{label}: sends a keyboard pop before the panic message", text(after[:300]))
         leave = hook.find(LEAVE_ALT)
         report.check(pop is not None and 0 <= leave < pop.start(),
                      f"{label}: current behaviour: the keyboard pop is sent after leaving the alternate screen",
                      text(after[:300]))
     else:
-        # Pinned, not endorsed: the hook pops though nothing was pushed.
         report.check(pop is not None,
                      f"{label}: current behaviour: a keyboard pop is sent though none was pushed",
                      text(after[:300]))
+    report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(hook) is None,
+                 f"{label}: current behaviour: the hook leaves the title set at startup", text(after[:300]))
+    if setups > 1:
+        report.check(hook.count(LEAVE_ALT) == setups,
+                     f"{label}: current behaviour: the hook restores once per setup_terminal call ({setups})",
+                     f"{hook.count(LEAVE_ALT)} restores: {text(after[:300])}")
 
 
 def run(path, report, renderer, mode, keyboard=True):
@@ -218,22 +234,33 @@ def run(path, report, renderer, mode, keyboard=True):
             if not started:
                 return
             check_tui_mode(report, label, probe, keyboard)
+            setups = 1
             if mode == "worker":
                 mark = len(probe.out)
                 probe.send()
                 survived = probe.pump(15, lambda: WORKER_DONE in probe.observer.text())
                 after = probe.out[mark:]
                 report.check(survived and WORKER_MESSAGE in after,
-                             f"{label}: a worker-thread panic is reported and the probe keeps drawing",
+                             f"{label}: current behaviour: a worker-thread panic prints its message "
+                             "onto the live screen, and the probe keeps drawing",
                              text(after[-300:]))
                 if not survived:
                     return
                 restored = [repr(seq) for seq in RESTORE_BYTES if seq in after]
                 report.check(not restored and probe.raw(),
-                             f"{label}: a worker-thread panic leaves the terminal alone",
+                             f"{label}: a worker-thread panic does not restore the terminal",
                              f"raw={probe.raw()} restore bytes {', '.join(restored)}")
                 check_tui_mode(report, f"{label} after the worker panic", probe, keyboard)
-            check_main_panic(report, label, probe, keyboard)
+            elif mode == "resume":
+                probe.send()
+                resumed = probe.pump(15, lambda: RESUMED in probe.observer.text())
+                report.check(resumed, f"{label}: the probe suspends, resumes and draws again",
+                             text(probe.out[-300:]))
+                if not resumed:
+                    return
+                check_tui_mode(report, f"{label} after resuming", probe, keyboard)
+                setups = 2
+            check_main_panic(report, label, probe, keyboard, setups)
         finally:
             probe.close()
 
@@ -246,8 +273,8 @@ def main():
     path = os.path.abspath(sys.argv[1])
     report = Report()
     for renderer in ("classic", "next"):
-        run(path, report, renderer, "main")
-        run(path, report, renderer, "worker")
+        for mode in ("main", "worker", "resume"):
+            run(path, report, renderer, mode)
     run(path, report, "classic", "main", keyboard=False)
     return 1 if report.failed else 0
 
