@@ -342,6 +342,8 @@ async fn run_windows_fallback(
     timeout_dur: Duration,
     timeout_ms: u64,
 ) -> ToolResult {
+    // A cancelled call drops this future; stop cmd.exe with it, as
+    // BashTool's fallback does. Its own children are not reached (#373).
     let mut child = match Command::new("cmd")
         .arg("/C")
         .arg(command)
@@ -349,6 +351,7 @@ async fn run_windows_fallback(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(c) => c,
