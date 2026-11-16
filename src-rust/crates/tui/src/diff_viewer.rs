@@ -478,14 +478,15 @@ pub fn parse_unified_diff(text: &str) -> Vec<FileDiffStats> {
             if let Some(f) = current_file.as_mut() {
                 f.is_new_file = true;
             }
-        } else if let (Some(from), None) = (raw_line.strip_prefix("rename from "), &current_hunk) {
+        } else if let Some(from) = raw_line.strip_prefix("rename from ") {
             // A rename's header names both paths in full, so these win over
             // the `diff --git` line, which cannot tell a space in a path from
-            // the gap between the two paths.
+            // the gap between the two paths. A hunk line always starts with
+            // ' ', '+', '-' or a backslash, so it never matches here.
             if let Some(f) = current_file.as_mut() {
                 f.renamed_from = Some(from.to_string());
             }
-        } else if let (Some(to), None) = (raw_line.strip_prefix("rename to "), &current_hunk) {
+        } else if let Some(to) = raw_line.strip_prefix("rename to ") {
             if let Some(f) = current_file.as_mut() {
                 f.path = to.to_string();
             }
@@ -662,6 +663,30 @@ pub fn render_diff_dialog(state: &DiffViewerState, area: Rect, buf: &mut Buffer)
             .add_modifier(Modifier::ITALIC),
     )]))
     .render(layout.footer_area, buf);
+}
+
+/// `text` in at most `max_width` columns: whole if it fits, otherwise an
+/// ellipsis and as much of its end as fits after it. Each candidate end is
+/// measured as a whole string, as the row is, and never starts on a
+/// zero-width character such as a combining mark.
+fn keep_end(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut start = text.len();
+    for (at, ch) in text.char_indices().rev() {
+        // One column for the ellipsis.
+        if UnicodeWidthStr::width(&text[at..]) + 1 > max_width {
+            break;
+        }
+        if ch.width().is_some_and(|width| width > 0) {
+            start = at;
+        }
+    }
+    format!("\u{2026}{}", &text[start..])
 }
 
 fn render_file_list(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
@@ -935,27 +960,6 @@ fn render_diff_detail(state: &DiffViewerState, area: Rect, buf: &mut Buffer) {
 
 /// How much of a line is compared word by word, unless a row shows more.
 const WORD_DIFF_MAX_CHARS: usize = 2_000;
-
-/// `text` in at most `max_width` columns: whole if it fits, otherwise an
-/// ellipsis and as much of its end as fits after it.
-fn keep_end(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut width = 1; // the ellipsis
-    let mut start = text.len();
-    for (at, ch) in text.char_indices().rev() {
-        width += ch.width().unwrap_or(0);
-        if width > max_width {
-            break;
-        }
-        start = at;
-    }
-    format!("\u{2026}{}", &text[start..])
-}
 
 /// Format a 10-char line-number gutter.
 fn format_gutter(old_no: Option<u32>, new_no: Option<u32>) -> String {

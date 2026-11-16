@@ -114,7 +114,9 @@ _diff_kinds_journey() {
   TUI_BOOT_STRING="$boot"
 
   if tui_start; then
-    local title_before; title_before="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_title}')"
+    local title_before running
+    title_before="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_title}')"
+    running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
     tui_type "/diff"; tui_keys Enter
 
     # Git sorts the files by path: the edited rename comes first.
@@ -148,12 +150,28 @@ _diff_kinds_journey() {
       _fail "$ui: a pure rename names its old and new paths" "$(tui_capture)"
     fi
     assert_contains "$(tui_capture)" "Renamed from old-name.txt" "$ui: and says the content is unchanged"
-    assert_matches "$(_diff_kinds_row "new-name.txt")" 'renamed *│' "$ui: the list marks it renamed, not +0 -0"
+    assert_matches "$(_diff_kinds_row "name.txt")" 'renamed *│' "$ui: the list marks it renamed, not +0 -0"
 
     tui_keys Escape
     if wait_absent "blob.bin" "$_DIFF_LARGE_WAIT"; then _pass "$ui: Esc closes the viewer"
     else _fail "$ui: Esc closes the viewer" "$(tui_capture)"; fi
     tui_keys C-c; sleep 0.3; tui_keys C-c
+
+    # The title check means something only if a title sequence that reaches
+    # this pane does retitle it: send one from the shell.
+    local waited=0 title
+    while [ "$waited" -lt 50 ] && \
+      [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+    tui_type "printf '\\033]0;suite-title\\007'"; tui_keys Enter
+    waited=0
+    while [ "$waited" -lt 30 ]; do
+      title="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_title}')"
+      [ "$title" = suite-title ] && break
+      sleep 0.1; waited=$((waited + 1))
+    done
+    assert_eq "$title" "suite-title" "$ui: a title sequence that reaches the pane does retitle it"
   fi
   tui_stop
 

@@ -138,17 +138,21 @@ _queue_round() { # ui, round number, how the second y is pressed
   log "       $tag: second y sent ${sent_ms} ms after the first, reached the $path, decided: $decided"
 
   if [ "$ui" = next ]; then
+    # Next counts quiet from when it reads a key, not from when the key
+    # arrived, so a loop stalled for 400 ms after opening the next panel could
+    # still let an earlier key count. The limit below bounds only the sending.
     if [ "$sent_ms" -ge 400 ]; then
       # A key this late can find the next panel armed, and then it counts.
       _skip "$tag: the second y took ${sent_ms} ms to send, so this round proves nothing"
     else
-      assert_eq "$decided" "no" "$tag: the second y does not decide the next panel"
+      assert_eq "$decided" "no" "$tag: the second y, which reached the $path, does not decide the next panel"
     fi
     case "$how" in
       "same write")
         assert_eq "$path" "composer" "$tag: the second y reaches the composer as text" ;;
       "150 ms later")
-        if [ "$path" = panel ]; then _pass "$tag: the second y reached the open panel, which ignored it"
+        # With a panel open, a key that is not in the composer went to the panel.
+        if [ "$path" = panel ]; then _pass "$tag: the second y missed the composer, so the open panel took it"
         else _skip "$tag: the second y arrived before the next panel opened"; fi ;;
     esac
   else
@@ -191,8 +195,9 @@ _queue_round() { # ui, round number, how the second y is pressed
   assert_eq "$(_queue_requests)" "$((before + 2))" "$tag: no other request was made"
 
   # Back to an idle turn and an empty composer, ready for the next round. The
-  # status line said something else while the round ran.
-  if [ "$ui" = next ]; then wait_for "ready" 10 >/dev/null; else wait_for "Worked for" 10 >/dev/null; fi
+  # status line said something else while the round ran; Classic's idle line
+  # starts with a verb picked at random and always ends "· done".
+  if [ "$ui" = next ]; then wait_for "ready" 10 >/dev/null; else wait_for "· done" 10 >/dev/null; fi
   local waited=0
   while [ "$waited" -lt 50 ] && _queue_in_composer; do
     tui_keys C-u; sleep 0.2; waited=$((waited + 1))
@@ -225,7 +230,7 @@ tc_approval_queue() {
   printf '%s\n' '{"hasCompletedOnboarding": true}' >"$QUEUE_SCRATCH/home/.coven-code/settings.json"
 
   python3 -B "${BASH_SOURCE[0]%/*}/../fake_anthropic.py" \
-    "$QUEUE_SCRATCH/port" "$QUEUE_LOG" "$QUEUE_SCRATCH/markers" 2>/dev/null &
+    "$QUEUE_SCRATCH/port" "$QUEUE_LOG" "$QUEUE_SCRATCH/markers" 2>"$QUEUE_SCRATCH/fake.err" &
   local fake_pid=$!
   local waited=0
   while [ "$waited" -lt 50 ] && [ ! -s "$QUEUE_SCRATCH/port" ]; do
@@ -255,6 +260,10 @@ tc_approval_queue() {
   TUI_BOOT_STRING="$saved_boot"
   kill "$fake_pid" 2>/dev/null
   wait "$fake_pid" 2>/dev/null
+  # A prompt the fake could not read shows up here, not on screen.
+  if grep -q "Traceback" "$QUEUE_SCRATCH/fake.err" 2>/dev/null; then
+    _fail "the fake API handled every request" "$(cat "$QUEUE_SCRATCH/fake.err")"
+  fi
   rm -rf "$QUEUE_SCRATCH"
   unset QUEUE_SCRATCH QUEUE_LOG
 }

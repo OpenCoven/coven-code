@@ -247,21 +247,68 @@ fn a_rename_keeps_its_old_path_and_its_new_one_in_full() {
 
 #[test]
 fn a_long_path_is_cut_at_a_character_and_keeps_its_end() {
-    let path = format!(
-        "src/{}/end.rs",
-        "\u{65e5}\u{672c}\u{8a9e}\u{00e9}".repeat(12)
-    );
-    let diff = format!(
-        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
-    );
-    for width in 60..=120 {
-        let rows = draw_dialog(parse_unified_diff(&diff), 0, width, 24);
+    // Wide characters, a two-byte letter, an emoji with a variation selector,
+    // and letters with combining accents.
+    for part in [
+        "\u{65e5}\u{672c}\u{8a9e}\u{00e9}",
+        "\u{2764}\u{fe0f}x",
+        "e\u{0301}a\u{0300}",
+    ] {
+        let path = format!("src/{}/end.rs", part.repeat(24));
+        let diff = format!(
+            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
+        );
+        for width in 60..=120 {
+            let rows = draw_dialog(parse_unified_diff(&diff), 0, width, 24);
+            let all = rows.join("\n");
+            let row = rows
+                .iter()
+                .find(|row| row.contains("\u{2026}") && row.contains("end.rs"));
+            assert!(
+                row.is_some_and(|row| row.contains("+1 -1")),
+                "{part:?} at {width} columns: the list row keeps the end of the path and its stats:\n{all}"
+            );
+            assert!(
+                row.is_some_and(|row| !row.contains("\u{2026}\u{0301}")
+                    && !row.contains("\u{2026}\u{0300}")
+                    && !row.contains("\u{2026}\u{fe0f}")),
+                "{part:?} at {width} columns: the cut does not start on a mark:\n{all}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_binary_rename_is_binary_and_names_both_paths() {
+    let diff = "diff --git a/logo.png b/art/logo.png
+similarity index 71%
+rename from logo.png
+rename to art/logo.png
+index 1a2b3c4..5d6e7f8 100644
+Binary files a/logo.png and b/art/logo.png differ
+";
+    let files = parse_unified_diff(diff);
+    let found: Vec<_> = files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.renamed_from.as_deref(),
+                file.binary,
+            )
+        })
+        .collect();
+    assert_eq!(found, [("art/logo.png", Some("logo.png"), true)]);
+    for (width, height) in [(120, 40), (80, 24)] {
+        let rows = draw_dialog(files.clone(), 0, width, height);
         let all = rows.join("\n");
         assert!(
-            rows.iter().any(|row| row.contains("\u{2026}")
-                && row.contains("end.rs")
-                && row.contains("+1 -1")),
-            "{width} columns: the list row keeps the end of the path and its stats:\n{all}"
+            shows(&rows, "logo.png \u{2192} art/logo.png  binary"),
+            "{width}x{height}: the header names both paths and says binary:\n{all}"
+        );
+        assert!(
+            shows(&rows, "Binary file \u{2014} no diff available"),
+            "{width}x{height}: the body says it is binary:\n{all}"
         );
     }
 }
