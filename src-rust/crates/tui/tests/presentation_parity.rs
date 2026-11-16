@@ -35,13 +35,14 @@
 //! outcomes; the outgoing-operations comparison uses keys that choose an
 //! option explicitly, pressed once the request is armed.
 //!
-//! Cancelling is not among the compared traces. On this base Classic's Escape
-//! does not ask the loop to cancel the turn, and Classic records no pending
-//! cancel for Ctrl+C either, although the loop's interrupt path cancels the
-//! token. So a cancel trace differs in `cancel_requested`, the cancellation
-//! phase and `is_streaming`. That is #408 decision D1, which moves Classic to
-//! Next's cancel model; the Next side is covered by
-//! `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
+//! Cancelling differs on this base, a finding that #408 decision D1 resolves
+//! by moving Classic to Next's cancel model. Classic's Escape does not ask the
+//! loop to cancel the turn, and Classic records no pending cancel for Ctrl+C
+//! either, although the loop's interrupt path cancels the token. So a cancel
+//! trace differs in `cancel_requested`, the cancellation phase, `is_streaming`
+//! and what a later Ctrl+C does, and only in those:
+//! `cancelling_differs_between_the_renderers_until_d1` pins that. The Next
+//! side is covered by `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
 
 use std::collections::BTreeMap;
 
@@ -180,6 +181,10 @@ impl Replay {
         );
         app.push_message(Message::user("Summarize the engine contract.".to_string()));
         app.turn_start = None;
+        // A completed turn rings the bell, so the effects the loop performs
+        // next are part of what the traces compare.
+        app.bell_on_complete = true;
+        app.completion_toast_min_secs = 0;
         let scope = SessionScope::default();
         let previous = scope.current();
         Self {
@@ -455,7 +460,89 @@ fn each_renderer_reaches_the_same_semantic_state_for_every_trace() {
         let tool = &durable.last().tools["toolu-parity-durable"];
         assert_eq!(tool.result.as_deref(), Some("coven text"));
         assert_eq!(tool.status, ToolStatus::Done);
+        assert_eq!(durable.last().effects, [PresentationEffect::RingBell]);
     }
+}
+
+/// The one compared difference in the traces, a finding that #408 decision D1
+/// resolves: on this base the renderers cancel differently. Escape, a
+/// backlog, the settle and a later Ctrl+C reach the same durable messages,
+/// tool rows and effects in both, but differ in the cancel request, the
+/// cancellation phase, whether the backlog restarts the turn and what the
+/// later Ctrl+C does. In Classic that Ctrl+C cancels the restarted turn
+/// again, which clears its tool rows (presentation-only).
+#[test]
+fn cancelling_differs_between_the_renderers_until_d1() {
+    let mut partial = Message::assistant("partial answer ");
+    partial.uuid = Some("msg-parity-cancel".to_string());
+    let steps = vec![
+        Step::Event(delta("partial answer ")),
+        Step::Key(key(KeyCode::Esc)),
+        Step::Event(delta("more from the backlog")),
+        Step::Event(tool_start(
+            "toolu-parity-cancel",
+            "Read",
+            r#"{"file_path":"COVEN.md"}"#,
+        )),
+        Step::Event(tool_end("toolu-parity-cancel", "Read", "coven text", false)),
+        Step::Event(QueryEvent::DurableMessage { message: partial }),
+        Step::Settle,
+        Step::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    ];
+    let classic = Replay::new(UiRenderer::Classic).run(steps.clone());
+    let next = Replay::new(UiRenderer::Next).run(steps);
+    let model = |step: &Semantic| {
+        (
+            step.is_streaming,
+            step.cancellation,
+            step.cancel_requested,
+            step.interrupt_key,
+        )
+    };
+    let last = classic.steps.len() - 1;
+    for (index, (classic_step, next_step)) in classic.steps.iter().zip(&next.steps).enumerate() {
+        let interrupted = index == last;
+        let shared = |step: &Semantic| Semantic {
+            is_streaming: false,
+            cancellation: TurnCancellation::Idle,
+            cancel_requested: false,
+            interrupt_key: false,
+            tools: if interrupted {
+                BTreeMap::new()
+            } else {
+                step.tools.clone()
+            },
+            ..step.clone()
+        };
+        assert_eq!(
+            shared(classic_step),
+            shared(next_step),
+            "only the cancel model may differ (step {index})"
+        );
+    }
+    // Escape: Next asks the loop to cancel; Classic asks for nothing.
+    assert_eq!(
+        model(&next.steps[1]),
+        (false, TurnCancellation::AwaitingRuntime, true, false)
+    );
+    assert_eq!(
+        model(&classic.steps[1]),
+        (false, TurnCancellation::Idle, false, false)
+    );
+    // The backlog restarts Classic's turn; Next stays cancelled.
+    assert!(classic.steps[2].is_streaming);
+    assert!(!next.steps[2].is_streaming);
+    // Settled, Next's Ctrl+C starts the exit sequence; Classic's cancels its
+    // restarted turn again. Both take the loop's interrupt path.
+    assert_eq!(
+        model(next.last()),
+        (false, TurnCancellation::Idle, false, true)
+    );
+    assert_eq!(next.app.exit_key_sequence_start, Some('c'));
+    assert!(classic.last().interrupt_key);
+    assert_eq!(classic.app.exit_key_sequence_start, None);
+    assert!(classic.last().tools.is_empty());
+    assert!(next.last().tools.contains_key("toolu-parity-cancel"));
 }
 
 #[test]
@@ -502,8 +589,18 @@ fn opened_request(renderer: UiRenderer, id: &str) -> PermissionRequest {
     }
 }
 
+/// Route a key the way the interactive loop does: the interrupt and exit keys
+/// first, then the App's own handling.
+fn route(app: &mut App, key: KeyEvent) {
+    if app.handle_control_key(key).is_none() {
+        app.handle_key_event(key);
+    }
+}
+
 /// Answer the open request with `codes`, pressed once it is armed, and
-/// return (tool use id, chosen option, confirmed).
+/// return (tool use id, chosen option, confirmed). The keys go straight to
+/// the request with the time it arms, instead of through the loop and a
+/// real wait of `PERMISSION_ARM_DELAY`.
 fn decide(app: &mut App, renderer: UiRenderer, codes: &[KeyCode]) -> (String, usize, bool) {
     let mut confirmed = false;
     for &code in codes {
@@ -531,7 +628,7 @@ fn drive(renderer: UiRenderer) -> Outgoing {
     let mut app = Replay::new(renderer).run(plain_turn()).app;
     for ch in "run the tests".chars() {
         draw(&app, renderer, 120, 40);
-        app.handle_key_event(key(KeyCode::Char(ch)));
+        route(&mut app, key(KeyCode::Char(ch)));
     }
     draw(&app, renderer, 120, 40);
     let submitted = app.take_input();
@@ -560,7 +657,7 @@ fn drive(renderer: UiRenderer) -> Outgoing {
 
     for ch in "next draft".chars() {
         draw(&app, renderer, 120, 40);
-        app.handle_key_event(key(KeyCode::Char(ch)));
+        route(&mut app, key(KeyCode::Char(ch)));
     }
     draw(&app, renderer, 120, 40);
     Outgoing {
