@@ -54,7 +54,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.100.0
 
       # tmux drives the pseudo-terminal; ALSA + pkg-config are needed to build
       # the binary (voice feature), mirroring the release workflow.
