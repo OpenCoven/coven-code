@@ -7,9 +7,14 @@
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
 use claurst_tools::{BashTool, PowerShellTool, PtyBashTool, Tool, ToolContext};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// A loop that only `cmd.exe` runs: each pass appends a line, then waits about
 /// a second in `ping`. The file stops growing once that `cmd.exe` is gone. The
@@ -327,4 +332,49 @@ async fn bash_fallback_exit_keeps_its_code_and_a_detached_process() {
 #[tokio::test]
 async fn powershell_exit_keeps_its_code_and_a_detached_process() {
     check_detached(Shell::PowerShell).await;
+}
+
+/// CI runners and some terminals start processes inside a job already. Run a
+/// grandchild case in a copy of this test binary that is in a job, so the
+/// tool's own job is nested in it.
+#[test]
+fn nested_job_stops_the_grandchild() {
+    // SAFETY: null attributes and name are allowed; they make an unnamed job.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
+    // SAFETY: `job` is a new, open handle that nothing else owns.
+    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    let mut copy = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "in_job_cancelled_bash_fallback_stops_its_grandchild",
+            "--exact",
+            "--ignored",
+        ])
+        .spawn()
+        .unwrap();
+    // The copy checks that it is in the job before it starts a shell.
+    // SAFETY: both handles are open.
+    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), copy.as_raw_handle()) } == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = copy.kill();
+        panic!("could not put the copy in a job: {error}");
+    }
+    assert!(
+        copy.wait().unwrap().success(),
+        "the run inside a job failed; its output is above"
+    );
+}
+
+#[tokio::test]
+#[ignore = "nested_job_stops_the_grandchild runs it inside a job"]
+async fn in_job_cancelled_bash_fallback_stops_its_grandchild() {
+    let mut in_job = 0;
+    // SAFETY: the pseudo handle is always valid, a null job means any job, and
+    // `in_job` outlives the call.
+    let asked = unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) };
+    assert!(
+        asked != 0 && in_job != 0,
+        "not in a job: run nested_job_stops_the_grandchild instead"
+    );
+    check_cancel(Shell::Bash, Ticker::Grandchild).await;
 }
