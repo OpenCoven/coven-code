@@ -347,10 +347,17 @@ fn ctrl_z_asks_to_suspend_with_the_inspector_open() {
 
 #[test]
 fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending() {
+    // Classic cancels through the runtime too (#408); its pending text is
+    // checked in cancel_parity.rs.
     for (renderer, cancel_key) in [
         (UiRenderer::Next, esc()),
         (
             UiRenderer::Next,
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ),
+        (UiRenderer::Classic, esc()),
+        (
+            UiRenderer::Classic,
             key(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ),
     ] {
@@ -377,18 +384,6 @@ fn escape_and_interrupt_request_runtime_cancellation_and_next_shows_it_pending()
             let text = text_of(&draw(&app, 80, 24).0);
             assert!(!text.contains("cancelling"), "{text}");
         }
-    }
-    // Classic keeps its existing cancel handling: no runtime request, and
-    // nothing for the loop to settle.
-    for cancel_key in [esc(), key(KeyCode::Char('c'), KeyModifiers::CONTROL)] {
-        let mut classic = next_app();
-        classic.renderer = UiRenderer::Classic;
-        classic.push_message(Message::user("run it".to_string()));
-        apply(&mut classic, delta("working on it"));
-        classic.handle_key_event(cancel_key);
-        assert!(!classic.is_streaming);
-        assert!(!classic.take_cancellation_request(), "{cancel_key:?}");
-        assert_eq!(classic.cancellation, TurnCancellation::Idle);
     }
     // Esc while idle does not invent a cancellation.
     let mut idle = next_app();
@@ -434,16 +429,16 @@ fn deltas_still_queued_when_a_turn_is_cancelled_cannot_restart_it() {
     }
     assert!(app.should_exit);
 
-    // Classic keeps its existing handling of late deltas.
+    // Classic drops them too (#408).
     let mut classic = next_app();
     classic.renderer = UiRenderer::Classic;
     classic.push_message(Message::user("run it".to_string()));
     apply(&mut classic, delta("delivered in time"));
     classic.handle_key_event(esc());
-    assert!(!classic.is_streaming);
+    assert!(classic.take_cancellation_request());
     apply(&mut classic, delta("too late"));
-    assert!(classic.is_streaming);
-    assert_eq!(classic.streaming_text, "too late");
+    assert!(!classic.is_streaming);
+    assert!(classic.streaming_text.is_empty());
 }
 
 #[test]
@@ -1039,7 +1034,7 @@ fn a_settled_cancellation_reports_its_outcome_and_remote_cancels_wait_too() {
 
     let mut remote = next_app();
     apply(&mut remote, delta("working"));
-    remote.note_cancellation_sent();
+    remote.note_cancellation_sent(true);
     let text = text_of(&draw(&remote, 80, 24).0);
     assert!(text.contains("cancelling"), "{text}");
 }

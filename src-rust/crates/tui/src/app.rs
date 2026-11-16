@@ -3556,10 +3556,15 @@ impl App {
         *self.tool_use_blocks = kept;
     }
 
-    /// Record a cancellation the loop performed without a key request
-    /// (remote control), so it is shown pending until the worker stops.
-    pub fn note_cancellation_sent(&mut self) {
-        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    /// Show a cancellation the loop performed without a key request (remote
+    /// control). A running turn is shown pending until its worker stops.
+    pub fn note_cancellation_sent(&mut self, turn_running: bool) {
+        if turn_running {
+            self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+            self.interrupt_tool_rows();
+        }
+        self.is_streaming = false;
+        self.status_message = Some("Cancelled by remote control.".to_string());
     }
 
     /// The loop calls this once no turn worker is running any more. A
@@ -3577,21 +3582,22 @@ impl App {
                 });
             *self.tool_use_blocks = finished;
             self.interrupted_tools.extend(running);
+            // A completion that arrived while the cancel was pending does not
+            // make this a finished turn: Classic shows "Cancelled.", not its
+            // done marker.
+            self.last_turn_verb = None;
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Ask the loop to cancel the running turn through its token.
+    fn request_turn_cancellation(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::Requested;
     }
 
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
-    /// Ask the loop to cancel the running turn through its token. Next only:
-    /// Classic keeps its existing cancel behavior unchanged.
-    fn request_turn_cancellation(&mut self) {
-        if self.renderer == crate::application::UiRenderer::Next {
-            self.cancellation = crate::application::TurnCancellation::Requested;
-        }
-    }
-
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -7988,8 +7994,7 @@ impl App {
         // or further interrupts would cancel again instead of reaching the exit
         // sequence. Tool starts are still recorded, and the worker's tool
         // results, durable messages and terminal events still apply.
-        let cancelling = self.renderer == crate::application::UiRenderer::Next
-            && self.cancellation != crate::application::TurnCancellation::Idle;
+        let cancelling = self.cancellation != crate::application::TurnCancellation::Idle;
         if cancelling && matches!(event, QueryEvent::Stream(_)) {
             return effects;
         }
@@ -8186,8 +8191,11 @@ impl App {
 
                 // Surface a clear "turn done" signal for long-running turns the
                 // user might have stepped away from. The faint "✽ Worked for Ns"
-                // status line is too quiet on its own.
-                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                // status line is too quiet on its own. A turn the user is
+                // cancelling gets none: they are here, and it settles as
+                // cancelled.
+                if !cancelled && !cancelling && turn_elapsed_secs >= self.completion_toast_min_secs
+                {
                     if self.completion_toast_enabled {
                         self.push_notification(
                             NotificationKind::Success,

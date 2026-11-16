@@ -22,8 +22,8 @@
 //!
 //! Presentation-only, so allowed to differ:
 //! - Rows a cancel interrupts, and what the call reports afterwards. Classic
-//!   keeps or drops them; Next moves them to its interrupted list. They are
-//!   compared only as the calls each App has shown a row for, live or not.
+//!   drops them; Next moves them to its interrupted list. They are compared
+//!   only as the calls each App has shown a row for, live or not.
 //! - Status wording, the spinner verb, and Next's shell and inspector state.
 //!
 //! Semantic, but different by design (#411): how a permission request opens.
@@ -35,14 +35,12 @@
 //! outcomes; the outgoing-operations comparison uses keys that choose an
 //! option explicitly, pressed once the request is armed.
 //!
-//! Cancelling differs on this base, a finding that #408 decision D1 resolves
-//! by moving Classic to Next's cancel model. Classic's Escape does not ask the
-//! loop to cancel the turn, and Classic records no pending cancel for Ctrl+C
-//! either, although the loop's interrupt path cancels the token. So a cancel
-//! trace differs in `cancel_requested`, the cancellation phase, `is_streaming`
-//! and what a later Ctrl+C does, and only in those:
-//! `cancelling_differs_between_the_renderers_until_d1` pins that. The Next
-//! side is covered by `next_backlog_tool_start_does_not_restart_a_cancelled_turn`.
+//! Cancelling follows one model in both renderers (#408 decision D1): Escape
+//! and Ctrl+C ask the loop to cancel the turn, the cancel stays pending until
+//! the runtime stops, and backlog output cannot restart the turn.
+//! `cancelling_is_the_same_in_both_renderers` compares a cancel trace step by
+//! step, and `next_backlog_tool_start_does_not_restart_a_cancelled_turn`
+//! covers a backlog tool start.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -469,16 +467,13 @@ fn each_renderer_reaches_the_same_semantic_state_for_every_trace() {
     }
 }
 
-/// The one compared difference in the traces, a finding that #408 decision D1
-/// resolves: on this base the renderers cancel differently. Escape while a
-/// tool runs, its result, a backlog with text and another tool, a durable
-/// message, the settle and a later Ctrl+C reach the same durable messages,
-/// effects and live rows in both, apart from the rows a cancel interrupts,
-/// which are presentation-only. They differ in the cancel request, the
-/// cancellation phase, whether the backlog restarts the turn and what the
-/// later Ctrl+C does; both are pinned step by step.
+/// Cancelling, which #408 decision D1 put on one model: Escape while a tool
+/// runs, its result, a backlog with text and another tool, a durable message,
+/// the settle and a later Ctrl+C reach the same semantic state after every
+/// step in both renderers. The cancel model itself is pinned step by step, so
+/// the comparison cannot pass on a trace that never cancels.
 #[test]
-fn cancelling_differs_between_the_renderers_until_d1() {
+fn cancelling_is_the_same_in_both_renderers() {
     use TurnCancellation::{AwaitingRuntime, Idle};
     let mut partial = Message::assistant("partial answer ");
     partial.uuid = Some("msg-parity-cancel".to_string());
@@ -499,26 +494,23 @@ fn cancelling_differs_between_the_renderers_until_d1() {
         Step::Settle,
         Step::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
     ];
-    let classic = Replay::new(UiRenderer::Classic).run(steps.clone());
-    let next = Replay::new(UiRenderer::Next).run(steps);
+    let (classic, next) = assert_parity("cancel", steps);
     // (is_streaming, cancellation, cancel_requested, interrupt_key) per step.
-    let model = |replay: &Replay| {
-        replay
-            .steps
-            .iter()
-            .map(|step| {
-                (
-                    step.is_streaming,
-                    step.cancellation,
-                    step.cancel_requested,
-                    step.interrupt_key,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
+    let model = next
+        .steps
+        .iter()
+        .map(|step| {
+            (
+                step.is_streaming,
+                step.cancellation,
+                step.cancel_requested,
+                step.interrupt_key,
+            )
+        })
+        .collect::<Vec<_>>();
     let pending = (false, AwaitingRuntime, false, false);
     assert_eq!(
-        model(&next),
+        model,
         [
             (true, Idle, false, false),
             (true, Idle, false, false),
@@ -532,62 +524,17 @@ fn cancelling_differs_between_the_renderers_until_d1() {
             (false, Idle, false, false),
             // Settled, Ctrl+C starts the exit sequence.
             (false, Idle, false, true),
-        ],
-        "Next"
+        ]
     );
-    assert_eq!(next.app.exit_key_sequence_start, Some('c'));
-    let restarted = (true, Idle, false, false);
-    assert_eq!(
-        model(&classic),
-        [
-            (true, Idle, false, false),
-            (true, Idle, false, false),
-            // Escape asks for nothing.
-            (false, Idle, false, false),
-            (false, Idle, false, false),
-            // The backlog restarts the turn.
-            restarted,
-            restarted,
-            restarted,
-            restarted,
-            restarted,
-            // Ctrl+C cancels the restarted turn again.
-            (false, Idle, false, true),
-        ],
-        "Classic"
-    );
-    assert_eq!(classic.app.exit_key_sequence_start, None);
-    // Everything else matches, apart from the rows a cancel interrupts:
-    // Next's Escape interrupts the running call, Classic's Ctrl+C clears its
-    // rows.
-    let last = classic.steps.len() - 1;
-    for (index, (classic_step, next_step)) in classic.steps.iter().zip(&next.steps).enumerate() {
-        let shared = |step: &Semantic| Semantic {
-            is_streaming: false,
-            cancellation: Idle,
-            cancel_requested: false,
-            interrupt_key: false,
-            tools: step
-                .tools
-                .iter()
-                .filter(|(id, _)| index < 2 || (id.as_str() != running && index < last))
-                .map(|(id, tool)| (id.clone(), tool.clone()))
-                .collect(),
-            ..step.clone()
-        };
-        assert_eq!(
-            shared(classic_step),
-            shared(next_step),
-            "only the cancel model may differ (step {index})"
-        );
+    for replay in [&classic, &next] {
+        assert_eq!(replay.app.exit_key_sequence_start, Some('c'));
+        assert!(replay.last().tools.contains_key("toolu-parity-cancel"));
     }
     assert!(next
         .app
         .interrupted_tools
         .iter()
         .any(|block| block.id == running));
-    assert!(classic.last().tools.is_empty());
-    assert!(next.last().tools.contains_key("toolu-parity-cancel"));
 }
 
 #[test]
