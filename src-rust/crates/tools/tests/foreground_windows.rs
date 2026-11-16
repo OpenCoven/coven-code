@@ -9,12 +9,19 @@ use claurst_core::permissions::AutoPermissionHandler;
 use claurst_tools::{BashTool, PowerShellTool, PtyBashTool, Tool, ToolContext};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+/// Holds, for the copy that `nested_job_stops_the_grandchild` runs, the value
+/// of the job handle the copy inherits.
+const OUTER_JOB: &str = "FOREGROUND_WINDOWS_OUTER_JOB";
 
 /// A loop that only `cmd.exe` runs: each pass appends a line, then waits about
 /// a second in `ping`. The file stops growing once that `cmd.exe` is gone. The
@@ -208,6 +215,18 @@ async fn check_completion(shell: Shell) {
     );
 }
 
+/// Stops a detached loop, and what it started, when the test ends, even if an
+/// assertion failed first.
+struct Detached(u32);
+
+impl Drop for Detached {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &self.0.to_string(), "/T", "/F"])
+            .output();
+    }
+}
+
 /// A command that exits with code 3 after starting a loop meant to outlive it.
 /// The call reports the code and the output, and the loop keeps going.
 async fn check_detached(shell: Shell) {
@@ -226,26 +245,18 @@ async fn check_detached(shell: Shell) {
         "{}",
         result.content
     );
-    let pid: u32 = result
-        .content
-        .lines()
-        .find_map(|line| line.trim().parse().ok())
-        .unwrap_or_else(|| panic!("no process ID in {}", result.content));
+    let _detached = Detached(
+        result
+            .content
+            .lines()
+            .find_map(|line| line.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no process ID in {}", result.content)),
+    );
     let returned = ticks(directory.path());
-    let kept = reaches_ticks(directory.path(), returned + 2).await;
-    let stopped = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .output()
-        .unwrap();
     assert!(
-        kept,
+        reaches_ticks(directory.path(), returned + 2).await,
         "the detached loop stopped when the call ended ({shell:?}): {returned} ticks then, {} now",
         ticks(directory.path())
-    );
-    assert!(
-        stopped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
     );
 }
 
@@ -334,13 +345,20 @@ async fn powershell_exit_keeps_its_code_and_a_detached_process() {
     check_detached(Shell::PowerShell).await;
 }
 
-/// CI runners and some terminals start processes inside a job already. Run a
-/// grandchild case in a copy of this test binary that is in a job, so the
-/// tool's own job is nested in it.
+/// Processes often start inside a job already: on Windows `cargo test` runs
+/// tests in one of its own, as do some CI systems and terminals. Run a
+/// grandchild case in a copy of this test binary inside one more job, so the
+/// tool's job is nested under both.
 #[test]
 fn nested_job_stops_the_grandchild() {
-    // SAFETY: null attributes and name are allowed; they make an unnamed job.
-    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    // The copy inherits this handle, so it can check that it is in the job.
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    // SAFETY: `attributes` outlives the call, and a null name is allowed.
+    let job = unsafe { CreateJobObjectW(&attributes, std::ptr::null()) };
     assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
     // SAFETY: `job` is a new, open handle that nothing else owns.
     let job = unsafe { OwnedHandle::from_raw_handle(job) };
@@ -350,6 +368,9 @@ fn nested_job_stops_the_grandchild() {
             "--exact",
             "--ignored",
         ])
+        .env(OUTER_JOB, (job.as_raw_handle() as usize).to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     // The copy checks that it is in the job before it starts a shell.
@@ -359,22 +380,30 @@ fn nested_job_stops_the_grandchild() {
         let _ = copy.kill();
         panic!("could not put the copy in a job: {error}");
     }
+    let output = copy.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        copy.wait().unwrap().success(),
-        "the run inside a job failed; its output is above"
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the run inside a job did not pass exactly one test:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[tokio::test]
 #[ignore = "nested_job_stops_the_grandchild runs it inside a job"]
 async fn in_job_cancelled_bash_fallback_stops_its_grandchild() {
+    let outer: usize = std::env::var(OUTER_JOB)
+        .expect("nested_job_stops_the_grandchild runs this")
+        .parse()
+        .unwrap();
     let mut in_job = 0;
-    // SAFETY: the pseudo handle is always valid, a null job means any job, and
-    // `in_job` outlives the call.
-    let asked = unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) };
+    // SAFETY: `outer` is the inherited job handle, the pseudo handle is always
+    // valid, and `in_job` outlives the call.
+    let asked = unsafe { IsProcessInJob(GetCurrentProcess(), outer as HANDLE, &mut in_job) };
     assert!(
         asked != 0 && in_job != 0,
-        "not in a job: run nested_job_stops_the_grandchild instead"
+        "not in the outer job: {}",
+        std::io::Error::last_os_error()
     );
     check_cancel(Shell::Bash, Ticker::Grandchild).await;
 }

@@ -253,3 +253,8 @@ jobs:
       - name: Test cancelled, timed-out and finished foreground commands
         working-directory: src-rust
         run: cargo test -p claurst-tools --locked --test foreground_windows
+
+      # The Job Object module is Windows-only, so its unit tests run only here.
+      - name: Test the Job Object resume decision
+        working-directory: src-rust
+        run: cargo test -p claurst-tools --locked --lib windows_job
