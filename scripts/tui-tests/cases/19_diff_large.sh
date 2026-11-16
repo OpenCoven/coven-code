@@ -93,11 +93,16 @@ _diff_kinds_repo() {
   mv "$repo/edited" "$repo/after-edit.txt"
 }
 
-# The file list's row for a file, found by the end of its path, which the list
-# keeps when it shortens a path. The row starts with the collapse mark; the
-# detail pane's header, on a row of its own, names the file too.
+# The file list's entry for a file, found by the end of its path, which the
+# list keeps when it shortens a path. Each screen row also carries a row of the
+# detail pane after the divider, which can name other files, so only the cell
+# between the dividers that holds the collapse mark is searched. awk splits on
+# the divider as a byte string, so this holds in any locale.
 _diff_kinds_row() { # end of the path
-  tui_capture | grep -F -- "▾ " | grep -F -- "$1" | head -1
+  tui_capture | awk -F'│' -v name="$1" '{
+    for (i = 1; i <= NF; i++)
+      if (index($i, "▾ ") && index($i, name)) { print $i; exit }
+  }'
 }
 
 _diff_kinds_journey() {
@@ -128,7 +133,7 @@ _diff_kinds_journey() {
     s="$(tui_capture)"
     assert_contains "$s" "before-edit.txt → after-edit.txt  +1 -1" "$ui: and counts its lines"
     assert_contains "$s" "moved line TEN" "$ui: and shows its edit"
-    assert_matches "$(_diff_kinds_row "edit.txt")" 'renamed *│' "$ui: the list marks it renamed"
+    assert_matches "$(_diff_kinds_row "edit.txt")" 'renamed *$' "$ui: the list marks it renamed"
 
     tui_keys Down
     if wait_for "Binary file — no diff available" "$_DIFF_LARGE_WAIT"; then
@@ -150,7 +155,7 @@ _diff_kinds_journey() {
       _fail "$ui: a pure rename names its old and new paths" "$(tui_capture)"
     fi
     assert_contains "$(tui_capture)" "Renamed from old-name.txt" "$ui: and says the content is unchanged"
-    assert_matches "$(_diff_kinds_row "name.txt")" 'renamed *│' "$ui: the list marks it renamed, not +0 -0"
+    assert_matches "$(_diff_kinds_row "name.txt")" 'renamed *$' "$ui: the list marks it renamed, not +0 -0"
 
     tui_keys Escape
     if wait_absent "blob.bin" "$_DIFF_LARGE_WAIT"; then _pass "$ui: Esc closes the viewer"
@@ -158,20 +163,25 @@ _diff_kinds_journey() {
     tui_keys C-c; sleep 0.3; tui_keys C-c
 
     # The title check means something only if a title sequence that reaches
-    # this pane does retitle it: send one from the shell.
-    local waited=0 title
+    # this pane does retitle it: send one from the shell, and keep the shell
+    # busy while looking, so a prompt that sets its own title cannot hide it.
+    local waited=0 title=""
     while [ "$waited" -lt 50 ] && \
       [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
       sleep 0.1; waited=$((waited + 1))
     done
-    tui_type "printf '\\033]0;suite-title\\007'"; tui_keys Enter
-    waited=0
-    while [ "$waited" -lt 30 ]; do
-      title="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_title}')"
-      [ "$title" = suite-title ] && break
-      sleep 0.1; waited=$((waited + 1))
-    done
-    assert_eq "$title" "suite-title" "$ui: a title sequence that reaches the pane does retitle it"
+    if [ "$waited" -lt 50 ]; then
+      tui_type "printf '\\033]0;suite-title\\007'; sleep 3"; tui_keys Enter
+      waited=0
+      while [ "$waited" -lt 30 ]; do
+        title="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_title}')"
+        [ "$title" = suite-title ] && break
+        sleep 0.1; waited=$((waited + 1))
+      done
+      assert_eq "$title" "suite-title" "$ui: a title sequence that reaches the pane does retitle it"
+    else
+      _fail "$ui: the TUI exits after Ctrl+C twice" "$(tui_capture)"
+    fi
   fi
   tui_stop
 
