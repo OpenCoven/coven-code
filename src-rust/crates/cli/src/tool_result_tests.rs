@@ -61,7 +61,12 @@ impl Interactive {
         }]);
         let mut answer = Message::assistant("The tests pass.".to_string());
         answer.uuid = Some("msg-answer".to_string());
+        // In the runtime's order: the call, the tool's run, its result, the
+        // answer.
         let events = [
+            QueryEvent::DurableMessage {
+                message: call.clone(),
+            },
             QueryEvent::ToolStart {
                 tool_name: "Bash".to_string(),
                 tool_id: "toolu-1".to_string(),
@@ -72,9 +77,6 @@ impl Interactive {
                 tool_id: "toolu-1".to_string(),
                 result: "ok".to_string(),
                 is_error: false,
-            },
-            QueryEvent::DurableMessage {
-                message: call.clone(),
             },
             QueryEvent::DurableMessage {
                 message: result.clone(),
@@ -119,7 +121,7 @@ fn a_turn_that_called_a_tool_is_not_taken_for_a_rewind() {
         assert!(cli.app.messages.len() < cli.messages.len(), "{case}");
 
         let generation = cli.scope.current();
-        // The loop runs the adoption after every key.
+        // The loop runs the adoption after every key the App handles.
         adopt_in_app_rewind(
             &mut cli.scope,
             &mut cli.app,
@@ -189,5 +191,41 @@ fn a_confirmed_rewind_cuts_both_conversations_at_the_chosen_message() {
         );
         assert!(cli.scope.admits(adopted), "{case}: adopted twice");
         assert_eq!(cli.messages.len(), 7, "{case}");
+    }
+}
+
+#[test]
+fn a_cancelled_rewind_changes_nothing() {
+    for renderer in [UiRenderer::Classic, UiRenderer::Next] {
+        let case = format!("{renderer:?}");
+        let mut cli = Interactive::after_a_tool_turn(renderer);
+        assert!(cli.app.intercept_slash_command_with_args("rewind", ""));
+        cli.app.replace_messages(cli.messages.clone());
+        cli.app.open_rewind_flow();
+
+        // Choose a message, decline the confirmation, then close the overlay.
+        let generation = cli.scope.current();
+        for code in [
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyCode::Char('n'),
+            crossterm::event::KeyCode::Esc,
+        ] {
+            cli.app.handle_key_event(crossterm::event::KeyEvent::new(
+                code,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert!(!cli.app.rewind_flow.visible, "{case}");
+        adopt_in_app_rewind(
+            &mut cli.scope,
+            &mut cli.app,
+            &mut cli.messages,
+            &mut cli.session,
+        );
+
+        assert!(cli.scope.admits(generation), "{case}: taken for a rewind");
+        assert_eq!(cli.messages.len(), 8, "{case}");
+        assert_eq!(cli.session.messages.len(), 8, "{case}");
+        assert!(holds_the_tool_result(&cli.messages), "{case}");
     }
 }
