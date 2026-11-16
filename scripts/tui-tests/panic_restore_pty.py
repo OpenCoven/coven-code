@@ -10,15 +10,16 @@ deliberately broken build of the product is needed. Each run gets its own
 raw PTY.
 
 Checks, per run:
-- Before the panic the probe is really in TUI mode: raw termios, alternate
-  screen, mouse capture, bracketed paste, hidden cursor and, unless opted
-  out, pushed keyboard flags. Without this the restore checks prove nothing.
+- Before the panic the probe is really in TUI mode: raw termios (no line
+  editing, echo, signals or output processing), alternate screen, mouse
+  capture, bracketed paste, hidden cursor and, unless opted out, pushed
+  keyboard flags. Without this the restore checks prove nothing.
 - A panic on the main thread restores every termios field and leaves the
   alternate screen, turns mouse capture and bracketed paste off, sends a
   keyboard pop and shows the cursor, all before the panic message. The
   message is printed and the process exits 101. Termios is shown restored
-  before the message by its newlines arriving translated to CRLF, which raw
-  mode does not do.
+  before the message by the message's first line break arriving translated
+  to CRLF, which raw mode (output processing off) does not do.
 - A panic on a spawned thread does not restore anything (the hook only
   restores on the thread that set the terminal up). The probe keeps running,
   and its later main-thread panic still restores.
@@ -26,7 +27,7 @@ Checks, per run:
   main-thread panic still restores.
 
 Some details are pinned as current behaviour, not endorsed, so a change to
-them is deliberate; their check lines start with "current behaviour":
+them is deliberate; their check lines contain "current behaviour":
 - the keyboard pop is sent after leaving the alternate screen the flags were
   pushed on (case 13 requires suspend to pop on the alternate screen);
 - a keyboard pop is sent even when nothing was pushed;
@@ -95,9 +96,16 @@ class Probe:
         )
 
     def pump(self, seconds, condition):
-        """Read output until `condition()` holds or `seconds` pass."""
+        """Read output until `condition()` holds or `seconds` pass. Once it
+        holds, keep reading until the PTY is briefly quiet, so a snapshot of
+        the terminal state is not taken in the middle of one frame."""
         deadline = time.monotonic() + seconds
-        while not condition() and time.monotonic() < deadline:
+        quiet_at = None
+        while time.monotonic() < deadline:
+            if quiet_at is None and condition():
+                quiet_at = time.monotonic() + 0.15
+            if quiet_at is not None and time.monotonic() >= quiet_at:
+                break
             ready, _, _ = select.select([self.master], [], [], 0.05)
             if ready:
                 try:
@@ -106,6 +114,8 @@ class Probe:
                     break
                 self.out += data
                 self.observer.feed(data)
+                if quiet_at is not None:
+                    quiet_at = time.monotonic() + 0.15
         return condition()
 
     def drain(self):
@@ -147,15 +157,21 @@ class Probe:
 
 
 def text(data):
-    return " ".join(data.decode("utf-8", "replace").split())
+    """Evidence with escape sequences shown, never sent to the terminal."""
+    return ascii(" ".join(data.decode("utf-8", "replace").split()))
 
 
 def check_tui_mode(report, label, probe, keyboard):
     """The probe has really taken the terminal."""
     modes = probe.observer.modes
-    report.check(probe.raw() and probe.termios_before[3] & COOKED == COOKED,
+    # The CRLF check after the panic relies on raw mode turning output
+    # processing off, so require that here.
+    now = termios.tcgetattr(probe.slave)
+    before = probe.termios_before
+    report.check(probe.raw() and not now[1] & termios.OPOST
+                 and before[3] & COOKED == COOKED and before[1] & termios.OPOST,
                  f"{label}: the probe puts the PTY in raw mode",
-                 repr((probe.termios_before[3], termios.tcgetattr(probe.slave)[3])))
+                 f"lflag {before[3]} -> {now[3]}, oflag {before[1]} -> {now[1]}")
     missing = [name for name, on in (
         ("alternate screen", modes.get(1049, False)),
         ("mouse capture", all(modes.get(mode, False) for mode in MOUSE_MODES)),
@@ -240,10 +256,11 @@ def run(path, report, renderer, mode, keyboard=True):
                 probe.send()
                 survived = probe.pump(15, lambda: WORKER_DONE in probe.observer.text())
                 after = probe.out[mark:]
-                report.check(survived and WORKER_MESSAGE in after,
-                             f"{label}: current behaviour: a worker-thread panic prints its message "
-                             "onto the live screen, and the probe keeps drawing",
+                report.check(survived, f"{label}: the probe keeps running and drawing after a worker-thread panic",
                              text(after[-300:]))
+                report.check(WORKER_MESSAGE in after,
+                             f"{label}: current behaviour: a worker-thread panic prints its message "
+                             "onto the live screen", text(after[-300:]))
                 if not survived:
                     return
                 restored = [repr(seq) for seq in RESTORE_BYTES if seq in after]

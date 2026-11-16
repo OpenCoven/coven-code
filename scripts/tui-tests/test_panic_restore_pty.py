@@ -24,6 +24,10 @@ def setup():
     if BEHAVIOUR == "no-setup":
         return
     tty.setraw(fd)
+    if BEHAVIOUR == "keeps-opost":
+        attrs = termios.tcgetattr(fd)
+        attrs[1] |= termios.OPOST
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
     write(sys.stdout, b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h\x1b[?2004h")
     if KEYBOARD:
         write(sys.stdout, b"\x1b[>9u")
@@ -115,6 +119,12 @@ class PanicRestoreDriverTests(unittest.TestCase):
     def test_probe_that_never_takes_the_terminal_fails(self):
         self.assert_fails("no-setup", "the probe puts the PTY in raw mode", "the probe enters TUI mode",
                           "keyboard flags are pushed")
+
+    def test_raw_mode_must_turn_output_processing_off(self):
+        # Otherwise the CRLF check could not tell when termios came back.
+        check = "the probe puts the PTY in raw mode"
+        _, failed = self.assert_fails("keeps-opost", check)
+        self.assertEqual([line for line in failed if check not in line], [])
 
     def test_each_pinned_behaviour_fails_on_its_own(self):
         for behaviour, check in (
