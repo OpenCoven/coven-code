@@ -55,6 +55,16 @@ for provider setup and `/account` for account management. The separate
 `coven-code auth login` flow requires a configured
 `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`; it is not a Claude CLI token-import path.
 
+A turn through the `claude` binary is the CLI's whole run, not its first
+result. When the CLI starts background work, such as a long command it puts in
+the background, it reports a result, stays open until that work is over, and
+then reports on it. The engine keeps the turn open for all of that, so the
+answer includes the report and the CLI is not stopped while it waits. Claude
+Code sets the limits on the wait; a background command gets 30 minutes unless
+the model asks for more. Because the CLI runs its own tools, the engine does
+not nudge such a turn for announcing work it then appears not to do: it cannot
+see the work.
+
 A turn through the `claude` binary can be quiet for minutes while one of the
 CLI's own tools runs, such as a build or a test suite. The engine keeps
 waiting for as long as the `claude` process is running. The 45-second stall
