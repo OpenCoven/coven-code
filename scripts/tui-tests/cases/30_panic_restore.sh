@@ -34,14 +34,17 @@ tc_panic_restore() {
   [ "${dir##*/}" = "release" ] && profile=" --release"
   build="(cd \"$ROOT/src-rust\" && cargo build$profile -p claurst -p claurst-tui --bins --example panic_restore)"
   if [ ! -x "$probe" ]; then
-    _fail "panic probe is built" "no $probe; build it alongside COVEN_BIN (same tree, profile and target), for example: $build"
+    local why="no $probe"
+    [ -e "$probe" ] && why="$probe is not executable"
+    _fail "panic probe is built" "$why; build it alongside COVEN_BIN (same tree, profile and target), for example: $build; or set COVEN_PANIC_PROBE to a probe built from this tree"
     return 0
   fi
   # Compare the probe with the files cargo built it from, as listed in its
   # dep-info: one line, "target: dep dep ...", with spaces in paths escaped as
   # "\ ". This catches a forgotten rebuild; it is not proof, since an edit
   # in the same second as the link, or while cargo was building, can slip
-  # through. An explicit COVEN_PANIC_PROBE is used as given.
+  # through, and dependency updates (Cargo.lock) are not listed. An explicit
+  # COVEN_PANIC_PROBE is used as given.
   if [ -z "${COVEN_PANIC_PROBE:-}" ] && [ -f "$probe.d" ]; then
     local deps="" dep us=$'\037'
     local -a files=()
@@ -51,7 +54,7 @@ tc_panic_restore() {
     for dep in ${files[@]+"${files[@]}"}; do
       dep="${dep//$us/ }"
       if [ "$dep" -nt "$probe" ]; then
-        _fail "panic probe is current" "$dep is newer than $probe; rebuild it alongside COVEN_BIN (same tree, profile and target), for example: $build"
+        _fail "panic probe is current" "$dep is newer than $probe; rebuild it alongside COVEN_BIN (same tree, profile and target), for example: $build; or set COVEN_PANIC_PROBE to a probe built from this tree"
         return 0
       fi
     done

@@ -27,7 +27,9 @@ Checks, per run:
   main-thread panic still restores.
 
 Some details are pinned as current behaviour, not endorsed, so a change to
-them is deliberate; their check lines contain "current behaviour":
+them is deliberate; their check lines contain "current behaviour". They
+describe the Unix restore path (Windows has its own branch, which pops
+before leaving the alternate screen, and is not exercised):
 - the keyboard pop is sent after leaving the alternate screen the flags were
   pushed on (case 13 requires suspend to pop on the alternate screen);
 - a keyboard pop is sent even when nothing was pushed;

@@ -216,6 +216,13 @@ class PanicRestoreCaseTests(unittest.TestCase):
         self.assertIn("FAIL panic probe is built", out)
         self.assertIn("--example panic_restore", out)
 
+    def test_probe_that_is_not_executable_fails(self):
+        self.probe.write_text("", encoding="utf-8")
+        result, out = self.run_case(COVEN_PANIC_PROBE=str(self.probe))
+        self.assertEqual(result.returncode, 1, out + result.stderr)
+        self.assertIn("FAIL panic probe is built", out)
+        self.assertIn(f"{self.probe} is not executable", out)
+
     def test_missing_probe_is_skipped_for_an_installed_binary(self):
         # The runner fails a run in which nothing passed, so add a passing case.
         (self.run_sh.parent / "cases" / "01_ok.sh").write_text(
