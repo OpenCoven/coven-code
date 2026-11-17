@@ -8,15 +8,16 @@ terminal").
 
 **Offline / headless-first:** no test makes a live model call or hits the
 network. Every assertion is deterministic and runnable on any machine with the
-binary and `tmux`.
+binary, the panic probe (case 30) and `tmux`.
 
 ## Usage
 
 ```bash
-# From the repo root. Auto-detects target/{debug,release}/coven-code.
+# From the repo root. Auto-detects target/{debug,release}/coven-code. Case 30
+# also needs the panic probe from that build; `--build` builds both.
 scripts/tui-tests/run.sh
 
-# Build the debug binary first, then test it.
+# Build the debug binary and the panic probe first, then test them.
 scripts/tui-tests/run.sh --build
 
 # Test a specific binary (e.g. an installed release).
@@ -44,6 +45,8 @@ python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
 These tests exercise the actual runner and assertion library with synthetic
 case inputs and an inert tmux executable. They need no engine, tmux server,
 credentials or network, and do not establish real-binary terminal acceptance.
+`test_panic_restore_pty.py` also needs a PTY: it runs the panic driver, and
+case 30 through the runner, against fake probes (about a minute).
 CI runs them before building and exercising the real engine.
 
 ## CI
@@ -51,13 +54,26 @@ CI runs them before building and exercising the real engine.
 Runs automatically via [`.github/workflows/tui-tests.yml`](../../.github/workflows/tui-tests.yml)
 on pushes to `main` and on PRs that touch `src-rust/**` or this suite (plus
 manual `workflow_dispatch`). The job installs `tmux`, builds the debug binary
-(`cargo build --locked --package claurst`), seeds an offline settings file
+and the panic probe (`cargo build --locked --package claurst --package
+claurst-tui --bins --example panic_restore`), seeds an offline settings file
 (`hasCompletedOnboarding: true`) so a credential-less runner lands on the main
 screen, and runs `run.sh`. No secrets or network access required.
 
 ## Requirements
 
 - The `coven-code` binary (built debug/release, or on `PATH`).
+- For `cases/30_panic_restore.sh`, the tui crate's `panic_restore` example
+  (`run.sh --build` builds it). It is built from source, so the case looks
+  for it in `COVEN_BIN`'s cargo output (`examples/panic_restore` next to
+  the binary) or `COVEN_PANIC_PROBE`. A missing probe fails the case when
+  `COVEN_BIN` is a cargo build (cargo's dep-info, `coven-code.d`, is next to
+  it), and so does a probe older than one of the files cargo built it from,
+  as its own dep-info (`panic_restore.d`) lists them (a plain `cargo build`
+  does not rebuild it); for an installed binary the case is skipped, since
+  the probe cannot test that binary. The freshness check sees the
+  workspace's own files, not dependency updates in `Cargo.lock`. An explicit
+  `COVEN_PANIC_PROBE` is used as given, without the freshness check, and
+  fails the case if it is missing; CI sets it to the probe it builds.
 - `tmux` (3.x). If absent, the headless cases still run and the interactive
   cases are reported as **skipped** rather than failed.
 
@@ -80,6 +96,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/27_classic_quit_save.sh` | Quitting mid-turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives a real turn. Ctrl+D twice while a held stream is still sending text exits, leaves the alternate screen, restores the cursor and turns mouse reporting off, and the saved session holds the prompt and the text delivered so far. Only Next prints its report and the resume command after exiting. Ctrl+D twice while an approved `sleep 20` runs exits within 8 s and saves the prompt; needs `python3` |
 | `cases/28_approval_queue.sh` | A second approval key | `fake_anthropic.py` asks for two Bash calls in one response, so the second request waits behind the first panel. The first panel is decided with `y` and a second `y` follows: in the same write, at once, and 150 ms later. In both renderers a `y` already waiting when the first panel closes lands in the composer as text and decides nothing. A `y` that reaches the open next panel is ignored by Next, which takes keys other than Escape only after 400 ms of quiet, and decides that panel in Classic, which takes keys at once. Each round checks whether the second call ran (its marker file); while it is undecided, its panel must still be open and the model must have been told nothing, and a deliberate `y` then runs it. Every round ends with the model told that both calls ran. In Next, a round whose two keys took 400 ms or more to send skips the decision check, since the next panel may have armed by then; needs `python3` |
 | `cases/29_tool_results_kept.sh` | Tool results after a tool turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` asks for a Bash call, the user approves it, and the model answers its result. Once the turn ends, single key presses (`x`, Backspace, as typing sends them) precede a follow-up prompt, whose request, read from the full `messages` the fake logs to a file of their own, must carry the call and, in the user message right after it, the tool result answering it; needs `python3` |
+| `cases/30_panic_restore.sh` | Panic restoration | The product has no known input that panics, so the tui crate's `panic_restore` example takes the terminal with the real `setup_terminal` and panics on request; `panic_restore_pty.py` runs it on a raw PTY, with `setup_terminal` for each renderer (Classic and Next; their event loops are not involved). Before the panic: raw termios (output processing off too), alternate screen, mouse capture, bracketed paste, hidden cursor and pushed keyboard flags. A main-thread panic restores every termios field and, before the panic message, turns output processing back on (the message's first line break arrives as CRLF), leaves the alternate screen, turns mouse capture and bracketed paste off, sends a keyboard pop and shows the cursor; the message is printed and the exit status is 101. A worker-thread panic restores nothing and the probe keeps drawing; its later main-thread panic still restores. After a suspend and resume through the real `suspend_terminal`, a panic still restores. With `COVEN_CODE_KEYBOARD_ENHANCEMENT=0` no flags are pushed. Lines containing "current behaviour" pin details that need a decision, not endorse them (Unix; Windows has its own restore branch, which pops before leaving the alternate screen, and is not exercised): the keyboard pop is sent after leaving the alternate screen the flags were pushed on (case 13 requires suspend to pop on the alternate screen), a pop is sent even when none was pushed, the startup title is not cleared, each `setup_terminal` call chains another hook (so after a resume the restore is written twice), and a worker-thread panic prints its message onto the live screen. Needs `python3` and the probe |
 
 ## Configuration
 
@@ -94,6 +111,7 @@ Override via environment variables:
 | `TUI_SOCKET` | `coven-tui-test-<pid>` | tmux server socket (`-L`), one per run, so the harness never touches your own tmux sessions and runs in parallel never touch each other |
 | `TUI_LOG_DIR` | _(unset)_ | If set, the full pane capture for each failing case is written here (CI uploads these as artifacts) |
 | `REQUIRE_TMUX` | `0` | If `1`, a missing `tmux` is a hard error instead of skipping the interactive cases (set in CI) |
+| `COVEN_PANIC_PROBE` | `examples/panic_restore` next to `COVEN_BIN` | The `panic_restore` probe for `cases/30_panic_restore.sh`, built from source. Used as given: not checked for freshness, and the case fails if it is missing |
 
 ## Writing a new case
 

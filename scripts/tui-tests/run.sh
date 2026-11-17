@@ -7,7 +7,7 @@
 #
 # Usage:
 #   scripts/tui-tests/run.sh                 # auto-detect binary, run all cases
-#   scripts/tui-tests/run.sh --build         # cargo build (debug) first
+#   scripts/tui-tests/run.sh --build         # build the debug binary and panic probe first
 #   COVEN_BIN=/path/to/coven-code run.sh     # test a specific binary
 #   scripts/tui-tests/run.sh 03 05           # run only cases matching 03* / 05*
 #
@@ -32,13 +32,14 @@ for arg in "$@"; do
 done
 
 if [ "$DO_BUILD" -eq 1 ]; then
-  info "Building debug binary (cargo build)…"
-  ( cd "$ROOT/src-rust" && cargo build ) || { warn "cargo build failed"; exit 2; }
+  info "Building debug binary and panic probe (cargo build)…"
+  ( cd "$ROOT/src-rust" && cargo build --package claurst --package claurst-tui --bins --example panic_restore ) \
+    || { warn "cargo build failed"; exit 2; }
 fi
 
 if ! detect_bin; then
   warn "Could not find the coven-code binary."
-  warn "Build it first:  (cd src-rust && cargo build)   or run:  $0 --build"
+  warn "Build it first:  $0 --build   (the binary and the panic probe)"
   warn "Or point COVEN_BIN at an installed binary."
   exit 2
 fi
