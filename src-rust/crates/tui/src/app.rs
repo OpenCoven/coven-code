@@ -8047,7 +8047,11 @@ impl App {
                 if self.response_reader.local_text.is_none() {
                     self.close_response_reader();
                 }
-                if !self.is_streaming {
+                // A repeated terminal stream event cannot begin another turn
+                // or re-arm the completion timer after TurnComplete (#408).
+                if !self.is_streaming
+                    && !matches!(stream_evt, claurst_api::AnthropicStreamEvent::MessageStop)
+                {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
                     // turn_start is set in begin_user_turn_snapshot (prompt

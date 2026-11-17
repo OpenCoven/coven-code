@@ -662,3 +662,32 @@ fn a_turn_after_a_rewind_completes_once() {
         turn
     });
 }
+
+#[test]
+fn a_duplicate_stream_stop_does_not_rearm_a_completed_turn() {
+    in_both_renderers(|renderer| {
+        let mut turn = Turn::started(renderer);
+        turn.app.completion_toast_min_secs = 0;
+        turn.run([
+            delta("All tests pass."),
+            durable_answer("msg-stop", "All tests pass.", None),
+            QueryEvent::Stream(AnthropicStreamEvent::MessageStop),
+            end_turn(),
+        ]);
+        let completed = turn.workspace();
+        assert_eq!(completed.context_used_tokens, 1200);
+        assert_eq!(turn.effects, [PresentationEffect::RingBell]);
+        turn.apply(QueryEvent::Stream(AnthropicStreamEvent::MessageStop));
+        let repeated = turn.apply(end_turn());
+        assert!(
+            repeated.is_empty(),
+            "{renderer:?}: terminal replay rang again"
+        );
+        assert_eq!(
+            turn.workspace(),
+            completed,
+            "{renderer:?}: terminal replay changed completion"
+        );
+        turn
+    });
+}
