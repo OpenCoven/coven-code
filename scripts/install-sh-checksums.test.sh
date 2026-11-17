@@ -38,7 +38,8 @@ EOF
 #!/bin/sh
 printf 'called\n' >> '$case_dir/tar.log'
 dest=''; while [ \$# -gt 0 ]; do if [ "\$1" = '-C' ]; then dest=\$2; break; fi; shift; done
-printf 'inert binary\n' > "\$dest/coven-code"
+# The installer runs the extracted binary before installing it on Linux.
+printf '#!/bin/sh\nexit 0\n' > "\$dest/coven-code"
 EOF
   chmod +x "$fake"/*
   if [[ "$label" == download_failure ]]; then

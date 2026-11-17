@@ -147,8 +147,27 @@ file_checksum() {
   fi
 }
 
+# Say why a binary that cannot start cannot start. Linux release binaries use
+# the system's glibc and ALSA library, and the loader names what is missing.
+report_start_failure() {
+  local output="$1" libc
+  print_message error "This ${APP} binary cannot start on this system, so nothing was installed." >&2
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output" | head -n 8 | sed 's/^/     /' >&2
+  fi
+  if [[ "$output" == *GLIBC_* ]]; then
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    print_message error "The binary needs a newer glibc than this system has (${libc:-version unknown}). The versions it needs are named above." >&2
+  fi
+  if [[ "$output" == *libasound.so.2* ]]; then
+    print_message error "The ALSA runtime library (libasound.so.2) is missing. Debian and Ubuntu: libasound2t64 or libasound2. Fedora and RHEL: alsa-lib." >&2
+  fi
+  print_message error "Runtime requirements: https://github.com/${REPO}/blob/main/docs/installation.md#linux-runtime-requirements" >&2
+}
+
 install_binary_and_alias() (
   local source="$1" stage target="${INSTALL_DIR}/${APP}" alias="${INSTALL_DIR}/${ALIAS}"
+  local start_output missing
   local had_target=0 had_alias=0 installed_target=0 installed_alias=0 committed=0
   local rollback_failed=0
 
@@ -183,6 +202,20 @@ install_binary_and_alias() (
   # inode (important for macOS signature validation) and each move is atomic.
   cp "$source" "$stage/$APP"
   chmod +x "$stage/$APP"
+  # On Linux, run the staged copy before it replaces anything. It is staged in
+  # the install directory, so a temporary directory mounted noexec does not
+  # matter.
+  if [[ "$PLATFORM" == linux ]] && ! start_output=$("$stage/$APP" --version 2>&1); then
+    # The loader stops at the first problem. ldd lists every missing library
+    # and symbol version, so one run of the installer names them all.
+    if command -v ldd >/dev/null 2>&1; then
+      missing=$(ldd "$stage/$APP" 2>&1 | grep 'not found' | sed 's/^[[:space:]]*//' || true)
+      if [[ -n "$missing" ]]; then start_output+=$'\n'"$missing"; fi
+    fi
+    # Name the binary, not its temporary staging path.
+    report_start_failure "${start_output//"$stage/$APP"/$APP}"
+    return 1
+  fi
   ln -s "$APP" "$stage/$ALIAS" || cp "$stage/$APP" "$stage/$ALIAS"
 
   if [[ -e "$target" || -L "$target" ]]; then
