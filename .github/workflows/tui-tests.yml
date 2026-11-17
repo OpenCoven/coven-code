@@ -73,9 +73,14 @@ jobs:
           key: tui-tests-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
           restore-keys: tui-tests-cargo-
 
-      - name: Build debug binary
+      # One invocation, so the panic probe shares the binary's feature set
+      # and build output instead of compiling the tui crate a second time.
+      # Building an example also resolves claurst and claurst-tui's
+      # dev-dependencies; a feature one of them enables would reach the
+      # binary under test too (none does today).
+      - name: Build debug binary and panic probe
         working-directory: src-rust
-        run: cargo build --locked --package claurst
+        run: cargo build --locked --package claurst --package claurst-tui --bins --example panic_restore
 
       # Belt-and-suspenders: mark onboarding complete so a credential-less
       # runner lands on the main screen rather than (potentially) a blocking
@@ -90,6 +95,9 @@ jobs:
           # Fail loudly if tmux is missing instead of silently skipping the
           # interactive cases, and persist pane captures for any failure.
           REQUIRE_TMUX: '1'
+          # The probe built above; if it is missing, case 30 fails rather
+          # than skipping.
+          COVEN_PANIC_PROBE: ${{ github.workspace }}/src-rust/target/debug/examples/panic_restore
           TUI_WIDTH: ${{ matrix.width }}
           TUI_HEIGHT: ${{ matrix.height }}
           TUI_LOG_DIR: ${{ runner.temp }}/tui-failures
