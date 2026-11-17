@@ -2562,6 +2562,30 @@ async fn stop_turn_and_keep_it(
     exit_report
 }
 
+/// Adopt a rewind the user confirmed in the App's overlay: cut the
+/// conversation the loop sends and saves at the same message, and start a
+/// new session generation, so nothing still queued from before the rewind
+/// reaches it (#408).
+///
+/// The overlay opens over the loop's conversation
+/// (`CommandResult::OpenRewindOverlay`), so the index names the same message
+/// in both. A shorter App conversation is no sign of a rewind: the App shows
+/// tool results on their calls' cards instead of storing the messages that
+/// carry them.
+fn adopt_in_app_rewind(
+    scope: &mut claurst_tui::application::SessionScope,
+    app: &mut claurst_tui::App,
+    messages: &mut Vec<claurst_core::types::Message>,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    if let Some(kept) = app.rewind_confirmed_at.take() {
+        scope.advance();
+        messages.truncate(kept);
+        session.messages = messages.clone();
+        session.updated_at = chrono::Utc::now();
+    }
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -4751,13 +4775,7 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
-                    if !app.is_streaming && app.messages.len() < messages.len() {
-                        // An in-App rewind replaced the visible conversation.
-                        session_scope.advance();
-                        messages = app.messages.clone();
-                        session.messages = messages.clone();
-                        session.updated_at = chrono::Utc::now();
-                    }
+                    adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
                 Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
@@ -8316,3 +8334,6 @@ mod goal_dispatch_tests;
 
 #[cfg(test)]
 mod session_save_tests;
+
+#[cfg(test)]
+mod tool_result_tests;

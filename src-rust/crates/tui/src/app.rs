@@ -779,6 +779,9 @@ pub struct App {
     pub message_selector: MessageSelectorOverlay,
     /// Multi-step rewind flow overlay.
     pub rewind_flow: RewindFlowOverlay,
+    /// The message index a rewind confirmed in the overlay kept up to, until
+    /// the loop cuts its own conversation there.
+    pub rewind_confirmed_at: Option<usize>,
     /// Full-screen reader for a completed assistant response.
     pub response_reader: ResponseReaderState,
     /// Bridge connection state.
@@ -1364,6 +1367,7 @@ impl App {
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
             rewind_flow: RewindFlowOverlay::new(),
+            rewind_confirmed_at: None,
             response_reader: ResponseReaderState::default(),
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
@@ -6423,6 +6427,7 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
+                        self.rewind_confirmed_at = Some(idx);
                         self.research_retrievals.retain(|index, _| *index < idx);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
