@@ -1287,6 +1287,7 @@ mod tests {
         let mut state = DiffViewerState::new();
         state.set_turn_diff(vec![diff_viewer::FileDiffStats {
             path: "src/lib.rs".to_string(),
+            renamed_from: None,
             added: 2,
             removed: 1,
             binary: false,

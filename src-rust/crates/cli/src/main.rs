@@ -2529,6 +2529,63 @@ async fn stop_turn_for_exit(
     messages.lock().await.clone()
 }
 
+/// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
+/// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
+/// it delivered, removing a goal continuation's synthetic prompt if no request
+/// for it was sent. The caller saves the session. Returns the report on the turn, taken before the
+/// stop, which can still deliver results; Next prints it from what was saved.
+async fn stop_turn_and_keep_it(
+    (handle, messages): (
+        tokio::task::JoinHandle<claurst_query::QueryOutcome>,
+        MessagesArc,
+    ),
+    queue: tokio::sync::mpsc::Receiver<claurst_tui::application::ScopedQueryEvent>,
+    goal_turn: &mut Option<InteractiveTurn>,
+    app: &mut claurst_tui::App,
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+    session: &mut claurst_core::history::ConversationSession,
+    command_messages: &mut Vec<claurst_core::types::Message>,
+) -> claurst_tui::next::TurnExitReport {
+    let exit_report = claurst_tui::next::TurnExitReport::capture(app);
+    abandon_interactive_turn(goal_turn, app, cancel);
+    let mut kept = stop_turn_for_exit(handle, &messages, queue, TURN_EXIT_WAIT).await;
+    session.messages = kept.clone();
+    session.updated_at = chrono::Utc::now();
+    rollback_unattempted_turn(
+        goal_turn.as_ref(),
+        false,
+        &mut kept,
+        app,
+        session,
+        command_messages,
+    );
+    exit_report
+}
+
+/// Adopt a rewind the user confirmed in the App's overlay: cut the
+/// conversation the loop sends and saves at the same message, and start a
+/// new session generation, so nothing still queued from before the rewind
+/// reaches it (#408).
+///
+/// The overlay opens over the loop's conversation
+/// (`CommandResult::OpenRewindOverlay`), so the index names the same message
+/// in both. A shorter App conversation is no sign of a rewind: the App shows
+/// tool results on their calls' cards instead of storing the messages that
+/// carry them.
+fn adopt_in_app_rewind(
+    scope: &mut claurst_tui::application::SessionScope,
+    app: &mut claurst_tui::App,
+    messages: &mut Vec<claurst_core::types::Message>,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    if let Some(kept) = app.rewind_confirmed_at.take() {
+        scope.advance();
+        messages.truncate(kept);
+        session.messages = messages.clone();
+        session.updated_at = chrono::Utc::now();
+    }
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -2543,6 +2600,23 @@ async fn forward_scoped_events(
             break;
         }
     }
+}
+
+/// Replace the conversation with `replacement` and start a new session
+/// generation, so nothing still queued from the replaced conversation's
+/// worker is admitted to it (#408).
+fn replace_conversation(
+    scope: &mut claurst_tui::application::SessionScope,
+    replacement: Vec<claurst_core::types::Message>,
+    messages: &mut Vec<claurst_core::types::Message>,
+    app: &mut claurst_tui::App,
+    session: &mut claurst_core::history::ConversationSession,
+) {
+    scope.advance();
+    app.replace_messages(replacement.clone());
+    session.messages = replacement.clone();
+    *messages = replacement;
+    session.updated_at = chrono::Utc::now();
 }
 
 struct InteractiveQuery {
@@ -2686,6 +2760,7 @@ fn select_idle_compaction(app: &claurst_tui::App, query_running: bool) -> Option
         || app.rate_limit_recovery.is_pending()
         || app.file_injection_dialog.visible
         || app.file_injection_force
+        || app.rewind_flow.visible
         || app.notifications.current_is_error()
     {
         return None;
@@ -3893,20 +3968,24 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
-                                    session_scope.advance();
-                                    messages.clear();
-                                    app.replace_messages(Vec::new());
-                                    session.messages.clear();
-                                    session.updated_at = chrono::Utc::now();
+                                    replace_conversation(
+                                        &mut session_scope,
+                                        Vec::new(),
+                                        &mut messages,
+                                        &mut app,
+                                        &mut session,
+                                    );
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
-                                    session_scope.advance();
                                     let removed = messages.len().saturating_sub(new_msgs.len());
-                                    messages = new_msgs.clone();
-                                    app.replace_messages(new_msgs);
-                                    session.messages = messages.clone();
-                                    session.updated_at = chrono::Utc::now();
+                                    replace_conversation(
+                                        &mut session_scope,
+                                        new_msgs,
+                                        &mut messages,
+                                        &mut app,
+                                        &mut session,
+                                    );
                                     app.status_message = Some(format!(
                                         "Rewound {} message{}.",
                                         removed,
@@ -4718,13 +4797,7 @@ async fn run_interactive(
                                 filter_tools_for_hosted_review(all_tools_arc.clone(), &cmd_ctx.config);
                         }
                     }
-                    if !app.is_streaming && app.messages.len() < messages.len() {
-                        // An in-App rewind replaced the visible conversation.
-                        session_scope.advance();
-                        messages = app.messages.clone();
-                        session.messages = messages.clone();
-                        session.updated_at = chrono::Utc::now();
-                    }
+                    adopt_in_app_rewind(&mut session_scope, &mut app, &mut messages, &mut session);
                 }
                 Event::Paste(data)
                     // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
@@ -4809,6 +4882,15 @@ async fn run_interactive(
             }
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
+
+        // A worker joins its forwarder before it finishes, so one seen finished
+        // here has queued every event it produced, and the drain below takes
+        // them all. Checked after the drain instead, a worker could finish in
+        // between and leave events queued; once its cancel is settled they
+        // would restart the turn on screen.
+        let task_finished = current_query
+            .as_ref()
+            .is_some_and(|(handle, _)| handle.is_finished());
 
         // Drain query events — also forward relevant ones to the bridge as outbound.
         while let Ok(scoped) = event_rx.try_recv() {
@@ -5088,14 +5170,7 @@ async fn run_interactive(
                     }
                     Ok(TuiBridgeEvent::Cancelled) => {
                         abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-                        if current_query.is_some()
-                            && app.renderer == claurst_tui::application::UiRenderer::Next
-                        {
-                            app.note_cancellation_sent();
-                            app.interrupt_tool_rows();
-                        }
-                        app.is_streaming = false;
-                        app.status_message = Some("Cancelled by remote control.".to_string());
+                        app.note_cancellation_sent(current_query.is_some());
                     }
                     Ok(TuiBridgeEvent::PermissionResponse {
                         tool_use_id,
@@ -5171,12 +5246,16 @@ async fn run_interactive(
         // Both bridge transports share the same literal-prompt launch path.
         // Primary events observed above precede supplementary messages read here;
         // each transport retains FIFO ordering. Never reinterpret remote slash text.
-        // A pending file-injection decision also holds remote prompts in their queue.
-        let file_injection_pending = app.file_injection_dialog.visible || app.file_injection_force;
+        // A pending file-injection decision also holds remote prompts in their
+        // queue, and so does an open rewind: a turn started under it would run
+        // from, and be saved with, the conversation the rewind removes (#408).
+        let remote_prompts_held = app.file_injection_dialog.visible
+            || app.file_injection_force
+            || app.rewind_flow.visible;
         if let Some(content) = take_remote_prompt(
             &mut pending_remote_prompts,
             &mut remote_prompt_rx,
-            app.is_streaming || file_injection_pending,
+            app.is_streaming || remote_prompts_held,
             current_query.is_some(),
         ) {
             if rollback_unattempted_turn(
@@ -5543,7 +5622,8 @@ async fn run_interactive(
         // existing conversation — the failed turn's prompt is never lost and
         // never duplicated.
         app.rate_limit_recovery.tick();
-        if current_query.is_none() && !app.is_streaming {
+        // An open rewind holds the retry, as it holds remote prompts (#408).
+        if current_query.is_none() && !app.is_streaming && !app.rewind_flow.visible {
             if let Some(directive) = app.rate_limit_recovery.take_retry_directive() {
                 if !messages.is_empty() && goal_turn.as_ref().is_some_and(|owner| !owner.abandoned)
                 {
@@ -5553,6 +5633,10 @@ async fn run_interactive(
                     });
                     app.is_streaming = true;
                     app.streaming_text.clear();
+                    // The retry pushes no prompt: it reruns a turn that never
+                    // completed, so that turn's timer is still running, and
+                    // the retry's completion spends it (#408).
+                    app.turn_start.get_or_insert_with(std::time::Instant::now);
 
                     let ct = CancellationToken::new();
                     cancel = Some(ct.clone());
@@ -5607,12 +5691,7 @@ async fn run_interactive(
             abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
         }
 
-        // Check if query task is done; sync messages from the task
-        let task_finished = current_query
-            .as_ref()
-            .map(|(h, _)| h.is_finished())
-            .unwrap_or(false);
-
+        // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
                 // Get the outcome and handle errors
@@ -5924,31 +6003,24 @@ async fn run_interactive(
     // Leave raw/alternate screen before waiting for best-effort HTTP cleanup.
     // Still join the worker if restoration fails, then report that error below.
     let terminal_result = restore_terminal(&mut terminal);
-    // Quitting mid-turn stops the worker and keeps what it delivered. Next only:
-    // Classic keeps its existing exit.
-    if app.renderer == claurst_tui::application::UiRenderer::Next {
-        if let Some((handle, msgs_arc)) = current_query.take() {
-            // Taken before the stop, which can still deliver results; the
-            // lines are chosen from what was saved.
-            let exit_report = claurst_tui::next::TurnExitReport::capture(&app);
-            abandon_interactive_turn(&mut goal_turn, &mut app, &cancel);
-            messages = stop_turn_for_exit(handle, &msgs_arc, event_rx, TURN_EXIT_WAIT).await;
-            session.messages = messages.clone();
-            session.updated_at = chrono::Utc::now();
-            session.model =
-                claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
-            session.working_dir = Some(tool_ctx.working_dir.display().to_string());
-            rollback_unattempted_turn(
-                goal_turn.as_ref(),
-                false,
-                &mut messages,
-                &mut app,
-                &mut session,
-                &mut cmd_ctx.messages,
-            );
-            let saved =
-                persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications)
-                    .await;
+    // Quitting mid-turn stops the worker and saves what it delivered, in both
+    // renderers. Only Next reports on the turn afterwards (#408).
+    if let Some(query) = current_query.take() {
+        session.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
+        session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+        let exit_report = stop_turn_and_keep_it(
+            query,
+            event_rx,
+            &mut goal_turn,
+            &mut app,
+            &cancel,
+            &mut session,
+            &mut cmd_ctx.messages,
+        )
+        .await;
+        let saved =
+            persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
+        if app.renderer == claurst_tui::application::UiRenderer::Next {
             for line in exit_report.lines(&session.messages) {
                 println!("{line}");
             }
@@ -6705,6 +6777,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_worker_seen_finished_before_a_drain_leaves_no_event_behind() {
+        // A model of the interactive loop's order each pass, around the real
+        // forwarder (`run_interactive` itself is out of reach of a unit
+        // test): check whether the worker has finished, drain the queue, do
+        // other awaited work, and only then handle a finished worker and
+        // settle its cancel. A worker finishes only once its forwarder has
+        // queued everything, so after a pass that saw it finished nothing of
+        // its turn can arrive any more.
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut queue) = tokio::sync::mpsc::channel(1);
+        for n in 0..3 {
+            turn_tx
+                .send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
+                .unwrap();
+        }
+        drop(turn_tx);
+        let handle = tokio::spawn(async move {
+            forward_scoped_events(turn_rx, events, Default::default()).await;
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let mut drained = 0;
+        loop {
+            let task_finished = handle.is_finished();
+            while queue.try_recv().is_ok() {
+                drained += 1;
+            }
+            // The awaited work between the drain and the settle lets the
+            // forwarder deliver more and the worker finish.
+            tokio::task::yield_now().await;
+            if task_finished {
+                break;
+            }
+        }
+        assert_eq!(drained, 3, "every event was applied before the settle");
+        assert!(queue.try_recv().is_err(), "nothing is left to arrive later");
+    }
+
+    #[tokio::test]
     async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
         let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events, queue) = tokio::sync::mpsc::channel(1);
@@ -6733,6 +6843,224 @@ mod tests {
         .await
         .expect("a closed queue must free the worker, not run out the wait");
         assert_eq!(kept.len(), 1);
+    }
+
+    /// #408: quitting during a turn stops it and keeps the prompt and the
+    /// output it delivered. The exit block calls `stop_turn_and_keep_it` in
+    /// either renderer, and it does not read the renderer; case 27 checks
+    /// that Classic's exit reaches it.
+    #[tokio::test]
+    async fn quitting_mid_turn_stops_the_turn_and_keeps_what_it_delivered() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (worker_messages, worker_token) = (messages.clone(), token.clone());
+        // Delivers its partial answer once cancelled, and not before.
+        let handle = tokio::spawn(async move {
+            worker_token.cancelled().await;
+            worker_messages
+                .lock()
+                .await
+                .push(claurst_core::types::Message::assistant(
+                    "partial answer".to_string(),
+                ));
+            claurst_query::QueryOutcome::Cancelled
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(token.clone()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert!(token.is_cancelled(), "the turn is cancelled");
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a turn that stops is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| (message.role.clone(), message.get_all_text()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (claurst_core::types::Role::User, "the prompt".to_string()),
+                (
+                    claurst_core::types::Role::Assistant,
+                    "partial answer".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// #408: quitting waits up to `TURN_EXIT_WAIT` for a turn that ignores
+    /// the stop, then keeps its prompt.
+    #[tokio::test]
+    async fn quitting_mid_turn_waits_out_a_turn_that_ignores_the_stop_then_keeps_its_prompt() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let handle = tokio::spawn(std::future::pending::<claurst_query::QueryOutcome>());
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut None,
+                &mut app,
+                &Some(tokio_util::sync::CancellationToken::new()),
+                &mut session,
+                &mut Vec::new(),
+            ),
+        )
+        .await
+        .expect("quitting waits for the turn only up to its bound");
+
+        assert!(
+            started.elapsed() >= TURN_EXIT_WAIT,
+            "the turn gets its full chance to stop"
+        );
+        assert_eq!(session.messages.len(), 1, "the prompt is kept");
+    }
+
+    /// #408: a worker that does not watch the token, as auto-compaction does
+    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. This models the compaction
+    /// worker's shape, not `compact_conversation` itself.
+    #[tokio::test]
+    async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+        app.auto_compact_running = true;
+        let prompt = claurst_core::types::Message::user("the prompt".to_string());
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(vec![prompt]));
+        let worker_messages = messages.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let summary = claurst_core::types::Message::assistant("the summary".to_string());
+            *worker_messages.lock().await = vec![summary.clone()];
+            claurst_query::QueryOutcome::EndTurn {
+                message: summary,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        });
+        let (_events, queue) = tokio::sync::mpsc::channel(1);
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        let started = std::time::Instant::now();
+
+        let report = stop_turn_and_keep_it(
+            (handle, messages),
+            queue,
+            &mut None,
+            &mut app,
+            &Some(tokio_util::sync::CancellationToken::new()),
+            &mut session,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert!(!report.is_turn(), "compaction gets no turn report");
+        assert!(
+            started.elapsed() < TURN_EXIT_WAIT,
+            "a worker that finishes is not waited out"
+        );
+        let kept: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| message.get_all_text())
+            .collect();
+        assert_eq!(kept, ["the summary"]);
+    }
+
+    /// #408: quitting during a goal continuation that never sent a request
+    /// removes its synthetic prompt from what is saved, and keeps it once a
+    /// request was sent.
+    #[tokio::test]
+    async fn quitting_drops_a_goal_continuations_prompt_only_if_no_request_was_sent() {
+        for sent in [false, true] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let store = claurst_core::GoalStore::open(&dir.path().join("goals.sqlite"))
+                .expect("goal store");
+            let mut session = claurst_core::history::ConversationSession::new("model".into());
+            store
+                .set_goal(&session.id, "the objective", None)
+                .expect("goal");
+            let turn = store
+                .capture_active_goal(&session.id)
+                .expect("capture")
+                .expect("active goal");
+            if sent {
+                turn.mark_request_attempted();
+            }
+            let mut goal_turn = Some(InteractiveTurn::from_goal(turn, 0));
+            let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+            app.select_renderer(claurst_tui::application::UiRenderer::Classic);
+            let mut conversation = vec![claurst_core::types::Message::user("earlier".to_string())];
+            goal_turn
+                .as_mut()
+                .expect("goal turn")
+                .inject(
+                    "continue the goal".to_string(),
+                    &mut conversation,
+                    &mut app,
+                    &mut session,
+                )
+                .expect("inject");
+            let mut command_messages = conversation.clone();
+            let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(conversation));
+            let token = tokio_util::sync::CancellationToken::new();
+            let worker_token = token.clone();
+            let handle = tokio::spawn(async move {
+                worker_token.cancelled().await;
+                claurst_query::QueryOutcome::Cancelled
+            });
+            let (_events, queue) = tokio::sync::mpsc::channel(1);
+
+            stop_turn_and_keep_it(
+                (handle, messages),
+                queue,
+                &mut goal_turn,
+                &mut app,
+                &Some(token),
+                &mut session,
+                &mut command_messages,
+            )
+            .await;
+
+            let saved: Vec<_> = session
+                .messages
+                .iter()
+                .map(|message| message.get_all_text())
+                .collect();
+            let expected: &[&str] = if sent {
+                &["earlier", "continue the goal"]
+            } else {
+                &["earlier"]
+            };
+            assert_eq!(saved, expected, "request sent: {sent}");
+            assert_eq!(
+                command_messages.len(),
+                expected.len(),
+                "request sent: {sent}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8036,4 +8364,10 @@ mod tests {
 mod goal_dispatch_tests;
 
 #[cfg(test)]
+mod reconcile_tests;
+
+#[cfg(test)]
 mod session_save_tests;
+
+#[cfg(test)]
+mod tool_result_tests;

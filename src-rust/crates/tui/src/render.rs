@@ -2609,6 +2609,7 @@ fn should_render_status_row(app: &App) -> bool {
     app.voice_recording
         || app.last_turn_elapsed.is_some()
         || app.is_streaming
+        || app.cancellation != crate::application::TurnCancellation::Idle
         || app.status_message.is_some()
         || interesting_stream_status
 }
@@ -2661,6 +2662,12 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         s
+    } else if app.cancellation != crate::application::TurnCancellation::Idle {
+        // Not "Cancelled." until the runtime has actually stopped the turn.
+        vec![Span::styled(
+            "Cancelling…",
+            Style::default().fg(Color::DarkGray),
+        )]
     } else if let (Some(verb), Some(elapsed)) =
         (app.last_turn_verb, app.last_turn_elapsed.as_deref())
     {
@@ -2955,7 +2962,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        // During streaming show "esc to interrupt". The "? shortcuts" hint is
+        // During streaming show that Escape interrupts the turn: it cancels
+        // the model and any running tool (#408). The "? shortcuts" hint is
         // rendered in the top-right status bar (see render_prompt area), so do
         // not duplicate it here (issue #149 follow-up).
         if spans.is_empty() && app.is_streaming {

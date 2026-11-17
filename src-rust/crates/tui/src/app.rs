@@ -420,6 +420,14 @@ pub struct ToolUseBlock {
     pub run: ToolRun,
 }
 
+impl ToolUseBlock {
+    /// Still at work as far as the runtime has shown: no result, and no
+    /// report that its own work ended.
+    fn is_unfinished(&self) -> bool {
+        self.status == ToolStatus::Running && self.run.finished.is_none()
+    }
+}
+
 /// What the query loop has reported about a tool's own work, ahead of the
 /// `ToolEnd` that waits for every tool in its response. Only Next shows this.
 #[derive(Debug, Clone, Default)]
@@ -779,6 +787,9 @@ pub struct App {
     pub message_selector: MessageSelectorOverlay,
     /// Multi-step rewind flow overlay.
     pub rewind_flow: RewindFlowOverlay,
+    /// The message index a rewind confirmed in the overlay kept up to, until
+    /// the loop cuts its own conversation there.
+    pub rewind_confirmed_at: Option<usize>,
     /// Full-screen reader for a completed assistant response.
     pub response_reader: ResponseReaderState,
     /// Bridge connection state.
@@ -1364,6 +1375,7 @@ impl App {
             global_search: GlobalSearchState::default(),
             message_selector: MessageSelectorOverlay::new(),
             rewind_flow: RewindFlowOverlay::new(),
+            rewind_confirmed_at: None,
             response_reader: ResponseReaderState::default(),
             bridge_state: BridgeConnectionState::Disconnected,
             notifications: NotificationQueue::new(),
@@ -1747,6 +1759,14 @@ impl App {
             .checked_sub(1)
     }
 
+    /// The tool rows opened in the current user turn.
+    fn current_turn_tool_rows(&self) -> impl Iterator<Item = &ToolUseBlock> {
+        let turn = self.current_user_turn_index();
+        self.tool_use_blocks
+            .iter()
+            .filter(move |block| block.turn_index == turn)
+    }
+
     fn current_agent_mode_snapshot(&self) -> String {
         self.agent_mode
             .clone()
@@ -1790,7 +1810,7 @@ impl App {
         }
     }
 
-    fn complete_current_turn_snapshot(&mut self, interrupted: bool) {
+    fn complete_current_turn_snapshot(&mut self, duration: Option<String>, interrupted: bool) {
         if let Some(index) = self.current_user_turn_index() {
             if self.turn_metadata.len() <= index {
                 self.sync_turn_metadata_to_messages();
@@ -1799,7 +1819,7 @@ impl App {
             let model_name = self.model_name.clone();
             let agent_mode = self.current_agent_mode_snapshot();
             if let Some(meta) = self.turn_metadata.get_mut(index) {
-                meta.duration = self.last_turn_elapsed.clone();
+                meta.duration = duration;
                 meta.interrupted = interrupted;
                 if meta.model_name.is_none() {
                     meta.model_name = Some(model_name);
@@ -3513,11 +3533,19 @@ impl App {
         }
     }
 
+    /// The row of a call: its live row, or the row a cancel moved to the
+    /// interrupted list, which keeps receiving what the call reports.
+    fn tool_row_mut(&mut self, tool_id: &str) -> Option<&mut ToolUseBlock> {
+        let rows = if self.tool_use_blocks.iter().any(|block| block.id == tool_id) {
+            &mut self.tool_use_blocks
+        } else {
+            &mut self.interrupted_tools
+        };
+        rows.iter_mut().find(|block| block.id == tool_id)
+    }
+
     fn tool_run_mut(&mut self, tool_id: &str) -> Option<&mut ToolRun> {
-        self.tool_use_blocks
-            .iter_mut()
-            .find(|block| block.id == tool_id)
-            .map(|block| &mut block.run)
+        self.tool_row_mut(tool_id).map(|block| &mut block.run)
     }
 
     fn prune_permission_decisions(&mut self) {
@@ -3543,15 +3571,20 @@ impl App {
         let (interrupted, kept): (Vec<_>, Vec<_>) = self
             .tool_use_blocks
             .drain(..)
-            .partition(|block| block.status == ToolStatus::Running && block.run.finished.is_none());
+            .partition(ToolUseBlock::is_unfinished);
         self.interrupted_tools.extend(interrupted);
         *self.tool_use_blocks = kept;
     }
 
-    /// Record a cancellation the loop performed without a key request
-    /// (remote control), so it is shown pending until the worker stops.
-    pub fn note_cancellation_sent(&mut self) {
-        self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+    /// Show a cancellation the loop performed without a key request (remote
+    /// control). A running turn is shown pending until its worker stops.
+    pub fn note_cancellation_sent(&mut self, turn_running: bool) {
+        if turn_running {
+            self.cancellation = crate::application::TurnCancellation::AwaitingRuntime;
+            self.interrupt_tool_rows();
+        }
+        self.is_streaming = false;
+        self.status_message = Some("Cancelled by remote control.".to_string());
     }
 
     /// The loop calls this once no turn worker is running any more. A
@@ -3559,21 +3592,32 @@ impl App {
     pub fn settle_cancellation(&mut self) {
         if self.cancellation != crate::application::TurnCancellation::Idle {
             self.status_message = Some("Cancelled.".to_string());
+            // A row still running was started by the backlog after the
+            // request, and the worker is gone without finishing it. Rows
+            // that finished, or reported finishing, keep their place, as
+            // `interrupt_tool_rows` keeps them.
+            let (running, finished): (Vec<_>, Vec<_>) = self
+                .tool_use_blocks
+                .drain(..)
+                .partition(ToolUseBlock::is_unfinished);
+            *self.tool_use_blocks = finished;
+            self.interrupted_tools.extend(running);
+            // A completion that arrived while the cancel was pending does not
+            // make this a finished turn: Classic shows "Cancelled.", not its
+            // done marker.
+            self.last_turn_verb = None;
         }
         self.cancellation = crate::application::TurnCancellation::Idle;
+    }
+
+    /// Ask the loop to cancel the running turn through its token.
+    fn request_turn_cancellation(&mut self) {
+        self.cancellation = crate::application::TurnCancellation::Requested;
     }
 
     /// Fold the row correction the Next renderer measured while the reader
     /// was scrolled away into `scroll_offset`, so later scroll steps move
     /// from where the reader actually is.
-    /// Ask the loop to cancel the running turn through its token. Next only:
-    /// Classic keeps its existing cancel behavior unchanged.
-    fn request_turn_cancellation(&mut self) {
-        if self.renderer == crate::application::UiRenderer::Next {
-            self.cancellation = crate::application::TurnCancellation::Requested;
-        }
-    }
-
     pub fn settle_scroll_anchor(&mut self) {
         let rows = self.next_shell.take_unsettled_rows();
         if !self.auto_scroll {
@@ -5644,7 +5688,7 @@ impl App {
                 self.interrupt_tool_rows();
                 self.status_message = Some("Cancelled.".to_string());
                 self.request_turn_cancellation();
-                self.complete_current_turn_snapshot(true);
+                self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
             // ---- Quit / cancel ----------------------------------------
@@ -5677,7 +5721,7 @@ impl App {
                     self.interrupt_tool_rows();
                     self.status_message = Some("Cancelled.".to_string());
                     self.request_turn_cancellation();
-                    self.complete_current_turn_snapshot(true);
+                    self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
                 } else {
                     // No text selected and not streaming: handle exit confirmation sequence.
                     // Always clear the prompt input on Ctrl+C.
@@ -6399,7 +6443,23 @@ impl App {
                     if let Some(idx) = self.rewind_flow.accept_confirm() {
                         // Truncate conversation to the selected message index.
                         self.messages.truncate(idx);
+                        self.rewind_confirmed_at = Some(idx);
                         self.research_retrievals.retain(|index, _| *index < idx);
+                        // Each kept user turn keeps its own record and tool
+                        // rows; the next prompt's follow them. A removed
+                        // turn's row would otherwise count as the next
+                        // turn's (#408).
+                        self.sync_turn_metadata_to_messages();
+                        let kept_turns = self
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == Role::User)
+                            .count();
+                        let kept_row = |block: &ToolUseBlock| {
+                            block.turn_index.is_none_or(|turn| turn < kept_turns)
+                        };
+                        self.tool_use_blocks.retain(kept_row);
+                        self.interrupted_tools.retain(kept_row);
                         // Remove system annotations placed after the truncation point.
                         self.system_annotations.retain(|a| a.after_index <= idx);
                         self.push_notification(
@@ -7966,13 +8026,12 @@ impl App {
     ) -> Vec<crate::application::PresentationEffect> {
         let mut effects = Vec::new();
         // A cancelled turn's backlog keeps arriving until the runtime settles.
-        // Its live output must not restart the turn on screen, or further
-        // interrupts would cancel again instead of reaching the exit sequence.
-        // The worker's durable messages and terminal events still apply.
-        if matches!(event, QueryEvent::Stream(_))
-            && self.renderer == crate::application::UiRenderer::Next
-            && self.cancellation != crate::application::TurnCancellation::Idle
-        {
+        // Its live output and tool starts must not restart the turn on screen,
+        // or further interrupts would cancel again instead of reaching the exit
+        // sequence. Tool starts are still recorded, and the worker's tool
+        // results, durable messages and terminal events still apply.
+        let cancelling = self.cancellation != crate::application::TurnCancellation::Idle;
+        if cancelling && matches!(event, QueryEvent::Stream(_)) {
             return effects;
         }
         // Auto-dismiss error modal when assistant responds
@@ -7988,7 +8047,11 @@ impl App {
                 if self.response_reader.local_text.is_none() {
                     self.close_response_reader();
                 }
-                if !self.is_streaming {
+                // A repeated terminal stream event cannot begin another turn
+                // or re-arm the completion timer after TurnComplete (#408).
+                if !self.is_streaming
+                    && !matches!(stream_evt, claurst_api::AnthropicStreamEvent::MessageStop)
+                {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
                     // turn_start is set in begin_user_turn_snapshot (prompt
@@ -8035,18 +8098,36 @@ impl App {
                 }
             }
 
+            // A start delivered again in its turn once its call has ended is a
+            // duplicate: it must not reopen the call or drop its result
+            // (#408). The runtime starts each call once, so a later turn's
+            // start with the same id is a new call and takes the row over.
+            QueryEvent::ToolStart { tool_id, .. }
+                if self
+                    .current_turn_tool_rows()
+                    .any(|block| block.id == tool_id && !block.is_unfinished()) => {}
+
             QueryEvent::ToolStart {
                 tool_name,
                 tool_id,
                 input_json,
             } => {
-                if !self.is_streaming && self.spinner_verb.is_none() {
-                    let seed = self.frame_count as usize ^ (self.messages.len() * 17);
-                    self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                if !cancelling {
+                    if !self.is_streaming && self.spinner_verb.is_none() {
+                        let seed = self.frame_count as usize ^ (self.messages.len() * 17);
+                        self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
+                    }
+                    self.is_streaming = true;
+                    self.status_message = Some(format!("Running {}…", tool_name));
                 }
-                self.is_streaming = true;
-                self.status_message = Some(format!("Running {}…", tool_name));
                 let turn_index = self.current_user_turn_index();
+                // A call the cancel already interrupted keeps its row there; a
+                // repeated start must not add a live one beside it.
+                let interrupted = cancelling
+                    && self
+                        .interrupted_tools
+                        .iter()
+                        .any(|block| block.id == tool_id);
                 if let Some(existing) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
                     existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
@@ -8056,7 +8137,7 @@ impl App {
                         opened: existing.run.opened,
                         ..ToolRun::default()
                     };
-                } else {
+                } else if !interrupted {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
                         name: tool_name,
@@ -8078,7 +8159,7 @@ impl App {
             } => {
                 // Build a multi-line preview: show up to 3 lines, truncate if more.
                 let preview = Self::tool_result_preview(&result);
-                if let Some(block) = self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id) {
+                if let Some(block) = self.tool_row_mut(&tool_id) {
                     block.status = if is_error {
                         ToolStatus::Error
                     } else {
@@ -8117,6 +8198,22 @@ impl App {
                 }
             }
 
+            // The runtime completes a turn once, and the completion spends the
+            // timer its prompt started (`begin_user_turn_snapshot`). Every
+            // turn the CLI starts pushes its prompt first, except a rate-limit
+            // retry, which reruns a turn that never completed and keeps its
+            // timer; the stream starts one only for a caller that is not yet
+            // streaming. A completion with no timer running is a duplicate
+            // and commits nothing more (#408): no second usage count, toast
+            // or bell, and the turn's record stays. Streamed text is still
+            // kept.
+            QueryEvent::TurnComplete { .. } if self.turn_start.is_none() => {
+                self.is_streaming = false;
+                self.spinner_verb = None;
+                self.flush_streamed_assistant_message();
+                self.invalidate_transcript();
+            }
+
             QueryEvent::TurnComplete {
                 turn,
                 stop_reason,
@@ -8147,20 +8244,52 @@ impl App {
                     .take()
                     .map(|start| format_elapsed_ms(start.elapsed().as_millis()));
                 let elapsed_label = elapsed.unwrap_or_else(|| "0s".to_string());
-                self.last_turn_elapsed = Some(elapsed_label.clone());
-                self.last_turn_verb = Some(sample_completion_verb(seed));
+                let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
+                // A call of this turn still at work has no result: the turn
+                // ended without it. It is not reported done and the turn is
+                // recorded interrupted (#408). Its row is dropped, as before,
+                // so say which calls had none, unless the user is cancelling.
+                let mut unfinished: Vec<String> = Vec::new();
+                for block in self
+                    .current_turn_tool_rows()
+                    .filter(|block| block.is_unfinished())
+                {
+                    let name = crate::application::view::one_line_safe(&block.name);
+                    if !unfinished.contains(&name) {
+                        unfinished.push(name);
+                    }
+                }
+                if unfinished.is_empty() {
+                    self.last_turn_elapsed = Some(elapsed_label.clone());
+                    self.last_turn_verb = Some(sample_completion_verb(seed));
+                } else if !cancelled && !cancelling {
+                    self.push_notification(
+                        NotificationKind::Warning,
+                        format!("Turn ended with no result from {}", unfinished.join(", ")),
+                        Some(10),
+                    );
+                }
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks
                     .retain(|b| b.status != ToolStatus::Running);
-                let cancelled = stop_reason.contains("abort") || stop_reason.contains("cancel");
-                self.complete_current_turn_snapshot(cancelled);
+                // A turn the user is cancelling settles as cancelled.
+                self.complete_current_turn_snapshot(
+                    Some(elapsed_label.clone()),
+                    cancelled || cancelling || !unfinished.is_empty(),
+                );
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
 
                 // Surface a clear "turn done" signal for long-running turns the
                 // user might have stepped away from. The faint "✽ Worked for Ns"
-                // status line is too quiet on its own.
-                if !cancelled && turn_elapsed_secs >= self.completion_toast_min_secs {
+                // status line is too quiet on its own. A turn the user is
+                // cancelling gets none: they are here, and it settles as
+                // cancelled. Nor does one that ended without a call's result.
+                if !cancelled
+                    && !cancelling
+                    && unfinished.is_empty()
+                    && turn_elapsed_secs >= self.completion_toast_min_secs
+                {
                     if self.completion_toast_enabled {
                         self.push_notification(
                             NotificationKind::Success,
@@ -9975,6 +10104,7 @@ role = "Research"
             .turn_files
             .push(crate::diff_viewer::FileDiffStats {
                 path: "src/main.rs".to_string(),
+                renamed_from: None,
                 added: 1,
                 removed: 0,
                 binary: false,

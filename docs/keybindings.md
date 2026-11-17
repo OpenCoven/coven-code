@@ -322,11 +322,9 @@ In vim insert mode, `Enter` also submits. Use `Shift+Enter` for newlines in vim 
 
 ### ESC During Streaming
 
-Pressing `Escape` while the model is streaming a response interrupts the stream. The partial response is preserved in the conversation history and the model stops generating. The input field regains focus and you can send a follow-up message.
+Pressing `Escape` while a turn is running cancels the whole turn, the same way `Ctrl+C` does, in both renderers: the model stops generating and the runtime cancels any tool call in progress. Live text stops streaming at once. Once the runtime has stopped, the partial answer it kept appears in the transcript and the saved session; it can include text that had not reached the screen yet. Nothing else the cancelled turn sends restarts it, so the next `Ctrl+C` starts the exit sequence instead of cancelling again. The input field keeps focus and you can send a follow-up message.
 
-This is equivalent to pressing `Ctrl+C` during streaming, except that `Ctrl+C` also signals any tool calls in progress to abort (via `AbortController`), while `Escape` only stops the stream and allows running tools to finish.
-
-In the Next renderer (`COVEN_CODE_UI=next`), `Escape` cancels the whole turn the same way `Ctrl+C` does, and the status shows `cancelling` until the runtime has actually stopped it. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
+Until the runtime has actually stopped the turn, the status says the cancel is pending: `Cancelling…` in Classic, `cancelling` in the Next renderer (`COVEN_CODE_UI=next`). Then it shows `Cancelled.`, with no turn-done notice or bell, even if the turn had already finished when the cancel reached it. A cancel from remote control follows the same steps. Auto-compaction does not stop when cancelled: the status says the cancel is pending until the compaction finishes, then shows `Cancelled.`, although the conversation was compacted. When the Next inspector is open, the first `Escape` closes the inspector instead of cancelling.
 
 ---
 
