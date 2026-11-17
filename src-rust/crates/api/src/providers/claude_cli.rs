@@ -588,9 +588,10 @@ pub struct ClaudeCliProvider {
     binary: Option<PathBuf>,
     /// See [`HEARTBEAT_PERIOD`]. A field so tests need not wait for it.
     heartbeat: std::time::Duration,
-    /// How long a running CLI may print nothing before the turn is stopped.
-    /// The keepalive holds off the consumer's stall timeout for as long as
-    /// the process lives, so this is the only bound on a CLI that hangs.
+    /// How long a running CLI may print nothing before the turn is stopped,
+    /// from its start as well as between its lines. The keepalive holds off
+    /// the consumer's stall timeout for as long as the process lives, so this
+    /// is the only bound on a CLI that hangs.
     quiet_limit: Option<std::time::Duration>,
     goal_authority: Option<(
         claurst_core::goal::GoalTurn,
@@ -728,15 +729,22 @@ impl ClaudeCliProvider {
         })?;
         let mut reader = BufReader::new(stdout);
         let mut first_line = String::new();
-        let read = reader
-            .read_line(&mut first_line)
-            .await
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("failed reading claude CLI output: {}", e),
-                status: None,
-                body: None,
-            })?;
+        // No stream exists yet to carry a keepalive or a stall timeout, so
+        // the quiet limit is all that bounds a CLI that hangs before it
+        // prints anything. Returning the error drops `child`, which stops it.
+        let first_read = reader.read_line(&mut first_line);
+        let read = match self.quiet_limit {
+            Some(limit) => tokio::time::timeout(limit, first_read)
+                .await
+                .map_err(|_| quiet_limit_error(&self.id, limit))?,
+            None => first_read.await,
+        }
+        .map_err(|e| ProviderError::Other {
+            provider: self.id.clone(),
+            message: format!("failed reading claude CLI output: {}", e),
+            status: None,
+            body: None,
+        })?;
         if read == 0 {
             // Exited without output. Reap the child so it doesn't linger.
             let status = child.wait().await.ok();
@@ -1252,6 +1260,25 @@ mod tests {
         (dir, items, started.elapsed())
     }
 
+    /// Whether process `pid` is still there after up to five seconds, which
+    /// is ample for a stopped process to be reaped.
+    #[cfg(unix)]
+    async fn still_running_after_a_wait(pid: &str) -> bool {
+        for _ in 0..100 {
+            let running = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !running {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        true
+    }
+
     #[cfg(unix)]
     fn is_quiet_limit_error(item: &Result<StreamEvent, ProviderError>) -> bool {
         matches!(item, Err(ProviderError::StreamError { message, .. })
@@ -1290,19 +1317,55 @@ mod tests {
             .any(|item| matches!(item, Ok(StreamEvent::Ping))));
 
         // Ending the stream stopped the CLI: nothing is left running.
-        let mut running = true;
-        for _ in 0..100 {
-            running = std::process::Command::new("kill")
-                .args(["-0", pid.trim()])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap()
-                .success();
-            if !running {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let running = still_running_after_a_wait(pid.trim()).await;
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            !running,
+            "the hung CLI (pid {}) is still running",
+            pid.trim()
+        );
+    }
+
+    /// A CLI can hang before it prints anything. No stream exists yet at
+    /// that point, so neither the keepalive nor the stall timeout is running:
+    /// the quiet limit has to cover the wait for the first line as well.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_silent_from_the_start_fails_the_turn_at_the_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mute-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let binary = dir.join("claude");
+        let script =
+            "#!/bin/sh\ncat >/dev/null\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n";
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_millis(50),
+            quiet_limit: Some(std::time::Duration::from_secs(1)),
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let started = std::time::Instant::now();
+        let error = match provider.create_message_stream(request).await {
+            Ok(_) => panic!("a CLI that printed nothing produced a stream"),
+            Err(error) => error,
+        };
+        let took = started.elapsed();
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+
+        assert!(
+            took >= std::time::Duration::from_secs(1),
+            "failed after {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "failed after {took:?}"
+        );
+        assert!(is_quiet_limit_error(&Err(error)));
+        let running = still_running_after_a_wait(pid.trim()).await;
         let _ = std::fs::remove_dir_all(dir);
         assert!(
             !running,

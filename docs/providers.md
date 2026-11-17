@@ -61,8 +61,9 @@ waiting for as long as the `claude` process is running. The 45-second stall
 timeout, which retries a silent API stream, does not cut that wait short.
 
 The wait has a limit of its own. A `claude` process that is still running and
-has printed nothing for 150 minutes is taken to have hung: the engine stops it
-and fails the turn, without running the prompt again. The limit is longer than
+has printed nothing for 150 minutes, from its start or since its last line, is
+taken to have hung: the engine stops it and fails the turn, without running
+the prompt again. The limit is longer than
 any command Claude Code runs by itself, which it stops after 10 minutes in the
 foreground and after 2 hours at most in the background. Set
 `COVEN_CODE_CLAUDE_QUIET_LIMIT_SECS` to a number of seconds to change it; `0`
