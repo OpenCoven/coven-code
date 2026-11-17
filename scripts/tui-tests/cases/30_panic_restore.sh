@@ -10,10 +10,11 @@
 #
 # The probe is built from source, so it is looked up in COVEN_BIN's cargo
 # output (examples/panic_restore next to it), or set COVEN_PANIC_PROBE. When
-# COVEN_BIN is a cargo build, a missing probe fails, and so does one older
-# than a file cargo built it from (a plain `cargo build` does not rebuild it);
-# for an installed binary there is nothing to check it against, so the case
-# is skipped.
+# COVEN_BIN is a cargo build (cargo's dep-info, coven-code.d, is next to it),
+# a missing probe fails, and so does one older than a file cargo built it
+# from (a plain `cargo build` does not rebuild it); for an installed binary
+# there is nothing to check it against, so the case is skipped. A missing
+# COVEN_PANIC_PROBE always fails.
 
 register_case tc_panic_restore
 
@@ -24,29 +25,31 @@ tc_panic_restore() {
   local dir="${COVEN_BIN%/*}" probe="${COVEN_PANIC_PROBE:-}"
   if [ -z "$probe" ]; then
     probe="$dir/examples/panic_restore"
-    if [ ! -x "$probe" ] && [ ! -d "$dir/deps" ]; then
+    if [ ! -x "$probe" ] && [ ! -f "$COVEN_BIN.d" ]; then
       _skip "COVEN_BIN is not a cargo build; set COVEN_PANIC_PROBE to check the source tree's probe"
       return 0
     fi
   fi
   local profile="" build
   [ "${dir##*/}" = "release" ] && profile=" --release"
-  build="(cd src-rust && cargo build$profile -p claurst -p claurst-tui --bins --example panic_restore)"
+  build="(cd \"$ROOT/src-rust\" && cargo build$profile -p claurst -p claurst-tui --bins --example panic_restore)"
   if [ ! -x "$probe" ]; then
     _fail "panic probe is built" "no $probe; build it with: $build"
     return 0
   fi
   # Compare the probe with the files cargo built it from, as listed in its
   # dep-info: one line, "target: dep dep ...", with spaces in paths escaped as
-  # "\ ". An explicit COVEN_PANIC_PROBE is used as given.
+  # "\ ". This catches a forgotten rebuild; it is not proof, since an edit
+  # in the same second as the link, or while cargo was building, can slip
+  # through. An explicit COVEN_PANIC_PROBE is used as given.
   if [ -z "${COVEN_PANIC_PROBE:-}" ] && [ -f "$probe.d" ]; then
-    local deps dep
-    local -a files
+    local deps="" dep us=$'\037'
+    local -a files=()
     IFS= read -r deps <"$probe.d"
     deps="${deps#*: }"
-    read -ra files <<<"${deps//\\ /$'\037'}"
+    read -ra files <<<"${deps//\\ /$us}"
     for dep in ${files[@]+"${files[@]}"}; do
-      dep="${dep//$'\037'/ }"
+      dep="${dep//$us/ }"
       if [ "$dep" -nt "$probe" ]; then
         _fail "panic probe is current" "$dep is newer than $probe; rebuild it with: $build"
         return 0

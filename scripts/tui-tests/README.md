@@ -44,6 +44,8 @@ python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
 These tests exercise the actual runner and assertion library with synthetic
 case inputs and an inert tmux executable. They need no engine, tmux server,
 credentials or network, and do not establish real-binary terminal acceptance.
+`test_panic_restore_pty.py` also needs a PTY: it runs the panic driver, and
+case 30 through the runner, against fake probes (about a minute).
 CI runs them before building and exercising the real engine.
 
 ## CI
@@ -63,10 +65,12 @@ screen, and runs `run.sh`. No secrets or network access required.
   (`run.sh --build` builds it). It is built from source, so the case looks
   for it in `COVEN_BIN`'s cargo output (`examples/panic_restore` next to
   the binary) or `COVEN_PANIC_PROBE`. A missing probe fails the case when
-  `COVEN_BIN` is a cargo build, and so does a probe older than any file
-  cargo built it from, as its dep-info (`panic_restore.d`) lists them (a
-  plain `cargo build` does not rebuild it); for an installed binary the case
-  is skipped, since the probe cannot test that binary.
+  `COVEN_BIN` is a cargo build (cargo's dep-info, `coven-code.d`, is next to
+  it), and so does a probe older than any file cargo built it from, as its
+  own dep-info (`panic_restore.d`) lists them (a plain `cargo build` does not
+  rebuild it); for an installed binary the case is skipped, since the probe
+  cannot test that binary. A missing `COVEN_PANIC_PROBE` always fails; CI
+  sets it to the probe it builds.
 - `tmux` (3.x). If absent, the headless cases still run and the interactive
   cases are reported as **skipped** rather than failed.
 

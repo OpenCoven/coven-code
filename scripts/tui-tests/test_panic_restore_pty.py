@@ -1,8 +1,13 @@
-"""panic_restore_pty.py against fake probes on a real PTY; no engine or cargo."""
+"""panic_restore_pty.py and case 30 against fake probes on a real PTY; no
+engine, tmux server or cargo."""
+import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -77,12 +82,16 @@ sys.exit(101)
 '''
 
 
+def write_fake_probe(path, behaviour="faithful"):
+    path.write_text(f"#!{sys.executable}\n" + FAKE.format(behaviour=behaviour), encoding="utf-8")
+    path.chmod(0o700)
+
+
 class PanicRestoreDriverTests(unittest.TestCase):
     def drive(self, behaviour):
         with tempfile.TemporaryDirectory(prefix="coven-fake-probe-") as temp:
             probe = pathlib.Path(temp) / "panic_restore"
-            probe.write_text(f"#!{sys.executable}\n" + FAKE.format(behaviour=behaviour), encoding="utf-8")
-            probe.chmod(0o700)
+            write_fake_probe(probe, behaviour)
             result = subprocess.run(
                 [sys.executable, "-B", str(HERE / "panic_restore_pty.py"), str(probe)],
                 capture_output=True, text=True, encoding="utf-8", timeout=180,
@@ -145,6 +154,102 @@ class PanicRestoreDriverTests(unittest.TestCase):
             with self.subTest(behaviour):
                 _, failed = self.assert_fails(behaviour, check)
                 self.assertEqual([line for line in failed if check not in line], [])
+
+
+class PanicRestoreCaseTests(unittest.TestCase):
+    """Case 30's probe lookup, through the actual runner."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="coven panic case ")
+        self.addCleanup(temp.cleanup)
+        self.root = pathlib.Path(temp.name)
+        suite = self.root / "scripts" / "tui-tests"
+        (suite / "cases").mkdir(parents=True)
+        for name in ("run.sh", "lib.sh", "panic_restore_pty.py", "zero_size_pty.py"):
+            shutil.copy2(HERE / name, suite / name)
+        shutil.copy2(HERE / "cases" / "30_panic_restore.sh", suite / "cases" / "30_panic_restore.sh")
+        self.run_sh = suite / "run.sh"
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        (self.tools / "tmux").write_text(
+            '#!/bin/sh\nif [ "$1" = "-V" ]; then printf "tmux fixture\\n"; fi\nexit 0\n', encoding="utf-8")
+        (self.tools / "tmux").chmod(0o700)
+        (self.tools / "python3").symlink_to(sys.executable)
+        # A cargo profile directory in the layout without deps/.
+        self.target = self.root / "target dir" / "debug"
+        (self.target / "examples").mkdir(parents=True)
+        self.bin = self.target / "coven-code"
+        self.bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.bin.chmod(0o700)
+        self.probe = self.target / "examples" / "panic_restore"
+        self.sources = self.root / "src dir"
+        self.sources.mkdir()
+
+    def dep_info(self, path, *deps):
+        """Cargo's form: "target: dep dep ...", spaces in paths escaped."""
+        target, *escaped = (str(item).replace(" ", "\\ ") for item in (path, *deps))
+        path.with_name(path.name + ".d").write_text(f"{target}: {' '.join(escaped)}\n", encoding="utf-8")
+
+    def source(self, name, age):
+        path = self.sources / name
+        path.write_text("", encoding="utf-8")
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def run_case(self, **env):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.fail("These harness regressions require bash")
+        result = subprocess.run(
+            [bash, str(self.run_sh)], cwd=self.root,
+            env={"PATH": str(self.tools) + os.pathsep + os.defpath, "HOME": str(self.root),
+                 "COVEN_BIN": str(self.bin), "REQUIRE_TMUX": "1", **env},
+            capture_output=True, text=True, encoding="utf-8", timeout=180,
+        )
+        return result, re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+
+    def test_missing_probe_fails_for_a_cargo_build(self):
+        self.dep_info(self.bin, self.source("main.rs", 1000))
+        result, out = self.run_case()
+        self.assertEqual(result.returncode, 1, out + result.stderr)
+        self.assertIn("FAIL panic probe is built", out)
+        self.assertIn("--example panic_restore", out)
+
+    def test_missing_probe_is_skipped_for_an_installed_binary(self):
+        # The runner fails a run in which nothing passed, so add a passing case.
+        (self.run_sh.parent / "cases" / "01_ok.sh").write_text(
+            'register_case tc_ok\ntc_ok() { assert_eq yes yes "checked"; }\n', encoding="utf-8")
+        result, out = self.run_case()
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn("skip COVEN_BIN is not a cargo build", out)
+
+    def test_missing_explicit_probe_fails(self):
+        result, out = self.run_case(COVEN_PANIC_PROBE=str(self.root / "missing"))
+        self.assertEqual(result.returncode, 1, out + result.stderr)
+        self.assertIn("FAIL panic probe is built", out)
+
+    def test_probe_older_than_a_file_it_was_built_from_fails(self):
+        write_fake_probe(self.probe)
+        os.utime(self.probe, (time.time() - 500, time.time() - 500))
+        edited = self.source("edited lib.rs", 100)
+        self.dep_info(self.probe, self.source("old.rs", 1000), edited)
+        result, out = self.run_case()
+        self.assertEqual(result.returncode, 1, out + result.stderr)
+        self.assertIn("FAIL panic probe is current", out)
+        self.assertIn(f"{edited} is newer than", out)
+
+    def test_current_probe_runs_the_driver(self):
+        # A newer file the probe was not built from, such as a test-only
+        # source, does not make it stale.
+        write_fake_probe(self.probe)
+        os.utime(self.probe, (time.time() - 500, time.time() - 500))
+        self.source("tests_only.rs", 100)
+        self.dep_info(self.probe, self.source("old.rs", 1000))
+        result, out = self.run_case()
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertIn(f"probe: {self.probe}", out)
+        self.assertRegex(out, r"Summary +\d{3} passed +0 failed +0 skipped")
 
 
 if __name__ == "__main__":
