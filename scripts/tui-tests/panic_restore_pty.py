@@ -14,12 +14,12 @@ Checks, per run:
   editing, echo, signals or output processing), alternate screen, mouse
   capture, bracketed paste, hidden cursor and, unless opted out, pushed
   keyboard flags. Without this the restore checks prove nothing.
-- A panic on the main thread restores every termios field and leaves the
-  alternate screen, turns mouse capture and bracketed paste off, sends a
-  keyboard pop and shows the cursor, all before the panic message. The
-  message is printed and the process exits 101. Termios is shown restored
-  before the message by the message's first line break arriving translated
-  to CRLF, which raw mode (output processing off) does not do.
+- A panic on the main thread restores every termios field. Before the
+  panic message it turns output processing back on (the message's first
+  line break arrives translated to CRLF, which raw mode does not do), leaves
+  the alternate screen, turns mouse capture and bracketed paste off, sends a
+  keyboard pop and shows the cursor. The message is printed and the process
+  exits 101.
 - A panic on a spawned thread does not restore anything (the hook only
   restores on the thread that set the terminal up). The probe keeps running,
   and its later main-thread panic still restores.
@@ -121,8 +121,9 @@ class Probe:
                 break
         return condition()
 
-    def drain(self):
-        """Read until the process has exited and the PTY has been quiet briefly."""
+    def drain(self, until):
+        """Read until the process has exited, `until` has arrived and the PTY
+        has been quiet briefly, or 15 s pass."""
         quiet_since = None
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -137,7 +138,7 @@ class Probe:
                     self.observer.feed(data)
                     quiet_since = None
                     continue
-            if self.proc.poll() is None:
+            if self.proc.poll() is None or until not in self.out:
                 continue
             quiet_since = quiet_since or time.monotonic()
             if time.monotonic() - quiet_since > 0.3:
@@ -201,7 +202,7 @@ def check_main_panic(report, label, probe, keyboard, setups):
     observer = copy.deepcopy(probe.observer)
     mark = len(probe.out)
     probe.send()
-    probe.drain()
+    probe.drain(MAIN_MESSAGE)
     after = probe.out[mark:]
     report.check(probe.proc.returncode == 101, f"{label}: exits with the panic status 101",
                  f"exit {probe.proc.returncode}: {text(after[-300:])}")
@@ -214,7 +215,7 @@ def check_main_panic(report, label, probe, keyboard, setups):
                  f"{label}: every termios field is restored",
                  repr((probe.termios_before, termios.tcgetattr(probe.slave))))
     report.check(COOKED_MESSAGE.search(after) is not None,
-                 f"{label}: termios is restored before the panic message", repr(after[-300:]))
+                 f"{label}: output processing is restored before the panic message", repr(after[-300:]))
     observer.feed(hook)
     modes = observer.modes
     for ok, what in (

@@ -10,9 +10,10 @@
 //! - `worker` first panics on a spawned thread, which must leave the terminal
 //!   alone, draws again, waits for a second byte, then panics on the main
 //!   thread.
-//! - `resume` (Unix) first hands the terminal back and takes it again with
-//!   the real `suspend_terminal`, as Ctrl+Z and `fg` do, draws again, waits
-//!   for a second byte, then panics on the main thread.
+//! - `resume` (Unix) first hands the terminal back and takes it again through
+//!   the real `suspend_terminal`, the path Ctrl+Z and `fg` take, without
+//!   stopping the process; then draws again, waits for a second byte and
+//!   panics on the main thread.
 
 use std::io::{self, Read};
 

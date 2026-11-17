@@ -34,7 +34,7 @@ tc_panic_restore() {
   [ "${dir##*/}" = "release" ] && profile=" --release"
   build="(cd \"$ROOT/src-rust\" && cargo build$profile -p claurst -p claurst-tui --bins --example panic_restore)"
   if [ ! -x "$probe" ]; then
-    _fail "panic probe is built" "no $probe; build it with: $build"
+    _fail "panic probe is built" "no $probe; build it alongside COVEN_BIN (same tree, profile and target), for example: $build"
     return 0
   fi
   # Compare the probe with the files cargo built it from, as listed in its
@@ -51,14 +51,14 @@ tc_panic_restore() {
     for dep in ${files[@]+"${files[@]}"}; do
       dep="${dep//$us/ }"
       if [ "$dep" -nt "$probe" ]; then
-        _fail "panic probe is current" "$dep is newer than $probe; rebuild it with: $build"
+        _fail "panic probe is current" "$dep is newer than $probe; rebuild it alongside COVEN_BIN (same tree, profile and target), for example: $build"
         return 0
       fi
     done
   fi
   log "  probe: $probe"
 
-  local line out rc
+  local line out rc fails_before="$TESTS_FAIL"
   out="$(python3 -B "${BASH_SOURCE[0]%/*}/../panic_restore_pty.py" "$probe" 2>&1)"
   rc=$?
   while IFS= read -r line; do
@@ -70,7 +70,7 @@ tc_panic_restore() {
   done <<<"$out"
   if ! grep -qE '^(ok|FAIL) ' <<<"$out"; then
     _fail "panic PTY driver reported checks" "$out"
-  elif [ "$rc" -ne 0 ] && ! grep -q '^FAIL ' <<<"$out"; then
+  elif [ "$rc" -ne 0 ] && [ "$TESTS_FAIL" -eq "$fails_before" ]; then
     _fail "panic PTY driver exited $rc" "$out"
   fi
 }

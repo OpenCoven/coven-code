@@ -116,7 +116,7 @@ class PanicRestoreDriverTests(unittest.TestCase):
 
     def test_missing_restore_fails(self):
         self.assert_fails("no-restore", "every termios field is restored",
-                          "termios is restored before the panic message", "leaves the alternate screen",
+                          "output processing is restored before the panic message", "leaves the alternate screen",
                           "turns mouse capture off", "turns bracketed paste off", "shows the cursor",
                           "sends a keyboard pop")
 
@@ -129,7 +129,7 @@ class PanicRestoreDriverTests(unittest.TestCase):
         self.assertEqual([line for line in failed if check not in line], [])
 
     def test_restore_after_the_message_fails(self):
-        result, _ = self.assert_fails("message-first", "termios is restored before the panic message",
+        result, _ = self.assert_fails("message-first", "output processing is restored before the panic message",
                                       "leaves the alternate screen before the panic message")
         self.assertIn("ok classic main: every termios field is restored", result.stdout)
 
@@ -239,17 +239,35 @@ class PanicRestoreCaseTests(unittest.TestCase):
         self.assertIn("FAIL panic probe is current", out)
         self.assertIn(f"{edited} is newer than", out)
 
+    def current_probe(self, behaviour):
+        write_fake_probe(self.probe, behaviour)
+        os.utime(self.probe, (time.time() - 500, time.time() - 500))
+        self.dep_info(self.probe, self.source("old.rs", 1000))
+
     def test_current_probe_runs_the_driver(self):
+        self.current_probe("faithful")
         # A newer file the probe was not built from, such as a test-only
         # source, does not make it stale.
-        write_fake_probe(self.probe)
-        os.utime(self.probe, (time.time() - 500, time.time() - 500))
         self.source("tests_only.rs", 100)
-        self.dep_info(self.probe, self.source("old.rs", 1000))
         result, out = self.run_case()
         self.assertEqual(result.returncode, 0, out + result.stderr)
         self.assertIn(f"probe: {self.probe}", out)
-        self.assertRegex(out, r"Summary +\d{3} passed +0 failed +0 skipped")
+        # Every check the driver reports is relayed.
+        driver = subprocess.run(
+            [sys.executable, "-B", str(HERE / "panic_restore_pty.py"), str(self.probe)],
+            capture_output=True, text=True, encoding="utf-8", timeout=180,
+        )
+        checks = sum(line.startswith("ok ") for line in driver.stdout.splitlines())
+        self.assertGreater(checks, 0, driver.stdout + driver.stderr)
+        self.assertRegex(out, rf"Summary +{checks} passed +0 failed +0 skipped")
+
+    def test_failing_driver_run_fails_the_case(self):
+        self.current_probe("no-restore")
+        result, out = self.run_case()
+        self.assertEqual(result.returncode, 1, out + result.stderr)
+        self.assertIn("FAIL classic main: every termios field is restored", out)
+        self.assertIn("│ ", out)  # the evidence is passed on
+        self.assertNotIn("panic PTY driver exited", out)
 
 
 if __name__ == "__main__":

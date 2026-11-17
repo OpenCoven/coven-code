@@ -75,6 +75,9 @@ jobs:
 
       # One invocation, so the panic probe shares the binary's feature set
       # and build output instead of compiling the tui crate a second time.
+      # Building an example also resolves claurst and claurst-tui's
+      # dev-dependencies; a feature one of them enables would reach the
+      # binary under test too (none does today).
       - name: Build debug binary and panic probe
         working-directory: src-rust
         run: cargo build --locked --package claurst --package claurst-tui --bins --example panic_restore
