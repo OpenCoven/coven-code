@@ -62,6 +62,51 @@ pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
 
 const INSTALL_HINT: &str = "claude CLI not found — install with `npm install -g @anthropic-ai/claude-code`, sign in by running `claude`, and ensure it is on PATH (or set COVEN_CODE_CLAUDE_BIN)";
 
+/// Env var setting, in seconds, how long a running CLI may print nothing
+/// before the turn is stopped. `0` waits without limit.
+pub const CLAUDE_QUIET_LIMIT_ENV: &str = "COVEN_CODE_CLAUDE_QUIET_LIMIT_SECS";
+
+/// The quiet limit when the env var does not set one. Claude Code stops its
+/// own commands sooner: ten minutes at most in the foreground, two hours at
+/// most in the background. A CLI silent for longer than that is not waiting
+/// on one of them.
+const DEFAULT_QUIET_LIMIT: std::time::Duration = std::time::Duration::from_secs(150 * 60);
+
+/// The quiet limit `value` asks for: `None` waits without limit. A value that
+/// is not a whole number of seconds is ignored, so a typing mistake cannot
+/// turn the limit off.
+fn quiet_limit_from(value: Option<&str>) -> Option<std::time::Duration> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Some(DEFAULT_QUIET_LIMIT),
+        Some(value) => match value.parse::<u64>() {
+            Ok(0) => None,
+            Ok(seconds) => Some(std::time::Duration::from_secs(seconds)),
+            Err(_) => {
+                warn!(
+                    value,
+                    "{CLAUDE_QUIET_LIMIT_ENV} is not a whole number of seconds; using the default"
+                );
+                Some(DEFAULT_QUIET_LIMIT)
+            }
+        },
+    }
+}
+
+/// The error for a CLI that is still running after `limit` of silence.
+fn quiet_limit_error(provider: &ProviderId, limit: std::time::Duration) -> ProviderError {
+    let waited = match limit.as_secs() {
+        seconds if seconds >= 120 && seconds % 60 == 0 => format!("{} minutes", seconds / 60),
+        seconds => format!("{seconds} s"),
+    };
+    ProviderError::StreamError {
+        provider: provider.clone(),
+        message: format!(
+            "claude CLI printed nothing for {waited} while still running, so the turn was stopped. Send the request again. To wait longer, set {CLAUDE_QUIET_LIMIT_ENV} to a number of seconds (0 waits without limit)"
+        ),
+        partial_response: None,
+    }
+}
+
 /// How often a quiet, running CLI turn tells the consumer it is still alive.
 /// Well inside the query loop's 45-second stall timeout, so a late tick
 /// cannot let it fire.
@@ -543,6 +588,10 @@ pub struct ClaudeCliProvider {
     binary: Option<PathBuf>,
     /// See [`HEARTBEAT_PERIOD`]. A field so tests need not wait for it.
     heartbeat: std::time::Duration,
+    /// How long a running CLI may print nothing before the turn is stopped.
+    /// The keepalive holds off the consumer's stall timeout for as long as
+    /// the process lives, so this is the only bound on a CLI that hangs.
+    quiet_limit: Option<std::time::Duration>,
     goal_authority: Option<(
         claurst_core::goal::GoalTurn,
         claurst_core::goal::GoalTurnPermission,
@@ -561,6 +610,7 @@ impl ClaudeCliProvider {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: resolve_claude_binary(),
             heartbeat: HEARTBEAT_PERIOD,
+            quiet_limit: quiet_limit_from(std::env::var(CLAUDE_QUIET_LIMIT_ENV).ok().as_deref()),
             goal_authority: None,
         }
     }
@@ -850,6 +900,7 @@ impl LlmProvider for ClaudeCliProvider {
         let provider_id = self.id.clone();
         let fallback_model = request.model.clone();
         let heartbeat_period = self.heartbeat;
+        let quiet_limit = self.quiet_limit;
 
         let s = stream! {
             // Retain ownership even before the stream is first polled; dropping
@@ -890,6 +941,7 @@ impl LlmProvider for ClaudeCliProvider {
                     // one read stays pinned across the heartbeats.
                     let read_line = turn.stdout.read_line(&mut line);
                     tokio::pin!(read_line);
+                    let quiet_since = tokio::time::Instant::now();
                     loop {
                         let finished = tokio::select! {
                             result = &mut read_line => Some(result),
@@ -902,9 +954,20 @@ impl LlmProvider for ClaudeCliProvider {
                             // sends no keepalive, so the consumer's stall
                             // timeout still covers a pipe left open behind it.
                             None => {
-                                if matches!(turn.child.try_wait(), Ok(None)) {
-                                    yield Ok(StreamEvent::Ping);
+                                if !matches!(turn.child.try_wait(), Ok(None)) {
+                                    continue;
                                 }
+                                // Running, but silent for longer than any
+                                // tool of its own is allowed to take: it has
+                                // hung. Ending the stream stops the process;
+                                // a keepalive would wait on it for ever.
+                                if let Some(limit) =
+                                    quiet_limit.filter(|limit| quiet_since.elapsed() >= *limit)
+                                {
+                                    yield Err(quiet_limit_error(&provider_id, limit));
+                                    return;
+                                }
+                                yield Ok(StreamEvent::Ping);
                             }
                         }
                     }
@@ -961,6 +1024,7 @@ impl LlmProvider for ClaudeCliProvider {
                     id: self.id.clone(),
                     binary: self.binary.clone(),
                     heartbeat: self.heartbeat,
+                    quiet_limit: self.quiet_limit,
                     goal_authority: Some((turn.clone(), permission)),
                 }
                 .create_message_stream(request)
@@ -1036,6 +1100,7 @@ mod tests {
                 std::env::temp_dir().join(format!("missing-claude-{}", uuid::Uuid::new_v4())),
             ),
             heartbeat: HEARTBEAT_PERIOD,
+            quiet_limit: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1078,6 +1143,7 @@ mod tests {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
             heartbeat: std::time::Duration::from_millis(100),
+            quiet_limit: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1131,6 +1197,7 @@ mod tests {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
             heartbeat: std::time::Duration::from_secs(30),
+            quiet_limit: None,
             goal_authority: None,
         };
         let request = request_with(vec![Message::user("fixture prompt")]);
@@ -1144,6 +1211,200 @@ mod tests {
             .iter()
             .any(|event| matches!(event, StreamEvent::Ping)));
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
+    }
+
+    /// A stand-in `claude` made of `body`, a provider that runs it with a
+    /// 50 ms heartbeat and `quiet_limit`, and everything its stream yields.
+    #[cfg(unix)]
+    async fn run_with_quiet_limit(
+        body: &str,
+        quiet_limit: Option<std::time::Duration>,
+    ) -> (
+        std::path::PathBuf,
+        Vec<Result<StreamEvent, ProviderError>>,
+        std::time::Duration,
+    ) {
+        use futures::StreamExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("silent-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let binary = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\n\
+             echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n{body}"
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = ClaudeCliProvider {
+            id: ProviderId::new(ProviderId::ANTHROPIC),
+            binary: Some(binary),
+            heartbeat: std::time::Duration::from_millis(50),
+            quiet_limit,
+            goal_authority: None,
+        };
+        let request = request_with(vec![Message::user("fixture prompt")]);
+        let started = std::time::Instant::now();
+        let mut stream = provider.create_message_stream(request).await.unwrap();
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        (dir, items, started.elapsed())
+    }
+
+    #[cfg(unix)]
+    fn is_quiet_limit_error(item: &Result<StreamEvent, ProviderError>) -> bool {
+        matches!(item, Err(ProviderError::StreamError { message, .. })
+            if message.contains("printed nothing for"))
+    }
+
+    /// The keepalive tells the query loop a silent CLI is busy for as long as
+    /// its process lives. A CLI that has hung is alive too, so without a
+    /// limit of the provider's own the turn would wait on it for ever.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_cli_silent_past_the_limit_ends_the_turn_with_an_error() {
+        // The CLI records its pid, then hangs: one process, alive and silent.
+        let (dir, items, took) = run_with_quiet_limit(
+            "echo $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n",
+            Some(std::time::Duration::from_secs(1)),
+        )
+        .await;
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+
+        // It was kept alive up to the limit, then failed once, and the stream
+        // ended there instead of waiting out the minute.
+        assert!(
+            took >= std::time::Duration::from_secs(1),
+            "ended after {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "ended after {took:?}"
+        );
+        let (last, before) = items.split_last().unwrap();
+        assert!(is_quiet_limit_error(last), "last item was {last:?}");
+        assert!(before.iter().all(Result::is_ok));
+        assert!(before
+            .iter()
+            .any(|item| matches!(item, Ok(StreamEvent::Ping))));
+
+        // Ending the stream stopped the CLI: nothing is left running.
+        let mut running = true;
+        for _ in 0..100 {
+            running = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            !running,
+            "the hung CLI (pid {}) is still running",
+            pid.trim()
+        );
+    }
+
+    /// The limit is on unbroken silence, not on the length of the turn: each
+    /// line the CLI prints starts the count again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_keeps_printing_is_not_stopped_by_the_quiet_limit() {
+        let line = "echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"step\"}]}}'\n";
+        // Four quiet stretches of 0.4 s: 1.6 s in all, against a 1.2 s limit.
+        let body = format!(
+            "{}echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n",
+            format!("sleep 0.4\n{line}").repeat(4)
+        );
+        let (dir, items, took) =
+            run_with_quiet_limit(&body, Some(std::time::Duration::from_millis(1200))).await;
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert!(
+            took >= std::time::Duration::from_millis(1600),
+            "ended after {took:?}"
+        );
+        assert!(items.iter().all(Result::is_ok), "{items:?}");
+        let steps = items
+            .iter()
+            .filter(
+                |item| matches!(item, Ok(StreamEvent::TextDelta { text, .. }) if text == "step"),
+            )
+            .count();
+        assert_eq!(steps, 4);
+        assert!(matches!(items.last(), Some(Ok(StreamEvent::MessageStop))));
+    }
+
+    /// The limit is for a CLI that is running. One that has gone while
+    /// something else holds its output open gets no keepalive and no quiet
+    /// limit error: the consumer's stall timeout covers it, as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_has_gone_is_not_reported_as_silent() {
+        // The CLI exits at once; a command it left behind keeps the pipe open
+        // for two seconds, well past the 300 ms limit.
+        let (dir, items, _) = run_with_quiet_limit(
+            "sleep 2 &\nexit 0\n",
+            Some(std::time::Duration::from_millis(300)),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert!(!items.iter().any(is_quiet_limit_error), "{items:?}");
+        assert!(matches!(
+            items.last(),
+            Some(Err(ProviderError::StreamError { message, .. }))
+                if message.contains("exited before emitting a result")
+        ));
+    }
+
+    #[test]
+    fn the_quiet_limit_comes_from_the_environment_value() {
+        use std::time::Duration;
+        // Unset or blank: the default.
+        assert_eq!(quiet_limit_from(None), Some(DEFAULT_QUIET_LIMIT));
+        assert_eq!(quiet_limit_from(Some("  ")), Some(DEFAULT_QUIET_LIMIT));
+        // A number of seconds; zero waits without limit.
+        assert_eq!(quiet_limit_from(Some("90")), Some(Duration::from_secs(90)));
+        assert_eq!(
+            quiet_limit_from(Some(" 600\n")),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(quiet_limit_from(Some("0")), None);
+        // Anything else is a mistake, and a mistake must not turn it off.
+        for value in ["ten", "-5", "1.5", "30m"] {
+            assert_eq!(
+                quiet_limit_from(Some(value)),
+                Some(DEFAULT_QUIET_LIMIT),
+                "{value}"
+            );
+        }
+    }
+
+    /// The provider the engine builds is the one the limit has to be on.
+    #[test]
+    fn a_new_provider_takes_its_quiet_limit_from_the_environment() {
+        let expected = quiet_limit_from(std::env::var(CLAUDE_QUIET_LIMIT_ENV).ok().as_deref());
+        assert_eq!(ClaudeCliProvider::new().quiet_limit, expected);
+    }
+
+    #[test]
+    fn the_quiet_limit_error_says_how_long_and_how_to_change_it() {
+        let provider = ProviderId::new(ProviderId::ANTHROPIC);
+        let text =
+            |seconds| match quiet_limit_error(&provider, std::time::Duration::from_secs(seconds)) {
+                ProviderError::StreamError { message, .. } => message,
+                other => panic!("unexpected error: {other:?}"),
+            };
+        assert!(text(9000).contains("printed nothing for 150 minutes while still running"));
+        assert!(text(90).contains("printed nothing for 90 s while still running"));
+        assert!(text(9000).contains(CLAUDE_QUIET_LIMIT_ENV));
     }
 
     #[test]
