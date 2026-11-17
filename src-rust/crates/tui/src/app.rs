@@ -10104,6 +10104,7 @@ role = "Research"
             .turn_files
             .push(crate::diff_viewer::FileDiffStats {
                 path: "src/main.rs".to_string(),
+                renamed_from: None,
                 added: 1,
                 removed: 0,
                 binary: false,
