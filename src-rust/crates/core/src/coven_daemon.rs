@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
-use crate::coven_shared::coven_home;
+use crate::coven_shared::daemon_socket_path;
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -321,15 +321,15 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
-    /// Create a client targeting the default socket path.
+    /// Create a client targeting [`crate::coven_shared::daemon_socket_path`]
+    /// (`$COVEN_HOME/coven.sock`, else `~/.coven/coven.sock`).
     ///
     /// Returns `None` when the socket file does not exist (daemon is not
     /// running / not installed).  Never panics.
     pub fn new() -> Option<Self> {
         #[cfg(unix)]
         {
-            let home = coven_home()?;
-            let sock = home.join("coven.sock");
+            let sock = daemon_socket_path()?;
             if sock.exists() {
                 Some(Self { sock_path: sock })
             } else {
