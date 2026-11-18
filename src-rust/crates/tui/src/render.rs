@@ -4167,6 +4167,36 @@ mod welcome_tests {
         assert!(!offline.contains("unknown"), "{offline:?}");
     }
 
+    /// The welcome line reads the registration, not only reachability: with
+    /// something listening on the socket and the registration unknown, it
+    /// says unknown.
+    #[cfg(unix)]
+    #[test]
+    fn welcome_line_reads_unknown_for_an_unknown_registration() {
+        use crate::application::SessionOwnership;
+
+        let (mut app, _guard, temp) = make_isolated_status_app();
+        // Bound and never accepting: a connection is queued and gets no
+        // answer, which reads as a busy daemon, so as online. Before a
+        // probe lands, the socket file's presence reads as online too.
+        let _listener =
+            std::os::unix::net::UnixListener::bind(temp.path().join("coven").join("coven.sock"))
+                .expect("bind socket");
+        crate::coven_status::forget_daemon_probe();
+        assert_eq!(welcome_daemon_state(&app), "online");
+
+        app.ownership = SessionOwnership::LedgerUnknown {
+            session_id: "session-a".to_string(),
+        };
+        assert_eq!(welcome_daemon_state(&app), "unknown");
+        app.ownership = SessionOwnership::LedgerRenewing {
+            session_id: "session-a".to_string(),
+        };
+        assert_eq!(welcome_daemon_state(&app), "unknown");
+        // Let the probe this started finish before the socket goes away.
+        crate::coven_status::forget_daemon_probe();
+    }
+
     #[test]
     fn welcome_line_names_each_daemon_presence() {
         use crate::application::DaemonPresence;

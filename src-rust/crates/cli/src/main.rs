@@ -2942,8 +2942,9 @@ struct LedgerRegistrations {
 }
 
 /// How long the exit waits for a registration still in flight before it
-/// sends the completions: the budget of the health read that precedes the
-/// registration request.
+/// sends the completions. Best effort: it covers the health read that
+/// precedes the registration request (2 s at most), not a daemon that is
+/// also slow to take the request itself.
 const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl LedgerRegistrations {
@@ -3012,11 +3013,12 @@ impl LedgerRegistrations {
     }
 
     /// At exit: mark every session a registration was sent for complete.
-    /// A registration still in flight gets up to `wait` to finish first, so
-    /// its completion does not reach the daemon ahead of it. The
-    /// completions then run side by side, so a daemon that accepts and
-    /// never answers delays the exit by one request timeout, however many
-    /// ids there are. `complete` is the blocking daemon call.
+    /// A registration still in flight gets up to `wait` to finish first;
+    /// if it has not, the completions go out anyway and one may reach the
+    /// daemon ahead of its registration. The completions run side by side,
+    /// so a daemon that accepts and never answers delays the exit by one
+    /// request timeout, however many ids there are. `complete` is the
+    /// blocking daemon call.
     async fn complete_all(
         self,
         wait: std::time::Duration,
@@ -8554,14 +8556,13 @@ mod tests {
             Err("no answer".to_string())
         });
         let started = Instant::now();
-        ledger
-            .complete_all(Duration::from_millis(100), completing(&log))
-            .await;
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            ledger.complete_all(Duration::from_millis(100), completing(&log)),
+        )
+        .await
+        .expect("the exit waited for a registration that never answers");
+        assert!(started.elapsed() >= Duration::from_millis(100));
         assert_eq!(*log.lock().unwrap(), ["complete session-a"]);
         drop(release);
     }

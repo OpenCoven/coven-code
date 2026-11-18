@@ -289,11 +289,11 @@ a start time is not an instance: it could not be told from its successor.
 
 **One look at the daemon** (`DaemonClient::sight`) is one of:
 
-- gone: no socket file, a refused connection, or a connection closed with no
-  answer;
-- unidentified: something accepted the connection but gave no complete health
-  answer within the budget, answered with an error status, or named no
-  process;
+- gone: no socket file, a connection that is refused or otherwise fails, or
+  one that fails or closes before any byte of an answer;
+- unidentified: a connection was made (or was still waiting to be accepted
+  when the budget ended) but gave no complete health answer within the
+  budget, answered with an error status, or named no process;
 - an instance.
 
 The background reachability probe behind the daemon indicator (at most one
@@ -307,7 +307,9 @@ registration reads health before and after its `POST /api/v1/sessions/external`
 (2 s budget each, off the UI thread). If both name the same instance, that
 instance holds the registration. If the daemon accepted the registration but
 the two readings differ or either names no instance, the registration is
-unknown from the start.
+unknown from the start. A health read that takes longer than its budget names
+no instance, so a daemon that is slow at that moment starts as unknown
+without having restarted.
 
 **Comparison.** Once a second the interactive loop compares the last
 completed probe with the instance that holds the registration:
@@ -323,8 +325,10 @@ completed probe with the instance that holds the registration:
 
 A probe that began before the registration was recorded is ignored, since it
 may show the daemon from before a restart. A restart is therefore noticed at
-the first probe that begins after it: within about 13 s (10 s cache, 2 s
-budget, 1 s loop interval).
+the first probe that begins after it and finds the new daemon: within about
+14 s (10 s cache, 2 s budget, and a loop tick each to start the probe and to
+read it). A probe that lands between the stop and the start reads gone and
+adds one more cycle.
 
 **What "unknown" looks like.**
 
@@ -354,7 +358,8 @@ before.
 At exit the engine sends one completion for every session id it sent a
 registration for, to whichever daemon answers then, including after the state
 became unknown. A registration still in flight gets up to 2 s to finish
-first.
+first. That is best effort: against a daemon slower than that, a completion
+can still arrive ahead of its registration and leave the row `running`.
 
 **Sessions that never registered** (`daemonLedger` off, the default) remember
 no instance. Their indicator reads online or offline as before, and nothing
@@ -371,14 +376,17 @@ daemon.
 - A health answer that names a pid and no start time still counts as an
   instance. A restart that got the same pid would then be noticed only
   through the socket file.
-- The socket file's device and inode are supporting evidence only: some file
-  systems reuse an inode number at once.
+- The socket file's device and inode are enough to read as changed, and not
+  enough to prove the same daemon: some file systems reuse an inode number at
+  once.
+- A daemon whose health never names a process reads unknown from the first
+  registration on, and each `/session resume` sends another registration.
 - "Unknown" is about which daemon holds the registration. The engine does not
   ask the new daemon whether the session row exists; with the same store it
   usually does, and registering again returns that row.
 - A store replaced or vacuumed under a daemon that keeps running is not
   noticed. That is option D's store check.
-- Between a restart and the next probe (up to about 13 s) the old label is
+- Between a restart and the next probe (up to about 14 s) the old label is
   still shown.
 - While nothing answers, Next's header keeps the last registration label;
   Next's own frames have no daemon indicator.

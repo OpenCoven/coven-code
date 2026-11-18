@@ -656,12 +656,17 @@ impl DaemonClient {
             }
 
             // Read until the daemon closes the connection, the budget runs
-            // out, or a read fails. Whatever arrived by then is the answer.
+            // out, a read fails, or the answer is far larger than any health
+            // response. Whatever arrived by then is the answer.
+            const LARGEST_ANSWER: usize = 64 * 1024;
             let mut raw = Vec::new();
             let mut chunk = [0_u8; 4096];
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                if left.is_zero()
+                    || raw.len() > LARGEST_ANSWER
+                    || stream.set_read_timeout(Some(left)).is_err()
+                {
                     break;
                 }
                 match stream.read(&mut chunk) {
@@ -1902,6 +1907,33 @@ mod tests {
             instance.started_at.as_deref(),
             Some("2026-11-18T05:06:40.214Z")
         );
+    }
+
+    /// What a connection that was made and then went wrong reads as: closed
+    /// with no byte of an answer is gone; an answer cut short is not. And a
+    /// health body that names a pid and no start time is still an instance.
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_or_cut_short_answer_and_a_pid_alone() {
+        let (_dir, client, server) = serve_once("");
+        assert_eq!(client.sight(SIGHT_BUDGET), DaemonSighting::Gone);
+        server.join().unwrap();
+
+        let (_dir, client, server) = serve_once(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"daemon\":{\"pi",
+        );
+        assert_eq!(client.sight(SIGHT_BUDGET), DaemonSighting::Unidentified);
+        server.join().unwrap();
+
+        let (_dir, client, server) = serve_once(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"apiVersion\":\"coven.daemon.v1\",\"covenVersion\":\"0.5.0\",\"daemon\":{\"pid\":77}}",
+        );
+        let sighting = client.sight(SIGHT_BUDGET);
+        server.join().unwrap();
+        let DaemonSighting::Instance(instance) = sighting else {
+            panic!("not an instance: {sighting:?}");
+        };
+        assert_eq!((instance.pid, instance.started_at), (Some(77), None));
     }
 
     /// An answer that names no process cannot be told from its successor,
