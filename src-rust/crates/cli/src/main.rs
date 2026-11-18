@@ -3575,6 +3575,8 @@ async fn run_interactive(
         }
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_companion_pose();
+        // Classic's footer glyph and the palette's suggestions read this.
+        app.refresh_daemon_status(std::time::Instant::now());
         // The session browser's list loads in the background (Next only;
         // Classic's browser is unchanged).
         if app.renderer == claurst_tui::application::UiRenderer::Next {

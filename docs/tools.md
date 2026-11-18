@@ -245,7 +245,7 @@ Output (stdout + stderr) is returned as a string. Commands that produce more tha
 
 Always quote file paths containing spaces. Use Unix shell syntax regardless of host OS.
 
-When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task.
+When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task. The task keeps running after the turn ends, until it finishes, times out or is cancelled. On Windows a timeout or cancel stops every process the command started; on Unix it stops the shell.
 
 ---
 
@@ -688,6 +688,7 @@ Create or attach to a git worktree for a given branch. Subsequent file operation
 |-----------|------|----------|-------------|
 | `branch` | string | yes | Branch name for the worktree |
 | `path` | string | no | Directory for the worktree (auto-generated if omitted) |
+| `post_create_command` | string | no | Shell command to run in the new worktree, such as `npm install`. If it is still running after 10 minutes, or the call is cancelled, it is stopped with every process it started. What it leaves running when it exits is not stopped. |
 
 ---
 
