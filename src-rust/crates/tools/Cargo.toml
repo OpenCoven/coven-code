@@ -37,5 +37,15 @@ portable-pty = "0.9"
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# Job Objects own each foreground Windows shell's process tree (#373).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [features]
 computer-use = ["dep:enigo", "dep:xcap", "dep:image"]
