@@ -1240,6 +1240,22 @@ impl LlmProvider for ClaudeCliProvider {
 mod tests {
     use super::*;
 
+    /// Keep newly written scenario files out of execve's ETXTBSY checks.
+    #[cfg(unix)]
+    pub(super) fn fixture_binary(dir: &std::path::Path, script: &str) -> PathBuf {
+        std::fs::write(dir.join("claude"), script).unwrap();
+        let binary = dir.join("launcher");
+        std::os::unix::fs::symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/claude_cli_fixture.sh"
+            ),
+            &binary,
+        )
+        .unwrap();
+        binary
+    }
+
     pub(super) fn request_with(messages: Vec<Message>) -> ProviderRequest {
         ProviderRequest {
             model: "claude-opus-4-8".to_string(),
@@ -1280,10 +1296,8 @@ mod tests {
     /// seconds the way a long tool call does, then finishes the turn.
     #[cfg(unix)]
     fn quiet_cli(quiet: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("quiet-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script = format!(
             "#!/bin/sh\ncat >/dev/null\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n\
@@ -1291,8 +1305,7 @@ mod tests {
              echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}'\n\
              echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = fixture_binary(&dir, &script);
         (dir, binary)
     }
 
@@ -1390,16 +1403,13 @@ mod tests {
         std::time::Duration,
     ) {
         use futures::StreamExt;
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("silent-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script = format!(
             "#!/bin/sh\ncat >/dev/null\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n{body}"
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = fixture_binary(&dir, &script);
         let provider = ClaudeCliProvider {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
@@ -1489,14 +1499,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cli_silent_from_the_start_fails_the_turn_at_the_limit() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("mute-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script =
-            "#!/bin/sh\ncat >/dev/null\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n";
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\ncat >/dev/null\nexec sleep 60\n";
+        let binary = fixture_binary(&dir, script);
         let provider = ClaudeCliProvider {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
@@ -1511,6 +1518,8 @@ mod tests {
             Err(error) => error,
         };
         let took = started.elapsed();
+        let error_result = Err(error);
+        assert!(is_quiet_limit_error(&error_result), "{error_result:?}");
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
 
         assert!(
@@ -1521,7 +1530,6 @@ mod tests {
             took < std::time::Duration::from_secs(30),
             "failed after {took:?}"
         );
-        assert!(is_quiet_limit_error(&Err(error)));
         let running = still_running_after_a_wait(pid.trim()).await;
         let _ = std::fs::remove_dir_all(dir);
         assert!(

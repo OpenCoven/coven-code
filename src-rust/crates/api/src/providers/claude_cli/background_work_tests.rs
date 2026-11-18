@@ -3,7 +3,7 @@
 // script that prints the lines the real CLI prints, in the order it prints
 // them (recorded from Claude Code 2.1.326).
 
-use super::tests::request_with;
+use super::tests::{fixture_binary, request_with};
 use super::*;
 use futures::StreamExt;
 use std::time::{Duration, Instant};
@@ -25,13 +25,10 @@ const LAST_RESULT: &str =
 /// the stream the way the query loop does, up to its `MessageStop`, and
 /// returns the events with how long they took.
 async fn run(lines: &[&str], heartbeat: Duration) -> (Vec<StreamEvent>, Duration) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("background-claude-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).unwrap();
-    let binary = dir.join("claude");
     let script = format!("#!/bin/sh\ncat >/dev/null\n{}\n", lines.join("\n"));
-    std::fs::write(&binary, script).unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binary = fixture_binary(&dir, &script);
     let provider = ClaudeCliProvider {
         binary: Some(binary),
         heartbeat,

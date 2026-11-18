@@ -1,5 +1,5 @@
 //! Adversarial combined-background/silence lifecycle regressions.
-use super::tests::request_with;
+use super::tests::{fixture_binary, request_with};
 use super::*;
 use futures::StreamExt;
 use std::time::{Duration, Instant};
@@ -10,12 +10,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(body: &str, heartbeat: Duration, limit: Option<Duration>) -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("claude-lifecycle-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
-        std::fs::write(&binary, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = fixture_binary(&dir, &format!("#!/bin/sh\ncat >/dev/null\n{body}\n"));
         let provider = ClaudeCliProvider {
             binary: Some(binary),
             heartbeat,
@@ -171,10 +168,24 @@ async fn an_error_result_publishes_its_usage_before_the_error() {
 
 #[tokio::test]
 async fn unrelated_metadata_does_not_extend_the_exit_grace() {
-    let body = format!("{INIT}\n{TASK}\n{RESULT}\n{NO_TASK}\nfor _ in $(seq 40); do sleep 0.05; {NO_TASK}; done\nexec sleep 2");
+    let body = format!("sleep 1.2\n{INIT}\n{TASK}\n{RESULT}\n{NO_TASK}\nfor _ in $(seq 40); do sleep 0.05; {NO_TASK}; done\nexec sleep 2");
     let f = Fixture::new(&body, Duration::from_millis(100), None);
+    let request = request_with(vec![Message::user("fixture prompt")]);
+    let mut stream = f.provider.create_message_stream(request).await.unwrap();
+    // The grace belongs to the reporting phase, after the startup handshake.
     let start = Instant::now();
-    let events = f.collect().await;
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        let terminal = matches!(
+            event,
+            Ok(StreamEvent::MessageStop | StreamEvent::Error { .. }) | Err(_)
+        );
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    drop(stream);
     assert!(
         matches!(events.last(), Some(Ok(StreamEvent::MessageStop))),
         "{events:?}"
