@@ -704,7 +704,9 @@ mod tests {
             format!("{UNCHECKED}Permission denied (os error 13)")
         );
 
-        // A symlink to itself: the path exists but never resolves.
+        // A symlink to itself: the path exists but never resolves. Its error
+        // (ELOOP) has no stable io::ErrorKind, so only the refusal and the
+        // wording are pinned, not the kind.
         fs::remove_dir(&project).unwrap();
         symlink(&project, &project).unwrap();
         let error = launch().expect_err("a symlink loop");
