@@ -1287,6 +1287,7 @@ mod tests {
         let mut state = DiffViewerState::new();
         state.set_turn_diff(vec![diff_viewer::FileDiffStats {
             path: "src/lib.rs".to_string(),
+            renamed_from: None,
             added: 2,
             removed: 1,
             binary: false,
@@ -1672,6 +1673,7 @@ mod tests {
             status: ToolStatus::Running,
             output_preview: None,
             input_json: r#"{"file_path":"foo.rs"}"#.to_string(),
+            run: Default::default(),
         });
         app.handle_query_event(claurst_query::QueryEvent::ToolEnd {
             tool_name: "Read".to_string(),

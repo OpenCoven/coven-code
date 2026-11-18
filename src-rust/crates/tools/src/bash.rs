@@ -1,6 +1,8 @@
 // Bash tool: execute shell commands with timeout, streaming output, and
 // persistent shell state (cwd + env) across invocations.
 
+#[cfg(unix)]
+use crate::process_tree::ForegroundGroup;
 use crate::{session_shell_state, PermissionLevel, ShellState, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
 use claurst_core::bash_classifier::{classify_bash_command, BashRiskLevel};
@@ -20,36 +22,6 @@ use tracing::debug;
 const SHELL_STATE_SENTINEL: &str = "__CC_SHELL_STATE__";
 
 pub struct BashTool;
-
-/// Own the group established at spawn, including while the tool future is
-/// dropped. Never discover a group from the caller or from a later PID probe.
-#[cfg(unix)]
-struct ForegroundGroup {
-    group: Option<nix::unistd::Pid>,
-}
-
-#[cfg(unix)]
-impl ForegroundGroup {
-    fn terminate(&mut self) -> Result<(), nix::errno::Errno> {
-        match self.group.take() {
-            Some(group) => match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL)
-            {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-                Err(error) => Err(error),
-            },
-            None => Ok(()),
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ForegroundGroup {
-    fn drop(&mut self) {
-        if let Err(error) = self.terminate() {
-            tracing::warn!(%error, "Could not terminate owned foreground process group");
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct BashInput {
@@ -557,16 +529,22 @@ impl BashTool {
             state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
         };
 
-        let mut child = match Command::new("cmd")
-            .arg("/C")
-            .arg(command)
+        let mut shell = Command::from(claurst_core::shell::command(command));
+        shell
             .current_dir(&effective_cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        // The job owns cmd.exe and everything it starts. A cancelled call
+        // drops it, which kills them all, and a timeout terminates it (#373).
+        #[cfg(windows)]
+        let (mut child, job) = match crate::windows_job::spawn(&mut shell) {
+            Ok(spawned) => spawned,
+            Err(e) => return ToolResult::error(e.report("Failed to spawn command")),
+        };
+        #[cfg(not(windows))]
+        let mut child = match shell.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
         };
@@ -590,6 +568,12 @@ impl BashTool {
 
         match result {
             Ok((stdout_lines, stderr_lines, status)) => {
+                // An ordinary exit leaves alone what the command started to
+                // outlive it.
+                #[cfg(windows)]
+                if let (Ok(_), Some(job)) = (&status, job) {
+                    job.release();
+                }
                 let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
                 let mut output = String::new();
                 if !stdout_lines.is_empty() {
@@ -616,6 +600,10 @@ impl BashTool {
                 }
             }
             Err(_) => {
+                #[cfg(windows)]
+                if let Some(job) = &job {
+                    job.terminate();
+                }
                 let _ = child.kill().await;
                 ToolResult::error(format!("Command timed out after {}ms", timeout_ms))
             }

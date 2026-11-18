@@ -28,6 +28,7 @@ set -uo pipefail
 : "${TUI_LOG_DIR:=}"                      # if set, failing-case pane captures are written here
 : "${REQUIRE_TMUX:=0}"                    # if 1, a missing tmux is a hard error (CI), not a skip
 : "${TUI_LAUNCH_PREFIX:=}"               # shell text typed before the binary (cd, env); cases set and restore it
+: "${TUI_SCRATCH_HOME:=}"                # home the runner makes for cases that bring none
 
 # --- counters (persist across sourced case files) -----------------------
 TESTS_RUN=0
@@ -149,7 +150,7 @@ assert_eq() {
 RUN_RC=0
 RUN_OUT=""
 run_bin() {
-  RUN_OUT="$("$COVEN_BIN" "$@" 2>&1)"
+  RUN_OUT="$(HOME="${TUI_SCRATCH_HOME:-${HOME:-}}" "$COVEN_BIN" "$@" 2>&1)"
   RUN_RC=$?
 }
 
@@ -220,6 +221,35 @@ wait_absent() {
 }
 
 tui_session_alive() { _tmux has-session -t "$TUI_SESSION" 2>/dev/null; }
+
+# Wall-clock time in tenths of a second. Needs python3.
+tui_now_tenths() { python3 -c 'import time; print(int(time.time() * 10))'; }
+
+# tui_quit_and_check <how> <keys...>
+# Press the quit keys, wait for the TUI to exit, then check it gave the terminal
+# back. Sets TUI_QUIT_TENTHS to how long the exit took after the last key, in
+# tenths of a second by the wall clock. Each pass of the wait also runs tmux, so
+# the pass count gives up later than 30 s; it only stops a hung exit.
+tui_quit_and_check() {
+  local how="$1" key passes=0 running start
+  shift
+  # The running process's name, whatever the binary under test is called.
+  running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
+  for key in "$@"; do tui_keys "$key"; start="$(tui_now_tenths)"; sleep 0.25; done
+  while [ "$passes" -lt 300 ] && \
+    [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
+    sleep 0.1; passes=$((passes + 1))
+  done
+  TUI_QUIT_TENTHS=$(($(tui_now_tenths) - start))
+  if [ "$passes" -lt 300 ]; then _pass "$how exits (after about $((TUI_QUIT_TENTHS / 10))s)"
+  else _fail "$how exits" "$(tui_capture)"; fi
+  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{alternate_on}')" "0" \
+    "$how leaves the alternate screen"
+  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{cursor_flag}')" "1" \
+    "$how restores the cursor"
+  assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{mouse_any_flag}')" "0" \
+    "$how turns mouse reporting off"
+}
 
 # tui_start [extra binary args...]
 # Spins up a fresh tmux session, waits for the shell, launches the binary,

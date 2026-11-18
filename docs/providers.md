@@ -36,10 +36,32 @@ to the Anthropic Messages API. Without an API key, turns run through the local
 `claude` binary. That CLI owns its authentication; Coven Code does not import or
 replay Claude CLI OAuth tokens.
 
+The CLI also runs its own tools under its own permission settings. Each turn's
+permission mode reaches it as `--permission-mode`. Started on its own, the
+engine otherwise leaves the CLI to whatever the user's and the workspace's
+Claude settings files allow. When Coven starts the engine for a headless run it
+sets `COVEN_CLAUDE_POLICY`, a JSON object naming Coven's settings file, the
+settings files the CLI may still read, extra directories and the user's MCP
+config. The engine adds those to every CLI launch. The object does not name a
+permission mode, so the turn's own stays the only one. It names two settings
+files: a read-only (`plan`) turn gets the one without Coven's allow rules,
+because the CLI applies allow rules in plan mode too. If the engine cannot
+apply the object in full (an unknown field counts), the turn fails with a
+message to update Coven and the engine together; the CLI is not started
+without the policy.
+
 Set `ANTHROPIC_API_KEY` or configure an engine-owned key. Use `/account connect`
 for provider setup and `/account` for account management. The separate
 `coven-code auth login` flow requires a configured
 `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`; it is not a Claude CLI token-import path.
+
+A turn through the `claude` binary includes its background work and reporting turns. Once the CLI reports background tasks, an intermediate result does not finish the engine turn. Completed results publish cumulative usage, including when a later report fails. A clean CLI exit between turns ends the run with what it reported; EOF during an unfinished reporting turn or an unsuccessful exit fails it. When no tasks or turn remain, the CLI gets 30 seconds to exit or start its next report. Metadata alone does not extend that grace, so a report starting later can be missed. Older CLIs without background-task snapshots retain their first-result behavior. The engine does not nudge a CLI run for apparently unfinished announcements because the CLI owns its tools.
+
+The engine sends keepalives while the CLI is running, including when its stdout contains only internal progress. These keepalives prevent the query loop's 45-second stream-stall retry from repeating healthy CLI work. They do not reset the CLI's separate silence clock.
+
+A running CLI that prints no stdout line for 150 minutes, from startup or since its last line, is stopped and the turn fails without repeating the prompt. Set `COVEN_CODE_CLAUDE_QUIET_LIMIT_SECS` to a whole number of seconds to change this limit; `0` waits without a silence limit. The deadline is independent of keepalive ticks and also covers a CLI that closes stdout before startup finishes. Each complete stdout line resets it. The default exceeds Claude Code's standard command ceilings, but operator overrides and MCP tools can remain silent longer and may require a higher limit. A direct CLI process that exits while a descendant keeps stdout open receives no keepalives; the existing consumer stall policy still applies in that case.
+
+Stopping this provider stops its direct CLI process. It does not guarantee termination of every descendant or work delegated to another process. Native scoped workspace runs use a separate host-owned process-group policy.
 
 Model availability and defaults depend on the installed catalog and account.
 Inspect the engine's resolved models rather than relying on a static price or

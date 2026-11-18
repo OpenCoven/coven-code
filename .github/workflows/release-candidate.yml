@@ -1,0 +1,161 @@
+name: Release candidate build
+
+# Builds, packages and runs the five release archives without publishing.
+# Nothing here can create a tag or a release: the token is read-only and no
+# step uploads anywhere except this run's own artifacts.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-candidate.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-build.yml'
+      - '.github/workflows/patch-release.yml'
+      - 'scripts/package-release.py'
+      - 'scripts/generate-release-checksums.mjs'
+      - 'scripts/smoke-release-archive.py'
+      - 'scripts/test-release-candidate.py'
+      # bump-version.py rewrites this file, so a version-stamp pull request
+      # gets its candidate archives built and run before the release.
+      - 'src-rust/crates/acp/registry-template/agent.json'
+  workflow_dispatch:
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Contract: shared build inputs, smoke fixtures, stamp preflight ──
+  contract:
+    runs-on: ubuntu-latest
+    name: Candidate contract and stamps
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify every release build uses the shared build and nothing publishes
+        run: python3 -B scripts/test-release-candidate.py -v
+
+      # A stamped version with no tag yet is a real candidate and gets the
+      # release preflight. An already released version only rehearses the build.
+      - name: Verify canonical stamps for an unreleased version
+        run: |
+          version="v$(python3 -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('src-rust/Cargo.toml').read_text())['workspace']['package']['version'])")"
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; then
+            echo "::notice::$version is already released. This run rehearses the release build; it is not a release candidate."
+          else
+            python scripts/check-release-version.py "$version"
+          fi
+
+  # ── Build: the shared release build, with release.yml's inputs ───
+  build:
+    needs: contract
+    uses: ./.github/workflows/release-build.yml
+    with:
+      persist-credentials: false
+      openssl: false
+      cargo-term-color: always
+
+  # The patch release builds with its own inputs. Build that profile too,
+  # keeping nothing, so a change to the shared build is tried both ways.
+  patch-profile:
+    needs: contract
+    uses: ./.github/workflows/release-build.yml
+    with:
+      persist-credentials: true
+      openssl: true
+      cargo-term-color: always
+      upload: false
+
+  # ── Package exactly as the release job does, then keep the result ───
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Package archives without publishing
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate and package release artifacts
+        run: |
+          python scripts/package-release.py artifacts release
+          node scripts/generate-release-checksums.mjs release
+          ls -lh release/
+          cat release/SHA256SUMS
+
+      - name: Upload candidate archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate
+          path: release/
+          retention-days: 14
+
+  # ── Native smoke: each archive runs on its own platform ─────────────
+  smoke:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: coven-code-windows-x86_64
+            os: windows-latest
+          - artifact: coven-code-linux-x86_64
+            os: ubuntu-latest
+          - artifact: coven-code-linux-aarch64
+            os: ubuntu-24.04-arm
+          - artifact: coven-code-macos-x86_64
+            os: macos-15-intel
+          - artifact: coven-code-macos-aarch64
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+    name: Run ${{ matrix.artifact }}
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download candidate archives
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate
+          path: release
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Linux archives load the system ALSA library for the voice feature.
+      - name: Install the Linux audio runtime library
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+      - name: Verify digest, contents, version and one turn
+        run: python scripts/smoke-release-archive.py release ${{ matrix.artifact }}

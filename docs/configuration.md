@@ -703,6 +703,9 @@ matches. They are defined in the `formatter` map:
 | `extensions` | File extensions this formatter handles (include the leading dot). |
 | `disabled` | Set to true to temporarily disable without removing the entry. |
 
+A formatter still running after 30 seconds is stopped, with every process it
+started.
+
 ---
 
 ## Example `settings.json`

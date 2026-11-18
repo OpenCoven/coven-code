@@ -9,6 +9,8 @@
 // 6. Manages stop conditions (end_turn, max_turns, cancellation)
 
 pub mod agent_tool;
+mod turn_budget;
+pub use turn_budget::{EffectiveTurnBudget, TurnBudgetSource};
 pub mod auto_dream;
 pub mod away_summary;
 pub mod command_queue;
@@ -84,6 +86,11 @@ pub enum QueryOutcome {
     Cancelled,
     /// An unrecoverable error occurred.
     Error(ClaudeError),
+    /// Local model-round limit reached with the transcript and tools settled.
+    TurnBudgetExhausted {
+        budget: EffectiveTurnBudget,
+        consumed: u32,
+    },
     /// The configured USD budget was exceeded.
     BudgetExceeded { cost_usd: f64, limit_usd: f64 },
 }
@@ -123,6 +130,38 @@ struct ProviderStreamContext<'a> {
 #[cfg(test)]
 tokio::task_local! {
     static TEST_STREAM_STALL_TIMEOUT: std::time::Duration;
+}
+
+/// Held by every test in this crate that changes `COVEN_CODE_HOME` or needs
+/// it to stay the same across calls, since tests share one process
+/// environment.
+#[cfg(test)]
+static CONFIG_HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Points `COVEN_CODE_HOME` at a directory until dropped, then puts back what
+/// was there, also when the test panics. Setting it takes the
+/// [`CONFIG_HOME_ENV_LOCK`] guard, which must outlive it; declare it after
+/// the directory so it drops first.
+#[cfg(test)]
+struct ConfigHomeOverride(Option<std::ffi::OsString>);
+
+#[cfg(test)]
+impl ConfigHomeOverride {
+    fn set(_lock: &tokio::sync::MutexGuard<'_, ()>, home: &std::path::Path) -> Self {
+        let previous = std::env::var_os("COVEN_CODE_HOME");
+        std::env::set_var("COVEN_CODE_HOME", home);
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ConfigHomeOverride {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("COVEN_CODE_HOME", previous),
+            None => std::env::remove_var("COVEN_CODE_HOME"),
+        }
+    }
 }
 
 // Goal checks bound the next observable request/work boundary. They cannot
@@ -516,7 +555,10 @@ fn parse_origin_repo_slug(remote_url: &str) -> Option<String> {
 pub struct QueryConfig {
     pub model: String,
     pub max_tokens: u32,
+    /// Inherited/default limit; an agent may override it.
     pub max_turns: u32,
+    /// Explicit per-run limit; wins over agent and contextual defaults.
+    pub max_turns_override: Option<std::num::NonZeroU32>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub output_style: claurst_core::system_prompt::OutputStyle,
@@ -577,6 +619,7 @@ impl Default for QueryConfig {
             model: claurst_core::constants::DEFAULT_MODEL.to_string(),
             max_tokens: claurst_core::constants::DEFAULT_MAX_TOKENS,
             max_turns: claurst_core::constants::MAX_TURNS_DEFAULT,
+            max_turns_override: None,
             system_prompt: None,
             append_system_prompt: None,
             output_style: claurst_core::system_prompt::OutputStyle::Default,
@@ -884,6 +927,15 @@ pub enum QueryEvent {
         result: String,
         is_error: bool,
     },
+    /// A tool is waiting for another in its response to finish first.
+    ToolQueued { tool_id: String },
+    /// A tool's own work begins: at once, or when its turn to write comes.
+    /// Time before this, on hooks or waiting, is not the tool's.
+    ToolRunning { tool_id: String },
+    /// A tool's own work has ended. Its [`QueryEvent::ToolEnd`], which carries
+    /// the result, follows once its hooks have run and every tool in the
+    /// response has ended.
+    ToolFinished { tool_id: String, is_error: bool },
     /// The model finished a turn.
     TurnComplete {
         turn: u32,
@@ -1155,11 +1207,7 @@ pub fn fire_post_sampling_hooks(
     };
 
     for entry in entries {
-        let sh = if cfg!(windows) { "cmd" } else { "sh" };
-        let flag = if cfg!(windows) { "/C" } else { "-c" };
-
-        let output = match std::process::Command::new(sh)
-            .args([flag, &entry.command])
+        let output = match claurst_core::shell::command(&entry.command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1256,10 +1304,7 @@ fn stop_hooks_with_reaper_observer(
                             return;
                         }
                     }
-                    let sh = if cfg!(windows) { "cmd" } else { "sh" };
-                    let flag = if cfg!(windows) { "/C" } else { "-c" };
-                    let _ = std::process::Command::new(sh)
-                        .args([flag, &cmd])
+                    let _ = claurst_core::shell::command(&cmd)
                         .current_dir(&dir)
                         .env("CLAUDE_HOOK_OUTPUT", &text)
                         .stdin(std::process::Stdio::null())
@@ -1753,8 +1798,43 @@ pub async fn run_query_loop_with_events(
     cancel_token: tokio_util::sync::CancellationToken,
     pending_messages: Option<&mut Vec<String>>,
 ) -> QueryOutcome {
+    run_query_loop_with_receipt(
+        client,
+        messages,
+        tools,
+        tool_ctx,
+        config,
+        cost_tracker,
+        event_tx,
+        cancel_token,
+        pending_messages,
+    )
+    .await
+    .outcome
+}
+
+/// Per-invocation accounting stays separate from tool contexts shared with children.
+#[derive(Debug)]
+pub struct QueryRun {
+    pub outcome: QueryOutcome,
+    pub num_turns: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_query_loop_with_receipt(
+    client: &claurst_api::AnthropicClient,
+    messages: &mut Vec<Message>,
+    tools: &[Box<dyn Tool>],
+    tool_ctx: &ToolContext,
+    config: &QueryConfig,
+    cost_tracker: Arc<CostTracker>,
+    event_tx: Option<QueryEventSink>,
+    cancel_token: tokio_util::sync::CancellationToken,
+    pending_messages: Option<&mut Vec<String>>,
+) -> QueryRun {
     let overload_observer = event_tx.clone();
     let mut retrievals = retrieval_journal::RetrievalJournal::default();
+    let mut num_turns = 0;
     let outcome = run_query_loop_inner(
         client,
         messages,
@@ -1766,13 +1846,14 @@ pub async fn run_query_loop_with_events(
         cancel_token,
         pending_messages,
         &mut retrievals,
+        &mut num_turns,
     )
     .await;
     // Context budgeting remains a request-time operation. The caller saves
     // the returned history, so put its typed retrieval facts back after all
     // request/compaction/exit paths settle, without restoring large bodies.
     retrievals.restore(messages);
-    if overload_observer
+    let outcome = if overload_observer
         .as_ref()
         .is_some_and(QueryEventSink::is_overloaded)
     {
@@ -1781,11 +1862,12 @@ pub async fn run_query_loop_with_events(
         ))
     } else {
         outcome
-    }
+    };
+    QueryRun { outcome, num_turns }
 }
 
 // Same domain inputs as the public loop above, plus its turn-local retrieval
-// journal. Keeping the exit wrapper separate covers every early return.
+// journal and invocation-local accounting. The exit wrapper covers every early return.
 #[allow(clippy::too_many_arguments)]
 async fn run_query_loop_inner(
     client: &claurst_api::AnthropicClient,
@@ -1798,6 +1880,7 @@ async fn run_query_loop_inner(
     cancel_token: tokio_util::sync::CancellationToken,
     mut pending_messages: Option<&mut Vec<String>>,
     retrievals: &mut retrieval_journal::RetrievalJournal,
+    num_turns: &mut u32,
 ) -> QueryOutcome {
     // One logical query owns one capture, including every tool follow-up and
     // its final reply. A caller-supplied capture (including absence) is final.
@@ -1837,12 +1920,10 @@ async fn run_query_loop_inner(
     // How many automatic retries remain when a stream stalls (no data for 45s).
     let mut retries_left: u32 = 2;
 
-    // If an agent defines a max_turns override, respect it (agent wins over config).
-    let effective_max_turns = config
-        .agent_definition
-        .as_ref()
-        .and_then(|a| a.max_turns)
-        .unwrap_or(config.max_turns);
+    let budget = match config.effective_turn_budget() {
+        Ok(budget) => budget,
+        Err(error) => return QueryOutcome::Error(ClaudeError::Config(error.into())),
+    };
 
     // Shadow-git snapshot: capture the worktree state before any tools run so we
     // can produce a per-turn file-change patch when the turn ends.
@@ -1973,29 +2054,22 @@ async fn run_query_loop_inner(
             .captured()
             .map(|turn| client.for_goal_turn(turn, goal_permission));
         let client = goal_client.as_ref().unwrap_or(client);
-        turn += 1;
-        tool_ctx
-            .current_turn
-            .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
-        // Check for cancellation
         if cancel_token.is_cancelled() {
             return QueryOutcome::Cancelled;
         }
-
-        if turn > effective_max_turns {
-            info!(turns = turn, "Max turns reached");
-            if let Some(ref tx) = event_tx {
+        if turn >= budget.max_turns.get() {
+            info!(turns = turn, "Model-round budget exhausted");
+            if let Some(tx) = &event_tx {
                 let _ = tx.send(QueryEvent::Status(format!(
-                    "Reached maximum turn limit ({})",
-                    effective_max_turns
+                    "Model-round budget exhausted ({turn}/{}); work is unfinished.",
+                    budget.max_turns
                 )));
             }
-            return QueryOutcome::Error(ClaudeError::Api(format!(
-                "Maximum turn limit ({}) reached",
-                effective_max_turns
-            )));
+            return QueryOutcome::TurnBudgetExhausted {
+                budget,
+                consumed: turn,
+            };
         }
-
         // Drain any pending user messages that were queued during the previous
         // tool-execution phase (e.g. commands entered while tools ran).
         // Mirrors the TS `messageQueueManager` drain between turns.
@@ -2084,7 +2158,7 @@ async fn run_query_loop_inner(
             }
 
             // Apply todo nudge on turns > 2.
-            if turn > 2 {
+            if turn >= 2 {
                 let nudge = build_todo_nudge(&tool_ctx.session_id);
                 if !nudge.is_empty() {
                     patched.append_system_prompt = Some(match &config.append_system_prompt {
@@ -2349,6 +2423,10 @@ async fn run_query_loop_inner(
                     // with placeholder text when the provider doesn't support them,
                     // preventing crashes on text-only models.
                     let mut caps = provider.capabilities();
+                    // Read before the model registry speaks for the model: a
+                    // provider that hands this loop no tool calls runs its
+                    // tools itself, as the Claude CLI does, or has none.
+                    let provider_hands_over_tool_calls = caps.tool_calling;
                     if let Some(model_entry) =
                         config.model_registry.as_ref().and_then(|model_registry| {
                             model_registry.get(&provider_id_str, &model_id_str)
@@ -2428,23 +2506,32 @@ async fn run_query_loop_inner(
                             "Goal authority revoked: {error}"
                         )));
                     }
-                    let stream = match await_goal_request(
-                        tool_ctx.goal_turn.captured(),
-                        goal_permission,
-                        &cancel_token,
-                        async {
-                            provider
-                                .create_message_stream_for_goal(
-                                    provider_request,
-                                    tool_ctx.goal_turn.captured(),
-                                    goal_permission,
-                                )
-                                .await
-                                .map_err(ClaudeError::from)
-                        },
-                    )
-                    .await
-                    {
+                    let dispatch = claurst_api::model_dispatch::ModelDispatch::default();
+                    let stream_result = dispatch
+                        .scope(await_goal_request(
+                            tool_ctx.goal_turn.captured(),
+                            goal_permission,
+                            &cancel_token,
+                            async {
+                                provider
+                                    .create_message_stream_for_goal(
+                                        provider_request,
+                                        tool_ctx.goal_turn.captured(),
+                                        goal_permission,
+                                    )
+                                    .await
+                                    .map_err(ClaudeError::from)
+                            },
+                        ))
+                        .await;
+                    if dispatch.was_attempted() {
+                        turn += 1;
+                        *num_turns = turn;
+                        tool_ctx
+                            .current_turn
+                            .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let stream = match stream_result {
                         Ok(s) => s,
                         Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
                         Err(e) => {
@@ -2625,7 +2712,6 @@ async fn run_query_loop_inner(
                                 retries_left + 1
                             )));
                         }
-                        turn -= 1;
                         continue;
                     }
                     if provider_stream_stalled {
@@ -2844,9 +2930,17 @@ async fn run_query_loop_inner(
                     // that executed no tools and whose text is empty or ends
                     // on an imminent-action announcement gets a bounded
                     // continuation nudge instead of ending the turn.
+                    //
+                    // Only where this loop runs the tools. A provider that
+                    // runs its own sends one message for a whole run: its
+                    // announcements, the work that followed them, and an
+                    // answer that may be a single word. "No tool calls" says
+                    // nothing about that run, and a nudge would start it
+                    // again.
                     let combined_text = assistant_msg.get_all_text();
-                    let stalled_announcement =
-                        stall_recovery_enabled() && is_stalled_announcement(&combined_text);
+                    let stalled_announcement = stall_recovery_enabled()
+                        && provider_hands_over_tool_calls
+                        && is_stalled_announcement(&combined_text);
                     if stalled_announcement && stall_recovery_count < STALL_RECOVERY_LIMIT {
                         stall_recovery_count += 1;
                         warn!(
@@ -2961,14 +3055,23 @@ async fn run_query_loop_inner(
                 "Goal authority revoked: {error}"
             )));
         }
-        let mut stream_rx = match await_goal_request(
-            tool_ctx.goal_turn.captured(),
-            goal_permission,
-            &cancel_token,
-            client.create_message_stream(request, handler),
-        )
-        .await
-        {
+        let dispatch = claurst_api::model_dispatch::ModelDispatch::default();
+        let stream_result = dispatch
+            .scope(await_goal_request(
+                tool_ctx.goal_turn.captured(),
+                goal_permission,
+                &cancel_token,
+                client.create_message_stream(request, handler),
+            ))
+            .await;
+        if dispatch.was_attempted() {
+            turn += 1;
+            *num_turns = turn;
+            tool_ctx
+                .current_turn
+                .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut stream_rx = match stream_result {
             Ok(rx) => rx,
             Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
             Err(e) => {
@@ -2997,7 +3100,6 @@ async fn run_query_loop_inner(
                         }
                         effective_model = fb.clone();
                         used_fallback = true;
-                        turn -= 1; // don't count this attempt against max_turns
                         continue;
                     }
                 }
@@ -3163,7 +3265,6 @@ async fn run_query_loop_inner(
                     retries_left + 1
                 )));
             }
-            turn -= 1; // don't count this stalled attempt
             continue;
         }
 
@@ -3972,6 +4073,11 @@ struct PreparedTool {
     blocked_result: Option<ToolResult>,
 }
 
+/// The result recorded for a tool call that cancellation cut off. It says the
+/// call was stopped, not what it did: the outcome stays unknown.
+pub const TOOL_CANCELLED_RESULT: &str =
+    "Tool cancelled before completion; side effects may already have occurred.";
+
 /// Execute tool invocations through the common policy-aware tool path.
 async fn execute_tool_blocks_with_hooks(
     tool_blocks: Vec<(String, String, Value)>,
@@ -3980,8 +4086,6 @@ async fn execute_tool_blocks_with_hooks(
     event_tx: Option<&QueryEventSink>,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Vec<ContentBlock> {
-    const CANCELLED: &str =
-        "Tool cancelled before completion; side effects may already have occurred.";
     // Phase 1: Run PreToolUse hooks sequentially so policy denials can block
     // execution before any tool side effects occur.
     let mut prepared: Vec<PreparedTool> = Vec::with_capacity(tool_blocks.len());
@@ -3991,7 +4095,7 @@ async fn execute_tool_blocks_with_hooks(
                 id,
                 name,
                 input,
-                blocked_result: Some(ToolResult::error(CANCELLED)),
+                blocked_result: Some(ToolResult::error(TOOL_CANCELLED_RESULT)),
             });
             continue;
         }
@@ -4030,46 +4134,39 @@ async fn execute_tool_blocks_with_hooks(
         )
         .await;
 
-        if cancel_token.is_cancelled() {
-            prepared.push(PreparedTool {
-                id,
-                name,
-                input,
-                blocked_result: Some(ToolResult::error(CANCELLED)),
-            });
-            continue;
-        }
-
-        if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
-            prepared.push(PreparedTool {
-                id,
-                name,
-                input,
-                blocked_result: Some(ToolResult::error(format!(
-                    "Goal authority denied tool: {error}"
-                ))),
-            });
-            continue;
-        }
-        let plugin_pre_outcome =
-            claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
-
-        let blocked_result = if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome
-        {
-            warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
-            Some(claurst_tools::ToolResult::error(format!(
-                "Blocked by hook: {}",
-                reason
-            )))
-        } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
-            warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
-            Some(claurst_tools::ToolResult::error(format!(
-                "Blocked by plugin hook: {}",
-                reason
+        let blocked_result = if cancel_token.is_cancelled() {
+            Some(ToolResult::error(TOOL_CANCELLED_RESULT))
+        } else if let Err(error) = tool_ctx.goal_turn.require_work(&tool_ctx.session_id) {
+            Some(ToolResult::error(format!(
+                "Goal authority denied tool: {error}"
             )))
         } else {
-            None
+            let plugin_pre_outcome =
+                claurst_plugins::run_global_pre_tool_hook(&name, &input, &tool_ctx.working_dir);
+            if let claurst_core::hooks::HookOutcome::Blocked(reason) = pre_outcome {
+                warn!(tool = %name, reason = %reason, "PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by hook: {}",
+                    reason
+                )))
+            } else if let claurst_plugins::HookOutcome::Deny(reason) = plugin_pre_outcome {
+                warn!(tool = %name, reason = %reason, "Plugin PreToolUse hook blocked execution");
+                Some(claurst_tools::ToolResult::error(format!(
+                    "Blocked by plugin hook: {}",
+                    reason
+                )))
+            } else {
+                None
+            }
         };
+        // A refused tool is over now: its row must not read as running while
+        // the hooks of the tools after it run.
+        if let (Some(result), Some(tx)) = (&blocked_result, event_tx) {
+            let _ = tx.send(QueryEvent::ToolFinished {
+                tool_id: id.clone(),
+                is_error: result.is_error,
+            });
+        }
 
         prepared.push(PreparedTool {
             id,
@@ -4093,67 +4190,102 @@ async fn execute_tool_blocks_with_hooks(
         .iter()
         .map(|p| {
             if let Some(result) = p.blocked_result.clone() {
-                futures::future::Either::Left(async move { result })
+                // Its finish, if it had a row, was reported when it was refused.
+                futures::future::Either::Left(std::future::ready((result, None)))
             } else {
                 let name = p.name.clone();
                 let input = p.input.clone();
                 let call_id = p.id.clone();
+                let tool_id = p.id.clone();
                 let writes = tools.iter().any(|tool| {
                     tool.name() == name
                         && tool.permission_level() == claurst_tools::PermissionLevel::Write
                 });
                 futures::future::Either::Right(claurst_tools::with_tool_call(call_id, async move {
+                    let report = |event| {
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(event);
+                        }
+                    };
                     let execute = async {
                         let _turn = if writes {
-                            Some(writer_turn.lock().await)
+                            Some(match writer_turn.try_lock() {
+                                Ok(turn) => turn,
+                                Err(_) => {
+                                    report(QueryEvent::ToolQueued {
+                                        tool_id: tool_id.clone(),
+                                    });
+                                    writer_turn.lock().await
+                                }
+                            })
                         } else {
                             None
                         };
+                        report(QueryEvent::ToolRunning {
+                            tool_id: tool_id.clone(),
+                        });
                         execute_tool(&name, &input, tools, tool_ctx).await
                     };
                     // Cancel each unfinished call rather than dropping the
                     // complete batch: join_all retains results already received,
                     // and queued writers must not start after cancellation.
-                    tokio::select! {
+                    // A call cancelled while it waits its turn still finishes,
+                    // so its row does not stay queued.
+                    let mut result = tokio::select! {
                         biased;
-                        _ = cancel_token.cancelled() => ToolResult::error(CANCELLED),
+                        _ = cancel_token.cancelled() => ToolResult::error(TOOL_CANCELLED_RESULT),
                         result = execute => result,
-                    }
+                    };
+                    // A fetch without a usable retrieval record fails here, so
+                    // its finish reports the outcome the result will carry.
+                    let retrieval_content = if name == claurst_core::constants::TOOL_NAME_WEB_FETCH
+                        && !result.is_error
+                    {
+                        let retrieval = result
+                            .metadata
+                            .take()
+                            .and_then(|metadata| {
+                                serde_json::from_value::<claurst_tools::web_fetch::Retrieval>(
+                                    metadata,
+                                )
+                                .ok()
+                            })
+                            .filter(claurst_tools::web_fetch::Retrieval::is_supported);
+                        match retrieval {
+                            Some(retrieval) => match retrieval.with_body(result.content.clone()) {
+                                Ok(content) => Some(content),
+                                Err(_) => {
+                                    result = ToolResult::error(
+                                        "Could not serialize WebFetch retrieval record",
+                                    );
+                                    None
+                                }
+                            },
+                            None => {
+                                result = ToolResult::error(
+                                    "WebFetch returned no supported retrieval record",
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    report(QueryEvent::ToolFinished {
+                        tool_id,
+                        is_error: result.is_error,
+                    });
+                    (result, retrieval_content)
                 }))
             }
         })
         .collect();
-    let exec_results: Vec<ToolResult> = futures::future::join_all(exec_futures).await;
+    let exec_results: Vec<(ToolResult, Option<ToolResultContent>)> =
+        futures::future::join_all(exec_futures).await;
 
     // Phase 3: run post-hooks, emit completion events, and return result blocks.
     let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(prepared.len());
-    for (p, mut result) in prepared.iter().zip(exec_results) {
-        let retrieval_content = if p.name == claurst_core::constants::TOOL_NAME_WEB_FETCH
-            && !result.is_error
-        {
-            let retrieval = result
-                .metadata
-                .take()
-                .and_then(|metadata| {
-                    serde_json::from_value::<claurst_tools::web_fetch::Retrieval>(metadata).ok()
-                })
-                .filter(claurst_tools::web_fetch::Retrieval::is_supported);
-            match retrieval {
-                Some(retrieval) => match retrieval.with_body(result.content.clone()) {
-                    Ok(content) => Some(content),
-                    Err(_) => {
-                        result = ToolResult::error("Could not serialize WebFetch retrieval record");
-                        None
-                    }
-                },
-                None => {
-                    result = ToolResult::error("WebFetch returned no supported retrieval record");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+    for (p, (result, retrieval_content)) in prepared.iter().zip(exec_results) {
         let post_ctx = claurst_core::hooks::HookContext {
             event: "PostToolUse".to_string(),
             tool_name: Some(p.name.clone()),
@@ -4455,6 +4587,8 @@ mod tests {
     struct ScriptedProvider {
         id: ProviderId,
         rounds: Mutex<VecDeque<ScriptedRound>>,
+        /// Stands in for the Claude CLI: no tool calls reach the query loop.
+        runs_own_tools: bool,
     }
 
     enum ScriptedRound {
@@ -4470,6 +4604,7 @@ mod tests {
         fn new(rounds: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     rounds
                         .into_iter()
@@ -4482,6 +4617,7 @@ mod tests {
         fn with_results(rounds: Vec<Vec<ScriptedProviderEvent>>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(rounds.into_iter().map(ScriptedRound::Events).collect()),
             }
         }
@@ -4489,6 +4625,7 @@ mod tests {
         fn partial_then_pending(events: Vec<StreamEvent>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     vec![ScriptedRound::PendingAfter(
                         events.into_iter().map(Ok).collect(),
@@ -4504,6 +4641,7 @@ mod tests {
         ) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     vec![
                         ScriptedRound::PendingAfter(partial_events.into_iter().map(Ok).collect()),
@@ -4519,6 +4657,7 @@ mod tests {
             (
                 Self {
                     id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                    runs_own_tools: false,
                     rounds: Mutex::new(
                         vec![ScriptedRound::ChannelAfter(
                             initial_events.into_iter().map(Ok).collect(),
@@ -4596,7 +4735,7 @@ mod tests {
         fn capabilities(&self) -> ProviderCapabilities {
             ProviderCapabilities {
                 streaming: true,
-                tool_calling: true,
+                tool_calling: !self.runs_own_tools,
                 thinking: false,
                 image_input: false,
                 pdf_input: false,
@@ -5465,6 +5604,7 @@ mod tests {
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 4096,
             max_turns: 10,
+            max_turns_override: None,
             system_prompt: sys.map(String::from),
             append_system_prompt: append.map(String::from),
             output_style: claurst_core::system_prompt::OutputStyle::Default,
@@ -7426,7 +7566,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(&outcome, QueryOutcome::Error(_)));
+        assert!(matches!(
+            &outcome,
+            QueryOutcome::TurnBudgetExhausted { consumed: 1, .. }
+        ));
         assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
         assert_eq!(
             events
@@ -7537,6 +7680,76 @@ mod tests {
         assert_eq!(
             final_durable.map(Message::get_all_text).as_deref(),
             Some("(no response — model ended the turn with stop_reason \"end_turn\")")
+        );
+    }
+
+    /// What the Claude CLI sends for a run that said what it would do, did it
+    /// with its own tools, and answered in one word. This loop sees no tool
+    /// call, and the last full sentence is the announcement.
+    fn run_that_announced_then_answered() -> Vec<StreamEvent> {
+        scripted_round(
+            "own-tools",
+            vec![
+                ContentBlock::Text {
+                    text: "The command is running in the background. I'll report its output when it finishes.".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "⚒ Read(tasks/output)".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "slept".to_string(),
+                },
+            ],
+            ProviderStopReason::EndTurn,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_runs_its_own_tools_is_not_nudged_for_announcing() {
+        // One round only: a nudge would ask for a second and panic.
+        let mut provider = ScriptedProvider::new(vec![run_that_announced_then_answered()]);
+        provider.runs_own_tools = true;
+
+        let (outcome, events, messages) = run_scripted_provider(provider).await;
+
+        match outcome {
+            QueryOutcome::EndTurn { message, .. } => {
+                assert!(message.get_all_text().ends_with("slept"));
+            }
+            other => panic!("a finished run must end the turn, got {other:?}"),
+        }
+        assert!(messages
+            .iter()
+            .all(|message| message.get_all_text() != STALL_RECOVERY_MSG));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    /// The same text from a provider whose tools this loop runs is still the
+    /// stall it looks like: nothing was executed after the announcement.
+    #[tokio::test]
+    async fn a_provider_whose_tools_this_loop_runs_is_still_nudged() {
+        let provider = ScriptedProvider::new(vec![
+            run_that_announced_then_answered(),
+            scripted_round(
+                "after-nudge",
+                vec![ContentBlock::Text {
+                    text: "The command printed slept.".to_string(),
+                }],
+                ProviderStopReason::EndTurn,
+            ),
+        ]);
+
+        let (outcome, _, messages) = run_scripted_provider(provider).await;
+
+        assert!(matches!(outcome, QueryOutcome::EndTurn { .. }));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.get_all_text() == STALL_RECOVERY_MSG)
+                .count(),
+            1
         );
     }
 
@@ -8824,6 +9037,277 @@ mod tests {
         assert_all_succeeded(&results);
     }
 
+    /// Ends when the test says so, so a test can look at what was reported while
+    /// it is still running.
+    struct HeldTool {
+        name: &'static str,
+        level: PermissionLevel,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for HeldTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Ends when the test says so"
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            self.level
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            self.release.notified().await;
+            ToolResult::error("held tool failed")
+        }
+    }
+
+    /// The next event about a tool's progress, skipping starts.
+    async fn next_progress(rx: &mut mpsc::UnboundedReceiver<QueryEvent>) -> String {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .expect("the expected event never came")
+                .expect("the channel closed");
+            match event {
+                QueryEvent::ToolQueued { tool_id } => return format!("queued {tool_id}"),
+                QueryEvent::ToolRunning { tool_id } => return format!("running {tool_id}"),
+                QueryEvent::ToolFinished { tool_id, is_error } => {
+                    return format!("finished {tool_id} error={is_error}")
+                }
+                QueryEvent::ToolEnd { tool_id, .. } => return format!("end {tool_id}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_reports_finishing_while_others_in_its_response_still_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let slow_gate = Arc::new(tokio::sync::Barrier::new(2));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(HeldTool {
+                name: "Quick",
+                level: PermissionLevel::ReadOnly,
+                release: release.clone(),
+            }),
+            Box::new(RendezvousTool {
+                name: "Slow",
+                level: PermissionLevel::Execute,
+                barrier: slow_gate.clone(),
+            }),
+        ];
+        let calls = [("quick", "Quick"), ("slow", "Slow")]
+            .map(|(id, name)| (id.to_string(), name.to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
+        let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running quick");
+            assert_eq!(next_progress(&mut rx).await, "running slow");
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished quick error=true");
+            slow_gate.wait().await;
+            assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
+            assert_eq!(next_progress(&mut rx).await, "end quick");
+            assert_eq!(next_progress(&mut rx).await, "end slow");
+        };
+        tokio::join!(run, watch);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_a_hook_refuses_reports_finishing_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let slow_gate = Arc::new(tokio::sync::Barrier::new(2));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(RendezvousTool {
+                name: "Refused",
+                level: PermissionLevel::ReadOnly,
+                barrier: Arc::new(tokio::sync::Barrier::new(1)),
+            }),
+            Box::new(RendezvousTool {
+                name: "Slow",
+                level: PermissionLevel::Execute,
+                barrier: slow_gate.clone(),
+            }),
+        ];
+        let calls = [("refused", "Refused"), ("slow", "Slow")]
+            .map(|(id, name)| (id.to_string(), name.to_string(), serde_json::json!({})))
+            .to_vec();
+        let mut ctx = scheduling_ctx(dir.path());
+        // The other tool's own hook holds until the refusal has been seen, so
+        // the refusal cannot wait for the hooks after it.
+        let go = dir.path().join("go");
+        ctx.config.hooks.insert(
+            HookEvent::PreToolUse,
+            vec![
+                HookEntry {
+                    command: "printf 'not this one' >&2; exit 2".to_string(),
+                    tool_filter: Some("Refused".to_string()),
+                    blocking: true,
+                },
+                HookEntry {
+                    command: format!("while [ ! -e '{}' ]; do sleep 0.05; done", go.display()),
+                    tool_filter: Some("Slow".to_string()),
+                    blocking: true,
+                },
+            ],
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
+        let watch = async {
+            // Refused at once, while the other tool's hook still runs. A
+            // refused tool's work never begins.
+            assert_eq!(next_progress(&mut rx).await, "finished refused error=true");
+            std::fs::write(&go, b"").unwrap();
+            assert_eq!(next_progress(&mut rx).await, "running slow");
+            slow_gate.wait().await;
+            assert_eq!(next_progress(&mut rx).await, "finished slow error=false");
+            assert_eq!(next_progress(&mut rx).await, "end refused");
+            assert_eq!(next_progress(&mut rx).await, "end slow");
+        };
+        tokio::join!(run, watch);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writing_tool_reports_waiting_for_its_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release: release.clone(),
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
+        let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running first");
+            assert_eq!(next_progress(&mut rx).await, "queued second");
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished first error=true");
+            assert_eq!(next_progress(&mut rx).await, "running second");
+            release.notify_one();
+            assert_eq!(next_progress(&mut rx).await, "finished second error=true");
+        };
+        tokio::join!(run, watch);
+    }
+
+    #[tokio::test]
+    async fn a_web_fetch_without_a_retrieval_record_reports_finishing_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(RendezvousTool {
+            name: claurst_core::constants::TOOL_NAME_WEB_FETCH,
+            level: PermissionLevel::ReadOnly,
+            barrier: Arc::new(tokio::sync::Barrier::new(1)),
+        })];
+        let calls = vec![(
+            "fetch".to_string(),
+            claurst_core::constants::TOOL_NAME_WEB_FETCH.to_string(),
+            serde_json::json!({}),
+        )];
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel).await;
+        // The row must not read done before the result says it failed.
+        assert_eq!(next_progress(&mut rx).await, "running fetch");
+        assert_eq!(next_progress(&mut rx).await, "finished fetch error=true");
+        assert_eq!(next_progress(&mut rx).await, "end fetch");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writer_cancelled_while_it_waits_finishes_without_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release,
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel);
+        let watch = async {
+            assert_eq!(next_progress(&mut rx).await, "running first");
+            assert_eq!(next_progress(&mut rx).await, "queued second");
+            cancel.cancel();
+            // The waiting writer finishes so its row does not stay queued, and
+            // its work never begins.
+            assert_eq!(next_progress(&mut rx).await, "finished first error=true");
+            assert_eq!(next_progress(&mut rx).await, "finished second error=true");
+            assert_eq!(next_progress(&mut rx).await, "end first");
+            assert_eq!(next_progress(&mut rx).await, "end second");
+        };
+        let (results, ()) = tokio::join!(run, watch);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn calls_cancelled_before_the_batch_starts_report_only_their_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(HeldTool {
+            name: "Writes",
+            level: PermissionLevel::Write,
+            release: Arc::new(tokio::sync::Notify::new()),
+        })];
+        let calls = ["first", "second"]
+            .map(|id| (id.to_string(), "Writes".to_string(), serde_json::json!({})))
+            .to_vec();
+        let ctx = scheduling_ctx(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let sink = QueryEventSink::from(tx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        execute_tool_blocks_with_hooks(calls, &tools, &ctx, Some(&sink), &cancel).await;
+        drop(sink);
+        let mut seen = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                QueryEvent::ToolStart { tool_id, .. } => seen.push(format!("start {tool_id}")),
+                QueryEvent::ToolQueued { tool_id } => seen.push(format!("queued {tool_id}")),
+                QueryEvent::ToolRunning { tool_id } => seen.push(format!("running {tool_id}")),
+                QueryEvent::ToolFinished { tool_id, .. } => {
+                    seen.push(format!("finished {tool_id}"))
+                }
+                QueryEvent::ToolEnd { tool_id, .. } => seen.push(format!("end {tool_id}")),
+                _ => {}
+            }
+        }
+        // No row was ever shown, so none is left to settle.
+        assert_eq!(seen, ["end first", "end second"]);
+    }
+
     #[test]
     fn repeated_provider_ids_keep_independent_attempt_uuids() {
         let mut messages = Vec::new();
@@ -8888,4 +9372,5 @@ mod tests {
     }
     include!("web_fetch_provenance_tests.rs");
     include!("tool_cancellation_tests.rs");
+    include!("turn_budget_tests.rs");
 }

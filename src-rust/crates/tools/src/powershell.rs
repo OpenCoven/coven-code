@@ -223,15 +223,25 @@ impl Tool for PowerShellTool {
         let timeout_ms = params.timeout.min(600_000);
         let timeout_dur = Duration::from_millis(timeout_ms);
 
-        let mut child = match Command::new(exe)
+        // A cancelled call drops this future, which stops the shell. On
+        // Windows a job owns the shell and everything it starts: dropping it
+        // kills them all, and a timeout terminates it (#373).
+        let mut command = Command::new(exe);
+        command
             .args(&args)
             .arg(&params.command)
             .current_dir(&ctx.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .spawn()
-        {
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        let (mut child, job) = match crate::windows_job::spawn(&mut command) {
+            Ok(spawned) => spawned,
+            Err(e) => return ToolResult::error(e.report("Failed to spawn PowerShell")),
+        };
+        #[cfg(not(windows))]
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to spawn PowerShell: {}", e)),
         };
@@ -255,6 +265,12 @@ impl Tool for PowerShellTool {
 
         match result {
             Ok((stdout_lines, stderr_lines, status)) => {
+                // An ordinary exit leaves alone what the command started to
+                // outlive it.
+                #[cfg(windows)]
+                if let (Ok(_), Some(job)) = (&status, job) {
+                    job.release();
+                }
                 let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
                 let mut output = stdout_lines.join("\n");
                 if !stderr_lines.is_empty() {
@@ -281,6 +297,10 @@ impl Tool for PowerShellTool {
                 }
             }
             Err(_) => {
+                #[cfg(windows)]
+                if let Some(job) = &job {
+                    job.terminate();
+                }
                 let _ = child.kill().await;
                 ToolResult::error(format!(
                     "PowerShell command timed out after {}ms",

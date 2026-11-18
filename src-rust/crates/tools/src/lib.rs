@@ -40,6 +40,7 @@ pub mod mcp_resources;
 pub mod monitor_tool;
 pub mod notebook_edit;
 pub mod powershell;
+mod process_tree;
 pub mod pty_bash;
 pub mod remote_trigger;
 pub mod repl_tool;
@@ -55,6 +56,10 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+#[cfg(windows)]
+mod windows_job;
+#[cfg(all(test, windows))]
+mod windows_ticker;
 pub mod workspace_scope;
 pub mod worktree;
 

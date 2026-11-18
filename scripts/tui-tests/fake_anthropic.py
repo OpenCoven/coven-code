@@ -5,23 +5,48 @@ Binds to 127.0.0.1 only. The first reply to a prompt asks the engine to run a
 real tool call: "tool: NAME JSON" for that tool and input, "run: COMMAND" for
 Bash with that command, or otherwise a Bash `touch` of a marker named by the
 prompt's last word. The reply to its tool result reports what the engine sent
-back, so a journey can see the outcome on screen. "flood: N" instead sends N
-text deltas in one burst, to put the interactive event path under pressure.
-Every request's messages are appended to the log for later checks.
+back, so a journey can see the outcome on screen. "tools: JSON" calls several
+tools in one response, from a list of [name, input]. "flood: N" instead sends N
+text deltas in one burst, to put the interactive event path under pressure;
+"flood: N hold" sends them and then keeps the stream open, adding "held line"
+every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
+can act while text is still arriving; a `release` file already there means no
+hold.
+Any other word after the count is an error.
+Each streamed request appends one JSON line to LOG_FILE for later checks,
+whose "last" holds the request's last message. Given MESSAGES_LOG, it also
+appends there a JSON line whose "messages" holds all of them, in order. That
+is a file of its own, because cases search LOG_FILE's lines for text that the
+history of a later request would repeat. Given CONNECTIONS_LOG too, it appends
+there a JSON line for every request it answers, once the reply is sent:
+the method, path, whether it streamed, a number unique to the TCP
+connection it came on (counting from 1), and when it started and ended, in
+seconds since the epoch. Only the connection pool that opened a connection
+can send a later request on it.
 
-Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR
+Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG [CONNECTIONS_LOG]]
 """
 import http.server
+import itertools
 import json
 import os
 import sys
+import time
 
 DENIED_TEXT = "TOOL_RESULT_ERROR"
 ALLOWED_TEXT = "TOOL_RESULT_OK"
 COMMAND_PREFIX = "run: "  # the rest of the prompt is the command, verbatim
 TOOL_PREFIX = "tool: "  # then a tool name and its JSON input
+TOOLS_PREFIX = "tools: "  # then a JSON list of [name, input] called in one response
 FLOOD_PREFIX = "flood: "  # then how many text deltas to send in one burst
 FLOOD_TEXT = "flood line\n"
+HOLD_WORD = "hold"  # after the count: keep the stream open until released
+RELEASE_MARKER = "release"
+HOLD_LIMIT_SECONDS = 300
+# While held, a delta every so often: text still arrives during the hold, and
+# the client, which retries a stream that sends nothing for 45 s, keeps it.
+HOLD_DELTA_SECONDS = 0.2
+HELD_TEXT = "held line\n"
 
 
 def sse(event, data):
@@ -66,7 +91,7 @@ def text_turn(text):
     )
 
 
-def flood_turn(count):
+def flood_head(count):
     return (
         message_start()
         + sse("content_block_start", {
@@ -77,25 +102,51 @@ def flood_turn(count):
             "type": "content_block_delta", "index": 0,
             "delta": {"type": "text_delta", "text": FLOOD_TEXT},
         }) * count
-        + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+    )
+
+
+def flood_tail():
+    return (
+        sse("content_block_stop", {"type": "content_block_stop", "index": 0})
         + message_end("end_turn")
     )
 
 
-def tool_turn(tool_id, name, tool_input):
+def flood_turn(count):
+    return flood_head(count) + flood_tail()
+
+
+class Held:
+    """A reply sent in two parts: the tail waits for the release marker."""
+
+    def __init__(self, head, tail, release):
+        self.head, self.tail, self.release = head, tail, release
+
+
+def tool_block(index, tool_id, name, tool_input):
     return (
-        message_start()
-        + sse("content_block_start", {
-            "type": "content_block_start", "index": 0,
+        sse("content_block_start", {
+            "type": "content_block_start", "index": index,
             "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}},
         })
         + sse("content_block_delta", {
-            "type": "content_block_delta", "index": 0,
+            "type": "content_block_delta", "index": index,
             "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input)},
         })
-        + sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-        + message_end("tool_use")
+        + sse("content_block_stop", {"type": "content_block_stop", "index": index})
     )
+
+
+def tool_turn(tool_id, name, tool_input):
+    return message_start() + tool_block(0, tool_id, name, tool_input) + message_end("tool_use")
+
+
+def tools_turn(tool_id, calls):
+    blocks = b"".join(
+        tool_block(index, f"{tool_id}_{index}", name, tool_input)
+        for index, (name, tool_input) in enumerate(calls)
+    )
+    return message_start() + blocks + message_end("tool_use")
 
 
 def last_tool_result(message):
@@ -126,7 +177,16 @@ def reply_for(messages, marker_dir, turn):
     text = message_text(last)
     tool_id = f"toolu_fake_{turn}"
     if text.startswith(FLOOD_PREFIX):
-        return flood_turn(int(text[len(FLOOD_PREFIX):]))
+        words = text[len(FLOOD_PREFIX):].split()
+        count = int(words[0])
+        if words[1:] == [HOLD_WORD]:
+            return Held(flood_head(count), flood_tail(),
+                        os.path.join(marker_dir, RELEASE_MARKER))
+        if words[1:]:
+            raise ValueError(f"unknown flood option: {' '.join(words[1:])}")
+        return flood_turn(count)
+    if text.startswith(TOOLS_PREFIX):
+        return tools_turn(tool_id, json.loads(text[len(TOOLS_PREFIX):]))
     if text.startswith(TOOL_PREFIX):
         name, _, tool_input = text[len(TOOL_PREFIX):].partition(" ")
         return tool_turn(tool_id, name, json.loads(tool_input))
@@ -141,10 +201,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     log_path = ""
     marker_dir = ""
+    messages_log_path = ""
+    connections_log_path = ""
+    connection_numbers = itertools.count(1)
     turn = 0
+
+    def setup(self):
+        super().setup()
+        # One handler serves every request on its connection.
+        self.connection_number = next(Handler.connection_numbers)
 
     def log_message(self, *_):
         pass
+
+    def log_connection(self, started, streamed):
+        if not self.connections_log_path:
+            return
+        with open(self.connections_log_path, "a", encoding="utf-8") as log:
+            log.write(json.dumps({
+                "method": self.command, "path": self.path, "stream": streamed,
+                "connection": self.connection_number,
+                "started": started, "ended": time.time(),
+            }) + "\n")
 
     def respond(self, status, content_type, body):
         self.send_response(status)
@@ -154,11 +232,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        started = time.time()
         self.respond(200, "application/json", b'{"data":[]}')
+        self.log_connection(started, False)
 
     def do_POST(self):
+        started = time.time()
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
+        streamed = bool(request.get("stream"))
+        self.reply_to(request)
+        self.log_connection(started, streamed)
+
+    def reply_to(self, request):
         if not request.get("stream"):
             # Side requests such as title generation are not part of the turn.
             self.respond(200, "application/json", json.dumps({
@@ -171,13 +257,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         messages = request.get("messages") or [{}]
         with open(self.log_path, "a", encoding="utf-8") as log:
             log.write(json.dumps({"last": messages[-1]}) + "\n")
+        if self.messages_log_path:
+            with open(self.messages_log_path, "a", encoding="utf-8") as log:
+                log.write(json.dumps({"messages": messages}) + "\n")
         Handler.turn += 1
-        self.respond(200, "text/event-stream",
-                     reply_for(messages, self.marker_dir, Handler.turn))
+        reply = reply_for(messages, self.marker_dir, Handler.turn)
+        if isinstance(reply, Held):
+            self.respond_held(reply)
+        else:
+            self.respond(200, "text/event-stream", reply)
+
+    def respond_held(self, reply):
+        # Chunked, since the deltas sent while it is held have no known length.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_chunk(reply.head)
+        now = time.monotonic()
+        deadline, next_delta = now + HOLD_LIMIT_SECONDS, now + HOLD_DELTA_SECONDS
+        while not os.path.exists(reply.release) and time.monotonic() < deadline:
+            if time.monotonic() >= next_delta:
+                self.write_chunk(sse("content_block_delta", {
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": HELD_TEXT},
+                }))
+                next_delta += HOLD_DELTA_SECONDS
+            time.sleep(0.05)
+        self.write_chunk(reply.tail)
+        self.wfile.write(b"0\r\n\r\n")
+
+    def write_chunk(self, data):
+        self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
 
 
 def main():
     port_file, Handler.log_path, Handler.marker_dir = sys.argv[1:4]
+    Handler.messages_log_path = sys.argv[4] if len(sys.argv) > 4 else ""
+    Handler.connections_log_path = sys.argv[5] if len(sys.argv) > 5 else ""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     with open(port_file + ".tmp", "w", encoding="utf-8") as f:
         f.write(str(server.server_address[1]))

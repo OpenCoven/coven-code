@@ -479,6 +479,8 @@ struct FamiliarImageCell {
 
 /// Keep each physical cell one column wide when replacing an untrusted control.
 /// Expanding caret notation here would overwrite an adjacent cell or the cursor.
+/// A tab is ordinary text in code and command output, so it becomes one space
+/// rather than a replacement character.
 fn inert_cell_symbol(symbol: &str) -> Cow<'_, str> {
     let is_control = |ch: char| {
         ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
@@ -487,7 +489,11 @@ fn inert_cell_symbol(symbol: &str) -> Cow<'_, str> {
         Cow::Owned(
             symbol
                 .chars()
-                .map(|ch| if is_control(ch) { '\u{fffd}' } else { ch })
+                .map(|ch| match ch {
+                    '\t' => ' ',
+                    ch if is_control(ch) => '\u{fffd}',
+                    ch => ch,
+                })
                 .collect(),
         )
     } else {
@@ -2603,6 +2609,7 @@ fn should_render_status_row(app: &App) -> bool {
     app.voice_recording
         || app.last_turn_elapsed.is_some()
         || app.is_streaming
+        || app.cancellation != crate::application::TurnCancellation::Idle
         || app.status_message.is_some()
         || interesting_stream_status
 }
@@ -2655,6 +2662,12 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         s
+    } else if app.cancellation != crate::application::TurnCancellation::Idle {
+        // Not "Cancelled." until the runtime has actually stopped the turn.
+        vec![Span::styled(
+            "Cancelling…",
+            Style::default().fg(Color::DarkGray),
+        )]
     } else if let (Some(verb), Some(elapsed)) =
         (app.last_turn_verb, app.last_turn_elapsed.as_deref())
     {
@@ -2949,7 +2962,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        // During streaming show "esc to interrupt". The "? shortcuts" hint is
+        // During streaming show that Escape interrupts the turn: it cancels
+        // the model and any running tool (#408). The "? shortcuts" hint is
         // rendered in the top-right status bar (see render_prompt area), so do
         // not duplicate it here (issue #149 follow-up).
         if spans.is_empty() && app.is_streaming {
@@ -3865,6 +3879,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Running,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         assert_eq!(streaming_status_label(&app), "Running Bash");
     }
@@ -3892,6 +3907,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Running,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         // Adapter-set message wins even when a tool is running.
         app.status_message = Some("Compacting context".to_string());
@@ -3919,6 +3935,7 @@ mod welcome_tests {
             status: crate::app::ToolStatus::Done,
             output_preview: None,
             input_json: String::new(),
+            run: Default::default(),
         });
         assert_eq!(streaming_status_label(&app), "Waiting on network");
     }

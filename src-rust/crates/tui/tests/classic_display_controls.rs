@@ -90,6 +90,7 @@ fn classic_live_text_and_tool_output_are_inert() {
         status: ToolStatus::Done,
         output_preview: Some(HOSTILE.into()),
         input_json: "{}".into(),
+        run: Default::default(),
     });
     assert_frame_inert(&app);
     assert_eq!(
@@ -151,4 +152,56 @@ fn ordinary_unicode_and_source_text_survive_rendering() {
     assert!(rendered.contains('漢') && rendered.contains('字'));
     assert!(rendered.contains("e\u{301}") && rendered.contains("👩\u{200d}💻"));
     assert_eq!(app.prompt_input.text, text);
+}
+
+/// Every row of a Classic frame, as text.
+fn classic_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(Vec::new()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
+        },
+    )
+    .unwrap();
+    let completed = terminal.draw(|frame| render_app(frame, app)).unwrap();
+    completed
+        .buffer
+        .content
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+#[test]
+fn classic_draws_a_tab_as_a_space() {
+    // A tab is ordinary text in code, diffs and command output. It must not
+    // reach the terminal raw, and it is not a character to flag as hostile.
+    let text = "TAB-BEGIN\tTAB-END";
+    type Show = fn(&mut App, &str);
+    let surfaces: [(&str, Show); 4] = [
+        ("prompt", |app, text| app.set_prompt_text(text.into())),
+        ("user message", |app, text| {
+            app.push_message(Message::user(text))
+        }),
+        ("assistant message", |app, text| {
+            app.push_message(Message::assistant(text))
+        }),
+        ("status", |app, text| app.status_message = Some(text.into())),
+    ];
+    let mut wrong = Vec::new();
+    for (surface, show) in surfaces {
+        let mut app = App::new(Config::default(), CostTracker::new());
+        show(&mut app, text);
+        let frame = classic_rows(&app, 120, 40).join("\n");
+        if frame.contains('\t') {
+            wrong.push(format!("{surface}: a raw tab reached a cell"));
+        }
+        if frame.contains('\u{fffd}') {
+            wrong.push(format!("{surface}: a tab was drawn as U+FFFD"));
+        }
+        if !frame.contains("TAB-BEGIN TAB-END") {
+            wrong.push(format!("{surface}: the tab is not one space"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

@@ -36,9 +36,29 @@ standalone copy on PATH. See the [unification guide](unification.md).
 | macOS | aarch64 | `coven-code-macos-aarch64.tar.gz` |
 
 These are build targets, not a guarantee of compatibility with every OS version.
-Linux binaries use system libraries; check the release's native verification
-results for the supported runtime baseline. There is no native Windows ARM64
-release artifact.
+There is no native Windows ARM64 release artifact.
+
+### Linux runtime requirements
+
+A Linux release binary uses two system libraries and cannot start without them.
+
+- **glibc.** The binary needs at least the glibc of the image it was built on.
+  The v0.9.2 archives need glibc 2.39. Ubuntu 24.04 has it. Debian 12 (2.36),
+  Ubuntu 22.04 (2.35), RHEL 9 and its rebuilds (2.34) and Amazon Linux 2023
+  (2.34) do not. A later release can need a newer one.
+  `getconf GNU_LIBC_VERSION` prints the system's version.
+- **ALSA.** `libasound.so.2` must be installed, even on a server that never uses
+  voice. On Debian and Ubuntu the package is `libasound2t64` or `libasound2`; on
+  Fedora and RHEL it is `alsa-lib`. Minimal container images usually lack it.
+
+On Linux, the shell installer runs the binary before it installs it. If the binary cannot
+start, the installer prints the loader's message, says which requirement is
+missing, installs nothing and leaves an existing install in place.
+`coven engine install` does not make this check; `coven doctor` reports whether
+the engine it installed can run.
+
+On a system with an older glibc, [build from source](#building-from-source) on that
+system.
 
 ## Standalone installation
 
@@ -121,7 +141,7 @@ coven-code --version
 Example engine output:
 
 ```
-coven-code 0.9.1
+coven-code 0.9.2
 ```
 
 Use `command -v coven-code` on Unix or `Get-Command coven-code` in PowerShell to
@@ -130,8 +150,10 @@ selection; the two paths may differ.
 
 ## Building from source
 
-Use the stable Rust toolchain used by CI and the checked-in lockfile. No older
-minimum Rust version is asserted here without a corresponding build check.
+Use the Rust toolchain CI and release builds use, and the checked-in lockfile.
+That toolchain is Rust 1.100.0, pinned in the `Install Rust toolchain` steps
+under `.github/workflows/`. No older minimum Rust version is asserted here
+without a corresponding build check.
 
 ```bash
 git clone https://github.com/OpenCoven/coven-code.git
