@@ -6,8 +6,9 @@
 # Quitting mid-turn with Ctrl+D twice must exit, give the terminal back, stop
 # the turn and save its prompt and the output it delivered, and must not wait
 # long while an approved command runs. Only Next reports on the turn after it
-# exits. (A unit test covers a turn that ignores the stop: the exit waits 2 s
-# at most.) Classic runs with COVEN_CODE_UI unset;
+# exits. When the save fails, both print the same one-line warning after the
+# terminal is restored (decision 6 on #496). (A unit test covers a turn that
+# ignores the stop: the exit waits 2 s at most.) Classic runs with COVEN_CODE_UI unset;
 # Next, which case 18 also covers, with COVEN_CODE_UI=next. Time limits are
 # generous because this also runs on debug builds and loaded hosts.
 
@@ -58,6 +59,8 @@ tc_classic_quit_save() {
       _cqs_held "$r" "$home" "$port" "$scratch/project"
       tui_stop
       _cqs_command "$r" "$home" "$port" "$scratch/project"
+      tui_stop
+      _cqs_unsaved "$r" "$scratch/home-$r-unsaved" "$port" "$scratch/project"
       tui_stop
     done
   else
@@ -120,4 +123,39 @@ _cqs_command() { # renderer, home, port, project
   saved="$(_cqs_saved_with "$home" "run: sleep 20")"
   if [ -n "$saved" ]; then _pass "$r: quitting while a command runs keeps the prompt"
   else _fail "$r: quitting while a command runs keeps the prompt" "no saved session names it"; fi
+}
+
+# Quitting during a turn when the session cannot be saved: the sessions
+# directory is read-only. Once the terminal is back, the pane shows one line
+# saying the session was not saved, in both renderers, and Classic prints
+# nothing else.
+_cqs_unsaved() { # renderer, home, port, project
+  local r="$1" home="$2" pane
+  local warning="Session not saved; any earlier saved copy lacks this turn."
+  if [ "$(id -u)" = 0 ]; then
+    _skip "$r: a read-only sessions directory does not stop root"; return 0
+  fi
+  mkdir -p "$home/.coven-code/sessions"
+  printf '%s\n' '{"hasCompletedOnboarding": true}' >"$home/.coven-code/settings.json"
+  chmod 500 "$home/.coven-code/sessions"
+  if _cqs_launch "$@"; then
+    tui_type "flood: 2000 hold"; sleep 0.3; tui_keys Enter
+    if wait_for "held line" 30; then
+      tui_quit_and_check "$r: Ctrl+D twice during a turn that cannot be saved" C-d C-d
+      pane="$(tui_capture)"
+      assert_eq "$(grep -cF -- "$warning" <<<"$pane")" "1" \
+        "$r: one line after the exit says the session was not saved"
+      assert_absent "$pane" "Pick it up with" "$r: no resume command follows a failed save"
+      if [ "$r" = next ]; then
+        assert_contains "$pane" "Quit during a turn" "$r: the exit report still follows the exit"
+      else
+        assert_absent "$pane" "Quit during a turn" "$r: no exit report follows the exit"
+      fi
+      assert_eq "$(find "$home/.coven-code/sessions" -type f | wc -l | tr -d ' ')" "0" \
+        "$r: nothing was saved"
+    else
+      _fail "$r: the held turn starts" "$(tui_capture)"
+    fi
+  fi
+  chmod 700 "$home/.coven-code/sessions"
 }
