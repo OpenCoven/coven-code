@@ -295,16 +295,24 @@ pub fn coven_home_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".coven"))
 }
 
+/// Path of the Coven daemon's IPC socket: `$COVEN_HOME/coven.sock`, or
+/// `~/.coven/coven.sock` when `COVEN_HOME` is unset or empty.
+///
+/// The socket may not exist. [`DaemonClient::new`] connects here, and
+/// user-facing messages name this path so they report the file that was
+/// actually checked.
+pub fn daemon_socket_path() -> Option<PathBuf> {
+    Some(coven_home_path()?.join("coven.sock"))
+}
+
 /// Whether the Coven daemon appears to be running, detected by the presence of
-/// its IPC socket at `~/.coven/coven.sock`.
+/// its IPC socket at [`daemon_socket_path`].
 ///
 /// When the daemon is up it owns `familiars.toml`, so coven-code must treat the
 /// roster as read-only. Standalone (no socket) is the only mode in which
 /// coven-code writes the file itself.
 pub fn daemon_socket_present() -> bool {
-    coven_home_path()
-        .map(|p| p.join("coven.sock").exists())
-        .unwrap_or(false)
+    daemon_socket_path().is_some_and(|sock| sock.exists())
 }
 
 /// Whether coven-code may write `~/.coven/familiars.toml` directly.
