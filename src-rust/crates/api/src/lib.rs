@@ -475,6 +475,11 @@ pub mod client {
     }
 
     /// The main Anthropic API client.
+    ///
+    /// Cloning shares the HTTP pool and keeps the configuration and any goal
+    /// authority, so a clone sends to the same endpoint with the same
+    /// credentials.
+    #[derive(Clone)]
     pub struct AnthropicClient {
         http: reqwest::Client,
         config: ClientConfig,

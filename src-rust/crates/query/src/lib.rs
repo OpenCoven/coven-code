@@ -3646,88 +3646,74 @@ async fn run_query_loop_inner(
 
                 // Asynchronously extract and persist session memories if warranted.
                 // Runs in a detached Tokio task so it doesn't block the query loop.
-                if session_memory::SessionMemoryExtractor::should_extract(messages) {
+                //
+                // Only the direct Anthropic path reaches this point (provider
+                // dispatch returns from its own branch), so `client` is the
+                // client this turn was sent through. Extraction reuses it and
+                // sends the transcript to the same endpoint with the same
+                // credentials, never to a default endpoint. Without a
+                // credential it does not run.
+                if session_memory::SessionMemoryExtractor::should_extract(messages)
+                    && !client.api_key_is_empty()
+                {
                     let model_clone = config.model.clone();
                     let messages_clone = messages.clone();
                     let working_dir_clone = tool_ctx.working_dir.clone();
                     let runtime_mode = tool_ctx.config.runtime_mode();
                     let hosted_review_config = tool_ctx.config.hosted_review.clone();
                     let session_id_clone = tool_ctx.session_id.clone();
-
-                    // Build a fresh client using the same API key.  This avoids
-                    // requiring an Arc in the existing run_query_loop signature.
-                    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-                        if !api_key.is_empty() {
-                            if let Ok(sm_client) = claurst_api::AnthropicClient::new(
-                                claurst_api::client::ClientConfig {
-                                    api_key,
-                                    ..Default::default()
-                                },
-                            ) {
-                                let background_goal = tool_ctx.goal_turn.for_background_work();
-                                let sm_client = match background_goal.captured() {
-                                    Some(turn) => {
-                                        sm_client.for_goal_turn(turn, GoalTurnPermission::Work)
-                                    }
-                                    None => sm_client,
-                                };
-                                let sm_client = std::sync::Arc::new(sm_client);
-                                tokio::spawn(async move {
-                                    if background_goal.require_work(&session_id_clone).is_err() {
-                                        return;
-                                    }
-                                    let memory_provenance = build_session_memory_provenance(
-                                        &session_id_clone,
+                    let background_goal = tool_ctx.goal_turn.for_background_work();
+                    let sm_client = match background_goal.captured() {
+                        Some(turn) => client.for_goal_turn(turn, GoalTurnPermission::Work),
+                        None => client.clone(),
+                    };
+                    tokio::spawn(async move {
+                        if background_goal.require_work(&session_id_clone).is_err() {
+                            return;
+                        }
+                        let memory_provenance =
+                            build_session_memory_provenance(&session_id_clone, &working_dir_clone);
+                        let extractor = session_memory::SessionMemoryExtractor::new(&model_clone);
+                        match extractor
+                            .extract(&messages_clone, &working_dir_clone, &sm_client)
+                            .await
+                        {
+                            Ok(memories) if !memories.is_empty() => {
+                                if background_goal.require_work(&session_id_clone).is_err() {
+                                    return;
+                                }
+                                let target =
+                                    working_dir_clone.join(".coven-code").join("AGENTS.md");
+                                let candidate_store =
+                                    session_memory::MemoryCandidateStore::for_working_dir(
                                         &working_dir_clone,
                                     );
-                                    let extractor =
-                                        session_memory::SessionMemoryExtractor::new(&model_clone);
-                                    match extractor
-                                        .extract(&messages_clone, &working_dir_clone, &sm_client)
-                                        .await
-                                    {
-                                        Ok(memories) if !memories.is_empty() => {
-                                            if background_goal
-                                                .require_work(&session_id_clone)
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                            let target = working_dir_clone
-                                                .join(".coven-code")
-                                                .join("AGENTS.md");
-                                            let candidate_store =
-                                                session_memory::MemoryCandidateStore::for_working_dir(
-                                                    &working_dir_clone,
-                                                );
-                                            if let Err(e) = session_memory::SessionMemoryExtractor::persist_with_policy(
-                                                &memories,
-                                                &target,
-                                                &candidate_store,
-                                                runtime_mode,
-                                                &hosted_review_config,
-                                                &memory_provenance,
-                                            )
-                                            .await
-                                            {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    "Failed to store session memories"
-                                                );
-                                            }
-                                        }
-                                        Ok(_) => {} // no memories extracted
-                                        Err(e) => {
-                                            tracing::debug!(
-                                                error = %e,
-                                                "Session memory extraction failed (non-fatal)"
-                                            );
-                                        }
-                                    }
-                                });
+                                if let Err(e) =
+                                    session_memory::SessionMemoryExtractor::persist_with_policy(
+                                        &memories,
+                                        &target,
+                                        &candidate_store,
+                                        runtime_mode,
+                                        &hosted_review_config,
+                                        &memory_provenance,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to store session memories"
+                                    );
+                                }
+                            }
+                            Ok(_) => {} // no memories extracted
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Session memory extraction failed (non-fatal)"
+                                );
                             }
                         }
-                    }
+                    });
                 }
 
                 // Trigger AutoDream consolidation check (non-blocking, best-effort).

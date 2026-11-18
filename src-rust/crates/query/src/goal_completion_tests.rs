@@ -157,6 +157,9 @@ mod goal_completion {
         fallback_model: Option<String>,
         initial_history: Option<Vec<Message>>,
         pending_creation: bool,
+        /// Keep the scripted provider registered even when the direct client
+        /// points at `direct_api_base`.
+        keep_registry: bool,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         hooks: std::collections::HashMap<
             claurst_core::config::HookEvent,
@@ -291,9 +294,7 @@ mod goal_completion {
         let mut config = make_config(Some("Local test"), Some("Keep existing instruction"));
         config.model = "scripted".to_string();
         config.fallback_model = fixture.fallback_model;
-        config.provider_registry = fixture
-            .direct_api_base
-            .is_none()
+        config.provider_registry = (fixture.keep_registry || fixture.direct_api_base.is_none())
             .then(|| Arc::new(registry));
         let tracker = CostTracker::new();
         let ctx = ToolContext {
@@ -2324,6 +2325,110 @@ mod goal_completion {
         assert_eq!(foreground.requests.len(), 1);
         assert!(!home.join("memory/.consolidation_lock").exists());
         assert!(!home.join("memory/.consolidation_state.json").exists());
+    }
+
+    fn extraction_history() -> Vec<Message> {
+        let history: Vec<_> = (0..20)
+            .map(|n| {
+                if n % 2 == 0 {
+                    Message::user(format!("Memory {n}"))
+                } else {
+                    Message::assistant(format!("Noted {n}"))
+                }
+            })
+            .collect();
+        assert!(session_memory::SessionMemoryExtractor::should_extract(
+            &history
+        ));
+        history
+    }
+
+    async fn wait_for_requests(count: &std::sync::atomic::AtomicUsize, expected: usize) -> usize {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = count.load(std::sync::atomic::Ordering::SeqCst);
+            if seen >= expected || tokio::time::Instant::now() >= deadline {
+                return seen;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    // #530: session memory extraction must go to the endpoint the turn used,
+    // not to the default Anthropic API base, and must not depend on
+    // ANTHROPIC_API_KEY being set in the environment.
+    #[tokio::test]
+    async fn memory_extraction_uses_the_turn_client_endpoint() {
+        if isolated_case_completed("memory_extraction_uses_the_turn_client_endpoint") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (base, count, stop, server) = serve_goal_responses(|attempt| {
+            if attempt == 0 {
+                sse_response("Done.", 1, true)
+            } else {
+                sse_response("[]", 1, true)
+            }
+        })
+        .await;
+        let run = run_goal_fixture(
+            dir.path(),
+            GoalTurnContext::Captured(None),
+            None,
+            GoalFixture {
+                direct_api_base: Some(base),
+                client_retries: Some(0),
+                initial_history: Some(extraction_history()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            matches!(run.outcome, QueryOutcome::EndTurn { .. }),
+            "{:?}",
+            run.outcome
+        );
+        // The turn request is the first; the detached extraction request is
+        // the second and must arrive at the same fixture.
+        let seen = wait_for_requests(&count, 2).await;
+        stop.cancel();
+        server.await.unwrap();
+        assert_eq!(seen, 2, "extraction request did not reach the turn endpoint");
+    }
+
+    // #530: when the turn is served by another provider, the transcript is
+    // not sent through the Anthropic client at all.
+    #[tokio::test]
+    async fn memory_extraction_skips_turns_served_by_another_provider() {
+        if isolated_case_completed("memory_extraction_skips_turns_served_by_another_provider") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (base, count, stop, server) =
+            serve_goal_responses(|_| sse_response("[]", 1, true)).await;
+        let run = run_goal_fixture(
+            dir.path(),
+            GoalTurnContext::Captured(None),
+            None,
+            GoalFixture {
+                direct_api_base: Some(base),
+                client_retries: Some(0),
+                initial_history: Some(extraction_history()),
+                keep_registry: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            matches!(run.outcome, QueryOutcome::EndTurn { .. }),
+            "{:?}",
+            run.outcome
+        );
+        assert_eq!(run.requests.len(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        stop.cancel();
+        server.await.unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
