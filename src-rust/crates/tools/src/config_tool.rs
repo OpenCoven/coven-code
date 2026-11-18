@@ -176,6 +176,15 @@ impl Tool for ConfigTool {
                     ) {
                         return ToolResult::error(e.to_string());
                     }
+                    // The approval can wait on the user for any length of
+                    // time, and "always allow" saves a rule while it does:
+                    // change the file as it is now, not as it was before.
+                    settings = match claurst_core::config::Settings::load().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return ToolResult::error(format!("Failed to load settings: {}", e))
+                        }
+                    };
                     settings.config.permission_mode = mode;
                     if let Err(e) = settings.save().await {
                         return ToolResult::error(format!("Failed to save settings: {}", e));

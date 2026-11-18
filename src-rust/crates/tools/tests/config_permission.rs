@@ -3,7 +3,10 @@
 //! Each case runs in a child process with its own engine home, because the
 //! settings file is found through process-wide environment.
 use claurst_core::config::{Config, PermissionMode, Settings};
-use claurst_core::permissions::{AutoPermissionHandler, PermissionManager};
+use claurst_core::permissions::{
+    AutoPermissionHandler, PermissionDecision, PermissionHandler, PermissionManager,
+    PermissionRequest,
+};
 use claurst_tools::{config_tool::ConfigTool, Tool, ToolContext};
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::{Duration, Instant};
@@ -75,6 +78,25 @@ fn headless_context(mode: PermissionMode, home: &std::path::Path) -> ToolContext
     }
 }
 
+/// Approves, and changes the settings file while the tool waits for the
+/// answer, as "always allow" does when it saves its rule.
+struct SavesWhileAsked(std::path::PathBuf);
+
+impl PermissionHandler for SavesWhileAsked {
+    fn check_permission(&self, request: &PermissionRequest) -> PermissionDecision {
+        self.request_permission(request)
+    }
+
+    fn request_permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+        std::fs::write(
+            self.0.join("settings.json"),
+            r#"{"config": {"model": "saved-during-approval"}}"#,
+        )
+        .unwrap();
+        PermissionDecision::Allow
+    }
+}
+
 fn set(setting: &str, value: &str) -> serde_json::Value {
     serde_json::json!({"setting": setting, "value": value})
 }
@@ -137,6 +159,21 @@ async fn config_permission_child() {
             assert!(!result.is_error, "{}", result.content);
             assert_eq!(saved_mode(), PermissionMode::AcceptEdits);
         }
+        "saved-during-approval" => {
+            let mut ctx = headless_context(PermissionMode::Default, &home);
+            ctx.permission_handler = Arc::new(SavesWhileAsked(home.clone()));
+            let result = ConfigTool
+                .execute(set("permission_mode", "accept_edits"), &ctx)
+                .await;
+            assert!(!result.is_error, "{}", result.content);
+            let settings = Settings::load_sync().unwrap();
+            assert_eq!(settings.config.permission_mode, PermissionMode::AcceptEdits);
+            assert_eq!(
+                settings.config.model.as_deref(),
+                Some("saved-during-approval"),
+                "what was saved during the approval must survive the change"
+            );
+        }
         _ => panic!("unknown fixture case"),
     }
     println!("config-permission-fixture-complete");
@@ -150,4 +187,9 @@ fn the_saved_permission_mode_cannot_be_changed_without_approval() {
 #[test]
 fn an_approved_change_to_the_saved_permission_mode_is_saved() {
     run_case("approved");
+}
+
+#[test]
+fn an_approved_change_keeps_what_was_saved_while_it_waited_for_approval() {
+    run_case("saved-during-approval");
 }
