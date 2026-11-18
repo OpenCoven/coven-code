@@ -2,13 +2,14 @@
 //!
 //! Killing `cmd.exe` or `powershell.exe` does not kill what it started. So the
 //! shell is created suspended, joins a new job, and only then runs: every
-//! process the shell or its descendants create is created inside the job.
+//! process the shell or its descendants create is created inside the job,
+//! unless it explicitly asks to leave it (`CREATE_BREAKAWAY_FROM_JOB`).
 //! Terminating the job, or closing its only handle, kills all of them.
 //!
 //! Only the shell's own process tree is in the job. Work the command hands to
-//! a process outside it is not: an elevated process (`Start-Process -Verb
-//! RunAs`), a scheduled task, a process created through WMI, a service, or a
-//! Linux process under WSL.
+//! a process outside it is not: a process started with explicit breakaway, an
+//! elevated process (`Start-Process -Verb RunAs`), a scheduled task, a process
+//! created through WMI, a service, or a Linux process under WSL.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -87,9 +88,10 @@ impl Job {
 
     /// Close the job without killing what the command left running when it
     /// exited, such as a process it started to outlive it. Unix keeps those
-    /// after an ordinary exit as well.
+    /// after an ordinary exit as well. Those processes stay in the job, so it
+    /// keeps allowing explicit breakaway for them.
     pub(crate) fn release(self) {
-        if let Err(error) = self.limit(0) {
+        if let Err(error) = self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK) {
             tracing::warn!(
                 %error,
                 "Could not release a foreground command's job; closing it kills what the command left running"
@@ -137,7 +139,7 @@ impl SpawnError {
 /// Spawn `command` with its whole process tree in a new job.
 ///
 /// The shell is created suspended and resumed only once it is in the job, so
-/// it cannot start anything outside it. This sets `command`'s creation flags,
+/// nothing it starts is outside the job unless it asks for breakaway. This sets `command`'s creation flags,
 /// replacing any it had: a caller that needs others, such as
 /// `CREATE_NO_WINDOW`, has to pass them in here first.
 ///
@@ -321,6 +323,13 @@ mod tests {
             flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
             0,
             "breakaway allowed: {flags:#x}"
+        );
+        // Exactly these two: silent breakaway would let every descendant
+        // leave the job without asking.
+        assert_eq!(
+            flags,
+            super::JOB_LIMITS,
+            "only kill on close and explicit breakaway"
         );
     }
 
