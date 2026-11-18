@@ -1774,17 +1774,28 @@ fn welcome_provider_label(app: &App) -> String {
         .unwrap_or_else(|| "anthropic".to_string())
 }
 
-/// One-glance daemon status: "Daemon: online" / "Daemon: offline".
+/// One-glance daemon status: "online", "offline", or "unknown" when a daemon
+/// answers but is not known to hold this session's ledger registration
+/// (#412).
 ///
 /// Uses the cached, non-blocking probe in [`crate::coven_status`]: the render
 /// path must never wait on a socket round-trip. The underlying background
 /// probe keeps the 2 s budget so a busy daemon doesn't flip the welcome panel
 /// to "offline" mid-load — see issue #50.
-fn welcome_daemon_label() -> String {
-    if crate::coven_status::daemon_looks_online() {
-        "Daemon: online".to_string()
-    } else {
-        "Daemon: offline".to_string()
+fn welcome_daemon_state(app: &App) -> &'static str {
+    daemon_presence_word(
+        app.ownership
+            .daemon_presence(crate::coven_status::daemon_looks_online()),
+    )
+}
+
+/// The welcome line's word for the daemon indicator.
+fn daemon_presence_word(presence: crate::application::DaemonPresence) -> &'static str {
+    use crate::application::DaemonPresence;
+    match presence {
+        DaemonPresence::Online => "online",
+        DaemonPresence::Offline => "offline",
+        DaemonPresence::Unknown => "unknown",
     }
 }
 
@@ -1948,7 +1959,7 @@ fn render_welcome_box(
         // the model, daemon, and familiar so a user on a 24×9 terminal
         // doesn't see a content-less "Coven Code v0.0.13" header.
         let model = welcome_model_label(app);
-        let daemon = welcome_daemon_label();
+        let daemon = welcome_daemon_state(app);
         let familiar = welcome_familiar_label(app);
         let line = Line::from(vec![
             Span::styled(
@@ -1962,7 +1973,10 @@ fn render_welcome_box(
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(format!(" · {model}"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!(" · {daemon}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" · Daemon: {daemon}"),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(
                 format!(" · {familiar}"),
                 Style::default().fg(Color::DarkGray),
@@ -2078,15 +2092,10 @@ fn render_welcome_box(
         truncate_meta(&friendly_model_label(app), left_w_usize),
         meta_style,
     )));
-    let daemon = welcome_daemon_label();
     let provider_line = format!(
         "{} \u{00b7} {}",
         title_case(&welcome_provider_label(app)),
-        if daemon.contains("online") {
-            "online"
-        } else {
-            "offline"
-        }
+        welcome_daemon_state(app)
     );
     left_lines.push(Line::from(Span::styled(
         truncate_meta(&provider_line, left_w_usize),
@@ -2779,12 +2788,14 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         let mut spans: Vec<Span> = Vec::new();
 
-        // Daemon online/offline indicator
+        // Daemon indicator: online, offline, or answering but not known to
+        // hold this session's ledger registration (#412).
         {
-            let (label, color) = if app.daemon_online {
-                ("\u{2726} coven", crate::overlays::COVEN_CODE_ACCENT)
-            } else {
-                ("\u{25cb} coven", Color::DarkGray)
+            use crate::application::DaemonPresence;
+            let (label, color) = match app.ownership.daemon_presence(app.daemon_online) {
+                DaemonPresence::Online => ("\u{2726} coven", crate::overlays::COVEN_CODE_ACCENT),
+                DaemonPresence::Offline => ("\u{25cb} coven", Color::DarkGray),
+                DaemonPresence::Unknown => ("\u{25cc} coven (unknown)", Color::Yellow),
             };
             spans.push(Span::styled(label, Style::default().fg(color)));
             spans.push(Span::raw("  "));
@@ -4105,15 +4116,76 @@ mod welcome_tests {
         }
     }
 
+    /// #412, policy B: Classic's footer says when the daemon answering is
+    /// not known to hold this session's ledger registration, instead of
+    /// showing it as online.
     #[test]
-    fn welcome_daemon_label_is_one_of_two_strings() {
+    fn footer_daemon_indicator_reads_online_offline_or_unknown() {
+        use crate::application::SessionOwnership;
+
+        let (mut app, _guard, _tmp) = make_isolated_status_app();
+        let footer = |app: &App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(180, 1)).expect("terminal");
+            terminal
+                .draw(|frame| render_footer(frame, app, frame.area()))
+                .expect("draw footer");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+
+        app.daemon_online = true;
+        let online = footer(&app);
+        assert!(online.contains("\u{2726} coven"), "{online:?}");
+        assert!(!online.contains("unknown"), "{online:?}");
+
+        app.ownership = SessionOwnership::LedgerUnknown {
+            session_id: "session-a".to_string(),
+        };
+        let unknown = footer(&app);
+        assert!(unknown.contains("\u{25cc} coven (unknown)"), "{unknown:?}");
+        assert!(!unknown.contains('\u{2726}'), "{unknown:?}");
+
+        // Sent again at a session start, not yet accepted: still unknown.
+        app.ownership = SessionOwnership::LedgerRenewing {
+            session_id: "session-a".to_string(),
+        };
+        let renewing = footer(&app);
+        assert!(
+            renewing.contains("\u{25cc} coven (unknown)"),
+            "{renewing:?}"
+        );
+
+        // With nothing answering, offline is what is known.
+        app.daemon_online = false;
+        let offline = footer(&app);
+        assert!(offline.contains("\u{25cb} coven"), "{offline:?}");
+        assert!(!offline.contains("unknown"), "{offline:?}");
+    }
+
+    #[test]
+    fn welcome_line_names_each_daemon_presence() {
+        use crate::application::DaemonPresence;
+
+        assert_eq!(daemon_presence_word(DaemonPresence::Online), "online");
+        assert_eq!(daemon_presence_word(DaemonPresence::Offline), "offline");
+        assert_eq!(daemon_presence_word(DaemonPresence::Unknown), "unknown");
+    }
+
+    #[test]
+    fn welcome_daemon_state_is_online_or_offline_without_a_registration() {
         // Either string is acceptable — the test machine may or may not have
         // the daemon socket. The label MUST be a stable, non-empty
         // human-readable hint, not a raw IO error.
-        let label = welcome_daemon_label();
+        let (app, _guard, _tmp) = make_isolated_status_app();
+        let state = welcome_daemon_state(&app);
         assert!(
-            label == "Daemon: online" || label == "Daemon: offline",
-            "unexpected daemon label: {label}"
+            state == "online" || state == "offline",
+            "unexpected daemon state: {state}"
         );
     }
 

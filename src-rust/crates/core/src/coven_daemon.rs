@@ -58,6 +58,35 @@ pub struct DaemonHealth {
     pub started_at: Option<String>,
 }
 
+/// One running daemon, as far as this client can tell it from another: the
+/// process its health response names and the socket file it was reached
+/// through. Two readings that differ in any field are different instances.
+/// [`DaemonClient::sight`] reports one only when the health response names
+/// a `pid`, a `started_at` or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonInstance {
+    pub pid: Option<u32>,
+    pub started_at: Option<String>,
+    pub api_version: String,
+    pub coven_version: String,
+    /// Device and inode of the socket file, read before connecting.
+    pub socket_file: Option<(u64, u64)>,
+}
+
+/// What one look at the daemon socket found. See [`DaemonClient::sight`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonSighting {
+    /// No socket file, the connection was refused, or it closed with no
+    /// answer: no daemon is serving.
+    Gone,
+    /// Something accepted the connection, but did not say which process it
+    /// is: no complete answer within the budget (a busy daemon), an error
+    /// status, or a health body naming neither a pid nor a start time.
+    Unidentified,
+    /// A daemon answered and named its process.
+    Instance(DaemonInstance),
+}
+
 /// Page of session events returned by `GET /api/v1/sessions/:id/events`.
 #[derive(Debug, Clone)]
 pub struct EventPage {
@@ -413,50 +442,7 @@ impl DaemonClient {
                 .read_to_end(&mut raw)
                 .map_err(|e| DaemonError::Transport(e.to_string()))?;
 
-            let response = String::from_utf8_lossy(&raw);
-            let idx = response.find("\r\n\r\n").ok_or_else(|| {
-                DaemonError::MalformedResponse("missing header/body delimiter".to_string())
-            })?;
-
-            let status_line = response.lines().next().unwrap_or("");
-            let status_code = status_line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .ok_or_else(|| {
-                    DaemonError::MalformedResponse(format!(
-                        "could not parse status from `{status_line}`"
-                    ))
-                })?;
-
-            let body_str = response[idx + 4..].to_string();
-
-            if (200..300).contains(&status_code) {
-                Ok(body_str)
-            } else {
-                // Try to extract the structured envelope:
-                // { "error": { "code": "...", "message": "..." } }
-                let (code, message) = match serde_json::from_str::<serde_json::Value>(&body_str) {
-                    Ok(v) => {
-                        let err = v.get("error");
-                        let code = err
-                            .and_then(|e| e.get("code"))
-                            .and_then(|c| c.as_str())
-                            .map(str::to_string);
-                        let message = err
-                            .and_then(|e| e.get("message"))
-                            .and_then(|c| c.as_str())
-                            .map(str::to_string);
-                        (code, message)
-                    }
-                    Err(_) => (None, None),
-                };
-                Err(DaemonError::BadStatus {
-                    status: status_code,
-                    code,
-                    message,
-                })
-            }
+            parse_response(&raw)
         }
         #[cfg(not(unix))]
         {
@@ -629,34 +615,82 @@ impl DaemonClient {
 
     /// Daemon liveness + version metadata.
     pub fn health(&self) -> Result<DaemonHealth, DaemonError> {
-        let body = self.get("/api/v1/health")?;
-        let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
-        let daemon = value.get("daemon");
-        Ok(DaemonHealth {
-            api_version: value
-                .get("apiVersion")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            coven_version: value
-                .get("covenVersion")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            pid: daemon
-                .and_then(|d| d.get("pid"))
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32),
-            socket: daemon
-                .and_then(|d| d.get("socket"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            started_at: daemon
-                .and_then(|d| d.get("startedAt"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        })
+        parse_health(&self.get("/api/v1/health")?)
+    }
+
+    /// Read the daemon's health once and say which instance answered.
+    /// `timeout` bounds sending the request and, as a whole, reading the
+    /// answer: a peer that keeps sending bytes cannot extend it.
+    ///
+    /// Like [`Self::check_reachability`], only a refused connection or one
+    /// that fails or closes before any byte of an answer reads as gone. A
+    /// daemon that accepts and stays silent, or whose answer is cut short,
+    /// is not reported as gone.
+    pub fn sight(&self, timeout: Duration) -> DaemonSighting {
+        #[cfg(unix)]
+        {
+            use std::io::ErrorKind;
+            use std::os::unix::fs::MetadataExt;
+
+            // No answer at all: gone, unless the daemon was merely slow.
+            let unanswered = |e: &std::io::Error| match e.kind() {
+                ErrorKind::TimedOut | ErrorKind::WouldBlock => DaemonSighting::Unidentified,
+                _ => DaemonSighting::Gone,
+            };
+
+            let deadline = std::time::Instant::now() + timeout;
+            let socket_file = std::fs::metadata(&self.sock_path)
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()));
+            let mut stream = match self.connect_with_timeout(timeout) {
+                Ok(stream) => stream,
+                Err(e) => return unanswered(&e),
+            };
+            let request =
+                "GET /api/v1/health HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\n\r\n";
+            if let Err(e) = stream
+                .write_all(request.as_bytes())
+                .and_then(|()| stream.flush())
+            {
+                return unanswered(&e);
+            }
+
+            // Read until the daemon closes the connection, the budget runs
+            // out, or a read fails. Whatever arrived by then is the answer.
+            let mut raw = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                    break;
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) if raw.is_empty() => return DaemonSighting::Gone,
+                    Ok(0) => break,
+                    Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) if raw.is_empty() => return unanswered(&e),
+                    Err(_) => break,
+                }
+            }
+            match parse_response(&raw).and_then(|body| parse_health(&body)) {
+                Ok(health) if health.pid.is_some() || health.started_at.is_some() => {
+                    DaemonSighting::Instance(DaemonInstance {
+                        pid: health.pid,
+                        started_at: health.started_at,
+                        api_version: health.api_version,
+                        coven_version: health.coven_version,
+                        socket_file,
+                    })
+                }
+                _ => DaemonSighting::Unidentified,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            DaemonSighting::Gone
+        }
     }
 
     /// Forward `input` to a live PTY-backed session.
@@ -843,6 +877,83 @@ impl DaemonClient {
     }
 }
 
+/// Split a raw HTTP/1.0 response into its body, or the daemon's error.
+#[cfg(unix)]
+fn parse_response(raw: &[u8]) -> Result<String, DaemonError> {
+    let response = String::from_utf8_lossy(raw);
+    let idx = response.find("\r\n\r\n").ok_or_else(|| {
+        DaemonError::MalformedResponse("missing header/body delimiter".to_string())
+    })?;
+
+    let status_line = response.lines().next().unwrap_or("");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| {
+            DaemonError::MalformedResponse(format!("could not parse status from `{status_line}`"))
+        })?;
+
+    let body_str = response[idx + 4..].to_string();
+
+    if (200..300).contains(&status_code) {
+        Ok(body_str)
+    } else {
+        // Try to extract the structured envelope:
+        // { "error": { "code": "...", "message": "..." } }
+        let (code, message) = match serde_json::from_str::<serde_json::Value>(&body_str) {
+            Ok(v) => {
+                let err = v.get("error");
+                let code = err
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string);
+                let message = err
+                    .and_then(|e| e.get("message"))
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string);
+                (code, message)
+            }
+            Err(_) => (None, None),
+        };
+        Err(DaemonError::BadStatus {
+            status: status_code,
+            code,
+            message,
+        })
+    }
+}
+
+fn parse_health(body: &str) -> Result<DaemonHealth, DaemonError> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| DaemonError::MalformedResponse(e.to_string()))?;
+    let daemon = value.get("daemon");
+    Ok(DaemonHealth {
+        api_version: value
+            .get("apiVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        coven_version: value
+            .get("covenVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        pid: daemon
+            .and_then(|d| d.get("pid"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32),
+        socket: daemon
+            .and_then(|d| d.get("socket"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        started_at: daemon
+            .and_then(|d| d.get("startedAt"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
 /// Minimal percent-encoder for path segments — escapes anything outside the
 /// unreserved set defined by RFC 3986. The daemon's session ids are UUID-shaped
 /// today, but encoding defensively avoids surprises if that ever changes.
@@ -987,6 +1098,96 @@ fn parse_memory_overview(body: &str) -> Result<MemoryOverview, DaemonError> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// A scripted daemon on a Unix socket, for this crate's tests.
+#[cfg(all(test, unix))]
+pub(crate) mod fake {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Reads each request in full, then writes what `respond` returns for
+    /// it, until dropped. Dropping it leaves the socket file behind, as a
+    /// killed daemon does.
+    pub(crate) struct FakeDaemon {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeDaemon {
+        pub(crate) fn start(
+            sock: &std::path::Path,
+            respond: impl Fn(&str) -> String + Send + 'static,
+        ) -> Self {
+            let listener = std::os::unix::net::UnixListener::bind(sock).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        // Accepted streams inherit O_NONBLOCK on macOS.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let request = read_request(&mut stream);
+                        let _ = stream.write_all(respond(&request).as_bytes());
+                    }
+                })
+            };
+            Self {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for FakeDaemon {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The request's head and, when it declares one, its whole body.
+    /// Answering before the request has arrived could close the stream
+    /// under the client's write.
+    fn read_request(stream: &mut std::os::unix::net::UnixStream) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let text = String::from_utf8_lossy(&request);
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let body_len = text[..head_end]
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|len| len.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= head_end + 4 + body_len {
+                    break;
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.extend_from_slice(&chunk[..n]),
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    /// A health answer in the shape Coven v0.5.0 sends.
+    pub(crate) fn health_response(pid: u32, started_at: &str) -> String {
+        format!(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"ok\":true,\"apiVersion\":\"coven.daemon.v1\",\"covenVersion\":\"0.5.0\",\"capabilities\":{{\"eventCursor\":\"sequence\"}},\"daemon\":{{\"pid\":{pid},\"startedAt\":\"{started_at}\",\"socket\":\"/x/coven.sock\"}}}}"
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1517,6 +1718,216 @@ mod tests {
             "{request}"
         );
         assert_eq!(error.status(), Some(404));
+    }
+
+    #[cfg(unix)]
+    use super::fake::{health_response, FakeDaemon};
+
+    #[cfg(unix)]
+    const SIGHT_BUDGET: Duration = Duration::from_secs(5);
+
+    /// #412, policy B: the epoch is what health says about the serving
+    /// process plus the socket file. One daemon gives the same instance on
+    /// every sighting.
+    #[cfg(unix)]
+    #[test]
+    fn sightings_of_one_daemon_name_the_same_instance() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let _daemon =
+            FakeDaemon::start(&sock, |_| health_response(4242, "2026-11-18T05:06:40.214Z"));
+        let client = DaemonClient {
+            sock_path: sock.clone(),
+        };
+
+        let first = client.sight(SIGHT_BUDGET);
+        let meta = fs::metadata(&sock).unwrap();
+        assert_eq!(
+            first,
+            DaemonSighting::Instance(DaemonInstance {
+                pid: Some(4242),
+                started_at: Some("2026-11-18T05:06:40.214Z".to_string()),
+                api_version: "coven.daemon.v1".to_string(),
+                coven_version: "0.5.0".to_string(),
+                socket_file: Some((meta.dev(), meta.ino())),
+            })
+        );
+        assert_eq!(client.sight(SIGHT_BUDGET), first);
+    }
+
+    /// A daemon restarted on the same socket path is a different instance,
+    /// whether its pid, its start time or both changed, and a dead daemon
+    /// that left its socket file behind is gone, not unidentified.
+    #[cfg(unix)]
+    #[test]
+    fn a_restarted_daemon_is_a_different_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let client = DaemonClient {
+            sock_path: sock.clone(),
+        };
+        let sight_of = |pid: u32, started_at: &str| {
+            let response = health_response(pid, started_at);
+            let daemon = FakeDaemon::start(&sock, move |_| response.clone());
+            let sighting = client.sight(SIGHT_BUDGET);
+            drop(daemon);
+            assert!(sock.exists(), "the stale socket file stays");
+            assert_eq!(client.sight(SIGHT_BUDGET), DaemonSighting::Gone);
+            fs::remove_file(&sock).unwrap();
+            assert_eq!(client.sight(SIGHT_BUDGET), DaemonSighting::Gone);
+            sighting
+        };
+
+        let first = sight_of(100, "2026-11-18T05:00:00Z");
+        let new_start = sight_of(100, "2026-11-18T05:00:09Z");
+        let new_pid = sight_of(101, "2026-11-18T05:00:00Z");
+        let both = sight_of(102, "2026-11-18T05:00:20Z");
+        // Each fake binds a new socket file. Compare what the daemon says
+        // about itself alone, so the file's identity cannot carry the test.
+        let named = |sighting: &DaemonSighting| match sighting {
+            DaemonSighting::Instance(instance) => DaemonInstance {
+                socket_file: None,
+                ..instance.clone()
+            },
+            other => panic!("not an instance: {other:?}"),
+        };
+        for (name, later) in [
+            ("start time", &new_start),
+            ("pid", &new_pid),
+            ("both", &both),
+        ] {
+            assert_ne!(
+                named(&first),
+                named(later),
+                "a new {name} must read as a new instance"
+            );
+        }
+    }
+
+    /// A daemon that accepts and never answers is neither gone nor an
+    /// instance, and the sighting returns within its budget.
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_daemon_is_unidentified_within_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let accepted = listener.accept();
+            // Hold the connection open, silent, until the test is done.
+            let _ = held.recv();
+            drop(accepted);
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let started = std::time::Instant::now();
+        let sighting = client.sight(Duration::from_millis(300));
+        let elapsed = started.elapsed();
+        drop(release);
+        server.join().unwrap();
+
+        assert_eq!(sighting, DaemonSighting::Unidentified);
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
+            "sight took {elapsed:?} against a 300 ms budget"
+        );
+    }
+
+    /// The budget bounds the whole look, not each read: a peer that keeps
+    /// sending bytes without ever finishing cannot hold the probe.
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_trickles_bytes_is_unidentified_within_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // One byte every 50 ms, for far longer than the budget, until
+            // the client hangs up.
+            for _ in 0..200 {
+                if stream.write_all(b"H").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let started = std::time::Instant::now();
+        let sighting = client.sight(Duration::from_millis(300));
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert_eq!(sighting, DaemonSighting::Unidentified);
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
+            "sight took {elapsed:?} against a 300 ms budget"
+        );
+    }
+
+    /// A daemon that answers in full and then keeps the connection open is
+    /// still identified, once the budget ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_complete_answer_on_a_connection_left_open_names_the_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("coven.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(health_response(4242, "2026-11-18T05:06:40.214Z").as_bytes())
+                .unwrap();
+            // Keep the connection open until the test is done.
+            let _ = held.recv();
+        });
+
+        let client = DaemonClient { sock_path: sock };
+        let sighting = client.sight(Duration::from_millis(300));
+        drop(release);
+        server.join().unwrap();
+
+        let DaemonSighting::Instance(instance) = sighting else {
+            panic!("not an instance: {sighting:?}");
+        };
+        assert_eq!(instance.pid, Some(4242));
+        assert_eq!(
+            instance.started_at.as_deref(),
+            Some("2026-11-18T05:06:40.214Z")
+        );
+    }
+
+    /// An answer that names no process cannot be told from its successor,
+    /// so it is not an instance: an error status, a body without the
+    /// `daemon` object, and a body that is not JSON.
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_that_names_no_process_is_unidentified() {
+        for response in [
+            "HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"error\":{\"code\":\"not_found\",\"message\":\"no route\"}}",
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"apiVersion\":\"coven.daemon.v1\"}",
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n[]",
+            "HTTP/1.0 200 OK\r\n\r\nnot json",
+        ] {
+            let (_dir, client, server) = serve_once(response);
+            assert_eq!(
+                client.sight(SIGHT_BUDGET),
+                DaemonSighting::Unidentified,
+                "{response}"
+            );
+            let request = server.join().unwrap();
+            assert!(
+                request.starts_with("GET /api/v1/health HTTP/1.0"),
+                "{request}"
+            );
+        }
     }
 
     /// Opt-in evidence against a real daemon whose `COVEN_HOME` holds only

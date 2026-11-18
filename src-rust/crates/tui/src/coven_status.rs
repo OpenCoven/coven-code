@@ -9,7 +9,7 @@
 //! resolution) must keep calling `coven_shared::load_familiars()` directly so
 //! a roster edit is always honored at the moment a security decision is made.
 
-use claurst_core::coven_shared::{self, CovenFamiliar, DaemonClient};
+use claurst_core::coven_shared::{self, CovenFamiliar, DaemonClient, DaemonSighting};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -26,8 +26,10 @@ const DAEMON_PROBE_TTL: Duration = Duration::from_secs(10);
 const DAEMON_PROBE_BUDGET: Duration = Duration::from_millis(2000);
 
 struct DaemonProbe {
+    /// When the probe began: its sighting may be this old.
+    began_at: Instant,
     checked_at: Instant,
-    online: bool,
+    sighting: DaemonSighting,
 }
 
 fn daemon_probe_cell() -> &'static Mutex<Option<DaemonProbe>> {
@@ -49,9 +51,12 @@ pub fn daemon_looks_online() -> bool {
         let guard = daemon_probe_cell()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        guard
-            .as_ref()
-            .map(|p| (p.online, now.duration_since(p.checked_at)))
+        guard.as_ref().map(|p| {
+            (
+                p.sighting != DaemonSighting::Gone,
+                now.duration_since(p.checked_at),
+            )
+        })
     };
 
     let stale = match cached {
@@ -68,15 +73,17 @@ pub fn daemon_looks_online() -> bool {
         // runs on the background thread.
         let client = DaemonClient::new();
         std::thread::spawn(move || {
-            let online = client
-                .map(|c| c.check_reachability(DAEMON_PROBE_BUDGET).looks_alive())
-                .unwrap_or(false);
+            let began_at = Instant::now();
+            let sighting = client
+                .map(|c| c.sight(DAEMON_PROBE_BUDGET))
+                .unwrap_or(DaemonSighting::Gone);
             let mut guard = daemon_probe_cell()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *guard = Some(DaemonProbe {
+                began_at,
                 checked_at: Instant::now(),
-                online,
+                sighting,
             });
             DAEMON_PROBE_IN_FLIGHT.store(false, Ordering::Release);
         });
@@ -86,6 +93,16 @@ pub fn daemon_looks_online() -> bool {
         Some((online, _)) => online,
         None => coven_shared::daemon_socket_present(),
     }
+}
+
+/// What the last completed probe found and when that probe began, or `None`
+/// before one lands. Never starts a probe; [`daemon_looks_online`] does.
+pub fn last_daemon_sighting() -> Option<(DaemonSighting, Instant)> {
+    daemon_probe_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|probe| (probe.sighting.clone(), probe.began_at))
 }
 
 // ---------------------------------------------------------------------------
