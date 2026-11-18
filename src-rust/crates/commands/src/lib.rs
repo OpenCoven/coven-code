@@ -10271,7 +10271,7 @@ impl SlashCommand for CovenCommand {
                         Some(sock) => {
                             format!("Coven daemon socket not found at {}.", sock.display())
                         }
-                        None => "Coven daemon socket not found: COVEN_HOME is unset and \
+                        None => "Coven daemon socket not found: COVEN_HOME is unset or empty and \
                                  no home directory was found."
                             .to_string(),
                     };
