@@ -1207,11 +1207,7 @@ pub fn fire_post_sampling_hooks(
     };
 
     for entry in entries {
-        let sh = if cfg!(windows) { "cmd" } else { "sh" };
-        let flag = if cfg!(windows) { "/C" } else { "-c" };
-
-        let output = match std::process::Command::new(sh)
-            .args([flag, &entry.command])
+        let output = match claurst_core::shell::command(&entry.command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1308,10 +1304,7 @@ fn stop_hooks_with_reaper_observer(
                             return;
                         }
                     }
-                    let sh = if cfg!(windows) { "cmd" } else { "sh" };
-                    let flag = if cfg!(windows) { "/C" } else { "-c" };
-                    let _ = std::process::Command::new(sh)
-                        .args([flag, &cmd])
+                    let _ = claurst_core::shell::command(&cmd)
                         .current_dir(&dir)
                         .env("CLAUDE_HOOK_OUTPUT", &text)
                         .stdin(std::process::Stdio::null())

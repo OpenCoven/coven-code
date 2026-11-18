@@ -2494,15 +2494,9 @@ impl SlashCommand for PluginSlashCommandAdapter {
                 } else {
                     format!("{} {}", command, args)
                 };
-                let cmd_result =
-                    std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-                        .args(if cfg!(windows) {
-                            vec!["/C", &full_cmd]
-                        } else {
-                            vec!["-c", &full_cmd]
-                        })
-                        .env("CLAUDE_PLUGIN_ROOT", plugin_root)
-                        .output();
+                let cmd_result = claurst_core::shell::command(&full_cmd)
+                    .env("CLAUDE_PLUGIN_ROOT", plugin_root)
+                    .output();
                 match cmd_result {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
