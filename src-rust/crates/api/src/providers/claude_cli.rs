@@ -24,6 +24,13 @@
 // same keepalive the HTTP transport forwards, and the stall timeout is left
 // to mean what it says: nothing is there to answer.
 //
+// Background work: the CLI prints a `result` at the end of each of its own
+// turns, and one run can hold several. With stdin closed it stays open for the
+// background commands, subagents and watches it started, then takes another
+// turn with their outcome. Once a run has started background work, the stream
+// therefore ends when the CLI exits, not at a `result`: ending at the first
+// one kills the CLI and the work the answer was waiting for.
+//
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
 // cached per process and replayed via `--resume` on follow-up turns. A fresh
 // conversation (no assistant turns in the request) resets the cache. When no
@@ -57,6 +64,9 @@ use crate::provider_types::{
 mod stderr;
 use stderr::StderrDrain;
 
+#[cfg(all(test, unix))]
+mod background_work_tests;
+
 /// Env var overriding the `claude` binary location.
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
 
@@ -66,6 +76,11 @@ const INSTALL_HINT: &str = "claude CLI not found — install with `npm install -
 /// Well inside the query loop's 45-second stall timeout, so a late tick
 /// cannot let it fire.
 const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How many heartbeat periods a CLI that has finished its background work gets
+/// to exit, or to start the turn that reports on it, after a `result`. A CLI
+/// that does neither is done, and the stream ends without it.
+const EXIT_GRACE_BEATS: u32 = 2;
 
 /// The `claude` session id carried across turns within this process.
 static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -330,12 +345,22 @@ struct EnvelopeMapper {
     message_started: bool,
     block_index: usize,
     session_id: Option<String>,
+    /// How many background tasks the CLI last reported as running.
+    live_background_tasks: usize,
+    /// The CLI has started background work in this run. From then on a
+    /// `result` closes one of the CLI's turns, not the run.
+    ran_background_work: bool,
+    /// One of the CLI's turns is under way: false from a `result` until the
+    /// next turn's first line.
+    turn_open: bool,
+    /// Usage summed over the results so far; `None` until the first one.
+    usage: Option<UsageInfo>,
 }
 
 /// What a single stdout line produced.
 struct LineOutcome {
     events: Vec<StreamEvent>,
-    /// The `result` envelope arrived — the stream is complete.
+    /// The run's last `result` envelope arrived — the stream is complete.
     done: bool,
 }
 
@@ -346,7 +371,22 @@ impl EnvelopeMapper {
             message_started: false,
             block_index: 0,
             session_id: None,
+            live_background_tasks: 0,
+            ran_background_work: false,
+            turn_open: true,
+            usage: None,
         }
+    }
+
+    /// The events that close the stream, carrying the usage of every result.
+    fn finish(&mut self) -> [StreamEvent; 2] {
+        [
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Some(self.usage.take().unwrap_or_default()),
+            },
+            StreamEvent::MessageStop,
+        ]
     }
 
     fn start_message_if_needed(&mut self, events: &mut Vec<StreamEvent>, model: Option<&str>) {
@@ -408,8 +448,21 @@ impl EnvelopeMapper {
                 }
                 let model = envelope.get("model").and_then(|v| v.as_str());
                 self.start_message_if_needed(&mut events, model);
+                match envelope.get("subtype").and_then(|v| v.as_str()) {
+                    Some("init") => self.turn_open = true,
+                    // The CLI sends the full set of running tasks each time.
+                    Some("background_tasks_changed") => {
+                        self.live_background_tasks = envelope
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .map_or(0, Vec::len);
+                        self.ran_background_work |= self.live_background_tasks > 0;
+                    }
+                    _ => {}
+                }
             }
             Some("assistant") => {
+                self.turn_open = true;
                 let message = envelope.get("message");
                 let model = message
                     .and_then(|m| m.get("model"))
@@ -460,7 +513,7 @@ impl EnvelopeMapper {
                 }
             }
             // The CLI's own tool results — internal to its agent loop.
-            Some("user") => {}
+            Some("user") => self.turn_open = true,
             Some("result") => {
                 self.start_message_if_needed(&mut events, None);
                 let is_error = envelope
@@ -488,16 +541,23 @@ impl EnvelopeMapper {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0)
                 };
-                events.push(StreamEvent::MessageDelta {
-                    stop_reason: Some(StopReason::EndTurn),
-                    usage: Some(UsageInfo {
-                        input_tokens: read_count("input_tokens"),
-                        output_tokens: read_count("output_tokens"),
-                        cache_creation_input_tokens: read_count("cache_creation_input_tokens"),
-                        cache_read_input_tokens: read_count("cache_read_input_tokens"),
-                    }),
-                });
-                events.push(StreamEvent::MessageStop);
+                // Each result counts its own turn only, so a run's usage is
+                // their sum.
+                let usage = self.usage.get_or_insert_with(UsageInfo::default);
+                usage.input_tokens += read_count("input_tokens");
+                usage.output_tokens += read_count("output_tokens");
+                usage.cache_creation_input_tokens += read_count("cache_creation_input_tokens");
+                usage.cache_read_input_tokens += read_count("cache_read_input_tokens");
+                self.turn_open = false;
+                // The CLI will exit, or take another turn, when its
+                // background work is over; the stream ends then.
+                if self.ran_background_work && !is_error {
+                    return LineOutcome {
+                        events,
+                        done: false,
+                    };
+                }
+                events.extend(self.finish());
                 return LineOutcome { events, done: true };
             }
             _ => {}
@@ -884,6 +944,15 @@ impl LlmProvider for ClaudeCliProvider {
                     return;
                 }
 
+                // Between its turns, with no background work left, the CLI
+                // either exits or starts the turn that reports on that work.
+                // One that stays silent instead has nothing more to say.
+                let exit_is_due = mapper.usage.is_some()
+                    && !mapper.turn_open
+                    && mapper.live_background_tasks == 0;
+                let exit_grace = tokio::time::sleep(heartbeat_period * EXIT_GRACE_BEATS);
+                tokio::pin!(exit_grace);
+
                 line.clear();
                 let read = {
                     // `read_line` loses what it has read if it is dropped, so
@@ -893,6 +962,8 @@ impl LlmProvider for ClaudeCliProvider {
                     loop {
                         let finished = tokio::select! {
                             result = &mut read_line => Some(result),
+                            // Handled as the end of the CLI's output.
+                            _ = &mut exit_grace, if exit_is_due => Some(Ok(0)),
                             _ = heartbeat.tick() => None,
                         };
                         match finished {
@@ -914,6 +985,14 @@ impl LlmProvider for ClaudeCliProvider {
                 match read {
                     Ok(0) => {
                         let stderr = turn.stderr.finish().await;
+                        // The CLI is gone after reporting at least one
+                        // result: the run is over, and that was its answer.
+                        if mapper.usage.is_some() {
+                            for event in mapper.finish() {
+                                yield Ok(event);
+                            }
+                            return;
+                        }
                         let detail = if stderr.is_empty() {
                             String::new()
                         } else {
@@ -1011,7 +1090,7 @@ impl LlmProvider for ClaudeCliProvider {
 mod tests {
     use super::*;
 
-    fn request_with(messages: Vec<Message>) -> ProviderRequest {
+    pub(super) fn request_with(messages: Vec<Message>) -> ProviderRequest {
         ProviderRequest {
             model: "claude-opus-4-8".to_string(),
             messages,

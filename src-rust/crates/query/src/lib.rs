@@ -2390,6 +2390,10 @@ async fn run_query_loop_inner(
                     // with placeholder text when the provider doesn't support them,
                     // preventing crashes on text-only models.
                     let mut caps = provider.capabilities();
+                    // Read before the model registry speaks for the model: a
+                    // provider that hands this loop no tool calls runs its
+                    // tools itself, as the Claude CLI does, or has none.
+                    let provider_hands_over_tool_calls = caps.tool_calling;
                     if let Some(model_entry) =
                         config.model_registry.as_ref().and_then(|model_registry| {
                             model_registry.get(&provider_id_str, &model_id_str)
@@ -2885,9 +2889,17 @@ async fn run_query_loop_inner(
                     // that executed no tools and whose text is empty or ends
                     // on an imminent-action announcement gets a bounded
                     // continuation nudge instead of ending the turn.
+                    //
+                    // Only where this loop runs the tools. A provider that
+                    // runs its own sends one message for a whole run: its
+                    // announcements, the work that followed them, and an
+                    // answer that may be a single word. "No tool calls" says
+                    // nothing about that run, and a nudge would start it
+                    // again.
                     let combined_text = assistant_msg.get_all_text();
-                    let stalled_announcement =
-                        stall_recovery_enabled() && is_stalled_announcement(&combined_text);
+                    let stalled_announcement = stall_recovery_enabled()
+                        && provider_hands_over_tool_calls
+                        && is_stalled_announcement(&combined_text);
                     if stalled_announcement && stall_recovery_count < STALL_RECOVERY_LIMIT {
                         stall_recovery_count += 1;
                         warn!(
@@ -4527,6 +4539,8 @@ mod tests {
     struct ScriptedProvider {
         id: ProviderId,
         rounds: Mutex<VecDeque<ScriptedRound>>,
+        /// Stands in for the Claude CLI: no tool calls reach the query loop.
+        runs_own_tools: bool,
     }
 
     enum ScriptedRound {
@@ -4542,6 +4556,7 @@ mod tests {
         fn new(rounds: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     rounds
                         .into_iter()
@@ -4554,6 +4569,7 @@ mod tests {
         fn with_results(rounds: Vec<Vec<ScriptedProviderEvent>>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(rounds.into_iter().map(ScriptedRound::Events).collect()),
             }
         }
@@ -4561,6 +4577,7 @@ mod tests {
         fn partial_then_pending(events: Vec<StreamEvent>) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     vec![ScriptedRound::PendingAfter(
                         events.into_iter().map(Ok).collect(),
@@ -4576,6 +4593,7 @@ mod tests {
         ) -> Self {
             Self {
                 id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                runs_own_tools: false,
                 rounds: Mutex::new(
                     vec![
                         ScriptedRound::PendingAfter(partial_events.into_iter().map(Ok).collect()),
@@ -4591,6 +4609,7 @@ mod tests {
             (
                 Self {
                     id: ProviderId::new(SCRIPTED_PROVIDER_ID),
+                    runs_own_tools: false,
                     rounds: Mutex::new(
                         vec![ScriptedRound::ChannelAfter(
                             initial_events.into_iter().map(Ok).collect(),
@@ -4668,7 +4687,7 @@ mod tests {
         fn capabilities(&self) -> ProviderCapabilities {
             ProviderCapabilities {
                 streaming: true,
-                tool_calling: true,
+                tool_calling: !self.runs_own_tools,
                 thinking: false,
                 image_input: false,
                 pdf_input: false,
@@ -7609,6 +7628,76 @@ mod tests {
         assert_eq!(
             final_durable.map(Message::get_all_text).as_deref(),
             Some("(no response — model ended the turn with stop_reason \"end_turn\")")
+        );
+    }
+
+    /// What the Claude CLI sends for a run that said what it would do, did it
+    /// with its own tools, and answered in one word. This loop sees no tool
+    /// call, and the last full sentence is the announcement.
+    fn run_that_announced_then_answered() -> Vec<StreamEvent> {
+        scripted_round(
+            "own-tools",
+            vec![
+                ContentBlock::Text {
+                    text: "The command is running in the background. I'll report its output when it finishes.".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "⚒ Read(tasks/output)".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "slept".to_string(),
+                },
+            ],
+            ProviderStopReason::EndTurn,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_runs_its_own_tools_is_not_nudged_for_announcing() {
+        // One round only: a nudge would ask for a second and panic.
+        let mut provider = ScriptedProvider::new(vec![run_that_announced_then_answered()]);
+        provider.runs_own_tools = true;
+
+        let (outcome, events, messages) = run_scripted_provider(provider).await;
+
+        match outcome {
+            QueryOutcome::EndTurn { message, .. } => {
+                assert!(message.get_all_text().ends_with("slept"));
+            }
+            other => panic!("a finished run must end the turn, got {other:?}"),
+        }
+        assert!(messages
+            .iter()
+            .all(|message| message.get_all_text() != STALL_RECOVERY_MSG));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, QueryEvent::TurnComplete { .. })));
+    }
+
+    /// The same text from a provider whose tools this loop runs is still the
+    /// stall it looks like: nothing was executed after the announcement.
+    #[tokio::test]
+    async fn a_provider_whose_tools_this_loop_runs_is_still_nudged() {
+        let provider = ScriptedProvider::new(vec![
+            run_that_announced_then_answered(),
+            scripted_round(
+                "after-nudge",
+                vec![ContentBlock::Text {
+                    text: "The command printed slept.".to_string(),
+                }],
+                ProviderStopReason::EndTurn,
+            ),
+        ]);
+
+        let (outcome, _, messages) = run_scripted_provider(provider).await;
+
+        assert!(matches!(outcome, QueryOutcome::EndTurn { .. }));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.get_all_text() == STALL_RECOVERY_MSG)
+                .count(),
+            1
         );
     }
 
