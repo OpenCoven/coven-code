@@ -2000,7 +2000,8 @@ pub mod config {
         /// Load settings from all config levels and merge them.
         /// Priority: project > engine-global > shared, except project-local
         /// executable MCP server definitions and provider-routing fields are
-        /// ignored before merging.
+        /// ignored before merging, and the permission mode always comes from
+        /// the user's own two layers.
         ///
         /// Three-layer load order (lowest → highest precedence):
         ///   1. Shared  — `~/.coven/settings.json`  (whitelisted keys only)
@@ -2041,7 +2042,12 @@ pub mod config {
             SharedSettings::load().apply_to(&mut merged);
             // 3. Find and merge project settings (safe project fields win).
             if let Some(project_settings) = Self::find_project_settings(cwd).await {
+                // A start with no `--permission-mode` runs in the saved mode,
+                // so that mode is the user's alone: a repository's file must
+                // neither choose it nor, by leaving it out, reset it.
+                let permission_mode = merged.config.permission_mode.clone();
                 merged = Self::merge(merged, Self::sanitize_project_settings(project_settings));
+                merged.config.permission_mode = permission_mode;
             }
             merged
         }
@@ -3184,6 +3190,110 @@ pub mod config {
                 engine.config.permission_mode,
                 PermissionMode::AcceptEdits
             ));
+        }
+
+        /// The permission mode `load_hierarchical` gives for these file
+        /// contents: the user's engine and shared settings, and a repository's.
+        fn loaded_permission_mode(
+            engine: Option<&str>,
+            shared: Option<&str>,
+            repository: &str,
+        ) -> PermissionMode {
+            let _guard = with_shared_layer(
+                |coven_home| {
+                    if let Some(shared) = shared {
+                        std::fs::write(coven_home.join("settings.json"), shared).unwrap();
+                    }
+                },
+                |code_home| {
+                    if let Some(engine) = engine {
+                        std::fs::write(code_home.join("settings.json"), engine).unwrap();
+                    }
+                },
+            );
+            let project = tempfile::tempdir().unwrap();
+            let config_dir = project.path().join(PROJECT_CONFIG_DIRNAME);
+            std::fs::create_dir(&config_dir).unwrap();
+            std::fs::write(config_dir.join("settings.json"), repository).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Settings::load_hierarchical(project.path()))
+                .config
+                .permission_mode
+        }
+
+        #[test]
+        fn a_repository_settings_file_neither_sets_nor_resets_the_users_permission_mode() {
+            let accept_edits = r#"{"config":{"permission_mode":"acceptEdits"}}"#;
+            for (engine, shared, repository, expected) in [
+                // Leaving the mode out must not reset the user's choice.
+                (Some(accept_edits), None, "{}", PermissionMode::AcceptEdits),
+                (
+                    Some(accept_edits),
+                    None,
+                    r#"{"config":{"model":"repository-model"}}"#,
+                    PermissionMode::AcceptEdits,
+                ),
+                (
+                    None,
+                    Some(r#"{"permission_mode":"plan"}"#),
+                    "{}",
+                    PermissionMode::Plan,
+                ),
+                // Naming a mode must not choose it, whatever the user has.
+                (
+                    Some(accept_edits),
+                    None,
+                    r#"{"config":{"permission_mode":"bypassPermissions"}}"#,
+                    PermissionMode::AcceptEdits,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"bypassPermissions"}}"#,
+                    PermissionMode::Default,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"acceptEdits"}}"#,
+                    PermissionMode::Default,
+                ),
+                (
+                    None,
+                    None,
+                    r#"{"config":{"permission_mode":"plan"}}"#,
+                    PermissionMode::Default,
+                ),
+            ] {
+                assert_eq!(
+                    loaded_permission_mode(engine, shared, repository),
+                    expected,
+                    "engine {engine:?}, shared {shared:?}, repository {repository}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_saved_permission_mode_that_cannot_be_read_is_the_default() {
+            for (engine, shared) in [
+                (Some(r#"{"config":{"permission_mode":"yolo"}}"#), None),
+                (Some(r#"{"config":{"permission_mode":7}}"#), None),
+                (
+                    Some(r#"{"config":{"permission_mode":"BYPASSPERMISSIONS"}}"#),
+                    None,
+                ),
+                (None, Some(r#"{"permission_mode":"yolo"}"#)),
+                (None, Some(r#"{"permission_mode":"bypass-permissions"}"#)),
+            ] {
+                assert_eq!(
+                    loaded_permission_mode(engine, shared, "{}"),
+                    PermissionMode::Default,
+                    "engine {engine:?}, shared {shared:?}"
+                );
+            }
         }
 
         /// A malformed / non-JSON shared file is non-fatal: `load()` returns
