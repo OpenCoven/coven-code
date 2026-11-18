@@ -8,13 +8,14 @@ $target = Join-Path $InstallDir 'coven-code.exe'
 $alias = Join-Path $InstallDir 'coven-cave.exe'
 $short = Join-Path $InstallDir 'coven.exe'
 
+# [Parameter] makes these advanced functions, so -ErrorAction is already a
+# common parameter and reaches the real cmdlet through @PSBoundParameters.
 function Copy-Item {
     param(
         [Parameter(Position=0)][string]$Path,
         [Parameter(Position=1)][string]$Destination,
         [string]$LiteralPath,
-        [switch]$Force,
-        [string]$ErrorAction
+        [switch]$Force
     )
     if ($Destination -eq $alias) { throw 'fixture alias copy failure' }
     Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
@@ -25,8 +26,7 @@ function Move-Item {
         [Parameter(Position=0)][string]$Path,
         [Parameter(Position=1)][string]$Destination,
         [string]$LiteralPath,
-        [switch]$Force,
-        [string]$ErrorAction
+        [switch]$Force
     )
     if ($Destination -eq $alias -and $LiteralPath -like '*new-coven-cave.exe') {
         throw 'fixture alias move failure'

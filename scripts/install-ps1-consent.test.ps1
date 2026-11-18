@@ -8,6 +8,9 @@ $env:COVEN_CODE_INSTALLER_TEST = '1'
 $InstallDir = $env:CONSENT_TARGET
 $target = Join-Path $InstallDir 'coven-code.exe'
 $alias = Join-Path $InstallDir 'coven-cave.exe'
+# Each case starts from only the existing engine and alias, without the .old
+# backups an earlier case's install kept.
+Get-ChildItem -LiteralPath $InstallDir -Force | Remove-Item -Recurse -Force
 [IO.File]::WriteAllText($target, 'old engine')
 [IO.File]::WriteAllText($alias, 'old alias')
 
