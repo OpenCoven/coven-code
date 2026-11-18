@@ -9,9 +9,10 @@ back, so a journey can see the outcome on screen. "tools: JSON" calls several
 tools in one response, from a list of [name, input]. "flood: N" instead sends N
 text deltas in one burst, to put the interactive event path under pressure;
 "flood: N hold" sends them and then keeps the stream open, adding "held line"
-every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
-can act while text is still arriving; a `release` file already there means no
-hold.
+every 0.2 s from the start of the reply, until a file named `release` appears
+in MARKER_DIR, so a journey can act while text is still arriving; lines that
+fell due while the client was still reading the burst follow it at once, and a
+`release` file already there means no hold.
 Any other word after the count is an error.
 Each streamed request appends one JSON line to LOG_FILE for later checks,
 whose "last" holds the request's last message. Given MESSAGES_LOG, it also
@@ -273,16 +274,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        # Held lines fall due every HOLD_DELTA_SECONDS from the start of the
+        # reply until the release file was made (its mtime, wall clock). A
+        # client that reads the burst at its own pace (the engine waits for its
+        # renderer) gets the lines that fell due meanwhile once it has read it,
+        # so the count depends on how long the stream was held, not on how
+        # fast the burst was read.
+        start = time.time()
         self.write_chunk(reply.head)
-        now = time.monotonic()
-        deadline, next_delta = now + HOLD_LIMIT_SECONDS, now + HOLD_DELTA_SECONDS
-        while not os.path.exists(reply.release) and time.monotonic() < deadline:
-            if time.monotonic() >= next_delta:
+        deadline, next_delta = start + HOLD_LIMIT_SECONDS, start + HOLD_DELTA_SECONDS
+        while True:
+            released = (os.path.getmtime(reply.release)
+                        if os.path.exists(reply.release) else None)
+            now = time.time()
+            due = min(now, deadline, released if released is not None else now)
+            while next_delta <= due:
                 self.write_chunk(sse("content_block_delta", {
                     "type": "content_block_delta", "index": 0,
                     "delta": {"type": "text_delta", "text": HELD_TEXT},
                 }))
                 next_delta += HOLD_DELTA_SECONDS
+            if released is not None or now >= deadline:
+                break
             time.sleep(0.05)
         self.write_chunk(reply.tail)
         self.wfile.write(b"0\r\n\r\n")
