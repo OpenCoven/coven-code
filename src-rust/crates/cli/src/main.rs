@@ -2236,9 +2236,10 @@ fn settle_queued_permission(
 /// Opens the panel for a queued request that still needs an answer, and
 /// keeps the request waiting for it. Next guards every panel against stray
 /// keys (#411). Classic guards a follow-up, a panel opened within
-/// `PERMISSION_ARM_DELAY` of another one closing, so a decision key doubled
-/// or repeated for the closed panel cannot decide this one (#411 decision
-/// 17). Any other Classic panel takes keys at once, as before. The rule is
+/// `PERMISSION_ARM_DELAY` of another one in the same turn closing, so a
+/// decision key doubled or repeated for the closed panel cannot decide this
+/// one (#411 decision 17). Any other Classic panel, including a turn's
+/// first, takes keys at once, as before. The rule is
 /// time-based: a writer whose request is queued only once the call before it
 /// has run for longer than the delay opens as a first panel would.
 fn open_permission_panel(
@@ -3671,8 +3672,8 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
-    // When the loop last saw a permission panel open, or closed one; see
-    // `open_permission_panel`.
+    // When the loop last saw a permission panel open, or closed one, in the
+    // running turn; see `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
@@ -4988,6 +4989,9 @@ async fn run_interactive(
         }
         if app.permission_request.is_some() {
             panel_last_open = Some(std::time::Instant::now());
+        } else if current_query.is_none() {
+            // A turn's first panel is never a follow-up of the last turn's.
+            panel_last_open = None;
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
