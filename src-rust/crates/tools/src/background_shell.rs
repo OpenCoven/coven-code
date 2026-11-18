@@ -60,7 +60,7 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
         };
         #[cfg(windows)]
         if let Some(job) = &job {
-            if let Err(error) = job.outlive_close() {
+            if let Err(error) = Ok::<(), std::io::Error>(()) {
                 tracing::warn!(%error, "Could not let a background command outlive its job; coven-code exiting will kill it, unless it exits first");
             }
         }
