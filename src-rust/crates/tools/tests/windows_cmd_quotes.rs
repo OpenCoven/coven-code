@@ -64,29 +64,30 @@ async fn output_of(tool: &dyn Tool, command: &str, directory: &Path) -> String {
     result.content
 }
 
-async fn check_foreground(tool: &dyn Tool) {
+/// A quoted path as an argument.
+async fn check_quoted_path(tool: &dyn Tool) {
     let directory = workspace();
-    let folder = directory.path().join("with space");
-    assert_eq!(
-        output_of(tool, QUOTED, directory.path()).await,
-        QUOTED_LINES.join("\n")
-    );
-    // A quoted path as an argument.
+    let note = directory.path().join("with space").join("note.txt");
     assert_eq!(
         output_of(
             tool,
-            &format!(r#"type "{}""#, folder.join("note.txt").display()),
+            &format!(r#"type "{}""#, note.display()),
             directory.path()
         )
         .await,
         "from a quoted path"
     );
-    // A quoted program path first and a quoted argument last: the line starts
-    // and ends with a quote that belongs to the command.
+}
+
+/// A quoted program path first and a quoted argument last: the line starts
+/// and ends with a quote that belongs to the command.
+async fn check_quoted_program(tool: &dyn Tool) {
+    let directory = workspace();
+    let script = directory.path().join("with space").join("show.cmd");
     assert_eq!(
         output_of(
             tool,
-            &format!(r#""{}" "x y""#, folder.join("show.cmd").display()),
+            &format!(r#""{}" "x y""#, script.display()),
             directory.path()
         )
         .await,
@@ -126,12 +127,40 @@ async fn background_output_of(tool: &dyn Tool) -> Vec<String> {
 
 #[tokio::test]
 async fn bash_fallback_passes_quotes_as_written() {
-    check_foreground(&BashTool).await;
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        output_of(&BashTool, QUOTED, directory.path()).await,
+        QUOTED_LINES.join("\n")
+    );
 }
 
 #[tokio::test]
 async fn pty_fallback_passes_quotes_as_written() {
-    check_foreground(&PtyBashTool).await;
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        output_of(&PtyBashTool, QUOTED, directory.path()).await,
+        QUOTED_LINES.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn bash_fallback_passes_a_quoted_path() {
+    check_quoted_path(&BashTool).await;
+}
+
+#[tokio::test]
+async fn pty_fallback_passes_a_quoted_path() {
+    check_quoted_path(&PtyBashTool).await;
+}
+
+#[tokio::test]
+async fn bash_fallback_runs_a_quoted_program_with_a_quoted_argument() {
+    check_quoted_program(&BashTool).await;
+}
+
+#[tokio::test]
+async fn pty_fallback_runs_a_quoted_program_with_a_quoted_argument() {
+    check_quoted_program(&PtyBashTool).await;
 }
 
 #[tokio::test]
