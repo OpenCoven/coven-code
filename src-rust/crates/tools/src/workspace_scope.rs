@@ -125,7 +125,32 @@ impl WorkspaceScope {
         profile.push_str("\n(allow file-read*)\n");
         let mut argv = Vec::new();
         for (i, root) in self.writable_roots.iter().enumerate() {
-            if root.canonicalize()? != *root || !root.is_dir() {
+            // Only an unchanged canonical directory launches; every other
+            // outcome of this check is a refusal.
+            let unchanged = match root.canonicalize() {
+                Ok(resolved) => resolved == *root && root.is_dir(),
+                // Renamed or removed since admission: nothing resolves at the
+                // saved path, or a folder above it is no longer a directory.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    false
+                }
+                // Any other failure (the folder may be intact but unreachable)
+                // names this check instead of passing on a bare OS error.
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "A saved workspace folder could not be checked before launch: {error}"
+                        ),
+                    ));
+                }
+            };
+            if !unchanged {
                 return Err(invalid("A saved workspace folder changed before launch."));
             }
             let key = format!("COVEN_WRITE_{i}");
@@ -573,5 +598,120 @@ mod tests {
             assert_eq!(output.status.success(), allowed, "{file:?}: {:?}", output);
             assert_eq!(file.exists(), allowed, "{file:?}");
         }
+    }
+
+    const CHANGED: &str = "A saved workspace folder changed before launch.";
+    const UNCHECKED: &str = "A saved workspace folder could not be checked before launch: ";
+
+    /// A scope over `work` and `project`, both writable, and its pre-launch
+    /// check as a shell launch would run it.
+    fn launch_check(work: &Path, project: &Path) -> impl Fn() -> io::Result<()> {
+        let scope = WorkspaceScope {
+            version: 1,
+            run_id: "test".into(),
+            access: "workspace-write".into(),
+            primary_root: work.to_path_buf(),
+            writable_roots: vec![work.to_path_buf(), project.to_path_buf()],
+            read_only_roots: vec![],
+        };
+        move || {
+            scope
+                .command_parts(Path::new("/bin/sh"), &["-c".into(), "true".into()])
+                .map(|_| ())
+        }
+    }
+
+    /// #531: a granted folder that is no longer at its saved path refuses the
+    /// launch with the changed-folder message, not a bare resolve error.
+    #[test]
+    fn a_writable_root_missing_from_its_saved_path_reads_as_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let work = base.join("a-workspace");
+        let holder = base.join("b-holder");
+        let project = holder.join("project");
+        fs::create_dir(&work).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let launch = launch_check(&work, &project);
+        launch().expect("unchanged folders launch");
+        let changed = |state: &str| {
+            let error = launch().expect_err(state);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "{state}: {error}"
+            );
+            assert_eq!(error.to_string(), CHANGED, "{state}");
+        };
+
+        let moved = holder.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        changed("renamed away");
+
+        symlink(holder.join("nowhere"), &project).unwrap();
+        changed("replaced by a dangling symlink");
+        fs::remove_file(&project).unwrap();
+
+        symlink(&moved, &project).unwrap();
+        changed("replaced by a symlink to another folder");
+        fs::remove_file(&project).unwrap();
+
+        fs::write(&project, "").unwrap();
+        changed("replaced by a regular file");
+        fs::remove_file(&project).unwrap();
+
+        // The folder that held the project is now a file, so the saved path
+        // fails to resolve with "not a directory" instead of "not found".
+        fs::rename(&holder, base.join("c-held")).unwrap();
+        fs::write(&holder, "").unwrap();
+        changed("parent replaced by a regular file");
+        fs::remove_file(&holder).unwrap();
+
+        fs::rename(base.join("c-held"), &holder).unwrap();
+        fs::rename(&moved, &project).unwrap();
+        launch().expect("the restored folder launches again");
+    }
+
+    /// A resolve failure that does not show the folder is gone still refuses
+    /// the launch. It names the check and keeps the cause, and does not claim
+    /// that the folder changed.
+    #[test]
+    fn a_writable_root_that_cannot_be_checked_still_refuses_the_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root's path lookups ignore mode bits, which the first case relies on.
+        assert!(
+            !nix::unistd::getuid().is_root(),
+            "run this suite as an ordinary user"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let work = base.join("a-workspace");
+        let holder = base.join("b-holder");
+        let project = holder.join("project");
+        fs::create_dir(&work).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let launch = launch_check(&work, &project);
+        launch().expect("unchanged folders launch");
+
+        // The project is intact but its parent can no longer be searched.
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = launch();
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = denied.expect_err("an unreadable parent");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!("{UNCHECKED}Permission denied (os error 13)")
+        );
+
+        // A symlink to itself: the path exists but never resolves.
+        fs::remove_dir(&project).unwrap();
+        symlink(&project, &project).unwrap();
+        let error = launch().expect_err("a symlink loop");
+        assert_ne!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(
+            error.to_string().starts_with(UNCHECKED) && error.to_string() != UNCHECKED,
+            "{error}"
+        );
     }
 }
