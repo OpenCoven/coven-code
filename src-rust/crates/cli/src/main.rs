@@ -2145,7 +2145,9 @@ fn settle_queued_permission(
 /// keys (#411). Classic guards a follow-up, a panel opened within
 /// `PERMISSION_ARM_DELAY` of another one closing, so a decision key doubled
 /// or repeated for the closed panel cannot decide this one (#411 decision
-/// 17). Any other Classic panel takes keys at once, as before.
+/// 17). Any other Classic panel takes keys at once, as before. The rule is
+/// time-based: a writer whose request is queued only once the call before it
+/// has run for longer than the delay opens as a first panel would.
 fn open_permission_panel(
     app: &mut claurst_tui::app::App,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -3584,7 +3586,7 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
-    // When the loop last saw a permission panel open; see
+    // When the loop last saw a permission panel open, or closed one; see
     // `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
@@ -4719,6 +4721,7 @@ async fn run_interactive(
                                 None
                             };
                             app.permission_request = None;
+                            panel_last_open = Some(std::time::Instant::now());
 
                             if let Some(prefix) = bash_prefix {
                                 app.bash_prefix_allowlist.insert(prefix);
@@ -5207,6 +5210,7 @@ async fn run_interactive(
                         );
                         if let Some((call_id, allowed)) = decided {
                             app.record_permission_decision(&call_id, allowed);
+                            panel_last_open = Some(std::time::Instant::now());
                         }
                     }
                     Ok(TuiBridgeEvent::SessionNameUpdate { title }) => {

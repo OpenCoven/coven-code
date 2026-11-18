@@ -89,12 +89,14 @@ print(int((time.monotonic() - start) * 1000))' "$TUI_SOCKET" "$TUI_SESSION" "$1"
 }
 
 # Classic's open panel focuses this option: `► [key]`.
-_queue_classic_focus() { grep -oE '► \[[^]]+\]' <<<"$(tui_capture)" | head -n 1 | tr -d '►[] '; }
+_queue_classic_focus() {
+  grep -oE '► \[[^]]+\]' <<<"$(tui_capture)" | head -n 1 | sed -E 's/^► \[(.*)\]$/\1/'
+}
 
 # Wait until the second y has been handled: its call ran, it is in the
 # composer, or the open panel has ignored it. Next says when its panel has
-# gone quiet. Classic shows no notice, so its panel counts as quiet once it
-# has been on screen for a second, well past the 400 ms a guard waits.
+# gone quiet. Classic shows no notice, so its panel counts as quiet once it is
+# on screen a second after the first call ran: the second y was read by then.
 _queue_settle() { # ui, marker
   local waited=0 s
   while [ "$waited" -lt 100 ]; do
