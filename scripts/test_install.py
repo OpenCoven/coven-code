@@ -135,6 +135,89 @@ exec /bin/mv "$@"
     def test_download_alias_failure_preserves_install(self):
         self.assert_alias_failure_preserves_install("--version", "1.2.3")
 
+    # A release binary that the system cannot run: the loader prints why and
+    # the process exits 127. These are the two messages a Linux system without
+    # ALSA, or with an older glibc, prints for the published archives.
+    NO_ALSA = ("coven-code: error while loading shared libraries: libasound.so.2: "
+               "cannot open shared object file: No such file or directory")
+    OLD_GLIBC = ("coven-code: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' "
+                 "not found (required by coven-code)")
+
+    def as_linux(self):
+        # The start check is Linux-only; these tests also run on macOS.
+        uname = self.bin / "uname"
+        uname.write_text("#!/bin/sh\n[ \"$1\" = -s ] && echo Linux || echo aarch64\n")
+        uname.chmod(0o755)
+
+    def unstartable(self, message):
+        self.as_linux()
+        # A quoted here-document keeps the loader's backtick literal.
+        return f"#!/bin/sh\ncat >&2 <<'LOADER'\n{message}\nLOADER\nexit 127\n".encode()
+
+    def assert_not_installed(self, result, *expected):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot start on this system, so nothing was installed", result.stderr)
+        for text in expected:
+            self.assertIn(text, result.stderr)
+        self.assertIn("docs/installation.md#linux-runtime-requirements", result.stderr)
+        self.assertNotIn("installed to", result.stdout)
+        self.assertFalse((self.home / ".bashrc").exists(), "a failed install edited the shell profile")
+
+    def test_local_binary_that_cannot_start_is_not_installed(self):
+        self.local.write_bytes(self.unstartable(self.NO_ALSA))
+        result = self.run_install("--binary", str(self.local))
+        self.assert_not_installed(result, "libasound.so.2: cannot open shared object file",
+                                  "The ALSA runtime library (libasound.so.2) is missing")
+        self.assertNotIn("newer glibc", result.stderr)
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_every_missing_requirement_is_named_in_one_run(self):
+        # The loader reports only the missing library; ldd also lists the
+        # glibc versions the binary needs.
+        self.local.write_bytes(self.unstartable(self.NO_ALSA))
+        ldd = self.bin / "ldd"
+        ldd.write_text("#!/bin/sh\ncat <<'LDD'\n"
+                       "coven-code: /lib/libc.so.6: version `GLIBC_2.39' not found (required by coven-code)\n"
+                       "\tlibasound.so.2 => not found\n"
+                       "\tlibc.so.6 => /lib/libc.so.6 (0x0000ffff00000000)\n"
+                       "LDD\n")
+        ldd.chmod(0o755)
+        result = self.run_install("--binary", str(self.local))
+        self.assert_not_installed(result, "version `GLIBC_2.39' not found",
+                                  "The binary needs a newer glibc than this system has",
+                                  "The ALSA runtime library (libasound.so.2) is missing")
+        self.assertNotIn("libc.so.6 =>", result.stderr)
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_downloaded_binary_that_cannot_start_keeps_the_prior_install(self):
+        binary = self.unstartable(self.OLD_GLIBC)
+        with tarfile.open(self.archive, "w:gz") as archive:
+            entry = tarfile.TarInfo("coven-code")
+            entry.size = len(binary)
+            archive.addfile(entry, io.BytesIO(binary))
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.sums.write_text("".join(f"{digest}  coven-code-{name}\n" for name in (
+            "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "macos-aarch64.tar.gz",
+            "macos-x86_64.tar.gz", "windows-x86_64.zip",
+        )))
+        self.target.mkdir()
+        (self.target / "coven-code").write_bytes(BINARY)
+        (self.target / "coven-cave").symlink_to("coven-code")
+
+        result = self.run_install("--version", "1.2.3")
+        self.assert_not_installed(result, "version `GLIBC_2.39' not found",
+                                  "The binary needs a newer glibc than this system has")
+        self.assertNotIn("ALSA", result.stderr)
+        self.assertEqual((self.target / "coven-code").read_bytes(), BINARY)
+        self.assertEqual(os.readlink(self.target / "coven-cave"), "coven-code")
+        self.assertEqual(sorted(path.name for path in self.target.iterdir()),
+                         ["coven-cave", "coven-code"])
+
+    def test_a_binary_that_starts_is_installed_on_linux(self):
+        self.as_linux()
+        self.assert_installed(self.run_install("--binary", str(self.local)))
+        self.assert_installed(self.run_install("--version", "1.2.3"))
+
 
 if __name__ == "__main__":
     unittest.main()

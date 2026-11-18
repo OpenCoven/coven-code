@@ -1,0 +1,227 @@
+name: Published release smoke
+
+# Runs the archives and the install.ps1 that a published release serves,
+# each on its own platform (#418). release-candidate.yml runs archives built
+# in its own run; this runs the bytes users download. It only reads: the
+# token is read-only and nothing is uploaded, tagged or edited.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to check, v0.9.2 or later
+        required: true
+        default: v0.9.2
+  pull_request:
+    paths:
+      - '.github/workflows/published-release-smoke.yml'
+
+permissions:
+  contents: read
+
+# A pull request has no inputs, so it checks this fallback. Keep it equal to
+# the dispatch default above.
+env:
+  TAG: ${{ inputs.tag || 'v0.9.2' }}
+  TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
+
+jobs:
+  # ── Every asset against SHA256SUMS and GitHub's digest ──────────────
+  # patch-release.yml replaces assets under an existing tag and moves the
+  # tag. Coven pins digests per version, so either counts as a failure here.
+  checksums:
+    name: Published assets match SHA256SUMS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Download every published asset
+        run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published
+
+      - name: Compare every digest
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          published_at="$(jq -r .published_at <<<"$release")"
+          target="$(jq -r .target_commitish <<<"$release")"
+          head="$(git rev-parse HEAD)"
+          echo "$TAG published $published_at from $target; the tag is now at $head"
+          failures=()
+          # release.yml publishes from a commit SHA; patch-release.yml moves
+          # the tag but leaves target_commitish alone.
+          if [[ "$target" =~ ^[0-9a-f]{40}$ && "$target" != "$head" ]]; then
+            failures+=("$TAG moved to $head after it was published from $target")
+          fi
+          [[ -f published/SHA256SUMS ]] || { echo "::error::$TAG has no SHA256SUMS"; exit 1; }
+          echo "Published SHA256SUMS:"
+          cat published/SHA256SUMS
+          echo
+          archives='coven-code-linux-aarch64.tar.gz coven-code-linux-x86_64.tar.gz coven-code-macos-aarch64.tar.gz coven-code-macos-x86_64.tar.gz coven-code-windows-x86_64.zip'
+          listed="$(awk '{print $2}' published/SHA256SUMS | xargs)"
+          [[ "$listed" == "$archives" ]] || failures+=("SHA256SUMS lists [$listed], expected [$archives]")
+          assets="$(jq -r '[.assets[].name] | sort | join(" ")' <<<"$release")"
+          expected="$(tr ' ' '\n' <<<"$archives SHA256SUMS install.ps1 install.sh" | LC_ALL=C sort | xargs)"
+          [[ "$assets" == "$expected" ]] || failures+=("release assets are [$assets], expected [$expected]")
+          for name in $expected; do
+            if [[ ! -f "published/$name" ]]; then
+              failures+=("$name: not downloaded")
+              continue
+            fi
+            downloaded="$(sha256sum "published/$name" | cut -d' ' -f1)"
+            github="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest | sub("^sha256:"; "")' <<<"$release")"
+            uploaded="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .created_at' <<<"$release")"
+            echo "$name"
+            echo "  downloaded  $downloaded"
+            echo "  GitHub      $github (computed at upload, $uploaded)"
+            [[ "$downloaded" == "$github" ]] || failures+=("$name: downloaded digest differs from GitHub's")
+            if [[ "$uploaded" > "$published_at" ]]; then
+              failures+=("$name: uploaded at $uploaded, after the release was published at $published_at")
+            fi
+            if [[ "$name" == install.* ]]; then
+              if cmp -s "published/$name" "$name"; then
+                echo "  tag file    identical to $name at $TAG"
+              else
+                failures+=("$name: differs from $name at $TAG")
+              fi
+            elif [[ "$name" != SHA256SUMS ]]; then
+              manifest="$(awk -v n="$name" '$2 == n {print $1}' published/SHA256SUMS)"
+              echo "  SHA256SUMS  $manifest"
+              [[ "$downloaded" == "$manifest" ]] || failures+=("$name: digest differs from SHA256SUMS")
+            fi
+          done
+          echo
+          if (( ${#failures[@]} )); then
+            printf '::error::%s\n' "${failures[@]}"
+            exit 1
+          fi
+          echo "All five archives match SHA256SUMS, every download matches GitHub's digest, and nothing was uploaded or moved after publication."
+
+  # ── Each published archive on its own platform ──────────────────────
+  archive:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: coven-code-linux-x86_64
+            archive: coven-code-linux-x86_64.tar.gz
+            os: ubuntu-latest
+          - artifact: coven-code-linux-aarch64
+            archive: coven-code-linux-aarch64.tar.gz
+            os: ubuntu-24.04-arm
+          - artifact: coven-code-windows-x86_64
+            archive: coven-code-windows-x86_64.zip
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    name: Run published ${{ matrix.artifact }}
+    timeout-minutes: 15
+    steps:
+      # The smoke script expects the version stamped in its own checkout.
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Linux archives load the system ALSA library for the voice feature.
+      - name: Install the Linux audio runtime library
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+      # Only the download gets the token; coven-code reads GH_TOKEN.
+      - name: Download the published archive and SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          [[ -f scripts/smoke-release-archive.py ]] || { echo "::error::$TAG predates scripts/smoke-release-archive.py"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern '${{ matrix.archive }}' --pattern SHA256SUMS
+          echo "Runner: $RUNNER_OS $RUNNER_ARCH ($(uname -srm)); source $(git rev-parse HEAD)"
+          echo "SHA256SUMS  $(awk '$2 == "${{ matrix.archive }}" {print $1}' published/SHA256SUMS)"
+          echo "downloaded  $(sha256sum 'published/${{ matrix.archive }}' | cut -d' ' -f1)"
+
+      - name: Verify digest, contents, version and one turn
+        run: python scripts/smoke-release-archive.py published ${{ matrix.artifact }}
+
+  # ── The published install.ps1, into a throwaway home ────────────────
+  install-ps1:
+    name: Run published install.ps1
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      # Only the download gets the token: install.ps1 and coven-code run
+      # in the steps below, and coven-code reads GH_TOKEN.
+      - name: Download the published install.ps1, Windows archive and SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ $TAG_PATTERN ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern install.ps1 --pattern coven-code-windows-x86_64.zip --pattern SHA256SUMS
+
+      # USERPROFILE and TEMP point at a throwaway directory. -NoModifyPath
+      # keeps the runner's user PATH, and dropping GITHUB_PATH keeps later
+      # steps' PATH, as they were. The user PATH is read unexpanded: it
+      # holds %USERPROFILE% references, which this step changes.
+      - name: Install with the published install.ps1
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'install-ps1'
+          $tempDir = Join-Path $root 'temp'
+          New-Item -ItemType Directory -Path (Join-Path $root 'home'), $tempDir | Out-Null
+          $userPath = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          $env:USERPROFILE = Join-Path $root 'home'
+          $env:TEMP = $tempDir
+          $env:TMP = $tempDir
+          Remove-Item Env:GITHUB_PATH
+          pwsh -NoLogo -NoProfile -File published/install.ps1 -Version $env:TAG -NoModifyPath
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited with $LASTEXITCODE" }
+          $after = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($after -ne $userPath) { throw "install.ps1 changed the user PATH from '$userPath' to '$after'" }
+          Write-Host "User PATH unchanged: $userPath"
+          if (Get-ChildItem -Force $tempDir) { throw 'install.ps1 left files in TEMP' }
+
+      - name: Check the installed binary against SHA256SUMS and run it
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'install-ps1'
+          $bin = Join-Path $root 'home\.coven-code\bin'
+          $zip = 'published/coven-code-windows-x86_64.zip'
+          $manifest = (Get-Content published/SHA256SUMS | Where-Object { $_ -match '  coven-code-windows-x86_64\.zip$' }) -split '  ' | Select-Object -First 1
+          $archive = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Expand-Archive $zip -DestinationPath (Join-Path $root 'archive')
+          $member = (Get-FileHash (Join-Path $root 'archive\coven-code.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installed = (Get-FileHash (Join-Path $bin 'coven-code.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $alias = (Get-FileHash (Join-Path $bin 'coven-cave.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA256SUMS        $manifest  coven-code-windows-x86_64.zip"
+          Write-Host "downloaded zip    $archive"
+          Write-Host "zip member        $member  coven-code.exe"
+          Write-Host "installed         $installed  $bin\coven-code.exe"
+          Write-Host "installed alias   $alias  $bin\coven-cave.exe"
+          if ($archive -ne $manifest) { throw 'The published zip does not match SHA256SUMS' }
+          if ($installed -ne $member -or $alias -ne $member) { throw 'The installed binaries are not the verified archive member' }
+          foreach ($name in 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA') {
+            Set-Item "Env:$name" (Join-Path $root 'home')
+          }
+          $env:Path = "$bin;$env:Path"
+          $resolved = (Get-Command coven-code).Source
+          $printed = (coven-code --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "coven-code --version exited with $LASTEXITCODE" }
+          Write-Host "$resolved --version: $printed"
+          $expected = 'coven-code ' + ($env:TAG -replace '^v', '')
+          if ($resolved -ne (Join-Path $bin 'coven-code.exe')) { throw "coven-code resolved to $resolved" }
+          if ($printed -cne $expected) { throw "expected '$expected', got '$printed'" }
