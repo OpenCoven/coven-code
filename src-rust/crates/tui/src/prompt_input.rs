@@ -2472,6 +2472,9 @@ impl PromptInputState {
             self.vim_pending = VimPendingState::None;
             self.visual_anchor = None;
             self.normalize();
+            // Typing can leave the cursor inside a cluster; Normal mode acts
+            // on whole clusters, so it starts on the edge before it.
+            self.cursor = cluster_start(&self.text, self.cursor);
             return;
         }
 
@@ -3384,13 +3387,14 @@ impl PromptInputState {
         if width == 0 {
             return (0, 0);
         }
-        let mut byte = 0usize;
+        // Snapped against the whole text, so a cursor between the two halves
+        // of a CRLF counts as being before it.
+        let cursor = cluster_start(&self.text, self.cursor);
         let mut row = 0usize;
-        for line in self.text.split('\n') {
-            let line_end = byte + line.len();
+        for (byte, line) in drawn_lines(&self.text) {
             let rows = wrap_ranges(line, width);
-            if self.cursor <= line_end {
-                let at = cluster_start(line, self.cursor - byte);
+            if cursor <= byte + line.len() {
+                let at = cursor - byte;
                 // The row the cursor is drawn on: an offset where one row
                 // ends and the next starts belongs to the next.
                 let (index, start) = rows
@@ -3409,7 +3413,6 @@ impl PromptInputState {
                 };
             }
             row += rows.len();
-            byte = line_end + 1; // newline
         }
         (row.saturating_sub(1), 0)
     }
@@ -3447,20 +3450,18 @@ impl PromptInputState {
         if self.text.is_empty() || width == 0 {
             return 1;
         }
-        let mut total = 0usize;
-        for line in self.text.split('\n') {
-            total += wrap_line(line, width).len().max(1);
-        }
-        total.max(1)
+        drawn_lines(&self.text)
+            .map(|(_, line)| wrap_ranges(line, width).len())
+            .sum::<usize>()
+            .max(1)
     }
 
     fn set_cursor_at_visual(&mut self, target_row: usize, target_col: usize, width: usize) {
         if width == 0 {
             return;
         }
-        let mut byte = 0usize;
         let mut row = 0usize;
-        for line in self.text.split('\n').collect::<Vec<_>>() {
+        for (byte, line) in drawn_lines(&self.text) {
             let rows = wrap_ranges(line, width);
             if let Some(range) = rows.get(target_row - row) {
                 // The last character edge at or before the target column,
@@ -3479,7 +3480,6 @@ impl PromptInputState {
                 return;
             }
             row += rows.len();
-            byte += line.len() + 1; // newline
         }
         self.cursor = self.text.len();
         self.history_pos = None;
@@ -3530,13 +3530,7 @@ pub fn input_height(state: &PromptInputState, text_width: u16) -> u16 {
     } else if text_width == 0 {
         state.text.lines().count().max(1)
     } else {
-        let mut total = 0usize;
-        let logical: Vec<&str> = state.text.split('\n').collect();
-        for line in &logical {
-            let chunks = wrap_line(line, text_width as usize).len().max(1);
-            total += chunks;
-        }
-        total.max(1)
+        state.visual_row_count(text_width as usize)
     };
     // top-line + text rows + breathing room + underline, capped so the prompt
     // never eats more than ~half the screen.
@@ -3548,6 +3542,24 @@ pub fn input_height(state: &PromptInputState, text_width: u16) -> u16 {
     } else {
         1
     }
+}
+
+/// Each logical line of `text`, with the byte offset it starts at, as the
+/// composer draws it: split on `\n`, leaving out the `\r` of a CRLF as
+/// `str::lines` does. A trailing newline yields a last, empty line, where the
+/// cursor can sit.
+fn drawn_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut next = 0usize;
+    text.split('\n').map(move |line| {
+        let start = next;
+        next += line.len() + 1; // newline
+        let ends_with_newline = next <= text.len();
+        let drawn = match line.strip_suffix('\r') {
+            Some(drawn) if ends_with_newline => drawn,
+            _ => line,
+        };
+        (start, drawn)
+    })
 }
 
 /// The byte range of each visual row of a logical line wrapped to `width`
@@ -6070,6 +6082,69 @@ mod tests {
     }
 
     #[test]
+    fn moving_up_and_down_stops_before_a_crlf() {
+        // The CR is not drawn, so column 3 of "ab\r" is past its end: the
+        // cursor goes before the CRLF, never between its two halves.
+        let text = "abcd\nab\r\nx";
+        let second = "abcd\n".len();
+        let mut s = composer(text, 3);
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, second + 2);
+        assert_eq!(s.cursor_visual_pos(40), (1, 2));
+        assert!(s.move_visual_down(40));
+        assert_eq!(s.cursor, text.len());
+        assert!(s.move_visual_up(40));
+        assert_eq!(s.cursor, second + 1);
+        assert!(s.move_visual_up(40));
+        assert_eq!(s.cursor, 1);
+
+        // A cursor left between the CR and the LF counts as before them.
+        let s = composer(text, second + 3);
+        assert_eq!(s.cursor_visual_pos(40), (1, 2));
+        assert_eq!(s.visual_row_count(2), 4);
+    }
+
+    #[test]
+    fn a_tab_counts_as_the_cells_it_is_drawn_with() {
+        let text = "a\tb";
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        let s = composer(text, 2);
+        render_prompt_input(
+            &s,
+            area,
+            &mut buf,
+            false,
+            InputMode::Default,
+            Color::Blue,
+            false,
+        );
+        let b = (0..20)
+            .find(|x| buf[(*x, 1)].symbol() == "b")
+            .unwrap_or_else(|| panic!("no b drawn"));
+        let (row, col) = s.cursor_visual_pos(18);
+        assert_eq!((row, col as u16 + 2), (0, b));
+        // Wrapping uses the same count: "a", the tab and "b" take three cells.
+        assert_eq!(wrap_line(text, 2), ["a\t".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn escape_from_insert_mode_starts_normal_mode_on_a_cluster_edge() {
+        // One regional indicator typed before a flag pairs with the flag's
+        // first half, so the cursor is inside a cluster until Escape.
+        let mut s = vim_composer(FLAG_JP, 0);
+        s.vim_command("i");
+        assert_eq!(s.vim_mode, VimMode::Insert);
+        for typed in "zzzz\u{1F1E9}".chars() {
+            s.insert_char(typed);
+        }
+        assert_eq!(s.cursor, "zzzz\u{1F1E9}".len());
+        s.vim_command("Escape");
+        assert_eq!(s.cursor, "zzzz".len());
+        s.vim_command("x");
+        assert_eq!(s.text, "zzzz\u{1F1F5}");
+    }
+    #[test]
     fn rendered_cursor_sits_where_the_next_character_is_drawn() {
         fn draw(s: &PromptInputState, focused: bool) -> Buffer {
             let area = Rect::new(0, 0, 20, 4);
@@ -6149,9 +6224,12 @@ mod tests {
             vim_cursors(&mut s, &["w", "b", "e", "w", "W", "B"]),
             [bar, 0, e_acute, bar, text.len(), bar]
         );
-        // `ge` goes to the start of the previous word here; what matters is
-        // that it is not left between the e and its mark.
-        assert_eq!(vim_cursors(&mut s, &["g", "e"]), [bar, 0]);
+        // `ge` must not leave the cursor between the e and its mark. Where
+        // it lands otherwise is not what this test is about.
+        s.vim_command("g");
+        s.vim_command("e");
+        assert!(s.cursor < bar, "ge moved back from {bar} to {}", s.cursor);
+        assert_eq!(cluster_start(&text, s.cursor), s.cursor);
 
         let mut s = vim_composer(&text, 0);
         s.vim_command("d");
