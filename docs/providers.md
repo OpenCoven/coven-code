@@ -55,19 +55,13 @@ for provider setup and `/account` for account management. The separate
 `coven-code auth login` flow requires a configured
 `COVEN_CODE_ANTHROPIC_OAUTH_CLIENT_ID`; it is not a Claude CLI token-import path.
 
-A turn through the `claude` binary can be quiet for minutes while one of the
-CLI's own tools runs, such as a build or a test suite. The engine keeps
-waiting for as long as the `claude` process is running. The 45-second stall
-timeout, which retries a silent API stream, does not cut that wait short.
+A turn through the `claude` binary includes its background work and reporting turns. Once the CLI reports background tasks, an intermediate result does not finish the engine turn. Completed results publish cumulative usage, including when a later report fails. A clean CLI exit between turns ends the run with what it reported; EOF during an unfinished reporting turn or an unsuccessful exit fails it. When no tasks or turn remain, the CLI gets 30 seconds to exit or start its next report. Metadata alone does not extend that grace, so a report starting later can be missed. Older CLIs without background-task snapshots retain their first-result behavior. The engine does not nudge a CLI run for apparently unfinished announcements because the CLI owns its tools.
 
-The wait has a limit of its own. A `claude` process that is still running and
-has printed nothing for 150 minutes, from its start or since its last line, is
-taken to have hung: the engine stops it and fails the turn, without running
-the prompt again. The limit is longer than
-any command Claude Code runs by itself, which it stops after 10 minutes in the
-foreground and after 2 hours at most in the background. Set
-`COVEN_CODE_CLAUDE_QUIET_LIMIT_SECS` to a number of seconds to change it; `0`
-waits without limit.
+The engine sends keepalives while the CLI is running, including when its stdout contains only internal progress. These keepalives prevent the query loop's 45-second stream-stall retry from repeating healthy CLI work. They do not reset the CLI's separate silence clock.
+
+A running CLI that prints no stdout line for 150 minutes, from startup or since its last line, is stopped and the turn fails without repeating the prompt. Set `COVEN_CODE_CLAUDE_QUIET_LIMIT_SECS` to a whole number of seconds to change this limit; `0` waits without a silence limit. The deadline is independent of keepalive ticks and also covers a CLI that closes stdout before startup finishes. Each complete stdout line resets it. The default exceeds Claude Code's standard command ceilings, but operator overrides and MCP tools can remain silent longer and may require a higher limit. A direct CLI process that exits while a descendant keeps stdout open receives no keepalives; the existing consumer stall policy still applies in that case.
+
+Stopping this provider stops its direct CLI process. It does not guarantee termination of every descendant or work delegated to another process. Native scoped workspace runs use a separate host-owned process-group policy.
 
 Model availability and defaults depend on the installed catalog and account.
 Inspect the engine's resolved models rather than relying on a static price or

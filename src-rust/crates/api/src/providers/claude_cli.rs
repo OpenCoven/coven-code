@@ -24,6 +24,13 @@
 // same keepalive the HTTP transport forwards, and the stall timeout is left
 // to mean what it says: nothing is there to answer.
 //
+// Background work: the CLI prints a `result` at the end of each of its own
+// turns, and one run can hold several. With stdin closed it stays open for the
+// background commands, subagents and watches it started, then takes another
+// turn with their outcome. Once a run has started background work, the stream
+// therefore ends when the CLI exits, not at a `result`: ending at the first
+// one kills the CLI and the work the answer was waiting for.
+//
 // Session continuity: the CLI's `session_id` (from the `init` envelope) is
 // cached per process and replayed via `--resume` on follow-up turns. A fresh
 // conversation (no assistant turns in the request) resets the cache. When no
@@ -56,6 +63,12 @@ use crate::provider_types::{
 
 mod stderr;
 use stderr::StderrDrain;
+
+#[cfg(all(test, unix))]
+mod background_work_tests;
+
+#[cfg(all(test, unix))]
+mod integration_tests;
 
 /// Env var overriding the `claude` binary location.
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
@@ -111,6 +124,11 @@ fn quiet_limit_error(provider: &ProviderId, limit: std::time::Duration) -> Provi
 /// Well inside the query loop's 45-second stall timeout, so a late tick
 /// cannot let it fire.
 const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How many heartbeat periods a CLI that has finished its background work gets
+/// to exit, or to start the turn that reports on it, after a `result`. A CLI
+/// that does neither is done, and the stream ends without it.
+const EXIT_GRACE_BEATS: u32 = 2;
 
 /// The `claude` session id carried across turns within this process.
 static CLI_SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -375,12 +393,22 @@ struct EnvelopeMapper {
     message_started: bool,
     block_index: usize,
     session_id: Option<String>,
+    /// How many background tasks the CLI last reported as running.
+    live_background_tasks: usize,
+    /// The CLI has started background work in this run. From then on a
+    /// `result` closes one of the CLI's turns, not the run.
+    ran_background_work: bool,
+    /// One of the CLI's turns is under way: false from a `result` until the
+    /// next turn's first line.
+    turn_open: bool,
+    /// Usage summed over the results so far; `None` until the first one.
+    usage: Option<UsageInfo>,
 }
 
 /// What a single stdout line produced.
 struct LineOutcome {
     events: Vec<StreamEvent>,
-    /// The `result` envelope arrived — the stream is complete.
+    /// The run's last `result` envelope arrived — the stream is complete.
     done: bool,
 }
 
@@ -391,7 +419,22 @@ impl EnvelopeMapper {
             message_started: false,
             block_index: 0,
             session_id: None,
+            live_background_tasks: 0,
+            ran_background_work: false,
+            turn_open: true,
+            usage: None,
         }
+    }
+
+    /// The events that close the stream, carrying the usage of every result.
+    fn finish(&mut self) -> [StreamEvent; 2] {
+        [
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Some(self.usage.take().unwrap_or_default()),
+            },
+            StreamEvent::MessageStop,
+        ]
     }
 
     fn start_message_if_needed(&mut self, events: &mut Vec<StreamEvent>, model: Option<&str>) {
@@ -453,8 +496,21 @@ impl EnvelopeMapper {
                 }
                 let model = envelope.get("model").and_then(|v| v.as_str());
                 self.start_message_if_needed(&mut events, model);
+                match envelope.get("subtype").and_then(|v| v.as_str()) {
+                    Some("init") => self.turn_open = true,
+                    // The CLI sends the full set of running tasks each time.
+                    Some("background_tasks_changed") => {
+                        self.live_background_tasks = envelope
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .map_or(0, Vec::len);
+                        self.ran_background_work |= self.live_background_tasks > 0;
+                    }
+                    _ => {}
+                }
             }
             Some("assistant") => {
+                self.turn_open = true;
                 let message = envelope.get("message");
                 let model = message
                     .and_then(|m| m.get("model"))
@@ -505,27 +561,29 @@ impl EnvelopeMapper {
                 }
             }
             // The CLI's own tool results — internal to its agent loop.
-            Some("user") => {}
+            Some("user") => self.turn_open = true,
             Some("result") => {
                 self.start_message_if_needed(&mut events, None);
                 let is_error = envelope
                     .get("is_error")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if is_error {
+                let error_detail = if is_error {
                     let detail = envelope
                         .get("result")
                         .and_then(|v| v.as_str())
                         .unwrap_or("claude CLI reported an error");
-                    events.push(StreamEvent::Error {
+                    Some(StreamEvent::Error {
                         error_type: envelope
                             .get("subtype")
                             .and_then(|v| v.as_str())
                             .unwrap_or("error")
                             .to_string(),
                         message: detail.to_string(),
-                    });
-                }
+                    })
+                } else {
+                    None
+                };
                 let usage_json = envelope.get("usage");
                 let read_count = |key: &str| {
                     usage_json
@@ -533,16 +591,34 @@ impl EnvelopeMapper {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0)
                 };
-                events.push(StreamEvent::MessageDelta {
-                    stop_reason: Some(StopReason::EndTurn),
-                    usage: Some(UsageInfo {
-                        input_tokens: read_count("input_tokens"),
-                        output_tokens: read_count("output_tokens"),
-                        cache_creation_input_tokens: read_count("cache_creation_input_tokens"),
-                        cache_read_input_tokens: read_count("cache_read_input_tokens"),
-                    }),
-                });
-                events.push(StreamEvent::MessageStop);
+                // Each result counts its own turn only, so a run's usage is
+                // their sum.
+                let usage = self.usage.get_or_insert_with(UsageInfo::default);
+                usage.input_tokens += read_count("input_tokens");
+                usage.output_tokens += read_count("output_tokens");
+                usage.cache_creation_input_tokens += read_count("cache_creation_input_tokens");
+                usage.cache_read_input_tokens += read_count("cache_read_input_tokens");
+                // Publish completed turns before a later failure or cancellation.
+                // Consumers merge cumulative snapshots rather than adding them.
+                if self.ran_background_work || is_error {
+                    events.push(StreamEvent::MessageDelta {
+                        stop_reason: None,
+                        usage: Some(usage.clone()),
+                    });
+                }
+                if let Some(error) = error_detail {
+                    events.push(error);
+                }
+                self.turn_open = false;
+                // The CLI will exit, or take another turn, when its
+                // background work is over; the stream ends then.
+                if self.ran_background_work && !is_error {
+                    return LineOutcome {
+                        events,
+                        done: false,
+                    };
+                }
+                events.extend(self.finish());
                 return LineOutcome { events, done: true };
             }
             _ => {}
@@ -732,6 +808,7 @@ impl ClaudeCliProvider {
         // No stream exists yet to carry a keepalive or a stall timeout, so
         // the quiet limit is all that bounds a CLI that hangs before it
         // prints anything. Returning the error drops `child`, which stops it.
+        let startup_started = tokio::time::Instant::now();
         let first_read = reader.read_line(&mut first_line);
         let read = match self.quiet_limit {
             Some(limit) => tokio::time::timeout(limit, first_read)
@@ -746,8 +823,18 @@ impl ClaudeCliProvider {
             body: None,
         })?;
         if read == 0 {
-            // Exited without output. Reap the child so it doesn't linger.
-            let status = child.wait().await.ok();
+            // Closing stdout does not prove exit. Keep the startup deadline
+            // through reaping, so a closed pipe cannot bypass the quiet limit.
+            let wait = child.wait();
+            let status = match self.quiet_limit {
+                Some(limit) => {
+                    tokio::time::timeout(limit.saturating_sub(startup_started.elapsed()), wait)
+                        .await
+                        .map_err(|_| quiet_limit_error(&self.id, limit))?
+                }
+                None => wait.await,
+            }
+            .map_err(|error| self.spawn_error(error))?;
             debug!(
                 ?status,
                 resume = resume.is_some(),
@@ -921,6 +1008,7 @@ impl LlmProvider for ClaudeCliProvider {
                 heartbeat_period,
             );
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut exit_deadline = None;
             loop {
                 let outcome = mapper.map_line(&line);
                 if let Some(session_id) = mapper.session_id.as_deref() {
@@ -938,10 +1026,32 @@ impl LlmProvider for ClaudeCliProvider {
                     yield Ok(event);
                 }
                 if outcome.done {
-                    // Let the child exit cleanly; kill_on_drop covers hangs.
-                    let _ = turn.child.wait().await;
+                    // The result is terminal. Dropping the owned child stops a
+                    // CLI that keeps running after publishing it.
                     return;
                 }
+
+                // Between its turns, with no background work left, the CLI
+                // either exits or starts the turn that reports on that work.
+                // One that stays silent instead has nothing more to say.
+                let exit_is_due = mapper.usage.is_some()
+                    && !mapper.turn_open
+                    && mapper.live_background_tasks == 0;
+                if exit_is_due {
+                    exit_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + heartbeat_period * EXIT_GRACE_BEATS
+                    });
+                } else {
+                    exit_deadline = None;
+                }
+                let exit_grace = async {
+                    match exit_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::pin!(exit_grace);
+                let mut grace_expired = false;
 
                 line.clear();
                 let read = {
@@ -949,10 +1059,32 @@ impl LlmProvider for ClaudeCliProvider {
                     // one read stays pinned across the heartbeats.
                     let read_line = turn.stdout.read_line(&mut line);
                     tokio::pin!(read_line);
-                    let quiet_since = tokio::time::Instant::now();
+                    let quiet_deadline = async {
+                        match quiet_limit {
+                            Some(limit) => tokio::time::sleep(limit).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::pin!(quiet_deadline);
+                    let mut quiet_expired = false;
                     loop {
                         let finished = tokio::select! {
                             result = &mut read_line => Some(result),
+                            // Handled as the end of the CLI's output.
+                            _ = &mut exit_grace => {
+                                grace_expired = true;
+                                Some(Ok(0))
+                            },
+                            _ = &mut quiet_deadline, if !quiet_expired => {
+                                quiet_expired = true;
+                                if matches!(turn.child.try_wait(), Ok(None)) {
+                                    if let Some(limit) = quiet_limit {
+                                        yield Err(quiet_limit_error(&provider_id, limit));
+                                        return;
+                                    }
+                                }
+                                continue;
+                            },
                             _ = heartbeat.tick() => None,
                         };
                         match finished {
@@ -965,36 +1097,61 @@ impl LlmProvider for ClaudeCliProvider {
                                 if !matches!(turn.child.try_wait(), Ok(None)) {
                                     continue;
                                 }
-                                // Running, but silent for longer than any
-                                // tool of its own is allowed to take: it has
-                                // hung. Ending the stream stops the process;
-                                // a keepalive would wait on it for ever.
-                                if let Some(limit) =
-                                    quiet_limit.filter(|limit| quiet_since.elapsed() >= *limit)
-                                {
-                                    yield Err(quiet_limit_error(&provider_id, limit));
-                                    return;
-                                }
                                 yield Ok(StreamEvent::Ping);
                             }
                         }
                     }
                 };
-                // Keepalives are for silence only.
-                heartbeat.reset();
+                // Keep the consumer clock independent of stdout: task snapshots
+                // and other internal lines may yield no mapped event at all.
                 match read {
                     Ok(0) => {
-                        let stderr = turn.stderr.finish().await;
-                        let detail = if stderr.is_empty() {
-                            String::new()
+                        // Real EOF and the between-turn grace have different
+                        // meanings. Only a clean exit between completed turns,
+                        // or a valid grace expiry, can finish an earlier result.
+                        let status = if grace_expired {
+                            turn.child.try_wait()
                         } else {
-                            format!(": {}", stderr)
+                            let grace = heartbeat_period * EXIT_GRACE_BEATS;
+                            let limit = quiet_limit.map_or(grace, |limit| limit.min(grace));
+                            match tokio::time::timeout(limit, turn.child.wait()).await {
+                                Ok(status) => status.map(Some),
+                                Err(_) => Ok(None),
+                            }
                         };
-                        yield Err(ProviderError::StreamError {
-                            provider: provider_id.clone(),
-                            message: format!("claude CLI exited before emitting a result{}", detail),
-                            partial_response: None,
-                        });
+                        let stderr = turn.stderr.finish().await;
+                        let failure = match status {
+                            Ok(Some(status)) if !status.success() => {
+                                Some(format!("claude CLI exited unsuccessfully ({status})"))
+                            }
+                            Err(error) => Some(format!("failed waiting for claude CLI: {error}")),
+                            _ if mapper.usage.is_none() => {
+                                Some("claude CLI exited before emitting a result".to_string())
+                            }
+                            _ if mapper.turn_open => {
+                                Some("claude CLI exited before completing its reporting turn".to_string())
+                            }
+                            Ok(None) if !grace_expired => {
+                                Some("claude CLI closed stdout before exiting".to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(message) = failure {
+                            let detail = if stderr.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {stderr}")
+                            };
+                            yield Err(ProviderError::StreamError {
+                                provider: provider_id.clone(),
+                                message: format!("{message}{detail}"),
+                                partial_response: None,
+                            });
+                        } else {
+                            for event in mapper.finish() {
+                                yield Ok(event);
+                            }
+                        }
                         return;
                     }
                     Ok(_) => {}
@@ -1083,7 +1240,23 @@ impl LlmProvider for ClaudeCliProvider {
 mod tests {
     use super::*;
 
-    fn request_with(messages: Vec<Message>) -> ProviderRequest {
+    /// Keep newly written scenario files out of execve's ETXTBSY checks.
+    #[cfg(unix)]
+    pub(super) fn fixture_binary(dir: &std::path::Path, script: &str) -> PathBuf {
+        std::fs::write(dir.join("claude"), script).unwrap();
+        let binary = dir.join("launcher");
+        std::os::unix::fs::symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/claude_cli_fixture.sh"
+            ),
+            &binary,
+        )
+        .unwrap();
+        binary
+    }
+
+    pub(super) fn request_with(messages: Vec<Message>) -> ProviderRequest {
         ProviderRequest {
             model: "claude-opus-4-8".to_string(),
             messages,
@@ -1123,10 +1296,8 @@ mod tests {
     /// seconds the way a long tool call does, then finishes the turn.
     #[cfg(unix)]
     fn quiet_cli(quiet: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("quiet-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script = format!(
             "#!/bin/sh\ncat >/dev/null\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n\
@@ -1134,8 +1305,7 @@ mod tests {
              echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}'\n\
              echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = fixture_binary(&dir, &script);
         (dir, binary)
     }
 
@@ -1233,16 +1403,13 @@ mod tests {
         std::time::Duration,
     ) {
         use futures::StreamExt;
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("silent-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script = format!(
             "#!/bin/sh\ncat >/dev/null\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n{body}"
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = fixture_binary(&dir, &script);
         let provider = ClaudeCliProvider {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
@@ -1332,14 +1499,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cli_silent_from_the_start_fails_the_turn_at_the_limit() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("mute-claude-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let binary = dir.join("claude");
         let script =
-            "#!/bin/sh\ncat >/dev/null\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n";
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\ncat >/dev/null\nexec sleep 60\n";
+        let binary = fixture_binary(&dir, script);
         let provider = ClaudeCliProvider {
             id: ProviderId::new(ProviderId::ANTHROPIC),
             binary: Some(binary),
@@ -1354,6 +1518,8 @@ mod tests {
             Err(error) => error,
         };
         let took = started.elapsed();
+        let error_result = Err(error);
+        assert!(is_quiet_limit_error(&error_result), "{error_result:?}");
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
 
         assert!(
@@ -1364,7 +1530,6 @@ mod tests {
             took < std::time::Duration::from_secs(30),
             "failed after {took:?}"
         );
-        assert!(is_quiet_limit_error(&Err(error)));
         let running = still_running_after_a_wait(pid.trim()).await;
         let _ = std::fs::remove_dir_all(dir);
         assert!(
