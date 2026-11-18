@@ -9,6 +9,8 @@
 // 6. Manages stop conditions (end_turn, max_turns, cancellation)
 
 pub mod agent_tool;
+mod turn_budget;
+pub use turn_budget::{EffectiveTurnBudget, TurnBudgetSource};
 pub mod auto_dream;
 pub mod away_summary;
 pub mod command_queue;
@@ -84,6 +86,11 @@ pub enum QueryOutcome {
     Cancelled,
     /// An unrecoverable error occurred.
     Error(ClaudeError),
+    /// Local model-round limit reached with the transcript and tools settled.
+    TurnBudgetExhausted {
+        budget: EffectiveTurnBudget,
+        consumed: u32,
+    },
     /// The configured USD budget was exceeded.
     BudgetExceeded { cost_usd: f64, limit_usd: f64 },
 }
@@ -548,7 +555,10 @@ fn parse_origin_repo_slug(remote_url: &str) -> Option<String> {
 pub struct QueryConfig {
     pub model: String,
     pub max_tokens: u32,
+    /// Inherited/default limit; an agent may override it.
     pub max_turns: u32,
+    /// Explicit per-run limit; wins over agent and contextual defaults.
+    pub max_turns_override: Option<std::num::NonZeroU32>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub output_style: claurst_core::system_prompt::OutputStyle,
@@ -609,6 +619,7 @@ impl Default for QueryConfig {
             model: claurst_core::constants::DEFAULT_MODEL.to_string(),
             max_tokens: claurst_core::constants::DEFAULT_MAX_TOKENS,
             max_turns: claurst_core::constants::MAX_TURNS_DEFAULT,
+            max_turns_override: None,
             system_prompt: None,
             append_system_prompt: None,
             output_style: claurst_core::system_prompt::OutputStyle::Default,
@@ -1794,8 +1805,43 @@ pub async fn run_query_loop_with_events(
     cancel_token: tokio_util::sync::CancellationToken,
     pending_messages: Option<&mut Vec<String>>,
 ) -> QueryOutcome {
+    run_query_loop_with_receipt(
+        client,
+        messages,
+        tools,
+        tool_ctx,
+        config,
+        cost_tracker,
+        event_tx,
+        cancel_token,
+        pending_messages,
+    )
+    .await
+    .outcome
+}
+
+/// Per-invocation accounting stays separate from tool contexts shared with children.
+#[derive(Debug)]
+pub struct QueryRun {
+    pub outcome: QueryOutcome,
+    pub num_turns: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_query_loop_with_receipt(
+    client: &claurst_api::AnthropicClient,
+    messages: &mut Vec<Message>,
+    tools: &[Box<dyn Tool>],
+    tool_ctx: &ToolContext,
+    config: &QueryConfig,
+    cost_tracker: Arc<CostTracker>,
+    event_tx: Option<QueryEventSink>,
+    cancel_token: tokio_util::sync::CancellationToken,
+    pending_messages: Option<&mut Vec<String>>,
+) -> QueryRun {
     let overload_observer = event_tx.clone();
     let mut retrievals = retrieval_journal::RetrievalJournal::default();
+    let mut num_turns = 0;
     let outcome = run_query_loop_inner(
         client,
         messages,
@@ -1807,13 +1853,14 @@ pub async fn run_query_loop_with_events(
         cancel_token,
         pending_messages,
         &mut retrievals,
+        &mut num_turns,
     )
     .await;
     // Context budgeting remains a request-time operation. The caller saves
     // the returned history, so put its typed retrieval facts back after all
     // request/compaction/exit paths settle, without restoring large bodies.
     retrievals.restore(messages);
-    if overload_observer
+    let outcome = if overload_observer
         .as_ref()
         .is_some_and(QueryEventSink::is_overloaded)
     {
@@ -1822,11 +1869,12 @@ pub async fn run_query_loop_with_events(
         ))
     } else {
         outcome
-    }
+    };
+    QueryRun { outcome, num_turns }
 }
 
 // Same domain inputs as the public loop above, plus its turn-local retrieval
-// journal. Keeping the exit wrapper separate covers every early return.
+// journal and invocation-local accounting. The exit wrapper covers every early return.
 #[allow(clippy::too_many_arguments)]
 async fn run_query_loop_inner(
     client: &claurst_api::AnthropicClient,
@@ -1839,6 +1887,7 @@ async fn run_query_loop_inner(
     cancel_token: tokio_util::sync::CancellationToken,
     mut pending_messages: Option<&mut Vec<String>>,
     retrievals: &mut retrieval_journal::RetrievalJournal,
+    num_turns: &mut u32,
 ) -> QueryOutcome {
     // One logical query owns one capture, including every tool follow-up and
     // its final reply. A caller-supplied capture (including absence) is final.
@@ -1878,12 +1927,10 @@ async fn run_query_loop_inner(
     // How many automatic retries remain when a stream stalls (no data for 45s).
     let mut retries_left: u32 = 2;
 
-    // If an agent defines a max_turns override, respect it (agent wins over config).
-    let effective_max_turns = config
-        .agent_definition
-        .as_ref()
-        .and_then(|a| a.max_turns)
-        .unwrap_or(config.max_turns);
+    let budget = match config.effective_turn_budget() {
+        Ok(budget) => budget,
+        Err(error) => return QueryOutcome::Error(ClaudeError::Config(error.into())),
+    };
 
     // Shadow-git snapshot: capture the worktree state before any tools run so we
     // can produce a per-turn file-change patch when the turn ends.
@@ -2014,29 +2061,22 @@ async fn run_query_loop_inner(
             .captured()
             .map(|turn| client.for_goal_turn(turn, goal_permission));
         let client = goal_client.as_ref().unwrap_or(client);
-        turn += 1;
-        tool_ctx
-            .current_turn
-            .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
-        // Check for cancellation
         if cancel_token.is_cancelled() {
             return QueryOutcome::Cancelled;
         }
-
-        if turn > effective_max_turns {
-            info!(turns = turn, "Max turns reached");
-            if let Some(ref tx) = event_tx {
+        if turn >= budget.max_turns.get() {
+            info!(turns = turn, "Model-round budget exhausted");
+            if let Some(tx) = &event_tx {
                 let _ = tx.send(QueryEvent::Status(format!(
-                    "Reached maximum turn limit ({})",
-                    effective_max_turns
+                    "Model-round budget exhausted ({turn}/{}); work is unfinished.",
+                    budget.max_turns
                 )));
             }
-            return QueryOutcome::Error(ClaudeError::Api(format!(
-                "Maximum turn limit ({}) reached",
-                effective_max_turns
-            )));
+            return QueryOutcome::TurnBudgetExhausted {
+                budget,
+                consumed: turn,
+            };
         }
-
         // Drain any pending user messages that were queued during the previous
         // tool-execution phase (e.g. commands entered while tools ran).
         // Mirrors the TS `messageQueueManager` drain between turns.
@@ -2125,7 +2165,7 @@ async fn run_query_loop_inner(
             }
 
             // Apply todo nudge on turns > 2.
-            if turn > 2 {
+            if turn >= 2 {
                 let nudge = build_todo_nudge(&tool_ctx.session_id);
                 if !nudge.is_empty() {
                     patched.append_system_prompt = Some(match &config.append_system_prompt {
@@ -2473,23 +2513,32 @@ async fn run_query_loop_inner(
                             "Goal authority revoked: {error}"
                         )));
                     }
-                    let stream = match await_goal_request(
-                        tool_ctx.goal_turn.captured(),
-                        goal_permission,
-                        &cancel_token,
-                        async {
-                            provider
-                                .create_message_stream_for_goal(
-                                    provider_request,
-                                    tool_ctx.goal_turn.captured(),
-                                    goal_permission,
-                                )
-                                .await
-                                .map_err(ClaudeError::from)
-                        },
-                    )
-                    .await
-                    {
+                    let dispatch = claurst_api::model_dispatch::ModelDispatch::default();
+                    let stream_result = dispatch
+                        .scope(await_goal_request(
+                            tool_ctx.goal_turn.captured(),
+                            goal_permission,
+                            &cancel_token,
+                            async {
+                                provider
+                                    .create_message_stream_for_goal(
+                                        provider_request,
+                                        tool_ctx.goal_turn.captured(),
+                                        goal_permission,
+                                    )
+                                    .await
+                                    .map_err(ClaudeError::from)
+                            },
+                        ))
+                        .await;
+                    if dispatch.was_attempted() {
+                        turn += 1;
+                        *num_turns = turn;
+                        tool_ctx
+                            .current_turn
+                            .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let stream = match stream_result {
                         Ok(s) => s,
                         Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
                         Err(e) => {
@@ -2670,7 +2719,6 @@ async fn run_query_loop_inner(
                                 retries_left + 1
                             )));
                         }
-                        turn -= 1;
                         continue;
                     }
                     if provider_stream_stalled {
@@ -3014,14 +3062,23 @@ async fn run_query_loop_inner(
                 "Goal authority revoked: {error}"
             )));
         }
-        let mut stream_rx = match await_goal_request(
-            tool_ctx.goal_turn.captured(),
-            goal_permission,
-            &cancel_token,
-            client.create_message_stream(request, handler),
-        )
-        .await
-        {
+        let dispatch = claurst_api::model_dispatch::ModelDispatch::default();
+        let stream_result = dispatch
+            .scope(await_goal_request(
+                tool_ctx.goal_turn.captured(),
+                goal_permission,
+                &cancel_token,
+                client.create_message_stream(request, handler),
+            ))
+            .await;
+        if dispatch.was_attempted() {
+            turn += 1;
+            *num_turns = turn;
+            tool_ctx
+                .current_turn
+                .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut stream_rx = match stream_result {
             Ok(rx) => rx,
             Err(ClaudeError::Cancelled) => return QueryOutcome::Cancelled,
             Err(e) => {
@@ -3050,7 +3107,6 @@ async fn run_query_loop_inner(
                         }
                         effective_model = fb.clone();
                         used_fallback = true;
-                        turn -= 1; // don't count this attempt against max_turns
                         continue;
                     }
                 }
@@ -3216,7 +3272,6 @@ async fn run_query_loop_inner(
                     retries_left + 1
                 )));
             }
-            turn -= 1; // don't count this stalled attempt
             continue;
         }
 
@@ -5556,6 +5611,7 @@ mod tests {
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 4096,
             max_turns: 10,
+            max_turns_override: None,
             system_prompt: sys.map(String::from),
             append_system_prompt: append.map(String::from),
             output_style: claurst_core::system_prompt::OutputStyle::Default,
@@ -7517,7 +7573,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(&outcome, QueryOutcome::Error(_)));
+        assert!(matches!(
+            &outcome,
+            QueryOutcome::TurnBudgetExhausted { consumed: 1, .. }
+        ));
         assert!(!matches!(&outcome, QueryOutcome::EndTurn { .. }));
         assert_eq!(
             events
@@ -9320,4 +9379,5 @@ mod tests {
     }
     include!("web_fetch_provenance_tests.rs");
     include!("tool_cancellation_tests.rs");
+    include!("turn_budget_tests.rs");
 }
