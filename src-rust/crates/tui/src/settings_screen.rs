@@ -260,8 +260,11 @@ impl SettingsScreen {
         }
         // The session's mode can come from a flag or a keystroke, and a start
         // without `--permission-mode` runs in the saved one, so saving these
-        // fields must not save the session's mode along with them.
-        let saved_mode = self.settings_snapshot.config.permission_mode.clone();
+        // fields must not save the session's mode along with them. The saved
+        // mode is read now: it may have changed since this screen opened.
+        let saved_mode = Settings::load_sync()
+            .map(|saved| saved.config.permission_mode)
+            .unwrap_or_else(|_| self.settings_snapshot.config.permission_mode.clone());
         self.settings_snapshot.config = config.clone();
         self.settings_snapshot.config.permission_mode = saved_mode;
         let _ = self.settings_snapshot.save_sync();

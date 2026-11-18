@@ -10,33 +10,59 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[test]
 #[ignore = "run by isolated parent with temporary engine home"]
 fn settings_permission_mode_child() {
+    // Only the parent below may run this: it rewrites the settings file of
+    // whatever engine home the environment names.
+    assert_eq!(
+        std::env::var("COVEN_SETTINGS_PERMISSION_MODE_FIXTURE").as_deref(),
+        Ok("1"),
+        "run through the parent test"
+    );
     let home = std::path::PathBuf::from(std::env::var_os("COVEN_CODE_HOME").unwrap());
+    let file = home.join("settings.json");
+    let save = |mode: &str| {
+        std::fs::write(
+            &file,
+            format!(r#"{{"config": {{"permission_mode": "{mode}"}}}}"#),
+        )
+        .unwrap()
+    };
+    // (saved before the screen opens, saved while it is open, the session's
+    // mode, what must be on disk afterwards)
     let cases = [
-        (None, PermissionMode::AcceptEdits, PermissionMode::Default),
         (
+            None,
+            None,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Default,
+        ),
+        (
+            None,
             None,
             PermissionMode::BypassPermissions,
             PermissionMode::Default,
         ),
         (
             Some("plan"),
+            None,
             PermissionMode::BypassPermissions,
             PermissionMode::Plan,
         ),
         (
             Some("acceptEdits"),
+            None,
             PermissionMode::Default,
             PermissionMode::AcceptEdits,
         ),
+        (
+            Some("acceptEdits"),
+            Some("default"),
+            PermissionMode::AcceptEdits,
+            PermissionMode::Default,
+        ),
     ];
-    for (max_tokens, (saved, session, expected)) in (4000..).zip(cases) {
-        let file = home.join("settings.json");
+    for (max_tokens, (saved, saved_while_open, session, expected)) in (4000..).zip(cases) {
         match saved {
-            Some(mode) => std::fs::write(
-                &file,
-                format!(r#"{{"config": {{"permission_mode": "{mode}"}}}}"#),
-            )
-            .unwrap(),
+            Some(mode) => save(mode),
             None => {
                 let _ = std::fs::remove_file(&file);
             }
@@ -48,6 +74,9 @@ fn settings_permission_mode_child() {
         };
         let mut screen = SettingsScreen::new();
         screen.open();
+        if let Some(mode) = saved_while_open {
+            save(mode);
+        }
         screen.start_edit("max_tokens", "");
         for c in max_tokens.to_string().chars() {
             handle_settings_key(
@@ -70,7 +99,7 @@ fn settings_permission_mode_child() {
         );
         assert_eq!(
             on_disk.permission_mode, expected,
-            "saved {saved:?}, session {session:?}"
+            "saved {saved:?}, then {saved_while_open:?}, session {session:?}"
         );
         assert_eq!(
             config.permission_mode, session,
@@ -92,6 +121,7 @@ fn saving_a_field_in_the_settings_screen_does_not_save_the_sessions_permission_m
         ])
         .env("COVEN_CODE_HOME", home.path())
         .env_remove("COVEN_CODE_TEST_HOME")
+        .env("COVEN_SETTINGS_PERMISSION_MODE_FIXTURE", "1")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

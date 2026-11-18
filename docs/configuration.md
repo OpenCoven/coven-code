@@ -365,7 +365,8 @@ Two limits to know about:
 - An engine-global `default` cannot be told apart from no saved mode, so it
   does not override an `acceptEdits`, `plan` or `bypassPermissions` in the
   shared file: `/config set permission-mode default` reports success and the
-  next start still uses the shared mode. Change the shared file, or pass
+  next start still acts on the shared mode (a shared `bypassPermissions` keeps
+  producing the not-restored notification). Change the shared file, or pass
   `--permission-mode default`.
 
 ---
