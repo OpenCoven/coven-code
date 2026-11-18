@@ -223,10 +223,15 @@ _dru_steps() { # renderer, dir
   fi
   # The registration is settled only after the health read that follows it:
   # stopping the fake before that would leave the state unknown from launch.
+  # The first health answer after the POST may be the background probe's,
+  # so give the registration's own read time to follow (it is sent as soon
+  # as the POST is answered), then require every request to be answered.
   while [ "$waited" -lt 50 ] && [ "$(_dru_health_after_registration "$first")" -lt 1 ]; do
     sleep 0.2; waited=$((waited + 1))
   done
-  if [ "$(_dru_health_after_registration "$first")" -lt 1 ]; then
+  sleep 1.5
+  if [ "$(_dru_health_after_registration "$first")" -lt 1 ] \
+    || [ "$(_dru_count "$first" "answered ")" -ne "$(($(wc -l <"$first") / 2))" ]; then
     _fail "$r: the first daemon answered the health read after the registration" "$(cat "$first")"
     return 0
   fi

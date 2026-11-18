@@ -299,8 +299,11 @@ a start time is not an instance: it could not be told from its successor.
 The background reachability probe behind the daemon indicator (at most one
 every 10 s, as before) now reads `GET /api/v1/health` to the end instead of
 the first byte of `GET /api/v1/familiars`. Its 2 s budget now covers the whole
-read, so a peer that keeps sending bytes cannot hold it. "Online" still means
-anything but gone, so a busy daemon is not shown as offline.
+read once connected, so a peer that keeps sending bytes cannot hold it. The
+connect itself is not timed (it never was): on a Unix socket it returns at
+once unless the daemon's listen queue is full, which on Linux blocks it and on
+macOS refuses it. "Online" still means anything but gone, so a busy daemon is
+not shown as offline.
 
 **Registration is tied to an instance.** With `daemonLedger` on, the
 registration reads health before and after its `POST /api/v1/sessions/external`
@@ -397,6 +400,17 @@ daemon.
   Classic's indicator still reads unknown after a restart.
 - A registration whose answer was lost (a timeout after the request was
   written) is still shown as failed, not as unknown.
+- A daemon replaced by one that never names a process (or always answers with
+  an error status) reads unidentified on every probe, so the registration
+  stays registered, even when the socket file's inode shows a different file.
+- A second `/session resume` while a registration sent again is still waiting
+  for its answer sends nothing: once that answer lands the state reads
+  registered for the session sent first, and the session bound last is not
+  registered until a later session start finds the state unknown.
+- The registration and completion requests keep their old transport: each read
+  waits up to 5 s, and that timer restarts with every byte, so a peer that
+  trickles bytes can hold them longer, and the connect is not timed (see the
+  probe above). Only the probe's whole read has a deadline.
 
 **Observed on 2026-11-18** with Coven v0.5.0 in a disposable `HOME` and
 `COVEN_HOME`, `daemonLedger` on, Classic and Next at 120x40:
@@ -415,7 +429,8 @@ daemon.
 The session row survived each restart, because the store was the same.
 
 **A daemon that accepts and never answers** (a listener on the socket that
-reads and stays silent), same date and sizes. Every wait is bounded:
+reads and stays silent), same date and sizes. Every wait measured here ended
+within the request timeout:
 
 - Launch is not delayed. The registration gives up after 7 s on its own task
   (2 s health, 5 s request) and Next reads `ledger unavailable`; Classic reads
@@ -427,8 +442,10 @@ reads and stays silent), same date and sizes. Every wait is bounded:
   side by side, so this stays one timeout when two ids were registered.
 
 Those 5 s waits were there before this change and are not changed by it. A
-quit within the first seconds after a launch or a `/session resume` can wait
-up to 2 s more, for the registration still in flight.
+quit within the first seconds after a launch or a `/session resume` waits up
+to 2 s for the registration still in flight before it sends the completions,
+and the process then still waits for that registration's own task to end
+(at most its 7 s against a silent daemon).
 
 ## Deferred
 
