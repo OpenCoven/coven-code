@@ -111,11 +111,15 @@ class PowerShellInstallerTests(unittest.TestCase):
         cases = (("9.9.9", "installed", {}), ("1.0.0", "kept", {}),
                  ("1.0.0", "installed", {"COVEN_CODE_INSTALL_FORCE": "1"}))
         for shell in self.shells():
+            # PowerShell 7 puts its own module paths in PSModulePath, and
+            # Windows PowerShell 5.1 then cannot load Get-FileHash.
+            shell_env = {name: value for name, value in env.items()
+                         if shell == "pwsh" or name.upper() != "PSMODULEPATH"}
             for version, expect, extra in cases:
                 with self.subTest(shell=shell, version=version, extra=extra):
                     result = subprocess.run(
                         [shell, "-NoProfile", "-NonInteractive", "-File", str(CONSENT_FIXTURE)],
-                        env={**env, **extra, "CONSENT_REPORTED_VERSION": version,
+                        env={**shell_env, **extra, "CONSENT_REPORTED_VERSION": version,
                              "CONSENT_EXPECT": expect},
                         capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
                     )
