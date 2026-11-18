@@ -105,7 +105,7 @@ function Invoke-HttpsDownload([string]$Uri, [string]$OutFile, [scriptblock]$Requ
                 if ($status -ne 200) { throw "HTTP $status downloading $current" }
                 $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
                 $outputStream = [IO.File]::Create($OutFile)
-                try { $inputStream.CopyToAsync($outputStream, 81920, $deadline.Token).GetAwaiter().GetResult() } finally {
+                try { $null = $inputStream.CopyToAsync($outputStream, 81920, $deadline.Token).GetAwaiter().GetResult() } finally {
                     $outputStream.Dispose()
                     $inputStream.Dispose()
                 }
