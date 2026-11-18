@@ -178,7 +178,9 @@ async fn supervise_background<Q, C>(
         QueryOutcome::EndTurn { .. } => AgentCompletion::Succeeded,
         QueryOutcome::MaxTokens { .. } => AgentCompletion::Partial,
         QueryOutcome::Cancelled => AgentCompletion::Cancelled,
-        QueryOutcome::Error(_) | QueryOutcome::BudgetExceeded { .. } => AgentCompletion::Failed,
+        QueryOutcome::Error(_)
+        | QueryOutcome::BudgetExceeded { .. }
+        | QueryOutcome::TurnBudgetExhausted { .. } => AgentCompletion::Failed,
     };
     let result_text = format_outcome(&outcome);
     claurst_core::tasks::global_registry().append_output(&agent_id, &result_text);
@@ -472,6 +474,7 @@ impl AgentTool {
             model,
             max_tokens: claurst_core::constants::DEFAULT_MAX_TOKENS,
             max_turns: resolved_max_turns,
+            max_turns_override: None,
             system_prompt: Some(system_prompt),
             append_system_prompt: None,
             output_style: ctx.config.effective_output_style(),
@@ -603,6 +606,10 @@ impl AgentTool {
                 let text = partial_message.get_all_text();
                 ToolResult::success(format!("{}\n\n[Note: Agent hit max_tokens limit]", text))
             }
+            QueryOutcome::TurnBudgetExhausted { budget, consumed } => ToolResult::error(format!(
+                "Sub-agent model-round budget exhausted ({consumed}/{}); task unfinished",
+                budget.max_turns
+            )),
             QueryOutcome::Cancelled => ToolResult::error("Sub-agent was cancelled".to_string()),
             QueryOutcome::Error(e) => ToolResult::error(format!("Sub-agent error: {}", e)),
             QueryOutcome::BudgetExceeded {
@@ -625,9 +632,9 @@ fn background_status(outcome: &QueryOutcome, result_text: &str) -> claurst_core:
     match outcome {
         QueryOutcome::EndTurn { .. } | QueryOutcome::MaxTokens { .. } => TaskStatus::Completed,
         QueryOutcome::Cancelled => TaskStatus::Cancelled,
-        QueryOutcome::Error(_) | QueryOutcome::BudgetExceeded { .. } => {
-            TaskStatus::Failed(result_text.to_owned())
-        }
+        QueryOutcome::Error(_)
+        | QueryOutcome::BudgetExceeded { .. }
+        | QueryOutcome::TurnBudgetExhausted { .. } => TaskStatus::Failed(result_text.to_owned()),
     }
 }
 
@@ -639,6 +646,10 @@ fn format_outcome(outcome: &QueryOutcome) -> String {
         } => format!(
             "{}\n\n[Note: Agent hit max_tokens limit]",
             partial_message.get_all_text()
+        ),
+        QueryOutcome::TurnBudgetExhausted { budget, consumed } => format!(
+            "[Agent model-round budget exhausted ({consumed}/{}); task unfinished]",
+            budget.max_turns
         ),
         QueryOutcome::Cancelled => "[Agent was cancelled]".to_string(),
         QueryOutcome::Error(e) => format!("[Agent error: {}]", e),

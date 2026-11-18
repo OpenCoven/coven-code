@@ -779,6 +779,7 @@ impl ClaudeCliProvider {
             turn.mark_request_attempted();
         }
         let mut child = command.spawn().map_err(|e| self.spawn_error(e))?;
+        crate::model_dispatch::mark_attempted();
 
         let mut stdin = child.stdin.take().ok_or_else(|| ProviderError::Other {
             provider: self.id.clone(),
