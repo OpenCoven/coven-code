@@ -1860,7 +1860,7 @@ pub mod config {
             };
         anyhow::ensure!(
             !layer.is_unreadable(),
-            "nextAppearance in {} is not an object",
+            "nextAppearance in {} is not an object; fix or remove it",
             path.display()
         );
         edits.apply_to(&mut layer);

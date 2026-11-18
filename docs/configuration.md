@@ -77,7 +77,7 @@ When Coven Code saves the engine-global file, it preserves the JSON values of un
 
 The top-level `reduceMotion` setting makes Next's activity indicator static.
 
-Under Next, `/config appearance` previews these before anything is saved:
+Under Next, `/config appearance` (or `/settings appearance`) previews these before anything is saved:
 
 ```text
 /config appearance                  List the settings and their values
@@ -87,7 +87,7 @@ Under Next, `/config appearance` previews these before anything is saved:
 /config appearance reset            Preview the defaults; save keeps them
 ```
 
-A save changes only the keys you previewed and keeps every other key and value, including keys this version does not know. The file is written back with its keys in alphabetical order. `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out when set to their default, `hints` is written as you set it, and after a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
+A save changes only the settings you previewed. Every other setting keeps its effect, and every key this version does not know is kept with its value. The file is written back with its keys in alphabetical order. Inside `nextAppearance`, `theme`, `colorMode`, `glyphs`, `density` and `layout` are left out whenever they hold their default, including ones you did not preview, since leaving them out means the same; `hints` is written as you set it, and an empty `nextAppearance` is removed. After a reset none of these keys is written; keys this version does not know are kept. If the file cannot be read as settings, the save is refused and the file is left alone. Project settings can set these keys too, and they win inside that folder; a save tells you when one does. `/config theme` chooses Classic's theme and does not change Next's.
 
 Measured contrast and its limits are in the [contrast record](tui-v2/contrast.md).
 

@@ -30,10 +30,6 @@ _look_json() { # file
   python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))' "$1"
 }
 
-_look_quit() {
-  tui_stop
-}
-
 # tmux can leave a window at an earlier size on a loaded host; reapply until it takes.
 _look_resize() { # width, height
   local tries=0
@@ -114,7 +110,7 @@ tc_appearance() {
       '{"hasCompletedOnboarding": true, '"$seen"', "nextAppearance": {"density": "compact", "glyphs": "unicode", "hints": false, "laterKey": 42}, "someFutureKey": {"kept": [1, 2]}}' \
       "next: a save changes only what it names"
   fi
-  _look_quit
+  tui_stop
 
   # A file that cannot be read is refused and left alone. The inspect layout
   # opens only at 120x32 or larger, so this launch has that size at any suite size.
@@ -139,7 +135,7 @@ tc_appearance() {
       _pass "next: reverting keeps the session running"
     else _fail "next: reverting keeps the session running" "$(tui_capture)"; fi
   fi
-  _look_quit
+  tui_stop
 
   # Project values stay out of the user's file, and the user hears who wins.
   printf '%s\n' '{"nextAppearance":{"theme":"light","colorMode":"16"}}' >"$project_file"
@@ -151,7 +147,7 @@ tc_appearance() {
       '{"hasCompletedOnboarding": true, '"$seen"', "nextAppearance": {"density": "compact", "glyphs": "unicode", "hints": false, "laterKey": 42, "theme": "dark"}, "someFutureKey": {"kept": [1, 2]}}' \
       "next: project values stay out of the user's file"
   fi
-  _look_quit
+  tui_stop
   printf '%s\n' '{}' >"$project_file"
 
   # Reset previews the defaults; only a save writes them.
@@ -165,7 +161,7 @@ tc_appearance() {
       '{"hasCompletedOnboarding": true, '"$seen"', "nextAppearance": {"laterKey": 42}, "someFutureKey": {"kept": [1, 2]}}' \
       "next: a reset keeps what this version does not know"
   fi
-  _look_quit
+  tui_stop
 
   # The layout setting takes effect at launch, when the inspector fits.
   printf '{"hasCompletedOnboarding":true,%s,"nextAppearance":{"layout":"work"}}\n' "$seen" >"$file"
@@ -180,12 +176,12 @@ tc_appearance() {
     if wait_for "canonical tasks" 5; then _pass "next: the layout returns when there is room"
     else _fail "next: the layout returns when there is room" "$(tui_capture)"; fi
   fi
-  _look_quit
+  tui_stop
   if TUI_WIDTH=100 _look_launch next preview "$scratch"; then
     assert_absent "$(tui_capture)" "canonical tasks" \
       "next: a narrow terminal keeps the transcript at launch"
   fi
-  _look_quit
+  tui_stop
 
   # /settings changes reduced motion, and Next draws it without a restart.
   printf '{"hasCompletedOnboarding":true,%s,"nextAppearance":{"glyphs":"unicode"}}\n' "$seen" >"$file"
@@ -206,7 +202,7 @@ tc_appearance() {
     else _fail "next: reduced motion applies without a restart" "$(tui_capture)"; fi
     wait_absent "working" 12 || true
   fi
-  _look_quit
+  tui_stop
 
   # Classic: the same command writes nothing, and the layout does not apply.
   printf '{"hasCompletedOnboarding":true,%s,"nextAppearance":{"layout":"work"}}\n' "$seen" >"$file"
@@ -220,7 +216,7 @@ tc_appearance() {
     if cmp -s "$file" "$scratch/before.json"; then _pass "classic: the command writes nothing"
     else _fail "classic: the command writes nothing" "$(cat "$file")"; fi
   fi
-  _look_quit
+  tui_stop
 
   TUI_LAUNCH_PREFIX="$saved_prefix"; TUI_BOOT_STRING="$saved_boot"
   kill "$fake_pid" 2>/dev/null; wait "$fake_pid" 2>/dev/null
