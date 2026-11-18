@@ -23,11 +23,32 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake","model":"fa
 i=1; text=""
 while [ "$i" -le 60 ]; do text="${text}fake line $i\\n"; i=$((i + 1)); done
 printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"model\":\"fake-model\",\"content\":[{\"type\":\"text\",\"text\":\"${text}\"}]}}"
-sleep 6
+# Hold the turn until the test releases it. The two-minute limit only ends a
+# fake that an aborted run left behind.
+i=0
+while [ ! -e "$FAKE_CLAUDE_RELEASE" ]; do
+  [ "$i" -lt 1200 ] || exit 1
+  sleep 0.1
+  i=$((i + 1))
+done
 touch "$FAKE_CLAUDE_DONE"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":1}}'
 FAKE
   chmod +x "$1"
+}
+
+# Succeeds once the pane holds a rule wider than 80 columns, as a frame drawn
+# at 120 columns does. The shell clears the screen when its size changes, so
+# an older frame does not. The rule is "-" where box drawing is not used.
+_next_shell_wait_wide_frame() {
+  local box ascii capture waited=0
+  box="$(printf '─%.0s' {1..81})"; ascii="$(printf -- '-%.0s' {1..81})"
+  while [ "$waited" -lt 50 ]; do
+    capture="$(tui_capture)"
+    if grep -qF -e "$box" -e "$ascii" <<<"$capture"; then return 0; fi
+    sleep 0.1; waited=$((waited + 1))
+  done
+  return 1
 }
 
 tc_next_shell() {
@@ -49,7 +70,8 @@ tc_next_shell() {
   done
   TUI_LAUNCH_PREFIX+=" $(printf '%q ' \
     "HOME=$scratch/home" "COVEN_HOME=$scratch/home/.coven" COVEN_CODE_UI=next \
-    "COVEN_CODE_CLAUDE_BIN=$scratch/bin/claude" "FAKE_CLAUDE_DONE=$scratch/done")"
+    "COVEN_CODE_CLAUDE_BIN=$scratch/bin/claude" "FAKE_CLAUDE_DONE=$scratch/done" \
+    "FAKE_CLAUDE_RELEASE=$scratch/release")"
   TUI_BOOT_STRING="preview"
 
   if tui_start; then
@@ -60,9 +82,17 @@ tc_next_shell() {
     assert_absent "$s" "Coven v" "Next draws its own shell, not Classic's welcome"
 
     # ---- draft and the one inspector ------------------------------------
+    # A hosted run did not act on a key sent about 5 ms after a resize (#519).
+    # The likely cause is that a key arriving together with a resize can stay
+    # unread until the next key, so each resize that a key follows first waits
+    # for a frame at the new size. Shrinking the pane drops the top rows of the
+    # old frame, so the header is back only once the shell has drawn again.
     _tmux resize-window -t "$TUI_SESSION" -x 80 -y 24
+    if wait_for "acme-next" 5; then _pass "the idle shell is shown at 80x24"
+    else _fail "the idle shell is shown at 80x24" "$(tui_capture)"; fi
     tui_type "draft one"
-    if wait_for "draft not sent" 5; then _pass "a typed draft is visibly unsent"
+    if wait_for "draft one" 5 && wait_for "draft not sent" 5; then
+      _pass "a typed draft is visibly unsent"
     else _fail "a typed draft is visibly unsent" "$(tui_capture)"; fi
     tui_keys M-i
     if wait_for "Activity" 5; then _pass "Alt+I opens the inspector"
@@ -90,6 +120,8 @@ tc_next_shell() {
 
     # ---- submit, stream, scroll away, resize, back to live ---------------
     _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40
+    if _next_shell_wait_wide_frame; then _pass "the draft view is redrawn at 120x40"
+    else _fail "the draft view is redrawn at 120x40" "$(tui_capture)"; fi
     tui_type "stream please"; tui_keys Enter
     if wait_for "fake line 60" 15; then _pass "the response streams into the transcript"
     else _fail "the response streams into the transcript" "$(tui_capture)"; fi
@@ -106,6 +138,11 @@ tc_next_shell() {
       assert_contains "$s" "working" "the turn is still running at ${size/ /x}"
     done
     _tmux resize-window -t "$TUI_SESSION" -x 120 -y 40
+    # The frame left over from 40x12 also says "scrolled up", so wait for the
+    # redrawn one before judging it and before sending Alt+G.
+    if _next_shell_wait_wide_frame && wait_for "scrolled up" 5; then
+      _pass "the scrolled view survives the resize back to 120x40"
+    else _fail "the scrolled view survives the resize back to 120x40" "$(tui_capture)"; fi
     tui_keys M-g
     if wait_for "stream please" 5; then _pass "Alt+G goes to the start of the transcript"
     else _fail "Alt+G goes to the start of the transcript" "$(tui_capture)"; fi
@@ -126,21 +163,33 @@ tc_next_shell() {
     else
       _pass "the cancelled turn's claude process exits"
     fi
-    # The fake finishes 6s after answering; give it the time it would need.
-    sleep 7
+    # Release the held turn only now, after the cancellation was judged. A
+    # fake that outlived the cancellation finishes as soon as it sees the
+    # file, so wait until it has finished or none is left.
+    touch "$scratch/release"
+    waited=0
+    while [ ! -e "$scratch/done" ] && pgrep -f "$scratch/bin/claude" >/dev/null 2>&1 \
+      && [ "$waited" -lt 50 ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
     if [ -e "$scratch/done" ]; then _fail "the cancelled turn did not run to completion"
     else _pass "the cancelled turn did not run to completion"; fi
     assert_contains "$(tui_capture)" "Cancelled." "the settled outcome is shown"
 
     # ---- quit and terminal restoration -----------------------------------
+    # The process tmux sees in the pane, whatever the binary under test is called.
+    local running
+    running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
     tui_keys C-c; sleep 0.3; tui_keys C-c
     # Type the check only once the shell owns the pane again; keys sent
     # while the app is still exiting are read by it and lost.
-    local waited=0
-    while [ "$waited" -lt 50 ] && \
-      [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "coven-code" ]; do
+    waited=0
+    while [ "$waited" -lt 300 ] && \
+      [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; do
       sleep 0.1; waited=$((waited + 1))
     done
+    if [ "$waited" -lt 300 ]; then _pass "quitting returns the pane to the shell"
+    else _fail "quitting returns the pane to the shell" "$(tui_capture)"; fi
     tui_type 'stty -a | grep -q -- "-icanon" && echo "RAW_$((40 + 1))" || echo "COOKED_$((40 + 2))"'
     tui_keys Enter
     if wait_for "COOKED_42" 10; then _pass "quitting restores cooked terminal mode"
