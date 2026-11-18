@@ -44,8 +44,20 @@ pub struct DaemonSession {
     pub title: String,
     pub status: String,
     pub project_root: String,
-    /// Present when the session has been archived; `None` for live sessions.
+    /// Present when the session has been archived; `None` otherwise. Archive
+    /// is separate from `status`: a finished session stays unarchived until
+    /// someone archives it.
     pub archived_at: Option<String>,
+}
+
+impl DaemonSession {
+    /// Whether the session is still live: its status is one of the daemon
+    /// contract's nonterminal harness-session statuses, `created`, `running`
+    /// or `idle`. The terminal ones (`completed`, `failed`, `killed`,
+    /// `orphaned`) and any status the contract does not list are not live.
+    pub fn is_live(&self) -> bool {
+        matches!(self.status.as_str(), "created" | "running" | "idle")
+    }
 }
 
 /// Daemon health response — surfaced by `GET /api/v1/health`.
@@ -1244,6 +1256,34 @@ mod tests {
         fs::write(dir.path().join("coven.sock"), b"").unwrap();
         let _g = EnvGuard::set("COVEN_HOME", dir.path().to_str().unwrap());
         assert!(DaemonClient::new().is_some());
+    }
+
+    /// The live set is the daemon contract's nonterminal statuses; every
+    /// terminal status, and one the contract does not list, is not live.
+    #[test]
+    fn only_nonterminal_session_statuses_are_live() {
+        let session = |status: &str| DaemonSession {
+            id: "s".to_string(),
+            harness: "coven-code".to_string(),
+            title: String::new(),
+            status: status.to_string(),
+            project_root: String::new(),
+            archived_at: None,
+        };
+        for status in ["created", "running", "idle"] {
+            assert!(session(status).is_live(), "{status} should be live");
+        }
+        for status in [
+            "completed",
+            "failed",
+            "killed",
+            "orphaned",
+            "active",
+            "unknown",
+            "",
+        ] {
+            assert!(!session(status).is_live(), "{status} should not be live");
+        }
     }
 
     #[test]
