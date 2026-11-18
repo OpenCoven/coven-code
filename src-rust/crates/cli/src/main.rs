@@ -2716,9 +2716,9 @@ async fn compact_idle_conversation(
 ///
 /// - Finished: the compaction stands, so a cancel requested while it ran is
 ///   settled here without saying "Cancelled.".
-/// - Cancelled: the conversation was left as it was; the loop's settle shows
-///   "Cancelled.". Auto-compaction stays off for the session, as after a
-///   failure, so it does not start again at once on the same history.
+/// - Cancelled: the conversation was left as it was. Auto-compaction stays
+///   off for the session, as after a failure, so it does not start again at
+///   once on the same history, and the status says both.
 /// - Failed (or the worker panicked): auto-compaction is turned off for the
 ///   session and the status says so.
 fn finish_idle_compaction(
@@ -2728,13 +2728,19 @@ fn finish_idle_compaction(
     app.auto_compact_running = false;
     match outcome {
         Some(claurst_query::QueryOutcome::EndTurn { .. }) => {
+            // Settles a pending cancel now, so the loop's later settle finds
+            // nothing to report. A compaction has no tool rows, so the row
+            // bookkeeping in the settle does nothing here.
             app.settle_cancellation();
             // After auto-compact the context was summarised — reset usage.
             app.context_used_tokens = 0;
             app.status_message = Some("Auto-compact complete.".to_string());
         }
         Some(claurst_query::QueryOutcome::Cancelled) => {
+            app.settle_cancellation();
             app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Cancelled. Auto-compact is off for this session.".to_string());
         }
         _ => {
             app.auto_compact_enabled = false;
@@ -7168,7 +7174,8 @@ mod tests {
     }
 
     /// Decision 4 (#406): a cancel during idle auto-compaction stops it. The
-    /// conversation is exactly what it was, and the status says "Cancelled.".
+    /// conversation is exactly what it was, and the status says it was
+    /// cancelled and that auto-compaction is now off.
     #[tokio::test]
     async fn idle_compaction_cancelled_mid_summary_leaves_history_and_says_cancelled() {
         let (client, mut requests, server) = compaction_fixture(false).await;
@@ -7203,7 +7210,14 @@ mod tests {
         let mut app = app_cancelling_idle_compaction();
         finish_idle_compaction(&mut app, Some(&outcome));
         app.settle_cancellation();
-        assert_eq!(app.status_message.as_deref(), Some("Cancelled."));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cancelled. Auto-compact is off for this session.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
         assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
         assert!(
             !app.auto_compact_enabled,
