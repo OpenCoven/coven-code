@@ -1070,6 +1070,10 @@ impl LlmProvider for ClaudeCliProvider {
                     let mut quiet_expired = false;
                     loop {
                         let finished = tokio::select! {
+                            // Output that is already waiting wins: a keepalive,
+                            // a grace expiry or a quiet limit is only for
+                            // silence, never for a line the CLI has written.
+                            biased;
                             result = &mut read_line => Some(result),
                             // Handled as the end of the CLI's output.
                             _ = &mut exit_grace => {
@@ -1303,8 +1307,9 @@ mod tests {
             "#!/bin/sh\ncat >/dev/null\n\
              echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fixture\"}}'\n\
              sleep {quiet}\n\
-             echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}'\n\
-             echo '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
+             printf '%s\\n%s\\n' \
+             '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"after the wait\"}}]}}}}' \
+             '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'\n"
         );
         let binary = fixture_binary(&dir, &script);
         (dir, binary)
