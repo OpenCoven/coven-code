@@ -3,7 +3,8 @@
 use crate::ToolContext;
 use std::time::Duration;
 
-/// How long a formatter may run.
+/// How long a formatter may run before it is killed with everything it
+/// started.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Try to format a file using any configured formatter.
@@ -55,8 +56,9 @@ async fn format_file_within(path: &str, ctx: &ToolContext, limit: Duration) {
             cmd.arg(path);
         }
 
-        // Run with a timeout; silently ignore all errors.
-        let _ = tokio::time::timeout(limit, cmd.output()).await;
+        // Run with a time limit, past which the formatter and everything it
+        // started are killed (#373); silently ignore all errors.
+        let _ = crate::process_tree::output_within(&mut cmd, limit).await;
 
         // Only apply the first matching formatter.
         break;

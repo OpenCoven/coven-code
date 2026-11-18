@@ -688,6 +688,7 @@ Create or attach to a git worktree for a given branch. Subsequent file operation
 |-----------|------|----------|-------------|
 | `branch` | string | yes | Branch name for the worktree |
 | `path` | string | no | Directory for the worktree (auto-generated if omitted) |
+| `post_create_command` | string | no | Shell command to run in the new worktree, such as `npm install`. If it is still running after 10 minutes, or the call is cancelled, it is stopped with every process it started. |
 
 ---
 

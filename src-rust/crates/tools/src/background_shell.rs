@@ -13,6 +13,12 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
     let task_name = format!("bg: {}", &command[..name_end]);
     let mut task = BackgroundTask::new(&task_name);
     task.pid = None; // Will be set after spawn
+                     // On Windows, cancelling the task, as the monitor tool does, cancels this
+                     // token, and the task then kills the command's job (#373).
+    #[cfg(windows)]
+    let stop = tokio_util::sync::CancellationToken::new();
+    #[cfg(windows)]
+    let task = task.with_cancel_token(stop.clone());
 
     let task_id = global_registry().register(task);
 
@@ -26,74 +32,104 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
         } else {
             ("bash", "-c")
         };
-        let child = crate::workspace_scope::shell(shell, &[flag.into(), command_clone]).and_then(
-            |(program, args)| {
-                Command::new(program)
-                    .args(args)
-                    .current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .stdin(Stdio::null())
-                    .kill_on_drop(true)
-                    .spawn()
-            },
-        );
+        let (program, args) =
+            match crate::workspace_scope::shell(shell, &[flag.into(), command_clone]) {
+                Ok(parts) => parts,
+                Err(e) => return fail(&task_id_clone, e.to_string()),
+            };
+        let mut shell = Command::new(program);
+        shell
+            .args(args)
+            .current_dir(&cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        // The job owns cmd.exe and everything it starts. A timeout or a cancel
+        // terminates it, and so does coven-code exiting, which closes its only
+        // handle (#373).
+        #[cfg(windows)]
+        let (mut c, job) = match crate::windows_job::spawn(&mut shell) {
+            Ok(spawned) => spawned,
+            Err(crate::windows_job::SpawnError::NotStarted(e)) => {
+                return fail(&task_id_clone, e.to_string())
+            }
+            Err(stopped) => return fail(&task_id_clone, stopped.report("Failed to spawn command")),
+        };
+        #[cfg(not(windows))]
+        let mut c = match shell.spawn() {
+            Ok(c) => c,
+            Err(e) => return fail(&task_id_clone, e.to_string()),
+        };
 
-        match child {
-            Ok(mut c) => {
-                let result = tokio::time::timeout_at(deadline, async {
-                    // Record PID in the registry.
-                    if let Some(pid) = c.id() {
-                        global_registry().set_pid(&task_id_clone, pid);
-                    }
+        #[cfg(windows)]
+        let stopped = stop.cancelled();
+        #[cfg(not(windows))]
+        let stopped = std::future::pending::<()>();
+        let ended = tokio::select! {
+            ended = tokio::time::timeout_at(deadline, async {
+                // Record PID in the registry.
+                if let Some(pid) = c.id() {
+                    global_registry().set_pid(&task_id_clone, pid);
+                }
 
-                    let stdout = c.stdout.take();
-                    let stderr = c.stderr.take();
-                    crate::shell_pipe::drain_background(stdout, stderr, &task_id_clone).await;
+                let stdout = c.stdout.take();
+                let stderr = c.stderr.take();
+                crate::shell_pipe::drain_background(stdout, stderr, &task_id_clone).await;
 
-                    match c.wait().await {
-                        Ok(status) if status.success() => {
-                            global_registry().complete(&task_id_clone);
-                        }
-                        Ok(status) => {
-                            let code = status.code().unwrap_or(-1);
-                            global_registry().finish_if_running(
-                                &task_id_clone,
-                                claurst_core::tasks::TaskStatus::Failed(format!(
-                                    "exit code {}",
-                                    code
-                                )),
-                            );
-                        }
-                        Err(e) => {
-                            global_registry().finish_if_running(
-                                &task_id_clone,
-                                claurst_core::tasks::TaskStatus::Failed(e.to_string()),
-                            );
-                        }
+                c.wait().await
+            }) => Some(ended),
+            () = stopped => None,
+        };
+
+        match ended {
+            Some(Ok(status)) => {
+                // An ordinary exit leaves alone what the command started to
+                // outlive it.
+                #[cfg(windows)]
+                if let (Ok(_), Some(job)) = (&status, job) {
+                    job.release();
+                }
+                match status {
+                    Ok(status) if status.success() => {
+                        global_registry().complete(&task_id_clone);
                     }
-                })
-                .await;
-                if result.is_err() {
-                    let mut message = format!("timed out after {}ms", timeout_ms);
-                    // kill() also waits for the owned child to be reaped.
-                    if let Err(error) = c.kill().await {
-                        message.push_str(&format!("; failed to kill/reap child: {}", error));
+                    Ok(status) => {
+                        let code = status.code().unwrap_or(-1);
+                        fail(&task_id_clone, format!("exit code {}", code));
                     }
-                    global_registry().finish_if_running(
-                        &task_id_clone,
-                        claurst_core::tasks::TaskStatus::Failed(message),
-                    );
+                    Err(e) => fail(&task_id_clone, e.to_string()),
                 }
             }
-            Err(e) => {
-                global_registry().finish_if_running(
-                    &task_id_clone,
-                    claurst_core::tasks::TaskStatus::Failed(e.to_string()),
-                );
+            Some(Err(_)) => {
+                #[cfg(windows)]
+                if let Some(job) = &job {
+                    job.terminate();
+                }
+                let mut message = format!("timed out after {}ms", timeout_ms);
+                // kill() also waits for the owned child to be reaped.
+                if let Err(error) = c.kill().await {
+                    message.push_str(&format!("; failed to kill/reap child: {}", error));
+                }
+                fail(&task_id_clone, message);
+            }
+            // Cancelled: the registry already says so.
+            None => {
+                #[cfg(windows)]
+                if let Some(job) = &job {
+                    job.terminate();
+                }
+                if let Err(error) = c.kill().await {
+                    tracing::warn!(%error, "Could not kill or reap a cancelled background command");
+                }
             }
         }
     });
 
     task_id
+}
+
+/// Record that the task failed, unless it already ended.
+fn fail(task_id: &str, reason: String) {
+    global_registry().finish_if_running(task_id, claurst_core::tasks::TaskStatus::Failed(reason));
 }

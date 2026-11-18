@@ -40,6 +40,7 @@ pub mod mcp_resources;
 pub mod monitor_tool;
 pub mod notebook_edit;
 pub mod powershell;
+mod process_tree;
 pub mod pty_bash;
 pub mod remote_trigger;
 pub mod repl_tool;

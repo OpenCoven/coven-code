@@ -1,4 +1,7 @@
-//! A Job Object for each foreground Windows shell command (#373).
+//! A Job Object for each Windows shell command (#373): the shell tools'
+//! foreground and background calls, worktree post-create commands and
+//! formatters. "The shell" below is the process spawned, which for a formatter
+//! is the formatter itself.
 //!
 //! Killing `cmd.exe` or `powershell.exe` does not kill what it started. So the
 //! shell is created suspended, joins a new job, and only then runs: every
@@ -82,7 +85,7 @@ impl Job {
         if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
             // Dropping the job still kills its processes.
             let error = io::Error::last_os_error();
-            tracing::warn!(%error, "Could not terminate a foreground command's job");
+            tracing::warn!(%error, "Could not terminate a command's job");
         }
     }
 
@@ -94,7 +97,7 @@ impl Job {
         if let Err(error) = self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK) {
             tracing::warn!(
                 %error,
-                "Could not release a foreground command's job; closing it kills what the command left running"
+                "Could not release a command's job; closing it kills what the command left running"
             );
         }
     }
@@ -152,7 +155,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
     let job = match Job::new() {
         Ok(job) => job,
         Err(error) => {
-            tracing::warn!(%error, "No job for a foreground command; only its shell will be stopped");
+            tracing::warn!(%error, "No job for a command; only its shell will be stopped");
             let child = command.spawn().map_err(SpawnError::NotStarted)?;
             return Ok((child, None));
         }
@@ -173,7 +176,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         Some(job)
     } else {
         let error = io::Error::last_os_error();
-        tracing::warn!(%error, "Could not put a foreground command in a job; only its shell will be stopped");
+        tracing::warn!(%error, "Could not put a command in a job; only its shell will be stopped");
         None
     };
     let resumed = match threads_of(id) {
@@ -185,7 +188,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         Resumed::NotStarted(error) => {
             // No thread of the shell has run, so starting it again cannot run
             // the command twice.
-            tracing::warn!(%error, "Could not resume a foreground command's shell; starting it again without a job");
+            tracing::warn!(%error, "Could not resume a command's shell; starting it again without a job");
             let _ = child.start_kill();
             let child = command
                 .creation_flags(0)
@@ -195,7 +198,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         }
         Resumed::Partly(error) => {
             // The command may have started, so stop it rather than run it again.
-            tracing::warn!(%error, "A foreground command's shell started but could not be fully resumed; stopping it");
+            tracing::warn!(%error, "A command's shell started but could not be fully resumed; stopping it");
             if let Some(job) = &job {
                 job.terminate();
             }

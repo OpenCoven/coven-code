@@ -432,23 +432,23 @@ impl Tool for ExitWorktreeTool {
 const POST_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Run the post-create command `cmd` in `worktree_path`, and describe how it
-/// went for the tool result. `_limit` is not applied yet.
-async fn post_create_within(cmd: &str, worktree_path: &Path, _limit: Duration) -> String {
-    let shell_result = if cfg!(target_os = "windows") {
-        tokio::process::Command::new("cmd")
-            .args(["/C", cmd])
-            .current_dir(worktree_path)
-            .output()
-            .await
+/// went for the tool result. A cancelled call, or a command still running
+/// after `limit`, kills it with everything it started (#373).
+async fn post_create_within(cmd: &str, worktree_path: &Path, limit: Duration) -> String {
+    let (program, flag) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
     } else {
-        tokio::process::Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(worktree_path)
-            .output()
-            .await
+        ("sh", "-c")
     };
-    match shell_result {
-        Ok(out) if out.status.success() => {
+    let mut shell = tokio::process::Command::new(program);
+    shell.args([flag, cmd]).current_dir(worktree_path);
+    match crate::process_tree::output_within(&mut shell, limit).await {
+        Ok(None) => format!(
+            "\nPost-create command '{}' timed out after {}ms and was stopped.",
+            cmd,
+            limit.as_millis()
+        ),
+        Ok(Some(out)) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             format!(
                 "\nPost-create command '{}' completed successfully.{}",
@@ -460,7 +460,7 @@ async fn post_create_within(cmd: &str, worktree_path: &Path, _limit: Duration) -
                 }
             )
         }
-        Ok(out) => {
+        Ok(Some(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             format!(
                 "\nPost-create command '{}' exited with error.\nStderr: {}",
