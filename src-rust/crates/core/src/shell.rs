@@ -10,6 +10,9 @@ use std::process::Command;
 /// it as `\"` (#517). So on Windows the line is appended unescaped, inside
 /// one more pair of quotes, and `/S` has `cmd.exe` strip exactly that pair
 /// and take the rest as written.
+///
+/// `line` is the whole command line. Add no arguments to the returned
+/// command: on Windows they would land after the closing quote.
 pub fn command(line: &str) -> Command {
     #[cfg(windows)]
     {

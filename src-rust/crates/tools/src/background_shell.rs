@@ -21,11 +21,11 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
 
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        // No workspace scope can be applied on Windows, so, as for a
-        // foreground command, `cmd.exe` is started without consulting it.
+        // On Windows the scope is asked only whether a shell may start. No
+        // scope can be active there; if one were, it would refuse.
         #[cfg(windows)]
-        let shell =
-            std::io::Result::Ok(Command::from(claurst_core::shell::command(&command_clone)));
+        let shell = crate::workspace_scope::shell("cmd", &[])
+            .map(|_| Command::from(claurst_core::shell::command(&command_clone)));
         #[cfg(not(windows))]
         let shell = crate::workspace_scope::shell("bash", &["-c".into(), command_clone]).map(
             |(program, args)| {

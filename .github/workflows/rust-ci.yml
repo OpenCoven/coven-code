@@ -264,9 +264,9 @@ jobs:
           grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/windows-job-tests.txt"
 
       # cmd.exe must get a command's double quotes exactly as written (#517).
-      # Every crate that hands a command line to cmd.exe has a test file for
-      # it. This step runs even if an earlier step failed, tries every crate,
-      # and requires tests from each.
+      # Each of these five crates hands a command line to cmd.exe and has a
+      # test file for it. This step runs even if an earlier step failed, tries
+      # every crate, and requires tests from each.
       - name: Test that cmd.exe gets a command's quotes as written
         if: ${{ !cancelled() }}
         working-directory: src-rust
@@ -274,7 +274,7 @@ jobs:
         run: |
           failed=0
           for package in claurst-core claurst-plugins claurst-tools claurst-query claurst-commands; do
-            cargo test -p "$package" --locked --test windows_cmd_quotes --no-fail-fast | tee "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
+            cargo test -p "$package" --locked --test windows_cmd_quotes | tee "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
             grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
           done
           exit "$failed"
