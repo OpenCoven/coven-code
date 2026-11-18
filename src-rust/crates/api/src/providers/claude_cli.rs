@@ -67,6 +67,9 @@ use stderr::StderrDrain;
 #[cfg(all(test, unix))]
 mod background_work_tests;
 
+#[cfg(all(test, unix))]
+mod integration_tests;
+
 /// Env var overriding the `claude` binary location.
 pub const CLAUDE_BIN_ENV: &str = "COVEN_CODE_CLAUDE_BIN";
 
@@ -565,20 +568,22 @@ impl EnvelopeMapper {
                     .get("is_error")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if is_error {
+                let error_detail = if is_error {
                     let detail = envelope
                         .get("result")
                         .and_then(|v| v.as_str())
                         .unwrap_or("claude CLI reported an error");
-                    events.push(StreamEvent::Error {
+                    Some(StreamEvent::Error {
                         error_type: envelope
                             .get("subtype")
                             .and_then(|v| v.as_str())
                             .unwrap_or("error")
                             .to_string(),
                         message: detail.to_string(),
-                    });
-                }
+                    })
+                } else {
+                    None
+                };
                 let usage_json = envelope.get("usage");
                 let read_count = |key: &str| {
                     usage_json
@@ -593,6 +598,17 @@ impl EnvelopeMapper {
                 usage.output_tokens += read_count("output_tokens");
                 usage.cache_creation_input_tokens += read_count("cache_creation_input_tokens");
                 usage.cache_read_input_tokens += read_count("cache_read_input_tokens");
+                // Publish completed turns before a later failure or cancellation.
+                // Consumers merge cumulative snapshots rather than adding them.
+                if self.ran_background_work || is_error {
+                    events.push(StreamEvent::MessageDelta {
+                        stop_reason: None,
+                        usage: Some(usage.clone()),
+                    });
+                }
+                if let Some(error) = error_detail {
+                    events.push(error);
+                }
                 self.turn_open = false;
                 // The CLI will exit, or take another turn, when its
                 // background work is over; the stream ends then.
@@ -792,6 +808,7 @@ impl ClaudeCliProvider {
         // No stream exists yet to carry a keepalive or a stall timeout, so
         // the quiet limit is all that bounds a CLI that hangs before it
         // prints anything. Returning the error drops `child`, which stops it.
+        let startup_started = tokio::time::Instant::now();
         let first_read = reader.read_line(&mut first_line);
         let read = match self.quiet_limit {
             Some(limit) => tokio::time::timeout(limit, first_read)
@@ -806,8 +823,18 @@ impl ClaudeCliProvider {
             body: None,
         })?;
         if read == 0 {
-            // Exited without output. Reap the child so it doesn't linger.
-            let status = child.wait().await.ok();
+            // Closing stdout does not prove exit. Keep the startup deadline
+            // through reaping, so a closed pipe cannot bypass the quiet limit.
+            let wait = child.wait();
+            let status = match self.quiet_limit {
+                Some(limit) => {
+                    tokio::time::timeout(limit.saturating_sub(startup_started.elapsed()), wait)
+                        .await
+                        .map_err(|_| quiet_limit_error(&self.id, limit))?
+                }
+                None => wait.await,
+            }
+            .map_err(|error| self.spawn_error(error))?;
             debug!(
                 ?status,
                 resume = resume.is_some(),
@@ -981,6 +1008,7 @@ impl LlmProvider for ClaudeCliProvider {
                 heartbeat_period,
             );
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut exit_deadline = None;
             loop {
                 let outcome = mapper.map_line(&line);
                 if let Some(session_id) = mapper.session_id.as_deref() {
@@ -998,8 +1026,8 @@ impl LlmProvider for ClaudeCliProvider {
                     yield Ok(event);
                 }
                 if outcome.done {
-                    // Let the child exit cleanly; kill_on_drop covers hangs.
-                    let _ = turn.child.wait().await;
+                    // The result is terminal. Dropping the owned child stops a
+                    // CLI that keeps running after publishing it.
                     return;
                 }
 
@@ -1009,8 +1037,21 @@ impl LlmProvider for ClaudeCliProvider {
                 let exit_is_due = mapper.usage.is_some()
                     && !mapper.turn_open
                     && mapper.live_background_tasks == 0;
-                let exit_grace = tokio::time::sleep(heartbeat_period * EXIT_GRACE_BEATS);
+                if exit_is_due {
+                    exit_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + heartbeat_period * EXIT_GRACE_BEATS
+                    });
+                } else {
+                    exit_deadline = None;
+                }
+                let exit_grace = async {
+                    match exit_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
                 tokio::pin!(exit_grace);
+                let mut grace_expired = false;
 
                 line.clear();
                 let read = {
@@ -1018,12 +1059,32 @@ impl LlmProvider for ClaudeCliProvider {
                     // one read stays pinned across the heartbeats.
                     let read_line = turn.stdout.read_line(&mut line);
                     tokio::pin!(read_line);
-                    let quiet_since = tokio::time::Instant::now();
+                    let quiet_deadline = async {
+                        match quiet_limit {
+                            Some(limit) => tokio::time::sleep(limit).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::pin!(quiet_deadline);
+                    let mut quiet_expired = false;
                     loop {
                         let finished = tokio::select! {
                             result = &mut read_line => Some(result),
                             // Handled as the end of the CLI's output.
-                            _ = &mut exit_grace, if exit_is_due => Some(Ok(0)),
+                            _ = &mut exit_grace => {
+                                grace_expired = true;
+                                Some(Ok(0))
+                            },
+                            _ = &mut quiet_deadline, if !quiet_expired => {
+                                quiet_expired = true;
+                                if matches!(turn.child.try_wait(), Ok(None)) {
+                                    if let Some(limit) = quiet_limit {
+                                        yield Err(quiet_limit_error(&provider_id, limit));
+                                        return;
+                                    }
+                                }
+                                continue;
+                            },
                             _ = heartbeat.tick() => None,
                         };
                         match finished {
@@ -1036,44 +1097,61 @@ impl LlmProvider for ClaudeCliProvider {
                                 if !matches!(turn.child.try_wait(), Ok(None)) {
                                     continue;
                                 }
-                                // Running, but silent for longer than any
-                                // tool of its own is allowed to take: it has
-                                // hung. Ending the stream stops the process;
-                                // a keepalive would wait on it for ever.
-                                if let Some(limit) =
-                                    quiet_limit.filter(|limit| quiet_since.elapsed() >= *limit)
-                                {
-                                    yield Err(quiet_limit_error(&provider_id, limit));
-                                    return;
-                                }
                                 yield Ok(StreamEvent::Ping);
                             }
                         }
                     }
                 };
-                // Keepalives are for silence only.
-                heartbeat.reset();
+                // Keep the consumer clock independent of stdout: task snapshots
+                // and other internal lines may yield no mapped event at all.
                 match read {
                     Ok(0) => {
+                        // Real EOF and the between-turn grace have different
+                        // meanings. Only a clean exit between completed turns,
+                        // or a valid grace expiry, can finish an earlier result.
+                        let status = if grace_expired {
+                            turn.child.try_wait()
+                        } else {
+                            let grace = heartbeat_period * EXIT_GRACE_BEATS;
+                            let limit = quiet_limit.map_or(grace, |limit| limit.min(grace));
+                            match tokio::time::timeout(limit, turn.child.wait()).await {
+                                Ok(status) => status.map(Some),
+                                Err(_) => Ok(None),
+                            }
+                        };
                         let stderr = turn.stderr.finish().await;
-                        // The CLI is gone after reporting at least one
-                        // result: the run is over, and that was its answer.
-                        if mapper.usage.is_some() {
+                        let failure = match status {
+                            Ok(Some(status)) if !status.success() => {
+                                Some(format!("claude CLI exited unsuccessfully ({status})"))
+                            }
+                            Err(error) => Some(format!("failed waiting for claude CLI: {error}")),
+                            _ if mapper.usage.is_none() => {
+                                Some("claude CLI exited before emitting a result".to_string())
+                            }
+                            _ if mapper.turn_open => {
+                                Some("claude CLI exited before completing its reporting turn".to_string())
+                            }
+                            Ok(None) if !grace_expired => {
+                                Some("claude CLI closed stdout before exiting".to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(message) = failure {
+                            let detail = if stderr.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {stderr}")
+                            };
+                            yield Err(ProviderError::StreamError {
+                                provider: provider_id.clone(),
+                                message: format!("{message}{detail}"),
+                                partial_response: None,
+                            });
+                        } else {
                             for event in mapper.finish() {
                                 yield Ok(event);
                             }
-                            return;
                         }
-                        let detail = if stderr.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", stderr)
-                        };
-                        yield Err(ProviderError::StreamError {
-                            provider: provider_id.clone(),
-                            message: format!("claude CLI exited before emitting a result{}", detail),
-                            partial_response: None,
-                        });
                         return;
                     }
                     Ok(_) => {}

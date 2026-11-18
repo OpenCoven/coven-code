@@ -70,7 +70,10 @@ fn assert_closes_once_with(events: &[StreamEvent], input_tokens: u64, output_tok
         .filter(|event| {
             matches!(
                 event,
-                StreamEvent::MessageDelta { .. } | StreamEvent::MessageStop
+                StreamEvent::MessageDelta {
+                    stop_reason: Some(_),
+                    ..
+                } | StreamEvent::MessageStop
             )
         })
         .collect();
