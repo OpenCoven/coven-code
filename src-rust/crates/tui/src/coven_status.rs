@@ -88,11 +88,16 @@ pub fn daemon_looks_online() -> bool {
     }
 }
 
-/// Drop the cached probe result, so the next read starts again from
-/// socket-file presence. The cache is process-wide, so a test that changes
-/// the daemon's state calls this instead of waiting out the TTL.
+/// Wait for any probe in flight to land, then drop the cached result, so the
+/// next read starts a fresh probe. The cache is process-wide, so a test that
+/// changes the daemon's state calls this instead of waiting out the TTL; a
+/// probe started before the change would otherwise land after it.
 #[cfg(test)]
 pub(crate) fn forget_daemon_probe() {
+    let deadline = Instant::now() + DAEMON_PROBE_BUDGET * 3;
+    while DAEMON_PROBE_IN_FLIGHT.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     *daemon_probe_cell()
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;

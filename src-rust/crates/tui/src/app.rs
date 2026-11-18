@@ -1208,10 +1208,10 @@ Move immutable borrow out of scope first, then take mutable. Good good good afte
 }
 
 /// How often the event loop re-reads daemon reachability into
-/// [`App::daemon_online`]. The read is a cached lookup that never blocks
-/// ([`crate::coven_status::daemon_looks_online`], whose own TTL paces the
-/// socket probes); this interval only bounds how far the footer trails it.
-pub const DAEMON_STATUS_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+/// [`App::daemon_online`]. The read is a cached lookup that never waits on the
+/// socket ([`crate::coven_status::daemon_looks_online`], whose own TTL paces
+/// the probes); this interval only bounds how far the footer trails it.
+const DAEMON_STATUS_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Accent color for build mode (default pink).
 pub const ACCENT_BUILD: Color = crate::overlays::COVEN_CODE_ACCENT;
@@ -2078,7 +2078,7 @@ impl App {
     }
 
     /// Re-read daemon reachability into [`Self::daemon_online`], at most once
-    /// per [`DAEMON_STATUS_REFRESH`]. The event loop calls this every
+    /// per `DAEMON_STATUS_REFRESH` (1 s). The event loop calls this every
     /// iteration, before drawing, whichever renderer draws.
     pub fn refresh_daemon_status(&mut self, now: std::time::Instant) {
         if now.saturating_duration_since(self.daemon_last_checked) >= DAEMON_STATUS_REFRESH {
@@ -9168,8 +9168,8 @@ mod tests {
     }
 
     /// #513: the refresh the event loop calls each iteration makes
-    /// `daemon_online` follow the daemon's socket, and reads it no more often
-    /// than `DAEMON_STATUS_REFRESH`.
+    /// `daemon_online` follow the daemon, and reads it no more often than
+    /// `DAEMON_STATUS_REFRESH`.
     #[cfg(unix)]
     #[test]
     fn daemon_status_refresh_follows_the_daemon_socket() {
@@ -9205,7 +9205,9 @@ mod tests {
         // before the request arrives could close the stream under the
         // probe's write and read as offline.
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let stop = Arc::new(AtomicBool::new(false));
         let daemon = {
             let stop = Arc::clone(&stop);
@@ -9228,6 +9230,7 @@ mod tests {
                     }
                     let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n[]");
                 }
+                // Dropping the listener leaves the socket file in place.
             })
         };
 
@@ -9239,20 +9242,42 @@ mod tests {
             "daemon_online never turned on while the daemon answered"
         );
 
-        // Stop the daemon and remove its socket, as `coven daemon stop` does.
+        // The daemon dies and leaves its socket behind. Only the probe can
+        // tell: the socket file still exists, so connecting is refused.
         stop.store(true, Ordering::Release);
         daemon.join().expect("fake daemon thread");
-        std::fs::remove_file(&socket).expect("remove socket");
+        assert!(socket.exists(), "the stale socket file stays");
         crate::coven_status::forget_daemon_probe();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::coven_status::daemon_looks_online() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !crate::coven_status::daemon_looks_online(),
+            "the probe never saw the daemon go"
+        );
 
-        // Inside the interval the last reading stands: no read every frame.
+        // The cache now says offline, but inside the interval the last
+        // reading stands: the refresh does not read every frame.
         app.refresh_daemon_status(now + DAEMON_STATUS_REFRESH / 2);
-        assert!(app.daemon_online, "refresh read the daemon inside the interval");
+        assert!(
+            app.daemon_online,
+            "refresh read the daemon inside the interval"
+        );
 
         assert!(
             refresh_until(&mut app, &mut now, false),
-            "daemon_online stayed on after the daemon stopped"
+            "daemon_online stayed on after the daemon stopped answering"
         );
+
+        // `coven daemon stop` removes the socket: the reading stays offline.
+        std::fs::remove_file(&socket).expect("remove socket");
+        crate::coven_status::forget_daemon_probe();
+        for _ in 0..5 {
+            now += DAEMON_STATUS_REFRESH;
+            app.refresh_daemon_status(now);
+            assert!(!app.daemon_online, "daemon_online came back with no socket");
+        }
     }
 
     #[test]
