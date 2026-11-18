@@ -21,23 +21,28 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
 
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("bash", "-c")
-        };
-        let child = crate::workspace_scope::shell(shell, &[flag.into(), command_clone]).and_then(
+        // No workspace scope can be applied on Windows, so, as for a
+        // foreground command, `cmd.exe` is started without consulting it.
+        #[cfg(windows)]
+        let shell =
+            std::io::Result::Ok(Command::from(claurst_core::shell::command(&command_clone)));
+        #[cfg(not(windows))]
+        let shell = crate::workspace_scope::shell("bash", &["-c".into(), command_clone]).map(
             |(program, args)| {
-                Command::new(program)
-                    .args(args)
-                    .current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .stdin(Stdio::null())
-                    .kill_on_drop(true)
-                    .spawn()
+                let mut shell = Command::new(program);
+                shell.args(args);
+                shell
             },
         );
+        let child = shell.and_then(|mut shell| {
+            shell
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+        });
 
         match child {
             Ok(mut c) => {

@@ -3395,17 +3395,9 @@ async fn run_interactive(
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 // Run via shell so pipes/redirects in the command string work.
-                let output = if cfg!(target_os = "windows") {
-                    tokio::process::Command::new("cmd")
-                        .args(["/C", &cmd_str])
-                        .output()
-                        .await
-                } else {
-                    tokio::process::Command::new("sh")
-                        .args(["-c", &cmd_str])
-                        .output()
-                        .await
-                };
+                let output = tokio::process::Command::from(claurst_core::shell::command(&cmd_str))
+                    .output()
+                    .await;
                 if let Ok(out) = output {
                     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     let _ = tx.try_send(text);

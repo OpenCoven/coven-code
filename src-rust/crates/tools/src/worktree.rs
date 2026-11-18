@@ -225,19 +225,11 @@ impl Tool for EnterWorktreeTool {
 
                 // Run optional post-create command in the new worktree directory
                 let post_create_output = if let Some(cmd) = params.post_create_command {
-                    let shell_result = if cfg!(target_os = "windows") {
-                        tokio::process::Command::new("cmd")
-                            .args(["/C", &cmd])
+                    let shell_result =
+                        tokio::process::Command::from(claurst_core::shell::command(&cmd))
                             .current_dir(&worktree_path)
                             .output()
-                            .await
-                    } else {
-                        tokio::process::Command::new("sh")
-                            .args(["-c", &cmd])
-                            .current_dir(&worktree_path)
-                            .output()
-                            .await
-                    };
+                            .await;
                     match shell_result {
                         Ok(out) if out.status.success() => {
                             let stdout = String::from_utf8_lossy(&out.stdout);

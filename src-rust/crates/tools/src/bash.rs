@@ -557,10 +557,8 @@ impl BashTool {
             state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
         };
 
-        let mut shell = Command::new("cmd");
+        let mut shell = Command::from(claurst_core::shell::command(command));
         shell
-            .arg("/C")
-            .arg(command)
             .current_dir(&effective_cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
