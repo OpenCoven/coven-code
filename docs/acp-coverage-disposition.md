@@ -47,3 +47,7 @@ handlers and EOF draining. Val owns the review of which local processes may
 attach to stdio, which methods use stored credentials, and whether the
 launcher boundary supplies the required authorization. Native editor and
 orchestrator acceptance remain open (#383).
+
+The [stdio trust boundary design note](acp-stdio-trust-boundary.md) records
+what the stdio peer is trusted with today and specifies the chosen direction,
+a launcher-supplied allowlist. It changes no behavior.
