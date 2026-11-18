@@ -1,12 +1,13 @@
 //! #517 on Windows: the shell tools hand a command line to `cmd.exe`. It must
 //! get the command's double quotes exactly as written, in a foreground call,
-//! a background task and a worktree post-create command.
+//! a background task and a worktree post-create command. The PowerShell tool
+//! does not go through `cmd.exe`; one case checks that it needs no change.
 #![cfg(windows)]
 
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
 use claurst_core::tasks::{global_registry, TaskStatus};
-use claurst_tools::{BashTool, EnterWorktreeTool, PtyBashTool, Tool, ToolContext};
+use claurst_tools::{BashTool, EnterWorktreeTool, PowerShellTool, PtyBashTool, Tool, ToolContext};
 use std::path::Path;
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
@@ -171,6 +172,23 @@ async fn bash_background_task_passes_quotes_as_written() {
 #[tokio::test]
 async fn pty_background_task_passes_quotes_as_written() {
     assert_eq!(background_output_of(&PtyBashTool).await, QUOTED_LINES);
+}
+
+/// `powershell.exe` reads its command line by the C runtime's rules, which are
+/// the ones std writes, so its command arrives as written. The `cmd.exe` fix
+/// does not touch this path.
+#[tokio::test]
+async fn powershell_already_gets_quotes_as_written() {
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        output_of(
+            &PowerShellTool,
+            r#"Write-Output "a b"; Write-Output 'say "c"'"#,
+            directory.path()
+        )
+        .await,
+        "a b\nsay \"c\""
+    );
 }
 
 /// EnterWorktree keeps one session per process, so this must stay the only
