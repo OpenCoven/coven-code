@@ -14236,7 +14236,9 @@ mod tests {
         let guard = CommandEnvGuard::with_coven_home(None);
         let sock_path = guard.coven_home().join("coven.sock");
         let listener = UnixListener::bind(&sock_path).expect("bind socket");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let stop = Arc::new(AtomicBool::new(false));
         let server = {
             let stop = Arc::clone(&stop);
