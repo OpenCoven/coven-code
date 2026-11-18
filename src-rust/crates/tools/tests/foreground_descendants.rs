@@ -223,6 +223,8 @@ fn repository() -> tempfile::TempDir {
         &["init", "-q"],
         &[
             "-c",
+            "commit.gpgsign=false",
+            "-c",
             "user.name=fixture",
             "-c",
             "user.email=fixture@example.invalid",
@@ -246,6 +248,9 @@ fn repository() -> tempfile::TempDir {
 
 /// A cancelled EnterWorktree call stops its post-create command and what that
 /// started. The subshell would write the marker 2 s in.
+///
+/// EnterWorktree keeps one session per process, and the cancelled call leaves
+/// it set, so this must stay the only EnterWorktree call in this binary.
 #[tokio::test]
 async fn cancelled_worktree_hook_owns_its_descendant() {
     let repository = repository();

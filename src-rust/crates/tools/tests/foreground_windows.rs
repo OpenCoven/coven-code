@@ -21,7 +21,7 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{FILETIME, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
@@ -31,6 +31,10 @@ use windows_sys::Win32::System::Threading::{
 /// Holds, for the copy that `nested_job_stops_the_grandchild` runs, the value
 /// of the job handle the copy inherits.
 const OUTER_JOB: &str = "FOREGROUND_WINDOWS_OUTER_JOB";
+
+/// Holds, for the copy that `background_task_outlives_the_process_that_started_it`
+/// runs, the directory its background task ticks in.
+const TICK_DIRECTORY: &str = "FOREGROUND_WINDOWS_TICK_DIRECTORY";
 
 /// A loop that only `cmd.exe` runs: each pass appends a line, then waits about
 /// a second in `ping`. The file stops growing once that `cmd.exe` is gone. The
@@ -434,6 +438,8 @@ fn repository() -> tempfile::TempDir {
         &["add", "ticker.cmd"],
         &[
             "-c",
+            "commit.gpgsign=false",
+            "-c",
             "user.name=fixture",
             "-c",
             "user.email=fixture@example.invalid",
@@ -485,6 +491,9 @@ async fn pty_background_exit_keeps_its_code_and_a_detached_process() {
 }
 
 /// A cancelled EnterWorktree call stops its post-create command's grandchild.
+///
+/// EnterWorktree keeps one session per process, and the cancelled call leaves
+/// it set, so this must stay the only EnterWorktree call in this binary.
 #[tokio::test]
 async fn cancelled_worktree_hook_stops_its_grandchild() {
     let repository = repository();
@@ -606,16 +615,7 @@ async fn powershell_exit_keeps_its_code_and_a_detached_process() {
 #[test]
 fn nested_job_stops_the_grandchild() {
     // The copy inherits this handle, so it can check that it is in the job.
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: 1,
-    };
-    // SAFETY: `attributes` outlives the call, and a null name is allowed.
-    let job = unsafe { CreateJobObjectW(&attributes, std::ptr::null()) };
-    assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
-    // SAFETY: `job` is a new, open handle that nothing else owns.
-    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    let job = inheritable_job();
     let mut copy = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "in_job_cancelled_bash_fallback_stops_its_grandchild",
@@ -660,4 +660,86 @@ async fn in_job_cancelled_bash_fallback_stops_its_grandchild() {
         std::io::Error::last_os_error()
     );
     check_cancel(Shell::Bash, Ticker::Grandchild).await;
+}
+
+/// Create a job whose handle children inherit, so that a copy of this test
+/// binary put in it can check that it is.
+fn inheritable_job() -> OwnedHandle {
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    // SAFETY: `attributes` outlives the call, and a null name is allowed.
+    let job = unsafe { CreateJobObjectW(&attributes, std::ptr::null()) };
+    assert!(!job.is_null(), "{}", std::io::Error::last_os_error());
+    // SAFETY: `job` is a new, open handle that nothing else owns.
+    unsafe { OwnedHandle::from_raw_handle(job) }
+}
+
+/// A background task outlives the turn, and coven-code too, until it is
+/// stopped, as it did before it had a job and as it does on Unix. A copy of
+/// this test binary starts one and exits; its loop must keep ticking. The copy
+/// runs in a job of this test's, which is terminated at the end to stop it.
+#[tokio::test]
+async fn background_task_outlives_the_process_that_started_it() {
+    let directory = workspace();
+    let job = inheritable_job();
+    let mut copy = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "in_copy_start_a_background_task_and_exit",
+            "--exact",
+            "--ignored",
+        ])
+        .env(OUTER_JOB, (job.as_raw_handle() as usize).to_string())
+        .env(TICK_DIRECTORY, directory.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // SAFETY: both handles are open.
+    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), copy.as_raw_handle()) } == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = copy.kill();
+        panic!("could not put the copy in a job: {error}");
+    }
+    let output = copy.wait_with_output().unwrap();
+    let exited = ticks(directory.path());
+    let survived = reaches_ticks(directory.path(), exited + 2).await;
+    let now = ticks(directory.path());
+    // SAFETY: `job` is open, and this process created it with all access.
+    unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the copy did not pass exactly one test:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        survived,
+        "the background task's loop stopped when the process that started it exited: \
+         {exited} ticks then, {now} now"
+    );
+}
+
+#[tokio::test]
+#[ignore = "background_task_outlives_the_process_that_started_it runs it"]
+async fn in_copy_start_a_background_task_and_exit() {
+    let outer: usize = std::env::var(OUTER_JOB)
+        .expect("background_task_outlives_the_process_that_started_it runs this")
+        .parse()
+        .unwrap();
+    let mut in_job = 0;
+    // SAFETY: `outer` is the inherited job handle, the pseudo handle is always
+    // valid, and `in_job` outlives the call.
+    let asked = unsafe { IsProcessInJob(GetCurrentProcess(), outer as HANDLE, &mut in_job) };
+    assert!(
+        asked != 0 && in_job != 0,
+        "not in the outer job: {}",
+        std::io::Error::last_os_error()
+    );
+    let directory = std::path::PathBuf::from(std::env::var_os(TICK_DIRECTORY).unwrap());
+    let ctx = context(&directory);
+    start_background(Shell::Bash, GRANDCHILD, 120_000, &ctx).await;
+    assert!(reaches_ticks(&directory, 2).await, "the loop never started");
 }

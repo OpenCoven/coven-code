@@ -1,7 +1,8 @@
 //! A loop for the Windows unit tests of commands that must be stopped with
 //! everything they started (#373). Only `cmd.exe` runs it: each pass appends a
 //! line to a file, then waits about a second in `ping`. The file stops growing
-//! once that `cmd.exe` is gone.
+//! once that `cmd.exe` is gone. `tests/foreground_windows.rs` has its own
+//! copy, since an integration test cannot use a test-only module of the lib.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

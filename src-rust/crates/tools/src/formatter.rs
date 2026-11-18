@@ -123,8 +123,13 @@ mod tests {
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "(sleep 2; echo survived > \"$1\") & wait".to_string(),
+                "echo started > \"$1\"; (sleep 2; echo survived > \"$2\") & wait".to_string(),
                 "formatter".to_string(),
+                directory
+                    .path()
+                    .join("started")
+                    .to_string_lossy()
+                    .into_owned(),
                 marker.to_string_lossy().into_owned(),
                 "$FILE".to_string(),
             ],
@@ -136,6 +141,10 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "the formatter call outlived its limit: {:?}",
             started.elapsed()
+        );
+        assert!(
+            directory.path().join("started").exists(),
+            "the formatter never ran"
         );
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(
@@ -159,7 +168,13 @@ mod tests {
                 .collect(),
         );
         let source = ticker.directory().join("source.rs");
-        format_file_within(&source.to_string_lossy(), &ctx, Duration::from_secs(4)).await;
+        // The loop runs 60 s unless it is stopped.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            format_file_within(&source.to_string_lossy(), &ctx, Duration::from_secs(4)),
+        )
+        .await
+        .expect("the formatter was not stopped at its limit");
         ticker.assert_stopped("formatter past its limit").await;
     }
 }

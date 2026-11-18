@@ -266,12 +266,15 @@ jobs:
 
       # The formatter and post-create command time limits must stop the
       # command's whole tree (#373). Their unit tests take a short limit, so
-      # they run here rather than in the integration test above. They run even
-      # if a step above failed, so one run reports every failure.
+      # they run here rather than in the integration test above. This step
+      # runs even if an earlier step failed, and requires tests from each
+      # module.
       - name: Test formatter and post-create command time limits
         if: ${{ !cancelled() }}
         working-directory: src-rust
         shell: bash
         run: |
-          cargo test -p claurst-tools --locked --lib -- formatter::tests worktree::tests | tee "$RUNNER_TEMP/time-limit-tests.txt"
-          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/time-limit-tests.txt"
+          for module in formatter worktree; do
+            cargo test -p claurst-tools --locked --lib "$module::tests" | tee "$RUNNER_TEMP/$module-tests.txt"
+            grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$module-tests.txt"
+          done
