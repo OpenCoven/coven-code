@@ -36,6 +36,80 @@ Partial local runs can still pass executed headless checks while explicitly
 reporting interactive skips. They are not full terminal acceptance. CI sets
 `REQUIRE_TMUX=1` so a missing terminal dependency cannot silently skip that gate.
 
+## Isolation from your own settings
+
+The binary reads settings from its home and from a `.coven-code` directory in
+any ancestor of its working directory. `run.sh` therefore makes a scratch
+directory under `TMPDIR` (default `/tmp`) for each run and removes it on exit:
+
+- Cases 01-07, which bring no home of their own, start the binary with `HOME`
+  set to a scratch home seeded with `{"hasCompletedOnboarding": true}`, from a
+  scratch working directory.
+- `COVEN_HOME`, `COVEN_CODE_HOME` and `COVEN_PARENT` are unset for the run,
+  since each changes which home the binary uses. The line typed into a tmux
+  pane for cases 02-07 changes to the scratch working directory and unsets them
+  again, because the pane's shell has read your startup files. A
+  `TUI_LAUNCH_PREFIX` you export is typed after that change of directory, so a
+  `cd` in it moves those cases again.
+- For the cases, `TMPDIR` points inside the scratch directory. The cases that
+  make their own homes and working directories do so with `mktemp -d` or
+  Python's `tempfile`, so these land there too. The exception is macOS, where
+  `mktemp -d` ignores `TMPDIR` and uses the per-user temporary directory under
+  `/var/folders`.
+- The run refuses to start (exit `2`) when the scratch directory is inside
+  your home directory (`$HOME` or your login home) or below a directory that
+  holds a `.coven-code`. Set `TMPDIR` to a directory that is neither.
+
+So a run started from the repository checkout, or with a throwaway `HOME`,
+neither reads nor writes your own `~/.coven-code`. A relative `COVEN_BIN`,
+`TUI_LOG_DIR`, `COVEN_PANIC_PROBE` or `COVEN_TUI_PTY_RECEIPTS` is resolved
+against the directory you started the run from. The shell in each tmux pane
+still starts with your own home and startup files; only the binary under test
+gets the scratch home.
+
+## Reproduce an intermittent failure
+
+From the repo root, point the runner at the exact binary you want to test. The
+example runs [case 08](cases/08_next_shell.sh) five times at 120x40. Each
+attempt gets its own log and failure captures, so a passing rerun does not
+replace the first failed pane.
+
+```bash
+receipt_dir="$(mktemp -d)"
+engine="${COVEN_BIN:-$PWD/src-rust/target/debug/coven-code}"
+for attempt in 1 2 3 4 5; do
+  rc=0
+  COVEN_BIN="$engine" REQUIRE_TMUX=1 \
+    TUI_WIDTH=120 TUI_HEIGHT=40 TUI_LOG_DIR="$receipt_dir/$attempt" \
+    scripts/tui-tests/run.sh 08_next_shell >"$receipt_dir/$attempt.log" 2>&1 || rc=$?
+  printf '%s %s\n' "$attempt" "$rc" >>"$receipt_dir/status"
+done
+printf 'Receipts in %s\n' "$receipt_dir"
+cat "$receipt_dir/status"
+```
+
+Record the binary's source revision, the initial pane size, the tmux version
+and the pass count when handing off a flake. A hosted run's failing pane is in
+its job log and, for 14 days, in the uploaded captures. Only a failure that
+was given the pane text has one.
+
+Three habits help keep a case from depending on the host's speed:
+
+- After a resize, wait for a frame drawn at the new size before sending a key.
+  A hosted run of case 08 did not act on a key sent about 5 ms after a resize;
+  the likely cause is that a key arriving together with a resize can stay
+  unread until the next key. Text that was already on screen does not show the
+  redraw; case 08 waits for the header after shrinking and for a wider rule
+  after growing.
+- A fake provider that must still be running when the test acts on it should
+  wait for a file the test creates, not sleep for a fixed time. Case 08's fake
+  `claude` holds its turn until the test has judged the cancellation.
+- After sending the quit keys, wait until tmux reports a different process in
+  the pane before typing at the shell, comparing against the name tmux
+  reported while the UI ran (a binary under test can have any name).
+  `tui_quit_and_check` from [the harness library](lib.sh) does this and needs
+  `python3`.
+
 ## Harness regression checks
 
 ```bash
@@ -43,8 +117,9 @@ python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
 ```
 
 These tests exercise the actual runner and assertion library with synthetic
-case inputs and an inert tmux executable. They need no engine, tmux server,
-credentials or network, and do not establish real-binary terminal acceptance.
+case inputs and stand-ins for `tmux` and the engine. They need no engine, tmux
+server, credentials or network, and do not establish real-binary terminal
+acceptance.
 `test_panic_restore_pty.py` also needs a PTY: it runs the panic driver, and
 case 30 through the runner, against fake probes (about a minute).
 CI runs them before building and exercising the real engine.
@@ -56,8 +131,10 @@ on pushes to `main` and on PRs that touch `src-rust/**` or this suite (plus
 manual `workflow_dispatch`). The job installs `tmux`, builds the debug binary
 and the panic probe (`cargo build --locked --package claurst --package
 claurst-tui --bins --example panic_restore`), seeds an offline settings file
-(`hasCompletedOnboarding: true`) so a credential-less runner lands on the main
-screen, and runs `run.sh`. No secrets or network access required.
+(`hasCompletedOnboarding: true`) in the runner's home, and runs `run.sh`. No
+case reads that file any more: `run.sh` seeds the scratch home it gives cases
+01-07 (see "Isolation from your own settings"), so a credential-less runner
+lands on the main screen. No secrets or network access required.
 
 ## Requirements
 
@@ -97,6 +174,7 @@ screen, and runs `run.sh`. No secrets or network access required.
 | `cases/28_approval_queue.sh` | A second approval key | `fake_anthropic.py` asks for two Bash calls in one response, so the second request waits behind the first panel. The first panel is decided with `y` and a second `y` follows: in the same write, at once, and 150 ms later. In both renderers a `y` already waiting when the first panel closes lands in the composer as text and decides nothing. A `y` that reaches the open next panel is ignored by Next, which takes keys other than Escape only after 400 ms of quiet, and decides that panel in Classic, which takes keys at once. Each round checks whether the second call ran (its marker file); while it is undecided, its panel must still be open and the model must have been told nothing, and a deliberate `y` then runs it. Every round ends with the model told that both calls ran. In Next, a round whose two keys took 400 ms or more to send skips the decision check, since the next panel may have armed by then; needs `python3` |
 | `cases/29_tool_results_kept.sh` | Tool results after a tool turn | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` asks for a Bash call, the user approves it, and the model answers its result. Once the turn ends, single key presses (`x`, Backspace, as typing sends them) precede a follow-up prompt, whose request, read from the full `messages` the fake logs to a file of their own, must carry the call and, in the user message right after it, the tool result answering it; needs `python3` |
 | `cases/30_panic_restore.sh` | Panic restoration | The product has no known input that panics, so the tui crate's `panic_restore` example takes the terminal with the real `setup_terminal` and panics on request; `panic_restore_pty.py` runs it on a raw PTY, with `setup_terminal` for each renderer (Classic and Next; their event loops are not involved). Before the panic: raw termios (output processing off too), alternate screen, mouse capture, bracketed paste, hidden cursor and pushed keyboard flags. A main-thread panic restores every termios field and, before the panic message, turns output processing back on (the message's first line break arrives as CRLF), leaves the alternate screen, turns mouse capture and bracketed paste off, sends a keyboard pop and shows the cursor; the message is printed and the exit status is 101. A worker-thread panic restores nothing and the probe keeps drawing; its later main-thread panic still restores. After a suspend and resume through the real `suspend_terminal`, a panic still restores. With `COVEN_CODE_KEYBOARD_ENHANCEMENT=0` no flags are pushed. Lines containing "current behaviour" pin details that need a decision, not endorse them (Unix; Windows has its own restore branch, which pops before leaving the alternate screen, and is not exercised): the keyboard pop is sent after leaving the alternate screen the flags were pushed on (case 13 requires suspend to pop on the alternate screen), a pop is sent even when none was pushed, the startup title is not cleared, each `setup_terminal` call chains another hook (so after a resume the restore is written twice), and a worker-thread panic prints its message onto the live screen. Needs `python3` and the probe |
+| `cases/31_classic_daemon_glyph.sh` | Coven daemon glyph | In Classic (`COVEN_CODE_UI` unset), a fake daemon on `coven.sock` in a disposable `COVEN_HOME` answers every request. The footer shows `✦ coven` while it runs, turns to `○ coven` within 25 s of the fake stopping and its socket being removed, with no input, and back to `✦ coven` within 25 s of a fresh fake starting; needs `python3` |
 | `cases/32_one_runtime.sh` | One runtime per renderer (#408) | In Classic (`COVEN_CODE_UI` unset) and Next, `fake_anthropic.py` drives two real turns, an approved Bash call and then a text answer. Between them the window grows by 20 columns and 5 rows until the app draws a rule that wide, then goes back. There is one session file after the first turn, and after the second turn and the exit it is still that one file with that id; under the home and the project, the only session file (`sessions/*.json`) and session index (`sessions.db`) are that file and that index, which holds that one session. The fake saw three streamed requests, each carrying the one before it, its reply and the next user message, and the request of the second turn came on a TCP connection the first turn used (the fake numbers connections in a log of its own), so it came from the same HTTP connection pool. The saved session is the last request's conversation plus its answer, and every indexed message is that session's. A user message has no uuid, so the index keeps only the first one ever (current behaviour); the check uses the answers. The tool-result request inside the first turn is not checked on its own. Not shown: anything built but never used to send or save; clients that share one pool; and the other clients the process builds the same way in both renderers (the registry's Anthropic provider, the per-goal-turn wrapper, Agent sub-agents, memory extraction, which ignores `ANTHROPIC_BASE_URL` and starts at 20 messages, and the replacements made by `/refresh` and an in-session login); one store object, since the index is opened at every save; the scheduler and memory authority; relaunching the other renderer on the same session, `/resume` and `/clear`; any transport but the direct API-key one; needs `python3` |
 
 ## Configuration
