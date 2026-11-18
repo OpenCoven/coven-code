@@ -28,6 +28,12 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.env = {**os.environ, "USERPROFILE": str(self.root), "GITHUB_ACTIONS": "false"}
         self.env.update({name: str(self.staging) for name in ("TMPDIR", "TMP", "TEMP")})
         self.env.pop("GITHUB_PATH", None)
+        # A PSModulePath inherited from PowerShell 7 (CI starts this file from
+        # it) keeps Windows PowerShell from loading its own modules, such as
+        # the one with Get-FileHash. Without the variable each shell builds
+        # its default.
+        self.env = {name: value for name, value in self.env.items()
+                    if name.upper() != "PSMODULEPATH"}
         self.shells = ["pwsh"]
         if shutil.which("powershell"):
             self.shells.append("powershell")
