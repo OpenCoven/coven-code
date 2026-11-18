@@ -28,6 +28,7 @@ set -uo pipefail
 : "${TUI_LOG_DIR:=}"                      # if set, failing-case pane captures are written here
 : "${REQUIRE_TMUX:=0}"                    # if 1, a missing tmux is a hard error (CI), not a skip
 : "${TUI_LAUNCH_PREFIX:=}"               # shell text typed before the binary (cd, env); cases set and restore it
+: "${TUI_SCRATCH_HOME:=}"                # home the runner makes for cases that bring none
 
 # --- counters (persist across sourced case files) -----------------------
 TESTS_RUN=0
@@ -149,7 +150,7 @@ assert_eq() {
 RUN_RC=0
 RUN_OUT=""
 run_bin() {
-  RUN_OUT="$("$COVEN_BIN" "$@" 2>&1)"
+  RUN_OUT="$(HOME="${TUI_SCRATCH_HOME:-${HOME:-}}" "$COVEN_BIN" "$@" 2>&1)"
   RUN_RC=$?
 }
 
