@@ -89,12 +89,18 @@ impl Job {
         }
     }
 
+    /// Let what is in the job outlive the job's last handle: closing it, or
+    /// coven-code exiting, then kills nothing. [`Job::terminate`] still does.
+    /// The job keeps allowing explicit breakaway.
+    pub(crate) fn outlive_close(&self) -> io::Result<()> {
+        self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+    }
+
     /// Close the job without killing what the command left running when it
     /// exited, such as a process it started to outlive it. Unix keeps those
-    /// after an ordinary exit as well. Those processes stay in the job, so it
-    /// keeps allowing explicit breakaway for them.
+    /// after an ordinary exit as well.
     pub(crate) fn release(self) {
-        if let Err(error) = self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK) {
+        if let Err(error) = self.outlive_close() {
             tracing::warn!(
                 %error,
                 "Could not release a command's job; closing it kills what the command left running"
@@ -300,9 +306,8 @@ mod tests {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
-    #[test]
-    fn a_new_job_kills_on_close_and_allows_explicit_breakaway() {
-        let job = Job::new().expect("create a job");
+    /// The job's limit flags, read back from the system.
+    fn limits(job: &Job) -> u32 {
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         // SAFETY: the pointer and size describe `limits`, the structure this
         // information class fills, and it outlives the call.
@@ -316,7 +321,20 @@ mod tests {
             )
         };
         assert_ne!(ok, 0, "query the job: {}", io::Error::last_os_error());
-        let flags = limits.BasicLimitInformation.LimitFlags;
+        limits.BasicLimitInformation.LimitFlags
+    }
+
+    #[test]
+    fn a_job_that_outlives_close_still_allows_explicit_breakaway() {
+        let job = Job::new().expect("create a job");
+        job.outlive_close().expect("drop kill on close");
+        assert_eq!(limits(&job), JOB_OBJECT_LIMIT_BREAKAWAY_OK);
+    }
+
+    #[test]
+    fn a_new_job_kills_on_close_and_allows_explicit_breakaway() {
+        let job = Job::new().expect("create a job");
+        let flags = limits(&job);
         assert_ne!(
             flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             0,

@@ -13,8 +13,9 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
     let task_name = format!("bg: {}", &command[..name_end]);
     let mut task = BackgroundTask::new(&task_name);
     task.pid = None; // Will be set after spawn
-                     // On Windows, cancelling the task, as the monitor tool does, cancels this
-                     // token, and the task then kills the command's job (#373).
+
+    // On Windows, cancelling the task, as the monitor tool does, cancels this
+    // token, and the task then kills the command's job (#373).
     #[cfg(windows)]
     let stop = tokio_util::sync::CancellationToken::new();
     #[cfg(windows)]
@@ -45,9 +46,10 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .kill_on_drop(true);
-        // The job owns cmd.exe and everything it starts. A timeout or a cancel
-        // terminates it, and so does coven-code exiting, which closes its only
-        // handle (#373).
+        // The job owns cmd.exe and everything it starts, and a timeout or a
+        // cancel terminates it (#373). Like the task, the command outlives
+        // the turn and coven-code until it is stopped, so the job does not
+        // kill on close.
         #[cfg(windows)]
         let (mut c, job) = match crate::windows_job::spawn(&mut shell) {
             Ok(spawned) => spawned,
@@ -56,6 +58,12 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
             }
             Err(stopped) => return fail(&task_id_clone, stopped.report("Failed to spawn command")),
         };
+        #[cfg(windows)]
+        if let Some(job) = &job {
+            if let Err(error) = job.outlive_close() {
+                tracing::warn!(%error, "Could not let a background command outlive its job; coven-code exiting will kill it");
+            }
+        }
         #[cfg(not(windows))]
         let mut c = match shell.spawn() {
             Ok(c) => c,
@@ -83,24 +91,18 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
         };
 
         match ended {
-            Some(Ok(status)) => {
-                // An ordinary exit leaves alone what the command started to
-                // outlive it.
-                #[cfg(windows)]
-                if let (Ok(_), Some(job)) = (&status, job) {
-                    job.release();
+            // An ordinary exit leaves alone what the command started to
+            // outlive it: on Windows, dropping the job kills nothing.
+            Some(Ok(status)) => match status {
+                Ok(status) if status.success() => {
+                    global_registry().complete(&task_id_clone);
                 }
-                match status {
-                    Ok(status) if status.success() => {
-                        global_registry().complete(&task_id_clone);
-                    }
-                    Ok(status) => {
-                        let code = status.code().unwrap_or(-1);
-                        fail(&task_id_clone, format!("exit code {}", code));
-                    }
-                    Err(e) => fail(&task_id_clone, e.to_string()),
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    fail(&task_id_clone, format!("exit code {}", code));
                 }
-            }
+                Err(e) => fail(&task_id_clone, e.to_string()),
+            },
             Some(Err(_)) => {
                 #[cfg(windows)]
                 if let Some(job) = &job {
