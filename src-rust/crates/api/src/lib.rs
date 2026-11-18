@@ -32,6 +32,7 @@ pub mod provider_types;
 
 // Provider abstraction traits (Phase 1B).
 pub mod auth;
+pub mod model_dispatch;
 pub mod provider;
 mod sse_lines;
 pub mod stream_parser;
@@ -848,6 +849,7 @@ pub mod client {
                         if let Some((turn, _)) = &self.goal_authority {
                             turn.mark_request_attempted();
                         }
+                        crate::model_dispatch::mark_attempted();
                         req.send().await
                     } => response.map_err(ClaudeError::Http)?,
                 };

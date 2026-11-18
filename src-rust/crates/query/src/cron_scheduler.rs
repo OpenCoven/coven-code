@@ -108,6 +108,11 @@ async fn run_scheduler_loop(
                     QueryOutcome::Cancelled => {
                         debug!(id = %task_id, "Cron task cancelled");
                     }
+                    QueryOutcome::TurnBudgetExhausted { budget, consumed } => {
+                        tracing::warn!(target: "claurst_core::child_diagnostics",
+                            task = ?task_id, consumed, max_turns = budget.max_turns.get(),
+                            "Cron task model-round budget exhausted; task unfinished");
+                    }
                     QueryOutcome::BudgetExceeded {
                         cost_usd,
                         limit_usd,

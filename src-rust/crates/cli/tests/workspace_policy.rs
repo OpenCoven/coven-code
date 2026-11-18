@@ -906,13 +906,9 @@ fn a_downgraded_scope_refuses_every_file_edit_tool() {
 /// before each shell launch, so it refuses the next shell outright, even that
 /// shell's write to the workspace. The Write tool is refused too, by the scope
 /// decision or by the same pre-launch check on its sandboxed write (see each
-/// test). Nothing lands. When given,
-/// `shell_refusal` and `write_refusal` are the errors those two calls report.
-fn granted_folder_changes_mid_reply(
-    symlink: bool,
-    shell_refusal: Option<&str>,
-    write_refusal: Option<&str>,
-) {
+/// test). Nothing lands. `shell_refusal` and `write_refusal` are the errors
+/// those two calls report.
+fn granted_folder_changes_mid_reply(symlink: bool, shell_refusal: &str, write_refusal: &str) {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let work = base.join("a-work");
@@ -999,20 +995,24 @@ fn granted_folder_changes_mid_reply(
         let result = tool_result(&frames, id);
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            result["is_error"] == true && refusal.is_none_or(|refusal| text.contains(refusal)),
+            result["is_error"] == true && text.contains(refusal),
             "the {id} call was not refused with {refusal:?}\n{result}\n{log}"
         );
     }
 }
 
 /// The renamed project no longer exists at its saved path, so the pre-launch
-/// check cannot resolve it. The Write tool is refused when it tries to create
-/// the missing project folder. Both calls currently report the raw resolve
-/// error ("No such file or directory") rather than the changed-folder message,
-/// so only the refusal is asserted here.
+/// check cannot resolve it and refuses the shell. The Write tool passes the
+/// scope decision, because its path is still under the saved folder, and is
+/// refused by the same pre-launch check when it tries to create the missing
+/// project folder. Both calls report the changed-folder message (#531).
 #[test]
 fn a_granted_folder_renamed_mid_reply_refuses_the_next_shell() {
-    granted_folder_changes_mid_reply(false, None, None);
+    granted_folder_changes_mid_reply(
+        false,
+        "A saved workspace folder changed before launch.",
+        "A saved workspace folder changed before launch.",
+    );
 }
 
 /// The project's saved path now resolves to an ungranted folder. The
@@ -1022,7 +1022,7 @@ fn a_granted_folder_renamed_mid_reply_refuses_the_next_shell() {
 fn a_granted_folder_replaced_by_a_symlink_mid_reply_refuses_the_next_shell() {
     granted_folder_changes_mid_reply(
         true,
-        Some("A saved workspace folder changed before launch."),
-        Some("Ask for the folder explicitly in Chat"),
+        "A saved workspace folder changed before launch.",
+        "Ask for the folder explicitly in Chat",
     );
 }
