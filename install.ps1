@@ -149,7 +149,7 @@ Examples:
     irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
     .\install.ps1 -Version 0.1.0
     .\install.ps1 -Binary C:\path\to\coven-code.exe
-    $env:COVEN_CODE_INSTALL_FORCE = '1'; irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
+    $env:COVEN_CODE_INSTALL_FORCE = '1'; try { irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex } finally { Remove-Item Env:COVEN_CODE_INSTALL_FORCE }
 "@
 }
 
@@ -197,7 +197,7 @@ function Get-EngineVersion([string]$Path) {
     } catch {
         return 'unknown'
     }
-    if ($vline.Trim() -match '^coven-code\s+v?(\S+)$') { return $Matches[1] }
+    if ($vline.Trim() -cmatch '^coven-code\s+v?(\S+)$') { return $Matches[1] }
     return 'unknown'
 }
 

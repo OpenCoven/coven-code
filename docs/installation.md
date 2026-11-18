@@ -100,7 +100,7 @@ curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/inst
 ```
 
 ```powershell
-$env:COVEN_CODE_INSTALL_FORCE = '1'; irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex; Remove-Item Env:COVEN_CODE_INSTALL_FORCE
+$env:COVEN_CODE_INSTALL_FORCE = '1'; try { irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex } finally { Remove-Item Env:COVEN_CODE_INSTALL_FORCE }
 ```
 
 The check covers `coven-code`, not the `coven-cave` alias beside it.

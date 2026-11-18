@@ -17,6 +17,7 @@ function Copy-Item {
         [string]$LiteralPath,
         [switch]$Force
     )
+    # A guard: Install-Binary copies only into its stage directory.
     if ($Destination -eq $alias) { throw 'fixture alias copy failure' }
     Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
 }

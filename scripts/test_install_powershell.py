@@ -126,6 +126,29 @@ class PowerShellInstallerTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual(list(self.staging.iterdir()), [], "download staging leaked")
 
+    def test_engine_version_needs_an_engine_that_names_itself(self):
+        not_an_exe = self.target / "coven-code.exe"
+        not_an_exe.write_bytes(b"not an executable")
+        script = (
+            "$env:COVEN_CODE_INSTALLER_TEST = '1'; . $env:CONSENT_INSTALLER; "
+            "function coven-code { 'coven-code 1.2.3' }; "
+            "function other-tool { 'other-tool 1.2.3' }; "
+            "function shouting { 'COVEN-CODE 1.2.3' }; "
+            "@((Get-EngineVersion 'coven-code'), (Get-EngineVersion 'other-tool'), "
+            "(Get-EngineVersion 'shouting'), (Get-EngineVersion $env:NOT_AN_EXE)) -join ','"
+        )
+        env = {**self.env, "CONSENT_INSTALLER": str(INSTALLER), "NOT_AN_EXE": str(not_an_exe)}
+        for shell, shell_env in self.shells(env):
+            with self.subTest(shell=shell):
+                result = subprocess.run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+                    env=shell_env, capture_output=True, text=True, timeout=30,
+                    stdin=subprocess.DEVNULL,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip().splitlines()[-1],
+                                 "1.2.3,unknown,unknown,unknown", result.stdout + result.stderr)
+
     def test_alias_failure_restores_existing_install(self):
         for name, contents in (("coven-code.exe", "old engine"),
                                ("coven-cave.exe", "old alias"),
