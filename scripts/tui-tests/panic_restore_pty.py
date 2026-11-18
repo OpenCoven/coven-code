@@ -17,9 +17,12 @@ Checks, per run:
 - A panic on the main thread restores every termios field. Before the
   panic message it turns output processing back on (the message's first
   line break arrives translated to CRLF, which raw mode does not do), leaves
-  the alternate screen, turns mouse capture and bracketed paste off, sends a
-  keyboard pop and shows the cursor. The message is printed and the process
-  exits 101.
+  the alternate screen, turns mouse capture and bracketed paste off, pops
+  the keyboard flags and shows the cursor. The pop is sent before leaving
+  the alternate screen: each screen has its own keyboard stack and the flags
+  were pushed on the alternate one, so a later pop would leave them there
+  for the next full-screen program (#410). The message is printed and the
+  process exits 101.
 - A panic on a spawned thread does not restore anything (the hook only
   restores on the thread that set the terminal up). The probe keeps running,
   and its later main-thread panic still restores.
@@ -28,14 +31,12 @@ Checks, per run:
 
 Some details are pinned as current behaviour, not endorsed, so a change to
 them is deliberate; their check lines contain "current behaviour". They
-describe the Unix restore path (Windows has its own branch, which pops
-before leaving the alternate screen, and is not exercised):
-- the keyboard pop is sent after leaving the alternate screen the flags were
-  pushed on (case 13 requires suspend to pop on the alternate screen);
+describe the Unix restore path (Windows has its own branch, which is not
+exercised):
 - a keyboard pop is sent even when nothing was pushed;
 - the title set at startup is not cleared;
 - every `setup_terminal` call chains another hook, so after a resume the
-  restore is written twice;
+  restore is written twice, and its second pop is sent on the main screen;
 - a worker-thread panic prints its message onto the live screen.
 
 Prints one line per check, `ok <message>` or `FAIL <message> :: <evidence>`,
@@ -189,7 +190,7 @@ def check_tui_mode(report, label, probe, keyboard):
     report.check(not missing, f"{label}: the probe enters TUI mode", "missing " + ", ".join(missing))
     pushed = KEYBOARD_PUSH.search(probe.out) is not None
     if keyboard:
-        report.check(pushed and probe.observer.keyboard_depth == 1,
+        report.check(pushed and probe.observer.keyboard_depths == {"main": 0, "alternate": 1},
                      f"{label}: keyboard flags are pushed, one level deep", text(probe.out[-300:]))
     else:
         report.check(not pushed, f"{label}: keyboard flags are not pushed when opted out",
@@ -229,12 +230,12 @@ def check_main_panic(report, label, probe, keyboard, setups):
         report.check(bool(ok), f"{label}: {what} before the panic message", text(after[:300]))
     pop = KEYBOARD_POP.search(hook)
     if keyboard:
-        # One stack is modelled; see the pinned order below for per-screen stacks.
-        report.check(bool(match) and observer.keyboard_depth == 0,
-                     f"{label}: sends a keyboard pop before the panic message", text(after[:300]))
-        leave = hook.find(LEAVE_ALT)
-        report.check(pop is not None and 0 <= leave < pop.start(),
-                     f"{label}: current behaviour: the keyboard pop is sent after leaving the alternate screen",
+        # The observer keeps one stack per screen, so a pop sent after
+        # leaving the alternate screen does not empty the stack pushed on it.
+        report.check(bool(match) and not any(observer.keyboard_depths.values()),
+                     f"{label}: pops the keyboard flags it pushed before the panic message", text(after[:300]))
+        report.check(pop is not None and pop.start() < hook.find(LEAVE_ALT),
+                     f"{label}: the keyboard pop is sent before leaving the alternate screen",
                      text(after[:300]))
     else:
         report.check(pop is not None,

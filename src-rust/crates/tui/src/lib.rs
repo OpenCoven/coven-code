@@ -261,16 +261,22 @@ pub use file_injection_dialog::{
 // Terminal initialization / teardown helpers (public API)
 // ---------------------------------------------------------------------------
 
-/// Restore terminal capabilities (alternate screen, mouse capture, bracketed paste, keyboard enhancement).
+/// Restore terminal capabilities (keyboard enhancement, alternate screen, mouse capture, bracketed paste).
 /// Used by both restore_terminal and the panic hook.
-fn restore_terminal_cleanup() -> io::Result<()> {
+///
+/// The keyboard flags are popped first, on both platforms. A terminal keeps
+/// one keyboard-flag stack per screen and setup pushed on the alternate one,
+/// so a pop sent after leaving it lands on the main screen's stack: the
+/// alternate stack then keeps one entry per run, and the next full-screen
+/// program that sets no flags itself gets every key as an escape code.
+fn restore_terminal_cleanup(out: &mut impl io::Write) -> io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     execute!(
-        io::stdout(),
+        out,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
-        PopKeyboardEnhancementFlags,
     )?;
 
     // On Windows, KeyboardEnhancementFlags may not have been pushed
@@ -280,8 +286,8 @@ fn restore_terminal_cleanup() -> io::Result<()> {
     {
         // Pop may fail on legacy Windows conhost where the push was a no-op;
         // do it best-effort so cleanup never errors out the process.
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+        execute!(out, LeaveAlternateScreen, DisableMouseCapture)?;
     }
 
     Ok(())
@@ -306,7 +312,7 @@ pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTermin
         if std::thread::current().id() == main_thread_id {
             // Best-effort restore — ignore errors, we're already unwinding.
             let _ = disable_raw_mode();
-            let _ = restore_terminal_cleanup();
+            let _ = restore_terminal_cleanup(&mut io::stdout());
             let _ = execute!(io::stdout(), crossterm::cursor::Show);
         }
         original_hook(panic_info);
@@ -369,7 +375,7 @@ pub fn restore_terminal(terminal: &mut AppTerminal) -> io::Result<()> {
     disable_raw_mode()?;
     // Restore the original title by clearing it (terminals fall back to default).
     let _ = execute!(terminal.backend_mut(), crossterm::terminal::SetTitle(""),);
-    restore_terminal_cleanup()?;
+    restore_terminal_cleanup(&mut io::stdout())?;
     // Never skip this as "already shown": the user keeps this cursor.
     terminal.backend_mut().forget_terminal_state();
     terminal.show_cursor()?;
@@ -425,12 +431,6 @@ pub fn suspend_terminal(
     stop: impl FnOnce(),
 ) -> io::Result<bool> {
     let title = last_terminal_title();
-    // Keyboard flags have one stack per screen and setup pushed on the
-    // alternate one, but restore pops after leaving it. Pop here too, or that
-    // stack grows on every suspend and programs run from the shell inherit it.
-    if should_push_keyboard_enhancement_for_process() {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    }
     let stopped = stop_if_restored(restore_terminal(terminal), stop);
     *terminal = setup_terminal(renderer)?;
     terminal.clear()?;
@@ -535,6 +535,31 @@ mod tests {
         let env = [("COVENCAVE", "1"), ("COVEN_CODE_KEYBOARD_ENHANCEMENT", "1")];
 
         assert!(should_push_keyboard_enhancement(env));
+    }
+
+    // ---- terminal restore ------------------------------------------------
+
+    /// Each screen has its own keyboard-flag stack and setup pushes on the
+    /// alternate one (#410). Unix only: on Windows the pop is best-effort
+    /// and goes through the console API when ANSI is not supported.
+    #[cfg(unix)]
+    #[test]
+    fn restore_pops_keyboard_flags_before_leaving_the_alternate_screen() {
+        let mut written = Vec::new();
+        restore_terminal_cleanup(&mut written).unwrap();
+        let written = String::from_utf8(written).unwrap();
+
+        let pop = written.find("\x1b[<1u");
+        let leave = written.find("\x1b[?1049l");
+        assert!(
+            matches!((pop, leave), (Some(pop), Some(leave)) if pop < leave),
+            "pop at {pop:?}, leave at {leave:?} in {written:?}"
+        );
+        assert_eq!(
+            written.matches("\x1b[<").count(),
+            1,
+            "one keyboard pop, none after leaving: {written:?}"
+        );
     }
 
     // ---- input helpers ---------------------------------------------------
