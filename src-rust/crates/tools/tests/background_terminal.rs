@@ -14,7 +14,8 @@ struct OwnedGroup(Child);
 impl Drop for OwnedGroup {
     fn drop(&mut self) {
         // The fixture leader parks after reporting; its PGID cannot be reused
-        // while this guard owns it. All background-tool descendants inherit this group.
+        // while this guard owns it. The background shell leads its own group
+        // (#373), so the worker also gives up after 30 s on its own.
         let pid = i32::try_from(self.0.id()).unwrap();
         assert!(pid >= 2, "fixture must own a positive process-group leader");
         let group = nix::unistd::Pid::from_raw(pid);
@@ -153,7 +154,7 @@ async fn check_tool(home: &Path, case: &str) {
         claurst_tools::find_tool(claurst_core::constants::TOOL_NAME_BASH).unwrap()
     };
     let exit_code = if case.ends_with('7') { 7 } else { 0 };
-    std::fs::write(home.join("wait.py"), format!("import os,time\nfrom pathlib import Path\nPath('started.tmp').write_text(str(os.getpid()))\nPath('started.tmp').rename('started')\nwhile not Path('release').exists(): time.sleep(0.01)\nos.write(1,b'finished\\n')\nraise SystemExit({exit_code})\n")).unwrap();
+    std::fs::write(home.join("wait.py"), format!("import os,time\nfrom pathlib import Path\nPath('started.tmp').write_text(str(os.getpid()))\nPath('started.tmp').rename('started')\nend=time.monotonic()+30\nwhile not Path('release').exists():\n    if time.monotonic()>end: raise SystemExit(9)\n    time.sleep(0.01)\nos.write(1,b'finished\\n')\nraise SystemExit({exit_code})\n")).unwrap();
     let result = tool.execute(serde_json::json!({"command":"exec python3 wait.py","run_in_background":true,"timeout":10000}), &ctx).await;
     assert!(!result.is_error, "{}", result.content);
     let id = result
@@ -193,7 +194,7 @@ async fn check_tool(home: &Path, case: &str) {
     })
     .await
     .expect("the cancel must stop and reap the worker");
-    // Allow the worker's synchronous registry update after wait() to finish.
+    // A late registry update from the stopped task must not change the status.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let task = global_registry().get(id).unwrap();

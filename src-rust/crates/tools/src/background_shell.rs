@@ -84,6 +84,10 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
             .and_then(|pid| i32::try_from(pid).ok())
             .filter(|pid| owns_group && *pid >= 2)
             .map(nix::unistd::Pid::from_raw);
+        #[cfg(unix)]
+        if owns_group && group.is_none() {
+            tracing::warn!("A background command has no process ID; a timeout or cancel will stop only its shell");
+        }
 
         let stopped = stop.cancelled();
         let ended = tokio::select! {
@@ -140,7 +144,9 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                 }
                 fail(&task_id_clone, message);
             }
-            // Cancelled: the registry already says so.
+            // Cancelled: the registry already says so. A cancel that lands
+            // after the shell exited, but before it is reaped, still kills
+            // the group: the user asked to stop it.
             None => {
                 #[cfg(windows)]
                 if let Some(job) = &job {

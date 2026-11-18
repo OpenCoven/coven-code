@@ -245,7 +245,7 @@ Output (stdout + stderr) is returned as a string. Commands that produce more tha
 
 Always quote file paths containing spaces. Use Unix shell syntax regardless of host OS.
 
-When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task. The task keeps running after the turn ends, until it finishes, times out or is cancelled. A timeout or cancel stops every process the command started: its process group on Unix, its job on Windows. A process the command started to outlive it keeps running after an ordinary exit.
+When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task. The task keeps running after the turn ends, until it finishes, times out or is cancelled. A timeout or cancel stops every process the command started: its process group on Unix, its job on Windows. In a scoped workspace on Unix, or on Windows when no job can be made, it stops only the shell. After an ordinary exit, a process the command started to outlive it keeps running; it must not hold the command's output open (redirect it), or the task keeps running until it times out, which then stops it.
 
 ---
 
@@ -267,7 +267,7 @@ Monitor background tasks started with `BashTool`'s `run_in_background=true`. Sup
 | `list` | Lists all background tasks with their IDs, status, and names |
 | `status` | Shows the status and metadata for a specific task |
 | `output` | Retrieves the stdout/stderr output collected so far |
-| `cancel` | Sends a termination signal to a running task |
+| `cancel` | Stops a running task and every process it started |
 
 Task statuses: `running`, `completed`, `failed: <reason>`, `cancelled`.
 

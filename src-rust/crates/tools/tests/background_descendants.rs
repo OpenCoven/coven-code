@@ -16,8 +16,7 @@ use std::time::Duration;
 
 /// The shell starts `sleep` and waits for it, so the task runs until it is
 /// stopped. `sleep` records its PID.
-const DESCENDANT: &str =
-    "sleep 120 & echo $! > child-pid.tmp; mv child-pid.tmp child-pid; wait";
+const DESCENDANT: &str = "sleep 120 & echo $! > child-pid.tmp; mv child-pid.tmp child-pid; wait";
 
 /// The shell starts `sleep` to outlive it, away from the task's pipes, and
 /// exits with code 3.
@@ -173,10 +172,10 @@ async fn check_cancel(pty: bool) {
 async fn check_timeout(pty: bool) {
     let directory = tempfile::tempdir().unwrap();
     let ctx = context(directory.path());
-    let (id, descendant) = start_background(pty, DESCENDANT, 2000, &ctx).await;
+    let (id, descendant) = start_background(pty, DESCENDANT, 5000, &ctx).await;
     assert_eq!(
         ended(&id).await,
-        TaskStatus::Failed("timed out after 2000ms".into())
+        TaskStatus::Failed("timed out after 5000ms".into())
     );
     assert!(
         gone_within(descendant.0, Duration::from_secs(5)).await,
