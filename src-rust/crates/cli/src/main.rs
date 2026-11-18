@@ -146,7 +146,7 @@ struct Cli {
 
     /// Permission mode. When omitted, an interactive session starts in the
     /// mode saved in your settings (a saved bypass-permissions is never
-    /// restored) and every other run starts in default
+    /// restored) and a headless run starts in default
     #[arg(long = "permission-mode", value_enum)]
     permission_mode: Option<CliPermissionMode>,
 
@@ -3239,8 +3239,6 @@ async fn run_interactive(
     let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
-    // The stderr warning is covered by the alternate screen; repeat it where
-    // the user can read it.
     // What the saved permission mode did to this session, said once in a
     // notification, which both renderers draw. The newest notification is
     // the one shown, so this goes in before the renderer warning and outlasts
@@ -3252,6 +3250,8 @@ async fn run_interactive(
             Some(30),
         );
     }
+    // The stderr warning is covered by the alternate screen; repeat it where
+    // the user can read it.
     if let Some(warning) = renderer_selection.warning {
         app.notifications
             .push(claurst_tui::NotificationKind::Warning, warning, Some(15));

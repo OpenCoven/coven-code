@@ -26,12 +26,11 @@ _saved_mode_dismiss() {
   else _fail "$1" "$(tui_capture)"; fi
 }
 
-# _saved_mode_start <label> [binary args...]: start, or record why not.
+# _saved_mode_start [binary args...]: tui_start, which records a failed boot
+# itself; a session that did not boot is torn down so the next one can start.
 _saved_mode_start() {
-  local label="$1"; shift
   tui_start "$@" && return 0
   tui_stop
-  _fail "$label: the session started"
   return 1
 }
 
@@ -46,7 +45,7 @@ _saved_mode_renderer() {
   local env_part=" env" var
   for var in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL OPENAI_API_KEY COVEN_CODE_PROVIDER \
     COVEN_CODE_API_BASE COVEN_HOME COVEN_CODE_HOME COVEN_CODE_TEST_HOME COVEN_PARENT \
-    COVEN_DAEMON_SOCKET COVEN_CODE_UI; do
+    COVEN_DAEMON_SOCKET COVEN_CODE_UI COVEN_CODE_CLAUDE_BIN; do
     env_part+=" -u $var"
   done
   # A standalone install: the engine home is ~/.coven-code under this HOME.
@@ -59,7 +58,7 @@ _saved_mode_renderer() {
   TUI_BOOT_STRING="$boot"
 
   # Nothing saved: default, and nothing to say about it.
-  if _saved_mode_start "$name, nothing saved"; then
+  if _saved_mode_start; then
     _saved_mode_get Default "$name: with nothing saved the session is in default"
     assert_absent "$(tui_capture)" "restored" "$name: nothing is announced when nothing is saved"
     # Save a mode the way a user does.
@@ -74,7 +73,7 @@ _saved_mode_renderer() {
   fi
 
   # The restart the issue describes: no flag, so the saved mode applies.
-  if _saved_mode_start "$name, acceptEdits saved"; then
+  if _saved_mode_start; then
     assert_contains "$(tui_capture)" "Saved accept-edits mode restored" \
       "$name: the session says it restored accept-edits"
     _saved_mode_dismiss "$name: the notification can be dismissed"
@@ -83,19 +82,19 @@ _saved_mode_renderer() {
   fi
 
   # The flag wins over the saved mode, and then there is nothing to announce.
-  if _saved_mode_start "$name, flag given" --permission-mode plan; then
+  if _saved_mode_start --permission-mode plan; then
     _saved_mode_get Plan "$name: --permission-mode plan wins over saved acceptEdits"
     assert_absent "$(tui_capture)" "restored" "$name: a flag start announces nothing"
     tui_stop
   fi
-  if _saved_mode_start "$name, default flag given" --permission-mode default; then
+  if _saved_mode_start --permission-mode default; then
     _saved_mode_get Default "$name: --permission-mode default wins over saved acceptEdits"
     tui_stop
   fi
 
   # A saved bypass mode is never restored: default, said once, no bypass gate.
   printf '%s\n' '{"hasCompletedOnboarding": true, "config": {"permission_mode": "bypassPermissions"}}' >"$settings"
-  if _saved_mode_start "$name, bypass saved"; then
+  if _saved_mode_start; then
     local shot; shot="$(tui_capture)"
     assert_contains "$shot" "Saved bypass mode not restored" "$name: the session says the saved bypass mode was not restored"
     assert_eq "$(grep -c "not restored" <<<"$shot")" "1" "$name: it says so once"
@@ -109,13 +108,13 @@ _saved_mode_renderer() {
   printf '%s\n' '{"config": {"permission_mode": "bypassPermissions"}}' \
     >"$scratch/repository/.coven-code/settings.json"
   TUI_LAUNCH_PREFIX="$in_repository"
-  if _saved_mode_start "$name, repository names bypass"; then
+  if _saved_mode_start; then
     _saved_mode_get Default "$name: a repository settings file cannot choose bypass"
     tui_stop
   fi
   printf '%s\n' '{"config": {"permission_mode": "acceptEdits"}}' \
     >"$scratch/repository/.coven-code/settings.json"
-  if _saved_mode_start "$name, repository names acceptEdits"; then
+  if _saved_mode_start; then
     _saved_mode_get Default "$name: a repository settings file cannot choose acceptEdits"
     assert_absent "$(tui_capture)" "restored" "$name: and nothing claims a mode was restored"
     tui_stop
@@ -124,7 +123,7 @@ _saved_mode_renderer() {
   printf '%s\n' '{"hasCompletedOnboarding": true, "config": {"permission_mode": "plan"}}' >"$settings"
   printf '%s\n' '{"config": {"model": "repository-model"}}' \
     >"$scratch/repository/.coven-code/settings.json"
-  if _saved_mode_start "$name, repository omits the mode"; then
+  if _saved_mode_start; then
     assert_contains "$(tui_capture)" "Saved plan mode restored" \
       "$name: the session says it restored plan"
     _saved_mode_dismiss "$name: and the plan notification can be dismissed"

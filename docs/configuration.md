@@ -14,9 +14,8 @@ the engine home. Global settings require **plain JSON**, without comments.
 
 Shared `<coven-home>/settings.json` supplies only `model`, `theme`, and
 `permission_mode` defaults when the engine-global values remain at defaults.
-Command-line overrides apply after settings loading. The saved permission mode
-is only used by an interactive session started without `--permission-mode`;
-see [Permission Modes](#permission-modes).
+Command-line overrides apply after settings loading. Which starts use the
+saved permission mode is described under [Permission Modes](#permission-modes).
 
 ### Per-project settings
 
@@ -335,20 +334,32 @@ coven-code --permission-mode bypass-permissions "..."
 
 ### Which mode a start uses
 
-1. `--dangerously-skip-permissions`, then `--permission-mode`, when given.
+1. `--dangerously-skip-permissions`, then `--permission-mode`, when given. A
+   run with a `--context` brief always bypasses permissions.
 2. Otherwise an interactive session starts in the saved `permission_mode`:
    the one `/config set permission-mode` or `/permissions set` wrote to your
-   engine-global settings, or the shared default when that is unset. A
+   engine-global settings, or the shared default when that is `default`. A
    notification says that a saved `acceptEdits` or `plan` was restored.
-3. A saved `bypassPermissions` is never restored. The session starts in
-   `default` and a notification says so; pass
-   `--permission-mode bypass-permissions` to use it.
-4. Headless runs (`--print`, a prompt argument, `stream-json`) ignore the saved
-   mode: without the flag they run in `default`.
+3. A saved `bypassPermissions` is never restored at startup. The session
+   starts in `default` and a notification says so; pass
+   `--permission-mode bypass-permissions` to use it, or save another mode to
+   stop the notification.
+4. Headless runs (`--print`, `--headless` or a prompt argument, whatever the
+   output format) ignore the saved mode: without the flag they run in
+   `default`.
 
 A value that is not one of the four modes counts as `default`; in engine-global
 settings it also makes the whole file invalid, so its other settings are not
 loaded. The `Config` tool asks for approval before it changes the saved mode.
+
+Two limits to know about:
+
+- `coven-code acp` takes no `--permission-mode` and is not covered by the list
+  above: it runs in the mode saved in engine-global settings, including a saved
+  `bypassPermissions`, with `plan` treated as `default`.
+- An engine-global `default` cannot be told apart from no saved mode, so it
+  does not override a shared `acceptEdits` or `plan`. Change the shared file,
+  or pass `--permission-mode default`.
 
 ---
 
