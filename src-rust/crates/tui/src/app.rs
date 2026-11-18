@@ -672,6 +672,9 @@ pub struct App {
     pub streaming_text: crate::next::tracked::Tracked<String>,
     pub streaming_thinking: String,
     pub status_message: Option<String>,
+    /// The status text a slash command's error put on the status row, kept
+    /// so the next slash command can take it down again (#529).
+    command_error_status: Option<String>,
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
     pub spinner_verb: Option<String>,
     pub should_exit: bool,
@@ -1339,6 +1342,7 @@ impl App {
             streaming_text: String::new().into(),
             streaming_thinking: String::new(),
             status_message: None,
+            command_error_status: None,
             spinner_verb: None,
             should_exit: false,
             tool_use_blocks: Vec::new().into(),
@@ -3702,6 +3706,22 @@ impl App {
         }
         self.refresh_prompt_input();
         input
+    }
+
+    /// Put a slash command's error on the status row.
+    pub fn show_command_error(&mut self, text: String) {
+        self.command_error_status = Some(text.clone());
+        self.status_message = Some(text);
+    }
+
+    /// A later slash command is being dispatched: take an earlier command's
+    /// error off the status row, unless something else has replaced it.
+    pub fn clear_command_error(&mut self) {
+        if let Some(error) = self.command_error_status.take() {
+            if self.status_message.as_deref() == Some(error.as_str()) {
+                self.status_message = None;
+            }
+        }
     }
 
     /// Compute the number of lines to scroll per wheel/trackpad event.
@@ -8687,6 +8707,34 @@ mod tests {
         let mut app = App::new(config, cost_tracker);
         app.install_command_catalog(test_command_catalog());
         app
+    }
+
+    /// A slash command's error leaves the status row when the next slash
+    /// command is dispatched (#529), but status text written after the
+    /// error is left alone.
+    #[test]
+    fn a_later_slash_command_takes_an_earlier_command_error_off_the_status_row() {
+        let mut app = make_app();
+        app.show_command_error("Error: Coven daemon offline.".to_string());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Error: Coven daemon offline.")
+        );
+        app.clear_command_error();
+        assert_eq!(app.status_message, None);
+
+        app.show_command_error("Error: first".to_string());
+        app.status_message = Some("Resumed session 12345678.".to_string());
+        app.clear_command_error();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Resumed session 12345678.")
+        );
+
+        // Ordinary status text is not a command error.
+        app.status_message = Some("Conversation cleared.".to_string());
+        app.clear_command_error();
+        assert_eq!(app.status_message.as_deref(), Some("Conversation cleared."));
     }
 
     #[test]

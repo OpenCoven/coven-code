@@ -3948,7 +3948,7 @@ async fn run_interactive(
                             let (name, args) = claurst_tui::input::parse_slash_command(&app.prompt_input.text);
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(name, args, &mut cmd_ctx) {
                                 app.take_input();
-                                app.status_message = Some(error);
+                                app.show_command_error(error);
                                 continue;
                             }
                         }
@@ -3978,8 +3978,9 @@ async fn run_interactive(
                                 claurst_tui::input::parse_slash_command(&input);
                             let cmd_name = cmd_name.to_ascii_lowercase();
                             let cmd_args = cmd_args.to_string();
+                            app.clear_command_error();
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
-                                app.status_message = Some(error);
+                                app.show_command_error(error);
                                 continue;
                             }
                             if renderer == claurst_tui::application::UiRenderer::Next {
@@ -4454,7 +4455,7 @@ async fn run_interactive(
                                     terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::Error(e)) => {
-                                    app.status_message = Some(format!("Error: {}", e));
+                                    app.show_command_error(format!("Error: {}", e));
                                 }
                                 Some(CommandResult::Silent) | None => {
                                     handled_by_cli = false;
@@ -4506,7 +4507,7 @@ async fn run_interactive(
                                 if !suggestions.is_empty() {
                                     message.push_str(&format!(". Try {}", suggestions.join(", ")));
                                 }
-                                app.status_message = Some(message);
+                                app.show_command_error(message);
                             }
 
                             if refresh_catalog {
