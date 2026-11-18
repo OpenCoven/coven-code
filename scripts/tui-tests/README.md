@@ -67,6 +67,49 @@ against the directory you started the run from. The shell in each tmux pane
 still starts with your own home and startup files; only the binary under test
 gets the scratch home.
 
+## Reproduce an intermittent failure
+
+From the repo root, point the runner at the exact binary you want to test. The
+example runs [case 08](cases/08_next_shell.sh) five times at 120x40. Each
+attempt gets its own log and failure captures, so a passing rerun does not
+replace the first failed pane.
+
+```bash
+receipt_dir="$(mktemp -d)"
+engine="${COVEN_BIN:-$PWD/src-rust/target/debug/coven-code}"
+for attempt in 1 2 3 4 5; do
+  rc=0
+  COVEN_BIN="$engine" REQUIRE_TMUX=1 \
+    TUI_WIDTH=120 TUI_HEIGHT=40 TUI_LOG_DIR="$receipt_dir/$attempt" \
+    scripts/tui-tests/run.sh 08_next_shell >"$receipt_dir/$attempt.log" 2>&1 || rc=$?
+  printf '%s %s\n' "$attempt" "$rc" >>"$receipt_dir/status"
+done
+printf 'Receipts in %s\n' "$receipt_dir"
+cat "$receipt_dir/status"
+```
+
+Record the binary's source revision, the initial pane size, the tmux version
+and the pass count when handing off a flake. A hosted run's failing pane is in
+its job log and, for 14 days, in the uploaded captures. Only a failure that
+was given the pane text has one.
+
+Three habits help keep a case from depending on the host's speed:
+
+- After a resize, wait for a frame drawn at the new size before sending a key.
+  A hosted run of case 08 did not act on a key sent about 5 ms after a resize;
+  the likely cause is that a key arriving together with a resize can stay
+  unread until the next key. Text that was already on screen does not show the
+  redraw; case 08 waits for the header after shrinking and for a wider rule
+  after growing.
+- A fake provider that must still be running when the test acts on it should
+  wait for a file the test creates, not sleep for a fixed time. Case 08's fake
+  `claude` holds its turn until the test has judged the cancellation.
+- After sending the quit keys, wait until tmux reports a different process in
+  the pane before typing at the shell, comparing against the name tmux
+  reported while the UI ran (a binary under test can have any name).
+  `tui_quit_and_check` from [the harness library](lib.sh) does this and needs
+  `python3`.
+
 ## Harness regression checks
 
 ```bash
