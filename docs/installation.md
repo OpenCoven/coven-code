@@ -43,9 +43,9 @@ There is no native Windows ARM64 release artifact.
 A Linux release binary uses two system libraries and cannot start without them.
 
 - **glibc.** The binary needs at least the glibc of the image it was built on.
-  The v0.9.2 archives need glibc 2.39. Ubuntu 24.04 has it. Debian 12 (2.36),
-  Ubuntu 22.04 (2.35), RHEL 9 and its rebuilds (2.34) and Amazon Linux 2023
-  (2.34) do not. A later release can need a newer one.
+  The v0.9.2 and v0.9.3 archives need glibc 2.39. Ubuntu 24.04 has it.
+  Debian 12 (2.36), Ubuntu 22.04 (2.35), RHEL 9 and its rebuilds (2.34) and
+  Amazon Linux 2023 (2.34) do not. A later release can need a newer one.
   `getconf GNU_LIBC_VERSION` prints the system's version.
 - **ALSA.** `libasound.so.2` must be installed, even on a server that never uses
   voice. On Debian and Ubuntu the package is `libasound2t64` or `libasound2`; on
@@ -141,7 +141,7 @@ coven-code --version
 Example engine output:
 
 ```
-coven-code 0.9.2
+coven-code 0.9.3
 ```
 
 Use `command -v coven-code` on Unix or `Get-Command coven-code` in PowerShell to
