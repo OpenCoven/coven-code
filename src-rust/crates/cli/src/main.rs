@@ -2140,6 +2140,26 @@ fn settle_queued_permission(
     }
 }
 
+/// Opens the panel for a queued request that still needs an answer, and
+/// keeps the request waiting for it. Next guards every panel against stray
+/// keys (#411). Classic guards a follow-up, a panel opened within
+/// `PERMISSION_ARM_DELAY` of another one closing, so a decision key doubled
+/// or repeated for the closed panel cannot decide this one (#411 decision
+/// 17). Any other Classic panel takes keys at once, as before.
+fn open_permission_panel(
+    app: &mut claurst_tui::app::App,
+    pending_permissions: &mut claurst_tools::PendingPermissionStore,
+    pending: claurst_tools::PendingPermissionRequest,
+    follow_up: bool,
+) {
+    let request = permission_request_from_core(&pending);
+    let guard = follow_up || app.renderer == claurst_tui::application::UiRenderer::Next;
+    app.permission_request = Some(if guard { request.guarded() } else { request });
+    pending_permissions
+        .waiting
+        .insert(pending.tool_use_id.clone(), pending);
+}
+
 fn handle_bridge_permission_response(
     dialog: &mut Option<claurst_tui::dialogs::PermissionRequest>,
     pending_permissions: &mut claurst_tools::PendingPermissionStore,
@@ -3564,6 +3584,9 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    // When the loop last saw a permission panel open; see
+    // `open_permission_panel`.
+    let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
             if let Some(snapshot) = log.take_snapshot() {
@@ -4828,6 +4851,10 @@ async fn run_interactive(
         }
 
         if app.permission_request.is_none() {
+            // A panel opening within the arming delay of the last one closing
+            // is a follow-up: a key meant for the closed panel can still come.
+            let follow_up = panel_last_open
+                .is_some_and(|seen| seen.elapsed() < claurst_tui::dialogs::PERMISSION_ARM_DELAY);
             loop {
                 let next_pending = pending_permissions.lock().queue.pop_front();
                 let Some(pending) = next_pending else {
@@ -4862,26 +4889,20 @@ async fn run_interactive(
 
                 match reevaluated {
                     Some(claurst_core::permissions::PermissionDecision::Ask { .. }) | None => {
-                        let tool_use_id = pending.tool_use_id.clone();
-                        let request = permission_request_from_core(&pending);
-                        // Next guards approvals against stray keys (#411);
-                        // Classic keeps its existing dialog behavior.
-                        app.permission_request = Some(
-                            if app.renderer == claurst_tui::application::UiRenderer::Next {
-                                request.guarded()
-                            } else {
-                                request
-                            },
+                        open_permission_panel(
+                            &mut app,
+                            &mut pending_permissions.lock(),
+                            pending,
+                            follow_up,
                         );
-                        pending_permissions
-                            .lock()
-                            .waiting
-                            .insert(tool_use_id, pending);
                         break;
                     }
                     Some(decision) => settle_queued_permission(&mut app, pending, decision),
                 }
             }
+        }
+        if app.permission_request.is_some() {
+            panel_last_open = Some(std::time::Instant::now());
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
@@ -7156,6 +7177,54 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// Decision 17 of #411: Classic guards a follow-up panel the way Next
+    /// guards every panel, and leaves its first panel as it was.
+    #[test]
+    fn classic_guards_only_a_follow_up_panel_and_next_guards_every_panel() {
+        use claurst_tui::application::UiRenderer;
+        use claurst_tui::dialogs::{handle_permission_key_at, PERMISSION_ARM_DELAY};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        for (renderer, follow_up, guarded) in [
+            (UiRenderer::Classic, false, false),
+            (UiRenderer::Classic, true, true),
+            (UiRenderer::Next, false, true),
+            (UiRenderer::Next, true, true),
+        ] {
+            let tag = format!("{renderer:?}, follow-up: {follow_up}");
+            let mut app = claurst_tui::App::new(
+                claurst_core::config::Config::default(),
+                claurst_core::cost::CostTracker::new(),
+            );
+            app.renderer = renderer;
+            let mut store = claurst_tools::PendingPermissionStore::default();
+            let (pending, _decision) = bridge_permission_fixture("perm-follow-up");
+            open_permission_panel(&mut app, &mut store, pending, follow_up);
+            assert!(store.waiting.contains_key("perm-follow-up"), "{tag}");
+            let Some(panel) = app.permission_request.as_mut() else {
+                panic!("{tag}: no panel opened");
+            };
+            assert_eq!(panel.arming, guarded, "{tag}");
+            let focused = panel.options[panel.selected_option].key;
+            assert_eq!(focused, if guarded { 'n' } else { 'y' }, "{tag}");
+
+            // A y that reaches the panel as it opens decides it only when
+            // the panel is not guarded.
+            let opened = panel.quiet_since;
+            assert_eq!(
+                handle_permission_key_at(panel, y, opened),
+                !guarded,
+                "{tag}"
+            );
+            if guarded {
+                // A y after a quiet gap still allows it.
+                let armed = opened + PERMISSION_ARM_DELAY;
+                assert!(handle_permission_key_at(panel, y, armed), "{tag}");
+                assert_eq!(panel.options[panel.selected_option].key, 'y', "{tag}");
+            }
+        }
     }
 
     #[test]

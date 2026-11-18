@@ -11,11 +11,11 @@
 #
 # A key that is already waiting when the first panel closes reaches the
 # composer as text in both renderers: the loop reads it before it opens the
-# next request. A key that reaches the next panel decides nothing in Next,
-# which ignores keys other than Escape until a new panel has been quiet for
-# 400 ms. Classic takes it at once and decides the panel. The case pins both;
-# whether Classic should change is a decision for the maintainer.
-# Engine-local evidence only.
+# next request. A key that reaches the next panel decides nothing in either
+# renderer. Next guards every panel: it opens on deny and ignores keys other
+# than Escape until the panel has been quiet for 400 ms. Classic guards a
+# follow-up panel the same way (#411 decision 17), and still opens its first
+# panel on allow, taking keys at once. Engine-local evidence only.
 
 register_case tc_approval_queue
 
@@ -88,8 +88,13 @@ subprocess.run(press, check=True)
 print(int((time.monotonic() - start) * 1000))' "$TUI_SOCKET" "$TUI_SESSION" "$1"
 }
 
+# Classic's open panel focuses this option: `► [key]`.
+_queue_classic_focus() { grep -oE '► \[[^]]+\]' <<<"$(tui_capture)" | head -n 1 | tr -d '►[] '; }
+
 # Wait until the second y has been handled: its call ran, it is in the
-# composer, or (Next) the open panel has gone quiet, so it was ignored.
+# composer, or the open panel has ignored it. Next says when its panel has
+# gone quiet. Classic shows no notice, so its panel counts as quiet once it
+# has been on screen for a second, well past the 400 ms a guard waits.
 _queue_settle() { # ui, marker
   local waited=0 s
   while [ "$waited" -lt 100 ]; do
@@ -98,6 +103,9 @@ _queue_settle() { # ui, marker
     grep -qE '^(›|❯) y' <<<"$s" && return 0
     if [ "$1" = next ] && _queue_panel_shows next "${2##*/}" && \
       ! grep -qF -- "$QUEUE_ARMING" <<<"$s"; then
+      return 0
+    fi
+    if [ "$1" = classic ] && [ "$waited" -ge 10 ] && _queue_panel_shows classic "${2##*/}"; then
       return 0
     fi
     sleep 0.1; waited=$((waited + 1))
@@ -116,7 +124,12 @@ _queue_round() { # ui, round number, how the second y is pressed
     _fail "$tag: the first call asks first" "$(tui_capture)"
     return 0
   fi
-  if [ "$ui" = next ]; then wait_absent "$QUEUE_ARMING" 5 >/dev/null; fi
+  if [ "$ui" = next ]; then
+    wait_absent "$QUEUE_ARMING" 5 >/dev/null
+  else
+    # Classic's first panel is not a follow-up: it opens on allow as before.
+    assert_eq "$(_queue_classic_focus)" "y" "$tag: the first panel opens on allow, unguarded"
+  fi
 
   case "$how" in
     "same write") tui_paste "yy" ;;
@@ -137,53 +150,34 @@ _queue_round() { # ui, round number, how the second y is pressed
   if [ -e "$project/$second" ]; then decided=yes; else decided=no; fi
   log "       $tag: second y sent ${sent_ms} ms after the first, reached the $path, decided: $decided"
 
-  if [ "$ui" = next ]; then
-    # Next counts quiet from when it reads a key, not from when the key
-    # arrived, so a loop stalled for 400 ms after opening the next panel could
-    # still let an earlier key count. The limit below bounds only the sending.
-    if [ "$sent_ms" -ge 400 ]; then
-      # A key this late can find the next panel armed, and then it counts.
-      _skip "$tag: the second y took ${sent_ms} ms to send, so this round proves nothing"
-    else
-      assert_eq "$decided" "no" "$tag: the second y, which reached the $path, does not decide the next panel"
-    fi
-    case "$how" in
-      "same write")
-        assert_eq "$path" "composer" "$tag: the second y reaches the composer as text" ;;
-      "150 ms later")
-        # With a panel open, a key that is not in the composer went to the panel.
-        if [ "$path" = panel ]; then _pass "$tag: the second y missed the composer, so the open panel took it"
-        else _skip "$tag: the second y arrived before the next panel opened"; fi ;;
-    esac
+  # A guard counts quiet from when it reads a key, not from when the key
+  # arrived, so a loop stalled for 400 ms after opening the next panel could
+  # still let an earlier key count. The limit below bounds only the sending.
+  if [ "$sent_ms" -ge 400 ]; then
+    # A key this late can find the next panel armed, and then it counts.
+    _skip "$tag: the second y took ${sent_ms} ms to send, so this round proves nothing"
   else
-    case "$how" in
-      "same write")
-        assert_eq "$path/$decided" "composer/no" \
-          "$tag: the second y reaches the composer and decides nothing" ;;
-      "at once")
-        # Timing decides where it lands; whichever it reached must agree.
-        if [ "$path" = panel ]; then
-          assert_eq "$decided" "yes" "$tag: the second y reached the next panel and decided it"
-        else
-          assert_eq "$decided" "no" "$tag: the second y reached the composer and decided nothing"
-        fi ;;
-      "150 ms later")
-        if [ "$path" = panel ]; then
-          assert_eq "$decided" "yes" \
-            "$tag: a y on the open next panel decides it at once (differs from Next by design)"
-        else
-          _skip "$tag: the second y arrived before the next panel opened"
-          assert_eq "$decided" "no" "$tag: the second y reached the composer and decided nothing"
-        fi ;;
-    esac
+    assert_eq "$decided" "no" "$tag: the second y, which reached the $path, does not decide the next panel"
   fi
+  case "$how" in
+    "same write")
+      assert_eq "$path" "composer" "$tag: the second y reaches the composer as text" ;;
+    "150 ms later")
+      # With a panel open, a key that is not in the composer went to the panel.
+      if [ "$path" = panel ]; then _pass "$tag: the second y missed the composer, so the open panel took it"
+      else _skip "$tag: the second y arrived before the next panel opened"; fi ;;
+  esac
 
   if [ "$decided" = no ]; then
     if _queue_wait_panel "$ui" "$second"; then _pass "$tag: the next panel is still open"
     else _fail "$tag: the next panel is still open" "$(tui_capture)"; fi
+    if [ "$ui" = classic ]; then
+      # Classic's follow-up panel is guarded as Next's are: it opens on deny.
+      assert_eq "$(_queue_classic_focus)" "n" "$tag: the follow-up panel opens on deny"
+    fi
     assert_eq "$(_queue_requests)" "$((before + 1))" \
       "$tag: the model has been told nothing while the next call waits"
-    if [ "$ui" = next ]; then wait_absent "$QUEUE_ARMING" 5 >/dev/null; fi
+    if [ "$ui" = next ]; then wait_absent "$QUEUE_ARMING" 5 >/dev/null; else sleep 0.5; fi
     tui_keys y
     if _queue_wait_file "$project/$second"; then
       _pass "$tag: a deliberate y then runs the second call"
