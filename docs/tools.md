@@ -245,7 +245,7 @@ Output (stdout + stderr) is returned as a string. Commands that produce more tha
 
 Always quote file paths containing spaces. Use Unix shell syntax regardless of host OS.
 
-When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task. The task keeps running after the turn ends, until it finishes, times out or is cancelled. On Windows a timeout or cancel stops every process the command started; on Unix it stops the shell.
+When `run_in_background` is `true`, the task ID is returned immediately. Use `MonitorTool` to check status, retrieve output, or cancel the task. The task keeps running after the turn ends, until it finishes, times out or is cancelled. A timeout or cancel stops every process the command started: its process group on Unix, its job on Windows. A process the command started to outlive it keeps running after an ordinary exit.
 
 ---
 

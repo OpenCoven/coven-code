@@ -14,11 +14,9 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
     let mut task = BackgroundTask::new(&task_name);
     task.pid = None; // Will be set after spawn
 
-    // On Windows, cancelling the task, as the monitor tool does, cancels this
-    // token, and the task then kills the command's job (#373).
-    #[cfg(windows)]
+    // Cancelling the task, as the monitor tool does, cancels this token, and
+    // the task then kills the command's process group or job (#373).
     let stop = tokio_util::sync::CancellationToken::new();
-    #[cfg(windows)]
     let task = task.with_cancel_token(stop.clone());
 
     let task_id = global_registry().register(task);
@@ -64,16 +62,30 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                 tracing::warn!(%error, "Could not let a background command outlive its job; coven-code exiting will kill it, unless it exits first");
             }
         }
+        // The shell leads its own process group, so a timeout or a cancel
+        // stops everything it started (#373). A scoped workspace refuses
+        // `setpgid`; there, as for foreground Bash, only the shell is stopped.
+        #[cfg(unix)]
+        let owns_group = !crate::workspace_scope::active();
+        #[cfg(unix)]
+        if owns_group {
+            shell.process_group(0);
+        }
         #[cfg(not(windows))]
         let mut c = match shell.spawn() {
             Ok(c) => c,
             Err(e) => return fail(&task_id_clone, e.to_string()),
         };
+        // Only a timeout or a cancel kills the group, never dropping the task:
+        // the command outlives the turn and coven-code until it is stopped.
+        #[cfg(unix)]
+        let group = c
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| owns_group && *pid >= 2)
+            .map(nix::unistd::Pid::from_raw);
 
-        #[cfg(windows)]
         let stopped = stop.cancelled();
-        #[cfg(not(windows))]
-        let stopped = std::future::pending::<()>();
         let ended = tokio::select! {
             ended = tokio::time::timeout_at(deadline, async {
                 // Record PID in the registry.
@@ -115,6 +127,12 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                 if let Some(job) = &job {
                     job.terminate();
                 }
+                #[cfg(unix)]
+                if let Some(group) = group {
+                    if let Err(error) = crate::process_tree::kill_group(group) {
+                        tracing::warn!(%error, "Could not kill a timed-out background command's process group");
+                    }
+                }
                 let mut message = format!("timed out after {}ms", timeout_ms);
                 // kill() also waits for the owned child to be reaped.
                 if let Err(error) = c.kill().await {
@@ -127,6 +145,12 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
                 #[cfg(windows)]
                 if let Some(job) = &job {
                     job.terminate();
+                }
+                #[cfg(unix)]
+                if let Some(group) = group {
+                    if let Err(error) = crate::process_tree::kill_group(group) {
+                        tracing::warn!(%error, "Could not kill a cancelled background command's process group");
+                    }
                 }
                 if let Err(error) = c.kill().await {
                     tracing::warn!(%error, "Could not kill or reap a cancelled background command");

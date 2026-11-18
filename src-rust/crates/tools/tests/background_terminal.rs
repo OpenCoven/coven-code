@@ -1,4 +1,4 @@
-//! Late background completion regressions through registered tools and the public Bash SDK.
+//! Background cancellation regressions through registered tools and the public Bash SDK.
 #![cfg(unix)]
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
@@ -175,11 +175,11 @@ async fn check_tool(home: &Path, case: &str) {
     })
     .await
     .expect("owned process starts before cancellation");
-    // This tests registry terminal-state preservation, not monitor process termination.
+    // A cancel through the registry stops the worker before it is released
+    // (#373), and the task keeps its Cancelled status and timestamp.
     global_registry().cancel(id);
     let cancelled_at = global_registry().get(id).unwrap().completed_at;
     assert!(cancelled_at.is_some());
-    std::fs::write(home.join("release"), b"continue").unwrap();
     let pid = i32::try_from(pid).unwrap();
     assert!(pid >= 2);
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -192,14 +192,14 @@ async fn check_tool(home: &Path, case: &str) {
         }
     })
     .await
-    .expect("worker must reap released child");
+    .expect("the cancel must stop and reap the worker");
     // Allow the worker's synchronous registry update after wait() to finish.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let task = global_registry().get(id).unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
         assert_eq!(task.completed_at, cancelled_at);
-        assert_eq!(task.output, ["finished"]);
+        assert!(task.output.is_empty(), "{:?}", task.output);
     }
     claurst_tools::clear_session_shell_state(&ctx.session_id);
 }
