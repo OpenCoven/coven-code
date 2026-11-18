@@ -700,7 +700,10 @@ impl Drop for TerminateOnDrop {
 /// runs in a job of this test's, which is terminated at the end to stop it.
 ///
 /// The copy writes to a file, not a pipe: the loop inherits the copy's output
-/// handles, so a pipe would not close while the loop runs.
+/// handles, so a pipe would not close while the loop runs. It ends with
+/// `std::process::exit`, as coven-code does on most paths: dropping a tokio
+/// runtime waits for its blocking pipe reads, and the loop also holds the
+/// background task's pipes.
 #[tokio::test]
 async fn background_task_outlives_the_process_that_started_it() {
     let directory = workspace();
@@ -741,8 +744,8 @@ async fn background_task_outlives_the_process_that_started_it() {
     let now = ticks(directory.path());
     let output = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        status.success() && output.contains("test result: ok. 1 passed"),
-        "the copy did not pass exactly one test:\n{output}"
+        status.success() && directory.path().join("copy-ready").exists(),
+        "the copy did not start its background task and exit cleanly ({status}):\n{output}"
     );
     assert!(
         survived,
@@ -771,4 +774,6 @@ async fn in_copy_start_a_background_task_and_exit() {
     let ctx = context(&directory);
     start_background(Shell::Bash, GRANDCHILD, 120_000, &ctx).await;
     assert!(reaches_ticks(&directory, 2).await, "the loop never started");
+    std::fs::write(directory.join("copy-ready"), "").unwrap();
+    std::process::exit(0);
 }
