@@ -435,13 +435,8 @@ const POST_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
 /// went for the tool result. A cancelled call, or a command still running
 /// after `limit`, kills it with everything it started (#373).
 async fn post_create_within(cmd: &str, worktree_path: &Path, limit: Duration) -> String {
-    let (program, flag) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let mut shell = tokio::process::Command::new(program);
-    shell.args([flag, cmd]).current_dir(worktree_path);
+    let mut shell = tokio::process::Command::from(claurst_core::shell::command(cmd));
+    shell.current_dir(worktree_path);
     match crate::process_tree::output_within(&mut shell, limit).await {
         Ok(None) => format!(
             "\nPost-create command '{}' timed out after {}ms and was stopped.",

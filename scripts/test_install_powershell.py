@@ -1,4 +1,4 @@
-"""Test local PowerShell installs without network or persistent PATH writes."""
+"""Test PowerShell installs without network or persistent PATH writes."""
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +10,7 @@ import unittest
 INSTALLER = Path(__file__).resolve().parents[1] / "install.ps1"
 ROLLBACK_FIXTURE = Path(__file__).resolve().with_name("install-ps1-rollback.test.ps1")
 CONSENT_FIXTURE = Path(__file__).resolve().with_name("install-ps1-consent.test.ps1")
+DOWNLOAD_FIXTURE = Path(__file__).resolve().with_name("install-ps1-download.test.ps1")
 ENGINE = b"fixture engine; never executed"
 
 
@@ -28,6 +29,15 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.env = {**os.environ, "USERPROFILE": str(self.root), "GITHUB_ACTIONS": "false"}
         self.env.update({name: str(self.staging) for name in ("TMPDIR", "TMP", "TEMP")})
         self.env.pop("GITHUB_PATH", None)
+        # A PSModulePath inherited from PowerShell 7 (CI starts this file from
+        # it) keeps Windows PowerShell from loading its own modules, such as
+        # the one with Get-FileHash. Without the variable each shell builds
+        # its default.
+        self.env = {name: value for name, value in self.env.items()
+                    if name.upper() != "PSMODULEPATH"}
+        self.shells = ["pwsh"]
+        if shutil.which("powershell"):
+            self.shells.append("powershell")
 
     def install(self, source, *args):
         result = subprocess.run(
@@ -100,26 +110,16 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.env["COVEN_CODE_INSTALL_FORCE"] = "1"
         self.assert_installed(self.install(self.source))
 
-    def shells(self, env):
-        """Each shell to run, with its environment. PowerShell 7 puts its own
-        module paths in PSModulePath, and Windows PowerShell 5.1 then cannot
-        load Get-FileHash, so 5.1 gets its own."""
-        shells = [("pwsh", env)]
-        if shutil.which("powershell"):
-            shells.append(("powershell", {name: value for name, value in env.items()
-                                          if name.upper() != "PSMODULEPATH"}))
-        return shells
-
     def test_a_downloaded_engine_replaces_only_the_same_version_without_consent(self):
         env = {**self.env, "CONSENT_INSTALLER": str(INSTALLER), "CONSENT_TARGET": str(self.target)}
         cases = (("9.9.9", "installed", {}), ("1.0.0", "kept", {}),
                  ("1.0.0", "installed", {"COVEN_CODE_INSTALL_FORCE": "1"}))
-        for shell, shell_env in self.shells(env):
+        for shell in self.shells:
             for version, expect, extra in cases:
                 with self.subTest(shell=shell, version=version, extra=extra):
                     result = subprocess.run(
                         [shell, "-NoProfile", "-NonInteractive", "-File", str(CONSENT_FIXTURE)],
-                        env={**shell_env, **extra, "CONSENT_REPORTED_VERSION": version,
+                        env={**env, **extra, "CONSENT_REPORTED_VERSION": version,
                              "CONSENT_EXPECT": expect},
                         capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
                     )
@@ -138,11 +138,11 @@ class PowerShellInstallerTests(unittest.TestCase):
             "(Get-EngineVersion 'shouting'), (Get-EngineVersion $env:NOT_AN_EXE)) -join ','"
         )
         env = {**self.env, "CONSENT_INSTALLER": str(INSTALLER), "NOT_AN_EXE": str(not_an_exe)}
-        for shell, shell_env in self.shells(env):
+        for shell in self.shells:
             with self.subTest(shell=shell):
                 result = subprocess.run(
                     [shell, "-NoProfile", "-NonInteractive", "-Command", script],
-                    env=shell_env, capture_output=True, text=True, timeout=30,
+                    env=env, capture_output=True, text=True, timeout=30,
                     stdin=subprocess.DEVNULL,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -162,17 +162,58 @@ class PowerShellInstallerTests(unittest.TestCase):
             "ROLLBACK_TARGET": str(self.target),
             "ROLLBACK_SOURCE": str(self.source),
         }
-        for shell, shell_env in self.shells(env):
+        for shell in self.shells:
             for mode in ("local", "download"):
                 with self.subTest(shell=shell, mode=mode):
                     result = subprocess.run(
                         [shell, "-NoProfile", "-NonInteractive", "-File", str(ROLLBACK_FIXTURE)],
-                        env={**shell_env, "ROLLBACK_MODE": mode},
+                        env={**env, "ROLLBACK_MODE": mode},
                         capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual(list(self.staging.iterdir()), [],
                                      "download or local staging leaked")
+
+    def download(self, shell, body):
+        """Run the installer's HTTP download and install against in-process responses."""
+        target = self.root / f"download {shell} {body}"
+        target.mkdir()
+        result = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-File", str(DOWNLOAD_FIXTURE)],
+            env={**self.env, "DOWNLOAD_INSTALLER": str(INSTALLER), "DOWNLOAD_TARGET": str(target),
+                 "DOWNLOAD_SOURCE": str(self.source), "DOWNLOAD_BODY": body},
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(list(self.staging.iterdir()), [], "download staging leaked")
+        return target, result
+
+    def test_download_prints_only_installer_messages(self):
+        expected = ("Installing coven-code v9.9.9 ", "Downloading https://", "Verified SHA-256 ",
+                    "Extracting...", "Installed: ", "Installed alias: ")
+        for shell in self.shells:
+            with self.subTest(shell=shell):
+                target, result = self.download(shell, "ok")
+                # Shown so a hosted run's log carries the output it accepted.
+                print(f"\n[{shell}] download install output:\n{result.stdout}", flush=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                lines = [line for line in result.stdout.splitlines() if line.strip()]
+                self.assertEqual([line for line in lines if not line.startswith(expected)], [],
+                                 "the download wrote a line that is not an installer message")
+                self.assertEqual(len(lines), len(expected), result.stdout)
+                for line, prefix in zip(lines, expected):
+                    self.assertTrue(line.startswith(prefix), result.stdout)
+                for name in ("coven-code.exe", "coven-cave.exe"):
+                    self.assertEqual((target / name).read_bytes(), ENGINE)
+
+    def test_failed_download_body_fails_the_install(self):
+        for shell in self.shells:
+            with self.subTest(shell=shell):
+                target, result = self.download(shell, "fail")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                # The copy's own error, not a later manifest or checksum
+                # failure on a file that was cut short.
+                self.assertRegex(result.stdout, "Download failed: .*fixture body failure")
+                self.assertEqual(list(target.iterdir()), [], "a failed download installed files")
 
 
 if __name__ == "__main__":
