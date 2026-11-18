@@ -13,7 +13,8 @@ every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
 can act while text is still arriving; a `release` file already there means no
 hold.
 Any other word after the count is an error.
-Each streamed request appends one JSON line to LOG_FILE for later checks,
+A session memory extraction request is answered with no memories and is not
+logged. Each other streamed request appends one JSON line to LOG_FILE for later checks,
 whose "last" holds the request's last message. Given MESSAGES_LOG, it also
 appends there a JSON line whose "messages" holds all of them, in order. That
 is a file of its own, because cases search LOG_FILE's lines for text that the
@@ -47,6 +48,11 @@ HOLD_LIMIT_SECONDS = 300
 # the client, which retries a stream that sends nothing for 45 s, keeps it.
 HOLD_DELTA_SECONDS = 0.2
 HELD_TEXT = "held line\n"
+# Session memory extraction runs after a turn once the conversation has 20
+# user and assistant messages, and goes to the same API base as the turn.
+# It is answered with no memories and kept out of the logs: it is not part
+# of the turn a case checks.
+EXTRACTION_SYSTEM_PREFIX = "You are a memory extraction assistant."
 
 
 def sse(event, data):
@@ -253,6 +259,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "stop_reason": "end_turn", "stop_sequence": None,
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }).encode())
+            return
+        system = request.get("system")
+        if isinstance(system, list):
+            system = " ".join(
+                block.get("text", "") for block in system if isinstance(block, dict)
+            )
+        if isinstance(system, str) and system.startswith(EXTRACTION_SYSTEM_PREFIX):
+            self.respond(200, "text/event-stream", text_turn("[]"))
             return
         messages = request.get("messages") or [{}]
         with open(self.log_path, "a", encoding="utf-8") as log:
