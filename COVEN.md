@@ -168,6 +168,8 @@ integration plan live in [docs/unification.md](docs/unification.md).
 
 ---
 
+The additive [run-budget v1 extension](docs/run-budget.md) uses the existing contract v1 error envelope and exit statuses. Consumers must probe the resolved executable's `--run-budget-capabilities` signal before promising explicit model-round budgets or persisted continuation; package versions and an engine-only patch do not establish installed Chat support. Coordination is tracked in coven-code#497, coven#1779 and chat#652.
+
 ## Release checklist
 
 Prepare a release from the reviewed main commit with explicit publication
