@@ -26,19 +26,24 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
 
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("bash", "-c")
+        // On Windows the scope is asked only whether a shell may start. No
+        // scope can be active there; if one were, it would refuse.
+        #[cfg(windows)]
+        let shell = crate::workspace_scope::shell("cmd", &[])
+            .map(|_| Command::from(claurst_core::shell::command(&command_clone)));
+        #[cfg(not(windows))]
+        let shell = crate::workspace_scope::shell("bash", &["-c".into(), command_clone]).map(
+            |(program, args)| {
+                let mut shell = Command::new(program);
+                shell.args(args);
+                shell
+            },
+        );
+        let mut shell = match shell {
+            Ok(shell) => shell,
+            Err(e) => return fail(&task_id_clone, e.to_string()),
         };
-        let (program, args) =
-            match crate::workspace_scope::shell(shell, &[flag.into(), command_clone]) {
-                Ok(parts) => parts,
-                Err(e) => return fail(&task_id_clone, e.to_string()),
-            };
-        let mut shell = Command::new(program);
         shell
-            .args(args)
             .current_dir(&cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
