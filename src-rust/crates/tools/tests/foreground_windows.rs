@@ -677,13 +677,35 @@ fn inheritable_job() -> OwnedHandle {
     unsafe { OwnedHandle::from_raw_handle(job) }
 }
 
+/// Terminates the job when dropped, so a failed test does not leave the loop
+/// running.
+struct TerminateOnDrop(OwnedHandle);
+
+impl Drop for TerminateOnDrop {
+    fn drop(&mut self) {
+        // SAFETY: the handle is open, and this process created the job with
+        // all access.
+        if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+            eprintln!(
+                "could not terminate the outer job: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
 /// A background task outlives the turn, and coven-code too, until it is
 /// stopped, as it did before it had a job and as it does on Unix. A copy of
 /// this test binary starts one and exits; its loop must keep ticking. The copy
 /// runs in a job of this test's, which is terminated at the end to stop it.
+///
+/// The copy writes to a file, not a pipe: the loop inherits the copy's output
+/// handles, so a pipe would not close while the loop runs.
 #[tokio::test]
 async fn background_task_outlives_the_process_that_started_it() {
     let directory = workspace();
+    let log = directory.path().join("copy.log");
+    let file = std::fs::File::create(&log).unwrap();
     let job = inheritable_job();
     let mut copy = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -693,8 +715,8 @@ async fn background_task_outlives_the_process_that_started_it() {
         ])
         .env(OUTER_JOB, (job.as_raw_handle() as usize).to_string())
         .env(TICK_DIRECTORY, directory.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
         .spawn()
         .unwrap();
     // SAFETY: both handles are open.
@@ -703,17 +725,24 @@ async fn background_task_outlives_the_process_that_started_it() {
         let _ = copy.kill();
         panic!("could not put the copy in a job: {error}");
     }
-    let output = copy.wait_with_output().unwrap();
+    let _job = TerminateOnDrop(job);
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(status) = copy.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the copy did not exit");
     let exited = ticks(directory.path());
     let survived = reaches_ticks(directory.path(), exited + 2).await;
     let now = ticks(directory.path());
-    // SAFETY: `job` is open, and this process created it with all access.
-    unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let output = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "the copy did not pass exactly one test:\n{stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        status.success() && output.contains("test result: ok. 1 passed"),
+        "the copy did not pass exactly one test:\n{output}"
     );
     assert!(
         survived,

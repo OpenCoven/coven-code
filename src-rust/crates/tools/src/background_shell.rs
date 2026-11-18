@@ -61,7 +61,7 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
         #[cfg(windows)]
         if let Some(job) = &job {
             if let Err(error) = job.outlive_close() {
-                tracing::warn!(%error, "Could not let a background command outlive its job; coven-code exiting will kill it");
+                tracing::warn!(%error, "Could not let a background command outlive its job; coven-code exiting will kill it, unless it exits first");
             }
         }
         #[cfg(not(windows))]
@@ -91,18 +91,25 @@ pub(crate) fn spawn(command: &str, cwd: PathBuf, timeout_ms: u64) -> String {
         };
 
         match ended {
-            // An ordinary exit leaves alone what the command started to
-            // outlive it: on Windows, dropping the job kills nothing.
-            Some(Ok(status)) => match status {
-                Ok(status) if status.success() => {
-                    global_registry().complete(&task_id_clone);
+            Some(Ok(status)) => {
+                // An ordinary exit leaves alone what the command started to
+                // outlive it. The job no longer kills on close, unless
+                // `outlive_close` failed above; release it in either case.
+                #[cfg(windows)]
+                if let (Ok(_), Some(job)) = (&status, job) {
+                    job.release();
                 }
-                Ok(status) => {
-                    let code = status.code().unwrap_or(-1);
-                    fail(&task_id_clone, format!("exit code {}", code));
+                match status {
+                    Ok(status) if status.success() => {
+                        global_registry().complete(&task_id_clone);
+                    }
+                    Ok(status) => {
+                        let code = status.code().unwrap_or(-1);
+                        fail(&task_id_clone, format!("exit code {}", code));
+                    }
+                    Err(e) => fail(&task_id_clone, e.to_string()),
                 }
-                Err(e) => fail(&task_id_clone, e.to_string()),
-            },
+            }
             Some(Err(_)) => {
                 #[cfg(windows)]
                 if let Some(job) = &job {
