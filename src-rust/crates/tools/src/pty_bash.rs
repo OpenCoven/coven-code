@@ -345,9 +345,7 @@ async fn run_windows_fallback(
     // The job owns cmd.exe and everything it starts. A cancelled call drops
     // it, which kills them all, and a timeout terminates it (#373).
     let (mut child, job) = match crate::windows_job::spawn(
-        Command::new("cmd")
-            .arg("/C")
-            .arg(command)
+        Command::from(claurst_core::shell::command(command))
             .current_dir(effective_cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

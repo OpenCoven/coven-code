@@ -36,6 +36,7 @@ pub mod child_diagnostics;
 pub mod crypto_utils;
 pub mod format_utils;
 pub mod secret_file;
+pub mod shell;
 pub mod spinner;
 pub mod status_notices;
 pub mod token_budget;
@@ -5584,12 +5585,7 @@ pub mod hooks {
 
             debug!(command = %entry.command, event = ?event, "Running hook");
 
-            let result = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-                .args(if cfg!(windows) {
-                    ["/C", &entry.command]
-                } else {
-                    ["-c", &entry.command]
-                })
+            let result = tokio::process::Command::from(crate::shell::command(&entry.command))
                 .current_dir(working_dir)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
