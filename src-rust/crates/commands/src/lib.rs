@@ -2883,7 +2883,14 @@ impl SlashCommand for DoctorCommand {
         lines.push("Coven Substrate".to_string());
         match claurst_core::coven_shared::DaemonClient::new() {
             None => {
-                lines.push("  • Daemon not installed (no ~/.coven/coven.sock)".to_string());
+                // Name the socket the client looks for, which follows
+                // COVEN_HOME, so the report matches what was checked.
+                lines.push(match claurst_core::coven_shared::daemon_socket_path() {
+                    Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
+                    None => "  • Coven daemon socket not found: COVEN_HOME is unset or empty and \
+                             no home directory was found."
+                        .to_string(),
+                });
                 lines.push(
                     "    Install: npm install -g @opencoven/coven  →  coven daemon start"
                         .to_string(),
@@ -14033,6 +14040,51 @@ mod tests {
             assert!(
                 msg.contains("Start it with `/coven daemon start`"),
                 "/coven {args:?} lost the start hint: {msg}"
+            );
+        }
+    }
+
+    /// #527: with no daemon socket, the Coven Substrate section of
+    /// `/status doctor` must name the socket the client checked
+    /// (`$COVEN_HOME/coven.sock`), not a fixed `~/.coven` path. The guard
+    /// points HOME and COVEN_HOME at a fresh tempdir with no socket, so this
+    /// never reads the real `~/.coven` or reaches a running daemon.
+    #[test]
+    fn doctor_names_the_socket_under_coven_home() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let expected = guard.coven_home().join("coven.sock");
+        assert!(!expected.exists());
+        let status = find_command("status").expect("/status command must be registered");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // First with an empty COVEN_HOME directory, then with COVEN_HOME
+        // naming a directory that does not exist.
+        for coven_home_exists in [true, false] {
+            if !coven_home_exists {
+                std::fs::remove_dir(guard.coven_home()).unwrap();
+            }
+            let mut ctx = make_ctx();
+            let CommandResult::Message(msg) = runtime.block_on(status.execute("doctor", &mut ctx))
+            else {
+                panic!("/status doctor must return a message");
+            };
+            let substrate = msg
+                .split_once("Coven Substrate\n")
+                .map(|(_, section)| section)
+                .unwrap_or_else(|| {
+                    panic!("/status doctor lost its Coven Substrate section: {msg}")
+                });
+            assert_eq!(
+                substrate,
+                format!(
+                    "  • Daemon not installed (no {})\n    \
+                     Install: npm install -g @opencoven/coven  →  coven daemon start",
+                    expected.display()
+                ),
+                "/status doctor must name the socket it checked \
+                 (COVEN_HOME exists: {coven_home_exists})"
             );
         }
     }
