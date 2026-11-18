@@ -5,33 +5,39 @@
 # Next (COVEN_CODE_UI=next) must keep one session, one provider client and one
 # store for the whole run. A local fake of the Messages API drives two real
 # turns, an approved tool call and then a text answer, with a redraw between
-# them: the window grows to 140x45, the app draws a frame that wide, and the
-# window goes back. The checks read only what can be seen from outside the
-# process:
+# them: the window grows by 20 columns and 5 rows, the app draws a frame that
+# wide, and the window goes back. The checks read only what can be seen from
+# outside the process:
 # - session: one session file after the first turn and, after the second turn
-#   and the exit, still that one file with that id, and no other session file
-#   or session index under the home or the project; the index holds that one
-#   session;
+#   and the exit, still that one file with that id; under the home and the
+#   project, the only session file (sessions/*.json) and session index
+#   (sessions.db) are that file and that index, which holds that one session;
 # - provider: three streamed requests; each carries the one before it, the
 #   fake's reply to it and the next user message; the request of the second
-#   turn arrives on a TCP connection an earlier request used, so it came from
-#   the same HTTP connection pool (one reqwest client, or a clone of it);
+#   turn arrives on a TCP connection the first turn used, so it came from the
+#   same HTTP connection pool (one reqwest client, or a clone of it);
 # - store: the saved session holds both turns (roles, text and tool ids) as
 #   the model saw them, with the last answer, and every indexed message
 #   belongs to that one session.
 # What it does not show:
 # - that nothing else is built. A session, client, scheduler or store that is
-#   built but never sends or saves leaves no trace. The process does build
-#   other clients, the same way for either renderer: main() registers an
-#   Anthropic provider with a pool of its own (used only without an API key
-#   or for another provider), each goal turn wraps the client in a new
-#   AnthropicClient on the same pool, and memory extraction builds its own
-#   client (reached at 20 messages; this run has 5). Clients sharing one pool
-#   cannot be told apart here;
+#   built but never sends or saves leaves no trace, and clients that share
+#   one pool cannot be told apart. The process builds other clients, the
+#   same way in either renderer: main() registers an Anthropic provider with
+#   a pool of its own (used only without an API key or for another
+#   provider); each goal turn wraps the client in a new AnthropicClient on
+#   the same pool; each Agent tool sub-agent builds its own client; memory
+#   extraction builds its own client with the default API base, ignoring
+#   ANTHROPIC_BASE_URL (reached at 20 messages; this run has at most 6); and
+#   /refresh and an in-session login replace the client and the registry by
+#   design. None of those paths runs here;
+# - one store object: the session index is opened again at every save, so
+#   "one store" here means one file on disk;
 # - the scheduler and the memory authority, which nothing here observes;
 # - a switch of renderer: the selector is read once at start, so each
 #   renderer runs in a process and home of its own, and relaunching the other
-#   renderer on the same session is not covered;
+#   renderer on the same session is not covered; nor are /resume and /clear,
+#   which change the session within a run;
 # - any transport but the direct API-key Claude one.
 
 register_case tc_one_runtime
@@ -83,15 +89,18 @@ _ort_wait_idle() {
 _ort_wait_saved() { # home, text
   local waited=0
   while [ "$waited" -lt 100 ]; do
-    find "$1" -type f -path '*/sessions/*.json' -exec grep -qF -- "$2" {} + 2>/dev/null && return 0
+    # find exits 0 when it finds no file at all, so test what grep names.
+    [ -n "$(find "$1" -type f -path '*/sessions/*.json' -exec grep -lF -- "$2" {} + 2>/dev/null)" ] \
+      && return 0
     sleep 0.1; waited=$((waited + 1))
   done
   return 1
 }
 
 # Report each check on a line of its own: "ok", "FAIL" or "id", a tab, the
-# check, a tab and what was seen. `first` runs after the first turn and
-# reports the session id; `final` runs after the exit and compares with it.
+# check, a tab and what was seen, and "end" last. `first` runs after the
+# first turn and reports the session id; `final` runs after the exit and
+# compares with it.
 _ort_check() { # first|final, home, project, messages log, connections log, first id
   python3 -B -c '
 import glob, json, os, pathlib, sqlite3, sys, time
@@ -165,10 +174,13 @@ if mode == "first":
         saved_id = load(files[0]).get("id")
         report("the session file is named for the id it holds", saved_id == ids[0], saved_id)
         print("id\t" + ids[0] + "\t")
+    print("end\t\t")
     sys.exit(0)
 
+saved_id = load(files[0]).get("id") if len(files) == 1 else None
 report("after the second turn and the exit, still one session file, with the id of the first turn",
-       ids == [first_id], "files: %s; first turn: %s" % (ids, first_id))
+       ids == [first_id] and saved_id == first_id,
+       "files: %s; id inside: %s; first turn: %s" % (ids, saved_id, first_id))
 elsewhere = []
 for root in (home, project):
     for parent, _, names in os.walk(root):
@@ -176,9 +188,12 @@ for root in (home, project):
             path = os.path.join(parent, name)
             if (name.endswith(".json") and os.path.basename(parent) == "sessions") \
                     or name == "sessions.db":
-                elsewhere.append(os.path.relpath(path, os.path.dirname(root)))
-report("no other session file or session index under the home or the project",
-       len(elsewhere) == 2, sorted(elsewhere))
+                elsewhere.append(os.path.realpath(path))
+expected_files = sorted([os.path.join(config, "sessions", first_id + ".json"),
+                         os.path.join(config, "sessions.db")])
+report("under the home and the project, the only session file and session index are those",
+       sorted(elsewhere) == expected_files,
+       [os.path.relpath(path, os.path.dirname(home)) for path in sorted(elsewhere)])
 
 db_path = os.path.join(config, "sessions.db")
 if os.path.exists(db_path):
@@ -221,12 +236,11 @@ for (before, after), want in zip(zip(requests, requests[1:]), added):
 report("each request carries the one before it, the reply to it and the next user message",
        carried, [signature(r) for r in requests])
 
-label = "the request of the second turn came on a connection an earlier request used"
+label = "the request of the second turn came on a connection the first turn used"
 if len(streams) == 3:
-    earlier = sorted({c["connection"] for c in read_lines(connections_log)
-                      if c["ended"] <= streams[2]["started"]})
-    report(label, streams[2]["connection"] in earlier,
-           "earlier: %s; second turn: %s" % (earlier, streams[2]["connection"]))
+    first_turn = sorted({streams[0]["connection"], streams[1]["connection"]})
+    report(label, streams[2]["connection"] in first_turn,
+           "first turn: %s; second turn: %s" % (first_turn, streams[2]["connection"]))
 else:
     report(label, False, streams)
 
@@ -237,22 +251,26 @@ answer = ("assistant", [("text", "flood line\nflood line")])
 expected = signature(requests[-1]) + [answer] if requests else None
 report("the saved session is the conversation the model saw, with its last answer",
        signature(saved) == expected, "saved: %s; expected: %s" % (signature(saved), expected))
+print("end\t\t")
 ' "$1" "$2" "$3" "$4" "$5" "$ORT_TOOL_PROMPT" "$ORT_TEXT_PROMPT" "${6:-}"
 }
 
 # Turn the checker's lines into results. Sets ORT_ID from an "id" line.
 _ort_report() { # renderer, then the checker's arguments
-  local r="$1" verdict label seen other=""
+  local r="$1" verdict label seen other="" ended=0
   shift
   while IFS=$'\t' read -r verdict label seen; do
     case "$verdict" in
       ok) _pass "$r: $label" ;;
       FAIL) _fail "$r: $label" "$seen" ;;
       id) ORT_ID="$label" ;;
+      end) ended=1 ;;
       *) other+="$verdict"$'\n' ;;
     esac
   done < <(_ort_check "$@" 2>&1)
-  if [ -n "$other" ]; then _fail "$r: the checker runs" "$other"; fi
+  if [ -n "$other" ] || [ "$ended" -ne 1 ]; then
+    _fail "$r: the checker runs to the end" "${other:-no end line}"
+  fi
 }
 
 # Wait until the pane shows a horizontal rule this wide, which only a frame
@@ -330,18 +348,20 @@ _ort_turns() { # renderer, dir
   _ort_report "$r" first "$dir/home" "$dir/project" "$log" "$dir/connections.log"
   if [ -z "$ORT_ID" ]; then return 1; fi
 
-  # A redraw: wider than both suite sizes, so a rule that wide can only come
-  # from a frame drawn after the resize. tmux holds a resize for 250 ms.
-  _tmux resize-window -t "$TUI_SESSION" -x 140 -y 45
-  if _ort_wait_rule 140; then _pass "$r: the app draws a frame at the new size"
+  # A redraw: wider than the pane was, so a rule that wide can only come from
+  # a frame drawn after the resize. tmux holds a resize for 250 ms.
+  local wide=$((TUI_WIDTH + 20))
+  _tmux resize-window -t "$TUI_SESSION" -x "$wide" -y $((TUI_HEIGHT + 5))
+  if _ort_wait_rule "$wide"; then _pass "$r: the app draws a frame at the new size"
   else _fail "$r: the app draws a frame at the new size" "$(tui_capture)"; return 1; fi
   _tmux resize-window -t "$TUI_SESSION" -x "$TUI_WIDTH" -y "$TUI_HEIGHT"
   sleep 0.6
   if wait_for "TOOL_RESULT_OK" 20 && \
     [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; then
-    _pass "$r: back at the suite size, the same process draws the first answer"
+    _pass "$r: back at the suite size, the app still runs and the first answer is on screen"
   else
-    _fail "$r: back at the suite size, the same process draws the first answer" "$(tui_capture)"
+    _fail "$r: back at the suite size, the app still runs and the first answer is on screen" \
+      "$(tui_capture)"
     return 1
   fi
 
