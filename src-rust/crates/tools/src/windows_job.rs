@@ -20,7 +20,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     GetProcessIdOfThread, OpenThread, ResumeThread, CREATE_SUSPENDED,
@@ -38,7 +38,8 @@ use windows_sys::Win32::System::Threading::{
 pub(crate) struct Job(OwnedHandle);
 
 /// The limits every new job gets.
-const JOB_LIMITS: JOB_OBJECT_LIMIT = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+const JOB_LIMITS: JOB_OBJECT_LIMIT =
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 
 impl Job {
     fn new() -> io::Result<Self> {
