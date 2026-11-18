@@ -8,8 +8,13 @@ use std::process::Command;
 /// `cmd.exe` does not read its command line by the C runtime's rules, which
 /// are the ones `Command::arg` writes: a `"` inside an argument would reach
 /// it as `\"` (#517). So on Windows the line is appended unescaped, inside
-/// one more pair of quotes, and `/S` has `cmd.exe` strip exactly that pair
-/// and take the rest as written.
+/// one more pair of quotes. `cmd.exe` strips the first and the last quote of
+/// what follows `/C`, which are that pair, and takes the rest as written.
+///
+/// It keeps the pair in one case: the line has no quote of its own and is
+/// the path, with a space in it, of a program. Then it runs that program.
+/// `/S` would turn that off, and is left out: such a line has always run
+/// here, because `Command::arg` put the same pair around it.
 ///
 /// `line` is the whole command line. Add no arguments to the returned
 /// command: on Windows they would land after the closing quote.
@@ -18,7 +23,7 @@ pub fn command(line: &str) -> Command {
     {
         use std::os::windows::process::CommandExt;
         let mut shell = Command::new("cmd");
-        shell.raw_arg(format!("/S /C \"{line}\""));
+        shell.raw_arg(format!("/C \"{line}\""));
         shell
     }
     #[cfg(not(windows))]

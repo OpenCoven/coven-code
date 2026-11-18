@@ -1,7 +1,9 @@
 //! #517 on Windows: the shell tools hand a command line to `cmd.exe`. It must
 //! get the command's double quotes exactly as written, in a foreground call,
-//! a background task and a worktree post-create command. The PowerShell tool
-//! does not go through `cmd.exe`; one case checks that it needs no change.
+//! a background task and a worktree post-create command. Three cases are
+//! controls that pass with and without the fix: a line without quotes that
+//! is a program path with a space still runs, in both Bash tools, and the
+//! PowerShell tool, which does not go through `cmd.exe`, needs no change.
 #![cfg(windows)]
 
 use claurst_core::config::{Config, PermissionMode};
@@ -96,6 +98,17 @@ async fn check_quoted_program(tool: &dyn Tool) {
     );
 }
 
+/// A program path with a space and no quotes, alone on the line. `cmd.exe`
+/// runs it, as it did before #517: the fix must not take that away.
+async fn check_unquoted_program(tool: &dyn Tool) {
+    let directory = workspace();
+    let script = directory.path().join("with space").join("show.cmd");
+    assert_eq!(
+        output_of(tool, &script.display().to_string(), directory.path()).await,
+        "[]"
+    );
+}
+
 /// Run [`QUOTED`] as a background task of `tool` and return its output lines.
 async fn background_output_of(tool: &dyn Tool) -> Vec<String> {
     let directory = tempfile::tempdir().unwrap();
@@ -162,6 +175,16 @@ async fn bash_fallback_runs_a_quoted_program_with_a_quoted_argument() {
 #[tokio::test]
 async fn pty_fallback_runs_a_quoted_program_with_a_quoted_argument() {
     check_quoted_program(&PtyBashTool).await;
+}
+
+#[tokio::test]
+async fn bash_fallback_still_runs_an_unquoted_program_path_with_a_space() {
+    check_unquoted_program(&BashTool).await;
+}
+
+#[tokio::test]
+async fn pty_fallback_still_runs_an_unquoted_program_path_with_a_space() {
+    check_unquoted_program(&PtyBashTool).await;
 }
 
 #[tokio::test]

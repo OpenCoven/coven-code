@@ -1,6 +1,7 @@
 //! #517 on Windows: a configured hook is a command line for `cmd.exe`, which
 //! must get the command's double quotes exactly as written. So must any line
-//! given to `claurst_core::shell::command`, which every such site calls.
+//! given to `claurst_core::shell::command`, which every site that runs a
+//! command line calls.
 #![cfg(windows)]
 
 use claurst_core::config::{HookEntry, HookEvent};
