@@ -30,7 +30,15 @@ use windows_sys::Win32::System::Threading::{
 /// The job that owns one command's process tree. Dropping it closes the only
 /// handle to the job, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` then kills every
 /// process still in it, so a cancelled call cleans up as well.
+///
+/// The job also sets `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, as Cargo's job does, so a
+/// descendant that explicitly asks to leave the job with
+/// `CREATE_BREAKAWAY_FROM_JOB` can still start. Such a process is then outside
+/// cleanup, like a process that calls `setsid` on Unix.
 pub(crate) struct Job(OwnedHandle);
+
+/// The limits every new job gets.
+const JOB_LIMITS: JOB_OBJECT_LIMIT = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
 impl Job {
     fn new() -> io::Result<Self> {
@@ -42,7 +50,7 @@ impl Job {
         }
         // SAFETY: `handle` is a new, open handle that nothing else owns.
         let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) });
-        job.limit(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
+        job.limit(JOB_LIMITS)?;
         Ok(job)
     }
 
@@ -277,8 +285,43 @@ fn resume_thread(process_id: u32, thread_id: u32) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resume_all, Resumed, SpawnError};
+    use super::{resume_all, Job, Resumed, SpawnError};
     use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    #[test]
+    fn a_new_job_kills_on_close_and_allows_explicit_breakaway() {
+        let job = Job::new().expect("create a job");
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // SAFETY: the pointer and size describe `limits`, the structure this
+        // information class fills, and it outlives the call.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.0.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_mut(&mut limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "query the job: {}", io::Error::last_os_error());
+        let flags = limits.BasicLimitInformation.LimitFlags;
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            0,
+            "kill on close: {flags:#x}"
+        );
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            0,
+            "breakaway allowed: {flags:#x}"
+        );
+    }
 
     fn refused() -> io::Error {
         io::Error::from(io::ErrorKind::PermissionDenied)
