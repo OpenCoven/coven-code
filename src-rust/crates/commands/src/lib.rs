@@ -2883,12 +2883,14 @@ impl SlashCommand for DoctorCommand {
         lines.push("Coven Substrate".to_string());
         match claurst_core::coven_shared::DaemonClient::new() {
             None => {
-                // Name the socket the client looks for, which follows
-                // COVEN_HOME, so the report matches what was checked.
+                // Name the socket path the client uses, which follows
+                // COVEN_HOME. On Unix that is the file `DaemonClient::new`
+                // just looked for; elsewhere it opens no socket and always
+                // lands here.
                 lines.push(match claurst_core::coven_shared::daemon_socket_path() {
                     Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
-                    None => "  • Coven daemon socket not found: COVEN_HOME is unset or empty and \
-                             no home directory was found."
+                    None => "  • Daemon not installed (no socket path: COVEN_HOME is unset or \
+                             empty and no home directory was found)"
                         .to_string(),
                 });
                 lines.push(
@@ -14063,7 +14065,7 @@ mod tests {
         // naming a directory that does not exist.
         for coven_home_exists in [true, false] {
             if !coven_home_exists {
-                std::fs::remove_dir(guard.coven_home()).unwrap();
+                std::fs::remove_dir_all(guard.coven_home()).unwrap();
             }
             let mut ctx = make_ctx();
             let CommandResult::Message(msg) = runtime.block_on(status.execute("doctor", &mut ctx))
@@ -14077,14 +14079,15 @@ mod tests {
                     panic!("/status doctor lost its Coven Substrate section: {msg}")
                 });
             assert_eq!(
-                substrate,
-                format!(
-                    "  • Daemon not installed (no {})\n    \
-                     Install: npm install -g @opencoven/coven  →  coven daemon start",
-                    expected.display()
-                ),
+                substrate.lines().next(),
+                Some(format!("  • Daemon not installed (no {})", expected.display()).as_str()),
                 "/status doctor must name the socket it checked \
-                 (COVEN_HOME exists: {coven_home_exists})"
+                 (COVEN_HOME exists: {coven_home_exists}): {msg}"
+            );
+            assert!(!msg.contains("~/.coven"), "{msg}");
+            assert!(
+                substrate.contains("Install: npm install -g @opencoven/coven"),
+                "/status doctor lost the install hint: {msg}"
             );
         }
     }
