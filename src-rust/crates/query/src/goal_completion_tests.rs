@@ -2518,6 +2518,9 @@ mod goal_completion {
             return;
         }
         use std::os::unix::fs::PermissionsExt;
+        // A hang guard, not a speed requirement: each step starts one or two
+        // Python fixtures, which takes seconds on a loaded runner.
+        const FIXTURE_TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
         for revoke in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("goals.sqlite");
@@ -2578,7 +2581,7 @@ print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'ou
                 .await
                 .unwrap();
             let events: Vec<_> =
-                tokio::time::timeout(std::time::Duration::from_secs(2), prime.collect())
+                tokio::time::timeout(FIXTURE_TURN_LIMIT, prime.collect())
                     .await
                     .unwrap();
             assert!(events
@@ -2593,7 +2596,7 @@ print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'ou
             });
             request.messages.push(Message::user("Continue A"));
             let response = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                FIXTURE_TURN_LIMIT,
                 provider.create_message_stream_for_goal(
                     request,
                     Some(&turn),
@@ -2606,7 +2609,7 @@ print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'ou
                 Err(_) => true,
                 Ok(stream) => {
                     let events: Vec<_> =
-                        tokio::time::timeout(std::time::Duration::from_secs(2), stream.collect())
+                        tokio::time::timeout(FIXTURE_TURN_LIMIT, stream.collect())
                             .await
                             .unwrap();
                     assert!(events
@@ -2621,23 +2624,35 @@ print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'ou
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
             // A priming request, then stale resume, then an active-only fresh
-            // fallback. Every fixture process must already have been reaped.
+            // fallback. No fixture process may outlive its turn. A dropped
+            // child is killed at once but reaped by the runtime afterwards, so
+            // it can still answer `kill -0` for a moment: wait for it, letting
+            // the runtime run, with a bound far above that moment.
             for spawn in &spawns {
                 assert!(!spawn["argv"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .any(|arg| arg == "--tools"));
-                let status = std::process::Command::new("/bin/kill")
-                    .args(["-0", &spawn["pid"].as_u64().unwrap().to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .unwrap();
-                assert!(
-                    !status.success(),
-                    "owned fake CLI child remained alive: {spawn}"
-                );
+                let pid = spawn["pid"].as_u64().unwrap().to_string();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let alive = std::process::Command::new("/bin/kill")
+                        .args(["-0", &pid])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success();
+                    if !alive {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "owned fake CLI child remained alive: {spawn}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
             }
             assert_eq!(spawns.len(), if revoke { 2 } else { 3 });
             assert_eq!(failed, revoke);
