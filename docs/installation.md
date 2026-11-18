@@ -80,7 +80,25 @@ The shell installer does not remove macOS quarantine attributes automatically.
 | `--binary <path>` | `-Binary <path>` | Install an already verified local binary |
 | `--install-dir <path>` | `-InstallDir <path>` | Override the install directory |
 | Not supported | `-NoModifyPath` | Leave the Windows user PATH unchanged |
+| `--force` | `-Force` | Replace an existing engine that differs from this one without asking |
 | `--help` | `-Help` | Print usage |
+
+An installer replaces an existing `coven-code` in the install directory only
+with consent. It installs without asking when the existing file has the same
+bytes as the new one, or when a download is for the version the existing engine
+reports. Otherwise it asks `Replace it? [y/N]` if its input is a terminal, and
+replaces the engine only on `y` or `yes`. With no terminal, as under `curl ... | bash` or
+in CI, it leaves the existing engine and alias untouched and exits non-zero.
+Consent without a prompt is `--force` (`-Force`), or `COVEN_CODE_INSTALL_FORCE=1`
+in the environment, which also works for the piped one-liners:
+
+```bash
+curl -fsSL https://github.com/OpenCoven/coven-code/releases/latest/download/install.sh | bash -s -- --force
+```
+
+```powershell
+$env:COVEN_CODE_INSTALL_FORCE = '1'; irm https://github.com/OpenCoven/coven-code/releases/latest/download/install.ps1 | iex
+```
 
 The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
