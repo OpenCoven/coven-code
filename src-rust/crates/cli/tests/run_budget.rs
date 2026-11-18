@@ -164,6 +164,28 @@ fn serve(stream: TcpStream, requests: &Mutex<Vec<Value>>) {
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
     let request: Value = serde_json::from_slice(&body).unwrap();
+    // Session memory extraction starts once a conversation has 20 messages and
+    // goes to the configured endpoint, so the 11-round runs reach it. It is not
+    // a model round: answer it with no memories and leave it out of `requests`.
+    // The engine may exit before reading the reply, so a failed write is fine.
+    if request["system"]
+        .as_str()
+        .is_some_and(|system| system.starts_with("You are a memory extraction assistant."))
+    {
+        let body: String = [
+            json!({"type":"message_start","message":{"id":"fixture-extraction","type":"message","role":"assistant","model":"claude-fixture","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"[]"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ]
+        .iter()
+        .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()))
+        .collect();
+        let _ = write!(reader.into_inner(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        return;
+    }
     let completed = request["messages"]
         .as_array()
         .unwrap()
