@@ -99,7 +99,8 @@ async fn check_quoted_program(tool: &dyn Tool) {
 }
 
 /// A program path with a space and no quotes, alone on the line. `cmd.exe`
-/// runs it, as it did before #517: the fix must not take that away.
+/// runs it, as it did before #517: the fix must not take that away. This
+/// holds while the temporary directory's path has none of `&()@^`.
 async fn check_unquoted_program(tool: &dyn Tool) {
     let directory = workspace();
     let script = directory.path().join("with space").join("show.cmd");

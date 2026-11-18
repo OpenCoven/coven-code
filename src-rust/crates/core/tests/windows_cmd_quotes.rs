@@ -35,7 +35,7 @@ async fn hook_command_passes_quotes_as_written() {
     );
 }
 
-/// The shared shell itself, for the callers that no test can drive on Windows:
+/// The shared shell itself, for the caller that no test can drive on Windows:
 /// the status line command only runs inside the interactive terminal.
 #[test]
 fn shell_command_passes_quotes_as_written() {
@@ -49,6 +49,11 @@ fn shell_command_passes_quotes_as_written() {
             format!(r#"type "{}""#, note.display()),
             "from a quoted path\r\n",
         ),
+        // An odd number of quotes: the two that are stripped are still the
+        // added pair.
+        (r#"echo "a"#.to_string(), "\"a\r\n"),
+        // A backslash at the very end is not doubled.
+        (r"echo a b\".to_string(), "a b\\\r\n"),
     ] {
         let output = claurst_core::shell::command(&line).output().unwrap();
         assert!(output.status.success(), "{line}: {output:?}");

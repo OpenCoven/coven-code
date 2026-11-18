@@ -11,10 +11,14 @@ use std::process::Command;
 /// one more pair of quotes. `cmd.exe` strips the first and the last quote of
 /// what follows `/C`, which are that pair, and takes the rest as written.
 ///
-/// It keeps the pair in one case: the line has no quote of its own and is
-/// the path, with a space in it, of a program. Then it runs that program.
-/// `/S` would turn that off, and is left out: such a line has always run
-/// here, because `Command::arg` put the same pair around it.
+/// It keeps the pair in one case: the line has no quote of its own, none of
+/// `&<>()@^|`, and is the path, with a space in it, of a program. Then it
+/// runs that program. `/S` would turn that off, and is left out: such a line
+/// has always run here, because `Command::arg` put the same pair around it.
+///
+/// So `cmd.exe` reads a line without a quote as it did when the line came
+/// through `Command::arg`, but for a backslash at its very end, which is no
+/// longer doubled.
 ///
 /// `line` is the whole command line. Add no arguments to the returned
 /// command: on Windows they would land after the closing quote.
