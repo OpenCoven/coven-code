@@ -258,7 +258,12 @@ impl SettingsScreen {
                 _ => {}
             }
         }
+        // The session's mode can come from a flag or a keystroke, and a start
+        // without `--permission-mode` runs in the saved one, so saving these
+        // fields must not save the session's mode along with them.
+        let saved_mode = self.settings_snapshot.config.permission_mode.clone();
         self.settings_snapshot.config = config.clone();
+        self.settings_snapshot.config.permission_mode = saved_mode;
         let _ = self.settings_snapshot.save_sync();
         self.pending_changes.clear();
     }
