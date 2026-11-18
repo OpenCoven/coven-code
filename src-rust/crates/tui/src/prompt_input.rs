@@ -6122,7 +6122,8 @@ mod tests {
         let b = (0..20)
             .find(|x| buf[(*x, 1)].symbol() == "b")
             .unwrap_or_else(|| panic!("no b drawn"));
-        let (row, col) = s.cursor_visual_pos(18);
+        // 20 cells less the two-cell prompt and the two-cell right margin.
+        let (row, col) = s.cursor_visual_pos(16);
         assert_eq!((row, col as u16 + 2), (0, b));
         // Wrapping uses the same count: "a", the tab and "b" take three cells.
         assert_eq!(wrap_line(text, 2), ["a\t".to_string(), "b".to_string()]);
@@ -6144,6 +6145,7 @@ mod tests {
         s.vim_command("x");
         assert_eq!(s.text, "zzzz\u{1F1F5}");
     }
+
     #[test]
     fn rendered_cursor_sits_where_the_next_character_is_drawn() {
         fn draw(s: &PromptInputState, focused: bool) -> Buffer {
