@@ -2544,6 +2544,9 @@ if '--resume' in sys.argv:
 print(json.dumps({'type':'system','session_id':'stale-fixture','model':'claude-test'}), flush=True)
 print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'Done.'}]}}), flush=True)
 print(json.dumps({'type':'result','is_error':False,'usage':{'input_tokens':1,'output_tokens':1}}), flush=True)
+# Outlive the result: only the provider's ownership ends this process.
+import time
+time.sleep(60)
 "#).unwrap();
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
             if revoke {
