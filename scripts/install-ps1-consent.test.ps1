@@ -56,6 +56,7 @@ if ($env:CONSENT_EXPECT -eq 'installed') {
     }
 } else {
     if ($null -eq $failure) { throw 'A different engine was replaced without consent' }
+    if ($failure.Exception.Message -notlike '*was not replaced*') { throw "Unexpected failure: $failure" }
     if ([IO.File]::ReadAllText($target) -ne 'old engine' -or
         [IO.File]::ReadAllText($alias) -ne 'old alias') {
         throw 'A refused install changed the existing engine'

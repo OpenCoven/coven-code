@@ -138,8 +138,10 @@ exec /bin/mv "$@"
 
     # #369: an existing engine that differs from the one being installed is
     # replaced only with consent.
-    OTHER = b"#!/bin/sh\nprintf 'fixture 1.0.0\\n'\n"
-    SAME_VERSION = b"#!/bin/sh\n# another build\nprintf 'fixture 1.2.3\\n'\n"
+    OTHER = b"#!/bin/sh\nprintf 'coven-code 1.0.0\\n'\n"
+    SAME_VERSION = b"#!/bin/sh\n# another build\nprintf 'coven-code 1.2.3\\n'\n"
+    # The right number, but not an engine that names itself.
+    FOREIGN = b"#!/bin/sh\nprintf 'other-tool 1.2.3\\n'\n"
 
     def existing(self, contents):
         self.target.mkdir()
@@ -187,6 +189,12 @@ exec /bin/mv "$@"
         self.existing(self.SAME_VERSION)
         self.assert_installed(self.run_install("--version", "1.2.3"))
 
+    def test_a_foreign_program_with_the_same_number_is_kept(self):
+        self.existing(self.FOREIGN)
+        result = self.run_install("--version", "1.2.3")
+        self.assert_kept(result, self.FOREIGN)
+        self.assertIn("version unknown", result.stderr)
+
     def run_on_terminal(self, answer, *args):
         primary, secondary = pty.openpty()
         try:
@@ -203,6 +211,12 @@ exec /bin/mv "$@"
         self.assertIn("Replace it? [y/N]", result.stderr)
         self.assert_kept(result, self.OTHER)
         result = self.run_on_terminal(b"y\n", "--binary", str(self.local))
+        self.assertIn("Replace it? [y/N]", result.stderr)
+        self.assert_installed(result)
+
+    def test_a_terminal_yes_replaces_a_download(self):
+        self.existing(self.OTHER)
+        result = self.run_on_terminal(b"yes\n", "--version", "1.2.3")
         self.assertIn("Replace it? [y/N]", result.stderr)
         self.assert_installed(result)
 

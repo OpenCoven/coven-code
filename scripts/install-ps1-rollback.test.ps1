@@ -68,7 +68,11 @@ try {
     } else {
         Install-Binary $source
     }
-} catch { $failed = $true }
+} catch {
+    # Only the fixture's alias failure counts; anything earlier tests nothing.
+    if ($_.Exception.Message -notlike 'fixture alias*') { throw }
+    $failed = $true
+}
 if (-not $failed) { throw 'Alias publication unexpectedly succeeded' }
 
 if ([IO.File]::ReadAllText($target) -ne 'old engine' -or

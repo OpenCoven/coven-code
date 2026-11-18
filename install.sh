@@ -249,7 +249,12 @@ install_binary_and_alias() (
   if [[ $force -ne 1 && -f "$target" ]] && ! same_bytes "$stage/$APP" "$target"; then
     installed_version=$("$target" --version </dev/null 2>/dev/null || true)
     installed_version=${installed_version%%$'\n'*}
-    installed_version=${installed_version//[^0-9.]/}
+    # Only an engine that names itself counts as the same version.
+    if [[ "$installed_version" =~ ^${APP}[[:space:]]+v?([0-9][^[:space:]]*)$ ]]; then
+      installed_version=${BASH_REMATCH[1]}
+    else
+      installed_version=""
+    fi
     if [[ -n "$local_binary" || "$installed_version" != "$specific_version" ]] &&
       ! confirm_replace "$installed_version"; then
       return 1

@@ -190,14 +190,15 @@ function Resolve-Version {
 }
 
 # ----- Already-installed check -----
-# The version an engine reports, or 'unknown'.
+# The version an engine reports as 'coven-code <version>', or 'unknown'.
 function Get-EngineVersion([string]$Path) {
     try {
-        $vline = (& $Path --version) 2>&1 | Select-Object -First 1
-        return ($vline -split '\s+')[-1]
+        $vline = [string]($null | & $Path --version 2>&1 | Select-Object -First 1)
     } catch {
         return 'unknown'
     }
+    if ($vline.Trim() -match '^coven-code\s+v?(\S+)$') { return $Matches[1] }
+    return 'unknown'
 }
 
 function Check-Existing($desiredVersion) {
@@ -209,7 +210,7 @@ function Check-Existing($desiredVersion) {
         Write-Muted "Use -Version to install a different one."
         exit 0
     }
-    Write-Muted "Found existing coven-code at $($existing.Source) (v$installed) - upgrading to v$desiredVersion"
+    Write-Muted "Found existing coven-code at $($existing.Source) (v$installed) - installing v$desiredVersion"
 }
 
 # ----- Download & extract -----
@@ -308,7 +309,8 @@ function Confirm-Replace([string]$Source, [string]$Target, [string]$DesiredVersi
     $installed = Get-EngineVersion $Target
     if (-not [string]::IsNullOrEmpty($DesiredVersion) -and $installed -eq $DesiredVersion) { return }
     $incoming = if ([string]::IsNullOrEmpty($DesiredVersion)) { 'the local binary' } else { "v$DesiredVersion" }
-    Write-Warn "$Target is a different coven-code (v$installed) from the one being installed ($incoming)."
+    $found = if ($installed -eq 'unknown') { 'version unknown' } else { "v$installed" }
+    Write-Warn "$Target is a different coven-code ($found) from the one being installed ($incoming)."
     if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
         # Read-Host fails under -NonInteractive; that is a no.
         try { $reply = Read-Host 'Replace it? [y/N]' } catch { $reply = '' }

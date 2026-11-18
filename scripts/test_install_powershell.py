@@ -100,21 +100,21 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.env["COVEN_CODE_INSTALL_FORCE"] = "1"
         self.assert_installed(self.install(self.source))
 
-    def shells(self):
-        shells = ["pwsh"]
+    def shells(self, env):
+        """Each shell to run, with its environment. PowerShell 7 puts its own
+        module paths in PSModulePath, and Windows PowerShell 5.1 then cannot
+        load Get-FileHash, so 5.1 gets its own."""
+        shells = [("pwsh", env)]
         if shutil.which("powershell"):
-            shells.append("powershell")
+            shells.append(("powershell", {name: value for name, value in env.items()
+                                          if name.upper() != "PSMODULEPATH"}))
         return shells
 
     def test_a_downloaded_engine_replaces_only_the_same_version_without_consent(self):
         env = {**self.env, "CONSENT_INSTALLER": str(INSTALLER), "CONSENT_TARGET": str(self.target)}
         cases = (("9.9.9", "installed", {}), ("1.0.0", "kept", {}),
                  ("1.0.0", "installed", {"COVEN_CODE_INSTALL_FORCE": "1"}))
-        for shell in self.shells():
-            # PowerShell 7 puts its own module paths in PSModulePath, and
-            # Windows PowerShell 5.1 then cannot load Get-FileHash.
-            shell_env = {name: value for name, value in env.items()
-                         if shell == "pwsh" or name.upper() != "PSMODULEPATH"}
+        for shell, shell_env in self.shells(env):
             for version, expect, extra in cases:
                 with self.subTest(shell=shell, version=version, extra=extra):
                     result = subprocess.run(
@@ -139,12 +139,12 @@ class PowerShellInstallerTests(unittest.TestCase):
             "ROLLBACK_TARGET": str(self.target),
             "ROLLBACK_SOURCE": str(self.source),
         }
-        for shell in self.shells():
+        for shell, shell_env in self.shells(env):
             for mode in ("local", "download"):
                 with self.subTest(shell=shell, mode=mode):
                     result = subprocess.run(
                         [shell, "-NoProfile", "-NonInteractive", "-File", str(ROLLBACK_FIXTURE)],
-                        env={**env, "ROLLBACK_MODE": mode},
+                        env={**shell_env, "ROLLBACK_MODE": mode},
                         capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
