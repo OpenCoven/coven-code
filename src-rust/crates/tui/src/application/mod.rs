@@ -75,12 +75,19 @@ pub struct ScopedQueryEvent {
 ///
 /// Each worker's forwarder waits for space instead of dropping, so semantic
 /// observations (tool results, errors, turn completion, durable messages)
-/// are never discarded under pressure. The query loop itself still emits
-/// into an unbounded per-turn buffer (`run_query_loop` takes an
-/// `UnboundedSender`), so a stalled interactive loop backs up into that
-/// buffer, not into this queue; bounding the producer needs a query-crate
-/// API change.
+/// are never discarded under pressure. A full queue stops the forwarder,
+/// which fills the worker's per-turn buffer
+/// ([`QUERY_PRODUCER_CAPACITY`]), which pauses the query loop itself.
 pub const QUERY_EVENT_QUEUE_CAPACITY: usize = 1024;
+
+/// Capacity of one turn's buffer between the query loop and its forwarder.
+///
+/// The query loop waits for space here rather than dropping or growing, so a
+/// stalled interactive loop pauses the turn: at most this many events plus
+/// [`QUERY_EVENT_QUEUE_CAPACITY`] are held for it. 256 matches the API
+/// client's own stream channel, which feeds most of these events one for one,
+/// so a full upstream stream fits without the loop waiting in normal use.
+pub const QUERY_PRODUCER_CAPACITY: usize = 256;
 
 /// An external effect requested by a presentation reducer step.
 ///

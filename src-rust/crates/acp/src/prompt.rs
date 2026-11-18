@@ -361,7 +361,7 @@ mod tests {
                 is_error: true,
             },
         ] {
-            tx.send(event).unwrap();
+            tx.emit(event).await.unwrap();
         }
         drop(tx);
         let forwarder = forward_events(connection, acp::SessionId::new("session-1"), rx);

@@ -2589,8 +2589,10 @@ fn adopt_in_app_rewind(
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
+/// While it waits, the turn's own bounded buffer fills and the query loop
+/// waits too (#408 D2).
 async fn forward_scoped_events(
-    mut turn_rx: tokio::sync::mpsc::UnboundedReceiver<claurst_query::QueryEvent>,
+    mut turn_rx: tokio::sync::mpsc::Receiver<claurst_query::QueryEvent>,
     events: tokio::sync::mpsc::Sender<claurst_tui::application::ScopedQueryEvent>,
     generation: claurst_tui::application::SessionGeneration,
 ) {
@@ -2646,17 +2648,20 @@ impl InteractiveQuery {
             let mut msgs = messages.lock().await.clone();
             // The query loop owns `turn_tx` and drops it when it returns, which
             // ends the forwarder; joining both keeps the worker's lifetime
-            // covering delivery of every event it produced.
-            let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+            // covering delivery of every event it produced. The buffer is
+            // bounded: when it is full the query loop waits for the
+            // forwarder instead of growing it.
+            let (turn_tx, turn_rx) =
+                tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
             let forward = forward_scoped_events(turn_rx, self.events, self.generation);
-            let run = claurst_query::run_query_loop(
+            let run = claurst_query::run_query_loop_with_events(
                 self.client.as_ref(),
                 &mut msgs,
                 self.tools.as_slice(),
                 &self.context,
                 &self.config,
                 self.tracker,
-                Some(turn_tx),
+                Some(turn_tx.into()),
                 self.cancel,
                 None,
             );
@@ -6733,13 +6738,14 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_forwarder_delivers_every_event_in_order_under_backpressure() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, mut receiver) = tokio::sync::mpsc::channel(1);
         let mut scope = claurst_tui::application::SessionScope::default();
         let generation = scope.advance();
         for n in 0..200 {
             turn_tx
-                .send(claurst_query::QueryEvent::Status(format!("event {n}")))
+                .try_send(claurst_query::QueryEvent::Status(format!("event {n}")))
                 .unwrap();
         }
         drop(turn_tx);
@@ -6761,11 +6767,12 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_forwarder_stops_when_the_interactive_loop_is_gone() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
         turn_tx
-            .send(claurst_query::QueryEvent::Status("orphan".into()))
+            .try_send(claurst_query::QueryEvent::Status("orphan".into()))
             .unwrap();
         // The sender stays alive: the forwarder must end on the closed queue,
         // not wait for the turn to finish.
@@ -6787,11 +6794,12 @@ mod tests {
         // settle its cancel. A worker finishes only once its forwarder has
         // queued everything, so after a pass that saw it finished nothing of
         // its turn can arrive any more.
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, mut queue) = tokio::sync::mpsc::channel(1);
         for n in 0..3 {
             turn_tx
-                .send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
+                .try_send(claurst_query::QueryEvent::Status(format!("backlog {n}")))
                 .unwrap();
         }
         drop(turn_tx);
@@ -6818,11 +6826,12 @@ mod tests {
 
     #[tokio::test]
     async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
-        let (turn_tx, turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (turn_tx, turn_rx) =
+            tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, queue) = tokio::sync::mpsc::channel(1);
         for _ in 0..3 {
             turn_tx
-                .send(claurst_query::QueryEvent::Status("backlog".into()))
+                .try_send(claurst_query::QueryEvent::Status("backlog".into()))
                 .unwrap();
         }
         drop(turn_tx);
