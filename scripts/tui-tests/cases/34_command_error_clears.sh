@@ -7,7 +7,8 @@
 # client is found and every request fails. `/coven sessions` then puts
 # `Error: Coven daemon offline. ...` on the status row. `/coven status`
 # succeeds: it prints `Coven daemon: offline` to the transcript, and the
-# earlier error is gone from the status row. Classic shows the status row
+# earlier error is gone from the status row. The same holds for the
+# `Unknown command: /zzqxv` error. Classic shows the status row
 # text only before its first turn, which is the case here. Classic runs with
 # COVEN_CODE_UI unset and no provider; nothing listens anywhere.
 
@@ -42,6 +43,17 @@ _cec_journey() { # renderer
         sleep 0.5
         assert_absent "$(tui_capture)" "Error: Coven daemon offline" \
           "$r: after the next command the earlier error is gone from the status row"
+        # An unknown command is an error too.
+        tui_type "/zzqxv"; sleep 0.3; tui_keys Enter
+        if wait_for "Unknown command: /zzqxv" 10; then
+          _pass "$r: an unknown command puts its error on the status row"
+          tui_type "/coven status"; sleep 0.3; tui_keys Enter
+          sleep 1
+          assert_absent "$(tui_capture)" "Unknown command: /zzqxv" \
+            "$r: after the next command the unknown-command error is gone"
+        else
+          _fail "$r: an unknown command puts its error on the status row" "$(tui_capture)"
+        fi
       else
         _fail "$r: the next command runs and prints its answer" "$(tui_capture)"
       fi

@@ -4362,7 +4362,7 @@ async fn run_interactive(
                                 if !suggestions.is_empty() {
                                     message.push_str(&format!(". Try {}", suggestions.join(", ")));
                                 }
-                                app.status_message = Some(message);
+                                app.show_command_error(message);
                             }
 
                             if refresh_catalog {
