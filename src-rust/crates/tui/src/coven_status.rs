@@ -98,9 +98,24 @@ pub(crate) fn forget_daemon_probe() {
     while DAEMON_PROBE_IN_FLIGHT.load(Ordering::Acquire) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(
+        !DAEMON_PROBE_IN_FLIGHT.load(Ordering::Acquire),
+        "a daemon probe outlived {:?}",
+        DAEMON_PROBE_BUDGET * 3
+    );
     *daemon_probe_cell()
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The last completed probe's reading, or `None` before one lands.
+#[cfg(test)]
+pub(crate) fn cached_daemon_probe() -> Option<bool> {
+    daemon_probe_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|probe| probe.online)
 }
 
 // ---------------------------------------------------------------------------

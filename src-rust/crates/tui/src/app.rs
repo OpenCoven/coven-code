@@ -9237,6 +9237,17 @@ mod tests {
         crate::coven_status::forget_daemon_probe();
         let mut app = make_app();
         let mut now = app.daemon_last_checked;
+        // Until a probe lands, the reading falls back to socket-file presence.
+        // Wait for the probe itself to find the daemon alive.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::coven_status::cached_daemon_probe().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            crate::coven_status::cached_daemon_probe(),
+            Some(true),
+            "the probe did not find the fake daemon"
+        );
         assert!(
             refresh_until(&mut app, &mut now, true),
             "daemon_online never turned on while the daemon answered"
@@ -9270,7 +9281,9 @@ mod tests {
             "daemon_online stayed on after the daemon stopped answering"
         );
 
-        // `coven daemon stop` removes the socket: the reading stays offline.
+        // `coven daemon stop` removes the socket. A guard, not a refresh
+        // check (the reading is already off): with no socket file, neither
+        // the fallback nor a probe turns it back on.
         std::fs::remove_file(&socket).expect("remove socket");
         crate::coven_status::forget_daemon_probe();
         for _ in 0..5 {
