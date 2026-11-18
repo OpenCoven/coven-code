@@ -254,6 +254,18 @@ jobs:
         working-directory: src-rust
         run: cargo test -p claurst-tools --locked --test foreground_windows
 
+      # Windows has no workspace sandbox, so a scoped launch must be refused
+      # before any model request (#459). The Linux job covers this in its
+      # workspace run; nothing else builds the engine's tests on Windows.
+      # This step runs even if an earlier step failed, and requires a test.
+      - name: Test that a scoped launch is refused without a sandbox
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          cargo test -p claurst --locked --test workspace_policy_unavailable | tee "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
+          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
+
       # The Job Object module is Windows-only, so its unit tests run only here.
       # A filter that matches nothing passes, so require at least one test.
       - name: Test the Job Object resume decision
