@@ -36,6 +36,37 @@ Partial local runs can still pass executed headless checks while explicitly
 reporting interactive skips. They are not full terminal acceptance. CI sets
 `REQUIRE_TMUX=1` so a missing terminal dependency cannot silently skip that gate.
 
+## Isolation from your own settings
+
+The binary reads settings from its home and from a `.coven-code` directory in
+any ancestor of its working directory. `run.sh` therefore makes a scratch
+directory under `TMPDIR` (default `/tmp`) for each run and removes it on exit:
+
+- Cases 01-07, which bring no home of their own, start the binary with `HOME`
+  set to a scratch home seeded with `{"hasCompletedOnboarding": true}`, from a
+  scratch working directory.
+- `COVEN_HOME`, `COVEN_CODE_HOME` and `COVEN_PARENT` are unset for the run,
+  since each changes which home the binary uses. The line typed into a tmux
+  pane for cases 02-07 changes to the scratch working directory and unsets them
+  again, because the pane's shell has read your startup files. A
+  `TUI_LAUNCH_PREFIX` you export is typed after that change of directory, so a
+  `cd` in it moves those cases again.
+- For the cases, `TMPDIR` points inside the scratch directory. The cases that
+  make their own homes and working directories do so with `mktemp -d` or
+  Python's `tempfile`, so these land there too. The exception is macOS, where
+  `mktemp -d` ignores `TMPDIR` and uses the per-user temporary directory under
+  `/var/folders`.
+- The run refuses to start (exit `2`) when the scratch directory is inside
+  your home directory (`$HOME` or your login home) or below a directory that
+  holds a `.coven-code`. Set `TMPDIR` to a directory that is neither.
+
+So a run started from the repository checkout, or with a throwaway `HOME`,
+neither reads nor writes your own `~/.coven-code`. A relative `COVEN_BIN`,
+`TUI_LOG_DIR`, `COVEN_PANIC_PROBE` or `COVEN_TUI_PTY_RECEIPTS` is resolved
+against the directory you started the run from. The shell in each tmux pane
+still starts with your own home and startup files; only the binary under test
+gets the scratch home.
+
 ## Harness regression checks
 
 ```bash
@@ -43,8 +74,9 @@ python3 -m unittest discover -s scripts/tui-tests -p 'test_*.py' -v
 ```
 
 These tests exercise the actual runner and assertion library with synthetic
-case inputs and an inert tmux executable. They need no engine, tmux server,
-credentials or network, and do not establish real-binary terminal acceptance.
+case inputs and stand-ins for `tmux` and the engine. They need no engine, tmux
+server, credentials or network, and do not establish real-binary terminal
+acceptance.
 `test_panic_restore_pty.py` also needs a PTY: it runs the panic driver, and
 case 30 through the runner, against fake probes (about a minute).
 CI runs them before building and exercising the real engine.
@@ -56,8 +88,10 @@ on pushes to `main` and on PRs that touch `src-rust/**` or this suite (plus
 manual `workflow_dispatch`). The job installs `tmux`, builds the debug binary
 and the panic probe (`cargo build --locked --package claurst --package
 claurst-tui --bins --example panic_restore`), seeds an offline settings file
-(`hasCompletedOnboarding: true`) so a credential-less runner lands on the main
-screen, and runs `run.sh`. No secrets or network access required.
+(`hasCompletedOnboarding: true`) in the runner's home, and runs `run.sh`. No
+case reads that file any more: `run.sh` seeds the scratch home it gives cases
+01-07 (see "Isolation from your own settings"), so a credential-less runner
+lands on the main screen. No secrets or network access required.
 
 ## Requirements
 
