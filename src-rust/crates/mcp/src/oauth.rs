@@ -2383,7 +2383,12 @@ mod tests {
                 {
                     token_server.abort();
                 }
-                result => break (result.unwrap(), token_server, callback_address),
+                result => {
+                    let result = result.unwrap_or_else(|error| {
+                        panic!("callback flow failed on attempt {attempts} of 3: {error:#}")
+                    });
+                    break (result, token_server, callback_address);
+                }
             }
         };
         token_server.await.unwrap();
