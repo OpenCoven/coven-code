@@ -88,6 +88,16 @@ pub fn daemon_looks_online() -> bool {
     }
 }
 
+/// Drop the cached probe result, so the next read starts again from
+/// socket-file presence. The cache is process-wide, so a test that changes
+/// the daemon's state calls this instead of waiting out the TTL.
+#[cfg(test)]
+pub(crate) fn forget_daemon_probe() {
+    *daemon_probe_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 // ---------------------------------------------------------------------------
 // Familiar roster (~/.coven/familiars.toml)
 // ---------------------------------------------------------------------------
