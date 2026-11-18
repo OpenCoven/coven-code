@@ -13,8 +13,8 @@ every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
 can act while text is still arriving; a `release` file already there means no
 hold.
 Any other word after the count is an error.
-A session memory extraction request is answered with no memories and is not
-logged. Each other streamed request appends one JSON line to LOG_FILE for later checks,
+A session memory extraction request is answered with no memories and is kept
+out of LOG_FILE and MESSAGES_LOG. Each other streamed request appends one JSON line to LOG_FILE for later checks,
 whose "last" holds the request's last message. Given MESSAGES_LOG, it also
 appends there a JSON line whose "messages" holds all of them, in order. That
 is a file of its own, because cases search LOG_FILE's lines for text that the
@@ -50,8 +50,8 @@ HOLD_DELTA_SECONDS = 0.2
 HELD_TEXT = "held line\n"
 # Session memory extraction runs after a turn once the conversation has 20
 # user and assistant messages, and goes to the same API base as the turn.
-# It is answered with no memories and kept out of the logs: it is not part
-# of the turn a case checks.
+# It is answered with no memories and kept out of LOG_FILE and MESSAGES_LOG
+# (CONNECTIONS_LOG still records it): it is not part of the turn a case checks.
 EXTRACTION_SYSTEM_PREFIX = "You are a memory extraction assistant."
 
 
