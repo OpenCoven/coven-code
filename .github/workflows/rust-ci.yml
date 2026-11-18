@@ -257,7 +257,8 @@ jobs:
       # Windows has no workspace sandbox, so a scoped launch must be refused
       # before any model request (#459). The Linux job covers this in its
       # workspace run; nothing else builds the engine's tests on Windows.
-      # This step runs even if an earlier step failed, and requires a test.
+      # This step runs even if an earlier step failed. A test file that
+      # compiles to no test passes, so require at least one passed test.
       - name: Test that a scoped launch is refused without a sandbox
         if: ${{ !cancelled() }}
         working-directory: src-rust
@@ -269,6 +270,7 @@ jobs:
       # The Job Object module is Windows-only, so its unit tests run only here.
       # A filter that matches nothing passes, so require at least one test.
       - name: Test the Job Object resume decision
+        if: ${{ !cancelled() }}
         working-directory: src-rust
         shell: bash
         run: |
