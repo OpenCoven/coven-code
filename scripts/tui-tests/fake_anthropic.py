@@ -18,11 +18,11 @@ whose "last" holds the request's last message. Given MESSAGES_LOG, it also
 appends there a JSON line whose "messages" holds all of them, in order. That
 is a file of its own, because cases search LOG_FILE's lines for text that the
 history of a later request would repeat. Given CONNECTIONS_LOG too, it appends
-there a JSON line for every request once its reply is sent: the method, path,
-whether it streamed, a number unique to the TCP connection it came on
-(counting from 1), and when it started and ended, in seconds since the
-epoch. Only the connection pool that opened a connection can send a later
-request on it.
+there a JSON line for every request it answers, once the reply is sent:
+the method, path, whether it streamed, a number unique to the TCP
+connection it came on (counting from 1), and when it started and ended, in
+seconds since the epoch. Only the connection pool that opened a connection
+can send a later request on it.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG [CONNECTIONS_LOG]]
 """

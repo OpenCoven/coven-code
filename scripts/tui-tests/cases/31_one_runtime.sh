@@ -15,7 +15,8 @@
 # - provider: three streamed requests; each carries the one before it, the
 #   fake's reply to it and the next user message; the request of the second
 #   turn arrives on a TCP connection the first turn used, so it came from the
-#   same HTTP connection pool (one reqwest client, or a clone of it);
+#   same HTTP connection pool (one reqwest client, or a clone of it); the
+#   tool-result request inside the first turn is not checked on its own;
 # - store: the saved session holds both turns (roles, text and tool ids) as
 #   the model saw them, with the last answer, and every indexed message
 #   belongs to that one session.
@@ -193,7 +194,7 @@ expected_files = sorted([os.path.join(config, "sessions", first_id + ".json"),
                          os.path.join(config, "sessions.db")])
 report("under the home and the project, the only session file and session index are those",
        sorted(elsewhere) == expected_files,
-       [os.path.relpath(path, os.path.dirname(home)) for path in sorted(elsewhere)])
+       [os.path.relpath(path, os.path.realpath(os.path.dirname(home))) for path in sorted(elsewhere)])
 
 db_path = os.path.join(config, "sessions.db")
 if os.path.exists(db_path):
@@ -218,7 +219,7 @@ report("every indexed message belongs to that session, the answer of each turn i
 requests = [line["messages"] for line in read_lines(messages_log)]
 streams = sorted((c for c in read_lines(connections_log) if c.get("stream")),
                  key=lambda c: c["started"])
-report("the model saw three streamed requests, none twice: the prompt, the tool result and the second prompt",
+report("the model saw three streamed requests",
        len(requests) == 3 and len(streams) == 3,
        "%d logged with messages, %d streamed" % (len(requests), len(streams)))
 
