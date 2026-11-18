@@ -249,16 +249,62 @@ jobs:
           restore-keys: rust-ci-windows-foreground-
 
       # No other job runs Rust tests on Windows; these cover the cmd.exe
-      # fallbacks that both Bash tools use there (#373).
+      # fallbacks that both Bash tools use there, their background tasks and
+      # the worktree post-create command (#373).
       - name: Test cancelled, timed-out and finished foreground commands
         working-directory: src-rust
         run: cargo test -p claurst-tools --locked --test foreground_windows
 
+      # Windows has no workspace sandbox, so a scoped launch must be refused
+      # before any model request (#459). The Linux job covers this in its
+      # workspace run; nothing else builds the engine's tests on Windows.
+      # This step runs even if an earlier step failed. A test file that
+      # compiles to no test passes, so require at least one passed test.
+      - name: Test that a scoped launch is refused without a sandbox
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          cargo test -p claurst --locked --test workspace_policy_unavailable | tee "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
+          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/workspace-policy-unavailable-tests.txt"
+
       # The Job Object module is Windows-only, so its unit tests run only here.
       # A filter that matches nothing passes, so require at least one test.
       - name: Test the Job Object resume decision
+        if: ${{ !cancelled() }}
         working-directory: src-rust
         shell: bash
         run: |
           cargo test -p claurst-tools --locked --lib windows_job | tee "$RUNNER_TEMP/windows-job-tests.txt"
           grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/windows-job-tests.txt"
+
+      # The formatter and post-create command time limits must stop the
+      # command's whole tree (#373). Their unit tests take a short limit, so
+      # they run here rather than in the integration test above. This step
+      # runs even if an earlier step failed, and requires tests from each
+      # module.
+      - name: Test formatter and post-create command time limits
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          for module in formatter worktree; do
+            cargo test -p claurst-tools --locked --lib "$module::tests" | tee "$RUNNER_TEMP/$module-tests.txt"
+            grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$module-tests.txt"
+          done
+
+      # cmd.exe must get a command's double quotes exactly as written (#517).
+      # Each of these five crates hands a command line to cmd.exe and has a
+      # test file for it. This step runs even if an earlier step failed, tries
+      # every crate, and requires tests from each.
+      - name: Test that cmd.exe gets a command's quotes as written
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          failed=0
+          for package in claurst-core claurst-plugins claurst-tools claurst-query claurst-commands; do
+            cargo test -p "$package" --locked --test windows_cmd_quotes | tee "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
+            grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/$package-cmd-quotes.txt" || failed=1
+          done
+          exit "$failed"

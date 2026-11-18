@@ -940,7 +940,14 @@ fn contract_version_ignores_renderer_selector() {
 #[test]
 fn contract_print_ignores_renderer_selector() {
     let text = assert_ignores_renderer_selector("--print", "", |cmd| {
-        cmd.args(["--print", "ping", "--model", FAKE_MODEL]);
+        cmd.args([
+            "--print",
+            "ping",
+            "--model",
+            FAKE_MODEL,
+            "--session-id",
+            CONTRACT_SESSION,
+        ]);
     });
     assert_eq!(text.code, 0, "{text}");
     assert_eq!(text.stdout, format!("{FAKE_REPLY}\n"), "{text}");
@@ -948,18 +955,23 @@ fn contract_print_ignores_renderer_selector() {
 
     let json = assert_ignores_renderer_selector("--print --output-format json", "", |cmd| {
         cmd.args(["--print", "--output-format", "json", "ping"])
-            .args(["--model", FAKE_MODEL]);
+            .args(["--model", FAKE_MODEL, "--session-id", CONTRACT_SESSION]);
     });
     assert_eq!(json.code, 0, "{json}");
     let frames = json.stdout_frames();
     assert_eq!(frames.len(), 1, "{json}");
     assert_eq!(frames[0]["type"], "result", "{json}");
     assert_eq!(frames[0]["result"], FAKE_REPLY, "{json}");
+    assert_eq!(frames[0]["session_id"], CONTRACT_SESSION, "{json}");
+    assert_eq!(
+        frames[0]["continuation"]["session_id"], CONTRACT_SESSION,
+        "{json}"
+    );
 
     let streamed =
         assert_ignores_renderer_selector("--print --output-format stream-json", "", |cmd| {
             cmd.args(["--print", "--output-format", "stream-json", "ping"])
-                .args(["--model", FAKE_MODEL]);
+                .args(["--model", FAKE_MODEL, "--session-id", CONTRACT_SESSION]);
         });
     assert_eq!(streamed.code, 0, "{streamed}");
     let frames = streamed.stdout_frames();
@@ -969,6 +981,11 @@ fn contract_print_ignores_renderer_selector() {
         .collect();
     assert_eq!(kinds, ["text_delta", "result"], "{streamed}");
     assert_eq!(frames[0]["text"], FAKE_REPLY, "{streamed}");
+    assert_eq!(frames[1]["session_id"], CONTRACT_SESSION, "{streamed}");
+    assert_eq!(
+        frames[1]["continuation"]["session_id"], CONTRACT_SESSION,
+        "{streamed}"
+    );
 
     // The error path: exit 1 with a message on stderr.
     let missing = assert_ignores_renderer_selector("--print without a prompt", "", |cmd| {

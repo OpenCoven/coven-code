@@ -32,6 +32,7 @@ pub mod provider_types;
 
 // Provider abstraction traits (Phase 1B).
 pub mod auth;
+pub mod model_dispatch;
 pub mod provider;
 mod sse_lines;
 pub mod stream_parser;
@@ -475,6 +476,11 @@ pub mod client {
     }
 
     /// The main Anthropic API client.
+    ///
+    /// Cloning shares the HTTP pool and keeps the configuration and any goal
+    /// authority, so a clone sends to the same endpoint with the same
+    /// credentials.
+    #[derive(Clone)]
     pub struct AnthropicClient {
         http: reqwest::Client,
         config: ClientConfig,
@@ -843,6 +849,7 @@ pub mod client {
                         if let Some((turn, _)) = &self.goal_authority {
                             turn.mark_request_attempted();
                         }
+                        crate::model_dispatch::mark_attempted();
                         req.send().await
                     } => response.map_err(ClaudeError::Http)?,
                 };

@@ -17,6 +17,7 @@ mod memory_admin;
 mod oauth_flow;
 #[cfg(all(test, unix))]
 mod plugin_mcp_config_tests;
+mod run_budget;
 mod stream_mode;
 mod upgrade;
 
@@ -154,9 +155,13 @@ struct Cli {
     #[arg(long = "resume", num_args(0..=1), default_missing_value("__last__"))]
     resume: Option<String>,
 
-    /// Maximum number of agentic turns
-    #[arg(long = "max-turns", default_value_t = 10)]
-    max_turns: u32,
+    /// Positive model-round budget per query (explicit > agent > default 10)
+    #[arg(long = "max-turns")]
+    max_turns: Option<std::num::NonZeroU32>,
+
+    /// Print offline run-budget capability JSON and exit
+    #[arg(long = "run-budget-capabilities", action = ArgAction::SetTrue)]
+    run_budget_capabilities: bool,
 
     /// Custom system prompt
     #[arg(long = "system-prompt", short = 's')]
@@ -509,6 +514,11 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
+    // Capability detection must not load credentials, migrate state, or launch work.
+    if raw_args.len() == 2 && raw_args[1] == "--run-budget-capabilities" {
+        println!("{}", run_budget::capabilities());
+        return Ok(());
+    }
     // Perform a best-effort, non-fatal relocation of the engine home from the
     // legacy ~/.coven-code/ to ~/.coven/code/ when running under the unified
     // coven CLI.  Must run before any Settings::load() or auth/config access.
@@ -607,6 +617,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cli = Cli::parse();
+    if cli.run_budget_capabilities {
+        println!("{}", run_budget::capabilities());
+        return Ok(());
+    }
 
     // --context loads a versioned coven-github session brief. It
     // implies full headless + skip-permissions and overrides model/cwd from the
@@ -1011,7 +1025,7 @@ async fn main() -> anyhow::Result<()> {
         claurst_query::QueryConfig::from_config_with_registry(&config, &model_registry);
     query_config.preserve_selected_model = cli.model.is_some() || cli.provider.is_some();
     query_config.model_registry = Some(model_registry.clone());
-    query_config.max_turns = cli.max_turns;
+    query_config.max_turns_override = cli.max_turns;
     query_config.system_prompt = Some(system_prompt);
     query_config.append_system_prompt = None;
     query_config.working_directory = Some(cwd.display().to_string());
@@ -1048,10 +1062,6 @@ async fn main() -> anyhow::Result<()> {
         if let Some(def) = all_agents.get(&agent_key) {
             let access = def.access.clone();
             query_config.agent_definition = Some(def.clone());
-            // Override max_turns from agent definition when specified.
-            if let Some(turns) = def.max_turns {
-                query_config.max_turns = turns;
-            }
             filter_tools_for_agent(tools, &access)
         } else {
             eprintln!(
@@ -1064,6 +1074,9 @@ async fn main() -> anyhow::Result<()> {
         tools
     };
     apply_headless_review_query_defaults(&mut query_config, github_context.as_ref());
+    query_config
+        .effective_turn_budget()
+        .map_err(anyhow::Error::msg)?;
     let tools = filter_tools_for_hosted_review(tools, &config);
 
     // --print / headless mode. No scheduled prompt runs here: a headless run is
@@ -1088,7 +1101,10 @@ async fn main() -> anyhow::Result<()> {
                 query_config,
                 cost_tracker,
                 model: claurst_api::effective_model_for_config(&config, &model_registry),
-                resume_id: cli.resume.clone(),
+                resume_id: cli
+                    .resume
+                    .clone()
+                    .or_else(|| cli.continue_session.then(|| "__last__".into())),
             })
             .await;
             return run;
@@ -1907,7 +1923,7 @@ async fn run_headless(
     github_context: Option<&SessionBrief>,
     client: Arc<claurst_api::AnthropicClient>,
     tools: Arc<Vec<Box<dyn claurst_tools::Tool>>>,
-    tool_ctx: ToolContext,
+    mut tool_ctx: ToolContext,
     query_config: claurst_query::QueryConfig,
     cost_tracker: Arc<CostTracker>,
 ) -> anyhow::Result<headless::HeadlessRun> {
@@ -1944,6 +1960,18 @@ async fn run_headless(
         vec![claurst_core::types::Message::user(prompt)]
     };
 
+    let resume = cli
+        .resume
+        .as_deref()
+        .or_else(|| cli.continue_session.then_some("__last__"));
+    let mut session = run_budget::session(&mut tool_ctx, &query_config, resume).await?;
+    let budget = query_config
+        .effective_turn_budget()
+        .map_err(anyhow::Error::msg)?;
+    let prompt_messages = messages;
+    messages = session.messages.clone();
+    messages.extend(prompt_messages);
+
     // --prefill: inject a partial assistant turn before the query so the model
     // continues from that text (mirrors TS --prefill flag).
     if let Some(ref prefill_text) = cli.prefill {
@@ -1972,18 +2000,19 @@ async fn run_headless(
     let cancel_clone = cancel.clone();
 
     let query_handle = tokio::spawn(async move {
-        claurst_query::run_query_loop(
+        let run = claurst_query::run_query_loop_with_receipt(
             client_clone.as_ref(),
             &mut messages,
             tools.as_slice(),
             &tool_ctx_clone,
             &qcfg,
             tracker_clone,
-            Some(event_tx_clone),
+            Some(event_tx_clone.into()),
             cancel_clone,
             None,
         )
-        .await
+        .await;
+        (run, messages)
     });
 
     // Drop the original tx so the channel closes when the task drops its clone
@@ -2043,9 +2072,19 @@ async fn run_headless(
     }
 
     // Wait for the query task to finish and get the final outcome
-    let outcome = query_handle.await.unwrap_or(QueryOutcome::Error(
-        claurst_core::error::ClaudeError::Other("Query task panicked".to_string()),
-    ));
+    let (outcome, saved, consumed) = match query_handle.await {
+        Ok((run, messages)) => {
+            let saved = run_budget::persist(&mut session, messages).await;
+            (run.outcome, saved, run.num_turns)
+        }
+        Err(error) => (
+            QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
+                "Query task failed: {error}"
+            ))),
+            false,
+            0,
+        ),
+    };
 
     // Classify the terminal outcome and capture the familiar's final prose (it
     // becomes the PR body) BEFORE the per-format match below consumes `outcome`.
@@ -2053,7 +2092,7 @@ async fn run_headless(
         QueryOutcome::EndTurn { .. } => RunOutcome::Completed,
         QueryOutcome::MaxTokens { .. } => RunOutcome::Truncated,
         QueryOutcome::Cancelled => RunOutcome::Cancelled,
-        QueryOutcome::Error(_) => RunOutcome::Errored,
+        QueryOutcome::Error(_) | QueryOutcome::TurnBudgetExhausted { .. } => RunOutcome::Errored,
         QueryOutcome::BudgetExceeded { .. } => RunOutcome::BudgetExceeded,
     };
     let final_text = if !full_text.is_empty() {
@@ -2068,6 +2107,22 @@ async fn run_headless(
         }
     };
 
+    // Exhaustion is a local, unfinished outcome in the existing v1 error envelope.
+    if matches!(
+        outcome,
+        QueryOutcome::TurnBudgetExhausted { .. } | QueryOutcome::Cancelled
+    ) && is_json_output
+    {
+        let exhausted = matches!(outcome, QueryOutcome::TurnBudgetExhausted { .. });
+        let mut frame = serde_json::json!({
+            "type":"result", "subtype":if exhausted {"error_during_execution"} else {"error_cancelled"},
+            "is_error":true, "session_id":session.id, "num_turns":consumed,
+            "error":if exhausted {run_budget::exhaustion_message(budget, consumed)} else {"cancelled".into()},
+            "result":final_text,
+        });
+        run_budget::annotate(&mut frame, budget, consumed, &outcome, &session.id, saved)?;
+        println!("{frame}");
+    }
     // Final output
     match cli.output_format {
         CliOutputFormat::Json => match outcome {
@@ -2077,7 +2132,7 @@ async fn run_headless(
                 } else {
                     full_text
                 };
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "type": "result",
                     "result": result_text,
                     "usage": {
@@ -2088,6 +2143,16 @@ async fn run_headless(
                     },
                     "cost_usd": cost_tracker.total_cost_usd(),
                 });
+                out["session_id"] = session.id.clone().into();
+                out["num_turns"] = consumed.into();
+                run_budget::annotate(
+                    &mut out,
+                    budget,
+                    consumed,
+                    &QueryOutcome::EndTurn { message, usage },
+                    &session.id,
+                    saved,
+                )?;
                 println!("{}", out);
             }
             QueryOutcome::Error(e) => {
@@ -2099,8 +2164,8 @@ async fn run_headless(
         CliOutputFormat::StreamJson => {
             // Already streamed above; emit final result event
             match outcome {
-                QueryOutcome::EndTurn { usage, .. } => {
-                    let out = serde_json::json!({
+                QueryOutcome::EndTurn { ref usage, .. } => {
+                    let mut out = serde_json::json!({
                         "type": "result",
                         "usage": {
                             "input_tokens": usage.input_tokens,
@@ -2108,6 +2173,9 @@ async fn run_headless(
                         },
                         "cost_usd": cost_tracker.total_cost_usd(),
                     });
+                    out["session_id"] = session.id.clone().into();
+                    out["num_turns"] = consumed.into();
+                    run_budget::annotate(&mut out, budget, consumed, &outcome, &session.id, saved)?;
                     println!("{}", out);
                 }
                 QueryOutcome::Error(e) => {
@@ -2131,6 +2199,31 @@ async fn run_headless(
             match outcome {
                 QueryOutcome::Error(e) => {
                     eprintln!("Error: {}", e);
+                }
+                QueryOutcome::TurnBudgetExhausted { budget, consumed } => {
+                    eprintln!("{}", run_budget::exhaustion_message(budget, consumed));
+                    if let Some(directory) = session
+                        .working_dir
+                        .as_deref()
+                        .filter(|_| saved && !claurst_tools::workspace_scope::active())
+                    {
+                        #[cfg(not(windows))]
+                        let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+                        #[cfg(windows)]
+                        let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
+                        #[cfg(windows)]
+                        let shell = " in PowerShell";
+                        #[cfg(not(windows))]
+                        let shell = "";
+                        eprintln!("Saved session: {}", session.id);
+                        eprintln!(
+                            "Resume{shell}: coven-code --resume {} --cwd {}",
+                            quote(&session.id),
+                            quote(directory)
+                        );
+                    } else {
+                        eprintln!("Engine continuation is unavailable for this run.");
+                    }
                 }
                 QueryOutcome::BudgetExceeded {
                     cost_usd,
@@ -3455,17 +3548,9 @@ async fn run_interactive(
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 // Run via shell so pipes/redirects in the command string work.
-                let output = if cfg!(target_os = "windows") {
-                    tokio::process::Command::new("cmd")
-                        .args(["/C", &cmd_str])
-                        .output()
-                        .await
-                } else {
-                    tokio::process::Command::new("sh")
-                        .args(["-c", &cmd_str])
-                        .output()
-                        .await
-                };
+                let output = tokio::process::Command::from(claurst_core::shell::command(&cmd_str))
+                    .output()
+                    .await;
                 if let Ok(out) = output {
                     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     let _ = tx.try_send(text);
@@ -3872,7 +3957,7 @@ async fn run_interactive(
                             let (name, args) = claurst_tui::input::parse_slash_command(&app.prompt_input.text);
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(name, args, &mut cmd_ctx) {
                                 app.take_input();
-                                app.status_message = Some(error);
+                                app.show_command_error(error);
                                 continue;
                             }
                         }
@@ -3902,8 +3987,9 @@ async fn run_interactive(
                                 claurst_tui::input::parse_slash_command(&input);
                             let cmd_name = cmd_name.to_ascii_lowercase();
                             let cmd_args = cmd_args.to_string();
+                            app.clear_command_error();
                             if let Err(error) = claurst_commands::preflight_interactive_slash_command(&cmd_name, &cmd_args, &mut cmd_ctx) {
-                                app.status_message = Some(error);
+                                app.show_command_error(error);
                                 continue;
                             }
                             let canonical_path = claurst_commands::canonical_catalog_path(&cmd_name, &cmd_args)
@@ -4369,7 +4455,7 @@ async fn run_interactive(
                                     terminal = claurst_tui::setup_terminal(renderer)?;
                                 }
                                 Some(CommandResult::Error(e)) => {
-                                    app.status_message = Some(format!("Error: {}", e));
+                                    app.show_command_error(format!("Error: {}", e));
                                 }
                                 Some(CommandResult::Silent) | None => {
                                     handled_by_cli = false;
@@ -4421,7 +4507,7 @@ async fn run_interactive(
                                 if !suggestions.is_empty() {
                                     message.push_str(&format!(". Try {}", suggestions.join(", ")));
                                 }
-                                app.status_message = Some(message);
+                                app.show_command_error(message);
                             }
 
                             if refresh_catalog {
@@ -4844,9 +4930,6 @@ async fn run_interactive(
                         if let Some(def) = resolve_tui_agent_mode(mode, &cmd_ctx.config.agents) {
                             base_query_config.agent_name = Some(mode.to_string());
                             base_query_config.agent_definition = Some(def.clone());
-                            if let Some(turns) = def.max_turns {
-                                base_query_config.max_turns = turns;
-                            }
                             tools_arc = filter_tools_for_hosted_review(
                                 filter_tools_for_agent(all_tools_arc.clone(), &def.access),
                                 &cmd_ctx.config,
@@ -5783,6 +5866,13 @@ async fn run_interactive(
                             None,
                         );
                     }
+                    Ok(QueryOutcome::TurnBudgetExhausted { budget, consumed }) => {
+                        app.notifications.push(
+                            claurst_tui::notifications::NotificationKind::Warning,
+                            run_budget::exhaustion_message(*budget, *consumed),
+                            None,
+                        );
+                    }
                     Ok(QueryOutcome::EndTurn { .. }) => {
                         // Successful turn — refresh the auto-retry budget for
                         // any future rate-limit episode.
@@ -5962,7 +6052,9 @@ async fn run_interactive(
                     || was_auto_compact
                     || matches!(
                         &query_outcome,
-                        Ok(QueryOutcome::Cancelled | QueryOutcome::BudgetExceeded { .. })
+                        Ok(QueryOutcome::Cancelled
+                            | QueryOutcome::BudgetExceeded { .. }
+                            | QueryOutcome::TurnBudgetExhausted { .. })
                     )
                     || goal_turn.as_ref().is_some_and(|owner| owner.abandoned)
                 {
