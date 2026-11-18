@@ -2414,7 +2414,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "{callback_address} still in use 10s after the flow returned: {rebound:?}"
+                "the callback address is still in use 10s after the flow returned: {rebound:?}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
