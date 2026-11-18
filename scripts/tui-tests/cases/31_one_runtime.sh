@@ -4,21 +4,35 @@
 # One runtime per renderer (#408). Starting Classic (COVEN_CODE_UI unset) or
 # Next (COVEN_CODE_UI=next) must keep one session, one provider client and one
 # store for the whole run. A local fake of the Messages API drives two real
-# turns, an approved tool call and then a text answer, with a full redraw (a
-# resize there and back) between them. The checks read only what can be seen
-# from outside the process:
-# - session: one session file, with the same id after the first turn, after
-#   the redraw, after the second turn and after the exit; the session index
-#   holds that one session;
-# - provider: three streamed requests, never two at once; each carries the
-#   one before it and its answer; the second turn's request arrives on a TCP
-#   connection that the first turn's requests used, which only the same
-#   client's connection pool can do;
-# - store: the saved session holds both turns as the model saw them, with the
-#   last answer, and every indexed message belongs to that one session.
-# It does not prove that nothing else is built: a second session, provider
-# client, scheduler or store that is constructed but never used to send or
-# save leaves no trace here. Only the direct API-key Claude transport runs.
+# turns, an approved tool call and then a text answer, with a redraw between
+# them: the window grows to 140x45, the app draws a frame that wide, and the
+# window goes back. The checks read only what can be seen from outside the
+# process:
+# - session: one session file after the first turn and, after the second turn
+#   and the exit, still that one file with that id, and no other session file
+#   or session index under the home or the project; the index holds that one
+#   session;
+# - provider: three streamed requests; each carries the one before it, the
+#   fake's reply to it and the next user message; the request of the second
+#   turn arrives on a TCP connection an earlier request used, so it came from
+#   the same HTTP connection pool (one reqwest client, or a clone of it);
+# - store: the saved session holds both turns (roles, text and tool ids) as
+#   the model saw them, with the last answer, and every indexed message
+#   belongs to that one session.
+# What it does not show:
+# - that nothing else is built. A session, client, scheduler or store that is
+#   built but never sends or saves leaves no trace. The process does build
+#   other clients, the same way for either renderer: main() registers an
+#   Anthropic provider with a pool of its own (used only without an API key
+#   or for another provider), each goal turn wraps the client in a new
+#   AnthropicClient on the same pool, and memory extraction builds its own
+#   client (reached at 20 messages; this run has 5). Clients sharing one pool
+#   cannot be told apart here;
+# - the scheduler and the memory authority, which nothing here observes;
+# - a switch of renderer: the selector is read once at start, so each
+#   renderer runs in a process and home of its own, and relaunching the other
+#   renderer on the same session is not covered;
+# - any transport but the direct API-key Claude one.
 
 register_case tc_one_runtime
 
@@ -78,12 +92,14 @@ _ort_wait_saved() { # home, text
 # Report each check on a line of its own: "ok", "FAIL" or "id", a tab, the
 # check, a tab and what was seen. `first` runs after the first turn and
 # reports the session id; `final` runs after the exit and compares with it.
-_ort_check() { # first|final, home, messages log, connections log, first id
+_ort_check() { # first|final, home, project, messages log, connections log, first id
   python3 -B -c '
-import glob, json, os, pathlib, sqlite3, sys
+import glob, json, os, pathlib, sqlite3, sys, time
 
-mode, home, messages_log, connections_log, tool_prompt, text_prompt, first_id = sys.argv[1:8]
-config = os.path.join(home, ".coven-code")
+mode, home, project, messages_log, connections_log, tool_prompt, text_prompt, first_id = sys.argv[1:9]
+# With COVEN_HOME set, the app moves its home to COVEN_HOME/code and leaves
+# .coven-code as a link to it; the walk below does not follow links.
+config = os.path.realpath(os.path.join(home, ".coven-code"))
 
 def report(label, ok, seen=""):
     seen = " ".join(str(seen).split())
@@ -92,6 +108,17 @@ def report(label, ok, seen=""):
 def session_ids():
     files = sorted(glob.glob(os.path.join(config, "sessions", "*.json")))
     return files, [os.path.basename(f)[: -len(".json")] for f in files]
+
+def load(path):
+    # The first save writes the file in place; read it again if it is short.
+    for _ in range(10):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except ValueError:
+            time.sleep(0.2)
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 def blocks(message):
     content = message.get("content")
@@ -135,14 +162,23 @@ files, ids = session_ids()
 if mode == "first":
     report("one session file after the first turn", len(ids) == 1, ids)
     if len(ids) == 1:
-        with open(files[0], encoding="utf-8") as f:
-            saved_id = json.load(f).get("id")
+        saved_id = load(files[0]).get("id")
         report("the session file is named for the id it holds", saved_id == ids[0], saved_id)
         print("id\t" + ids[0] + "\t")
     sys.exit(0)
 
-report("still one session file, with the id of the first turn, after the redraw, the second turn and the exit",
+report("after the second turn and the exit, still one session file, with the id of the first turn",
        ids == [first_id], "files: %s; first turn: %s" % (ids, first_id))
+elsewhere = []
+for root in (home, project):
+    for parent, _, names in os.walk(root):
+        for name in names:
+            path = os.path.join(parent, name)
+            if (name.endswith(".json") and os.path.basename(parent) == "sessions") \
+                    or name == "sessions.db":
+                elsewhere.append(os.path.relpath(path, os.path.dirname(root)))
+report("no other session file or session index under the home or the project",
+       len(elsewhere) == 2, sorted(elsewhere))
 
 db_path = os.path.join(config, "sessions.db")
 if os.path.exists(db_path):
@@ -154,9 +190,10 @@ if os.path.exists(db_path):
 else:
     indexed, owners, texts = None, None, []
 report("the session index holds one session, with that id", indexed == [first_id], indexed)
-# The index keys a message by its uuid, and a user message has none, so
-# every one shares the id "unknown" and only the first is kept. The answers
-# carry their own, so they show both turns reached the index.
+# Current behaviour, not endorsed: the index keys a message by its uuid, and
+# a user message has none, so each is stored under the id "unknown", which
+# the whole index shares, and only the first one ever is kept. The answers
+# carry uuids, so they show both turns reached the index.
 answers = [any(text.strip() == want for text in texts)
            for want in ("TOOL_RESULT_OK", "flood line\nflood line")]
 report("every indexed message belongs to that session, the answer of each turn included",
@@ -166,54 +203,69 @@ report("every indexed message belongs to that session, the answer of each turn i
 requests = [line["messages"] for line in read_lines(messages_log)]
 streams = sorted((c for c in read_lines(connections_log) if c.get("stream")),
                  key=lambda c: c["started"])
-report("the model saw three streamed requests: the prompt, the tool result and the second prompt",
+report("the model saw three streamed requests, none twice: the prompt, the tool result and the second prompt",
        len(requests) == 3 and len(streams) == 3,
        "%d logged with messages, %d streamed" % (len(requests), len(streams)))
-overlaps = [(a["started"], a["ended"], b["started"])
-            for a, b in zip(streams, streams[1:]) if b["started"] < a["ended"]]
-report("no two streamed requests were open at once", len(streams) > 1 and not overlaps, overlaps)
 
-carried = len(requests) == 3
-for before, after in zip(requests, requests[1:]):
+# What each request adds to the one before it: the reply of the fake to that one,
+# then the next user message.
+added = [
+    [("assistant", [("tool_use", "toolu_fake_1", "Bash")]), ("user", [("tool_result", "toolu_fake_1")])],
+    [("assistant", [("text", "TOOL_RESULT_OK")]), ("user", [("text", text_prompt)])],
+]
+carried = len(requests) == 3 and signature(requests[0]) == [("user", [("text", tool_prompt)])]
+for (before, after), want in zip(zip(requests, requests[1:]), added):
     before, after = without_cache_control(before), without_cache_control(after)
-    if len(after) != len(before) + 2 or after[: len(before)] != before:
+    if after[: len(before)] != before or signature(after[len(before):]) != want:
         carried = False
-if requests:
-    carried = carried and signature(requests[0]) == [("user", [("text", tool_prompt)])] \
-        and signature(requests[-1])[-1] == ("user", [("text", text_prompt)])
-report("each request carries the one before it, its answer and the next user message, from the first prompt on",
+report("each request carries the one before it, the reply to it and the next user message",
        carried, [signature(r) for r in requests])
 
+label = "the request of the second turn came on a connection an earlier request used"
 if len(streams) == 3:
-    first_turn = {streams[0]["connection"], streams[1]["connection"]}
-    report("the request of the second turn came on a connection the first turn used",
-           streams[2]["connection"] in first_turn,
-           "first turn: %s; second turn: %s" % (sorted(first_turn), streams[2]["connection"]))
+    earlier = sorted({c["connection"] for c in read_lines(connections_log)
+                      if c["ended"] <= streams[2]["started"]})
+    report(label, streams[2]["connection"] in earlier,
+           "earlier: %s; second turn: %s" % (earlier, streams[2]["connection"]))
 else:
-    report("the request of the second turn came on a connection the first turn used", False, streams)
+    report(label, False, streams)
 
 saved = []
 if len(files) == 1:
-    with open(files[0], encoding="utf-8") as f:
-        saved = json.load(f).get("messages") or []
+    saved = load(files[0]).get("messages") or []
 answer = ("assistant", [("text", "flood line\nflood line")])
 expected = signature(requests[-1]) + [answer] if requests else None
-report("the saved session is the conversation the model saw, and its last answer",
+report("the saved session is the conversation the model saw, with its last answer",
        signature(saved) == expected, "saved: %s; expected: %s" % (signature(saved), expected))
-' "$1" "$2" "$3" "$4" "$ORT_TOOL_PROMPT" "$ORT_TEXT_PROMPT" "${5:-}"
+' "$1" "$2" "$3" "$4" "$5" "$ORT_TOOL_PROMPT" "$ORT_TEXT_PROMPT" "${6:-}"
 }
 
 # Turn the checker's lines into results. Sets ORT_ID from an "id" line.
 _ort_report() { # renderer, then the checker's arguments
-  local r="$1" verdict label seen
+  local r="$1" verdict label seen other=""
   shift
   while IFS=$'\t' read -r verdict label seen; do
     case "$verdict" in
       ok) _pass "$r: $label" ;;
+      FAIL) _fail "$r: $label" "$seen" ;;
       id) ORT_ID="$label" ;;
-      *) _fail "$r: ${label:-the checker runs}" "${seen:-$verdict}" ;;
+      *) other+="$verdict"$'\n' ;;
     esac
   done < <(_ort_check "$@" 2>&1)
+  if [ -n "$other" ]; then _fail "$r: the checker runs" "$other"; fi
+}
+
+# Wait until the pane shows a horizontal rule this wide, which only a frame
+# drawn at that width has.
+_ort_wait_rule() { # width
+  local waited=0
+  while [ "$waited" -lt 100 ]; do
+    tui_capture | python3 -B -c 'import re, sys
+runs = [len(m) for m in re.findall("\u2500+", sys.stdin.read())]
+sys.exit(0 if max(runs, default=0) >= int(sys.argv[1]) else 1)' "$1" && return 0
+    sleep 0.2; waited=$((waited + 1))
+  done
+  return 1
 }
 
 tc_one_runtime() {
@@ -250,7 +302,8 @@ _ort_journey() { # renderer, dir
 
   ORT_ID=""
   if _ort_launch "$r" "$dir/home" "$(cat "$dir/port")" "$dir/project" && _ort_turns "$r" "$dir"; then
-    _ort_report "$r" final "$dir/home" "$dir/messages.log" "$dir/connections.log" "$ORT_ID"
+    _ort_report "$r" final "$dir/home" "$dir/project" "$dir/messages.log" "$dir/connections.log" \
+      "$ORT_ID"
   fi
   tui_stop
   kill "$fake_pid" 2>/dev/null
@@ -259,7 +312,7 @@ _ort_journey() { # renderer, dir
 
 # Returns nonzero when the journey cannot reach the final checks.
 _ort_turns() { # renderer, dir
-  local r="$1" dir="$2" log="$2/messages.log" running size
+  local r="$1" dir="$2" log="$2/messages.log" running
   running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
 
   tui_type "$ORT_TOOL_PROMPT"; sleep 0.3; tui_keys Enter
@@ -274,20 +327,21 @@ _ort_turns() { # renderer, dir
     _fail "$r: the first turn is saved" "$(find "$dir/home" -type f)"; return 1
   fi
   _pass "$r: the first turn ends and is saved"
-  _ort_report "$r" first "$dir/home" "$log" "$dir/connections.log"
+  _ort_report "$r" first "$dir/home" "$dir/project" "$log" "$dir/connections.log"
   if [ -z "$ORT_ID" ]; then return 1; fi
 
-  # A full redraw: tmux holds a resize for 250 ms, so each size is kept past
-  # that. 100x30 differs from both suite sizes.
-  for size in "100 30" "$TUI_WIDTH $TUI_HEIGHT"; do
-    _tmux resize-window -t "$TUI_SESSION" -x "${size% *}" -y "${size#* }"
-    sleep 0.6
-  done
+  # A redraw: wider than both suite sizes, so a rule that wide can only come
+  # from a frame drawn after the resize. tmux holds a resize for 250 ms.
+  _tmux resize-window -t "$TUI_SESSION" -x 140 -y 45
+  if _ort_wait_rule 140; then _pass "$r: the app draws a frame at the new size"
+  else _fail "$r: the app draws a frame at the new size" "$(tui_capture)"; return 1; fi
+  _tmux resize-window -t "$TUI_SESSION" -x "$TUI_WIDTH" -y "$TUI_HEIGHT"
+  sleep 0.6
   if wait_for "TOOL_RESULT_OK" 20 && \
     [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" = "$running" ]; then
-    _pass "$r: the redraw keeps the process and draws the first answer again"
+    _pass "$r: back at the suite size, the same process draws the first answer"
   else
-    _fail "$r: the redraw keeps the process and draws the first answer again" "$(tui_capture)"
+    _fail "$r: back at the suite size, the same process draws the first answer" "$(tui_capture)"
     return 1
   fi
 
@@ -297,9 +351,11 @@ _ort_turns() { # renderer, dir
       "$(_ort_lines "$log") requests; $(tui_capture)"
     return 1
   fi
-  if ! _ort_wait_saved "$dir/home" "$ORT_TEXT_PROMPT"; then
+  if ! _ort_wait_saved "$dir/home" "flood line"; then
     _fail "$r: the second turn is saved" "$(find "$dir/home" -type f)"; return 1
   fi
   _pass "$r: the second turn ends and is saved"
   tui_quit_and_check "$r: Ctrl+C twice after the turns" C-c C-c
+  # The checks that follow are about the run as it ended.
+  [ "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" != "$running" ]
 }

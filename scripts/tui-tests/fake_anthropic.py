@@ -21,8 +21,8 @@ history of a later request would repeat. Given CONNECTIONS_LOG too, it appends
 there a JSON line for every request once its reply is sent: the method, path,
 whether it streamed, the number this server gave the TCP connection it came
 on (1 for the first connection accepted, and so on), and when it started and
-ended, in seconds since the epoch. A client that keeps one connection pool
-sends a later request on a connection an earlier one used.
+ended, in seconds since the epoch. Only the connection pool that opened a
+connection can send a later request on it.
 
 Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG [CONNECTIONS_LOG]]
 """
