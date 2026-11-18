@@ -3672,8 +3672,8 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
-    // When the loop last saw a permission panel open, or closed one, in the
-    // running turn; see `open_permission_panel`.
+    // When the loop last saw a permission panel open, or closed one; cleared
+    // when a turn ends. See `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
     'main: loop {
         if let Some(log) = &diagnostic_log {
@@ -4989,9 +4989,6 @@ async fn run_interactive(
         }
         if app.permission_request.is_some() {
             panel_last_open = Some(std::time::Instant::now());
-        } else if current_query.is_none() {
-            // A turn's first panel is never a follow-up of the last turn's.
-            panel_last_open = None;
         }
         app.set_queued_approvals(queued_approval_calls(&pending_permissions.lock()));
 
@@ -5807,6 +5804,9 @@ async fn run_interactive(
         // Sync messages from a task seen finished before the drain above.
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
+                // The next turn's first panel is not a follow-up of this
+                // turn's last one, however soon it opens.
+                panel_last_open = None;
                 // Get the outcome and handle errors
                 let query_outcome = handle.await;
                 match &query_outcome {
