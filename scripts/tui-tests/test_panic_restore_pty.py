@@ -45,6 +45,8 @@ def restore():
     modes = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l"
     if BEHAVIOUR == "pop-after-leave":
         write(sys.stdout, b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
+    elif BEHAVIOUR == "pop-on-both-screens":
+        write(sys.stdout, pop + b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
     else:
         write(sys.stdout, pop + b"\x1b[?1049l" + modes + b"\x1b[?25h")
     if BEHAVIOUR == "title-reset":
@@ -159,6 +161,17 @@ class PanicRestoreDriverTests(unittest.TestCase):
         self.assertEqual(len(failed), 14, result.stdout)
         self.assertIn("ok classic main without keyboard flags: current behaviour: "
                       "a keyboard pop is sent though none was pushed", result.stdout)
+
+    def test_second_pop_on_the_main_screen_fails(self):
+        # What suspend_terminal wrote before #410: its own pop, then the
+        # restore's.
+        checks = ("the keyboard pop is sent before leaving the alternate screen",
+                  "current behaviour: the hook restores once per setup_terminal call")
+        result, failed = self.assert_fails("pop-on-both-screens", *checks)
+        self.assertEqual([line for line in failed if not any(check in line for check in checks)], [])
+        # Four runs that push flags set up once; the two that resume are
+        # caught by the count of pops per restore.
+        self.assertEqual(len(failed), 6, result.stdout)
 
     def test_each_pinned_behaviour_fails_on_its_own(self):
         for behaviour, check in (

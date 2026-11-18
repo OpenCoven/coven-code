@@ -228,25 +228,28 @@ def check_main_panic(report, label, probe, keyboard, setups):
         (match and modes[25], "shows the cursor"),
     ):
         report.check(bool(ok), f"{label}: {what} before the panic message", text(after[:300]))
-    pop = KEYBOARD_POP.search(hook)
+    pops = [found.start() for found in KEYBOARD_POP.finditer(hook)]
     if keyboard:
         # The observer keeps one stack per screen, so a pop sent after
         # leaving the alternate screen does not empty the stack pushed on it.
         report.check(bool(match) and not any(observer.keyboard_depths.values()),
                      f"{label}: pops the keyboard flags it pushed before the panic message", text(after[:300]))
-        report.check(pop is not None and pop.start() < hook.find(LEAVE_ALT),
+        # One setup writes one pop, so none follows on the main screen.
+        report.check(bool(pops) and pops[0] < hook.find(LEAVE_ALT) and (setups > 1 or len(pops) == 1),
                      f"{label}: the keyboard pop is sent before leaving the alternate screen",
-                     text(after[:300]))
+                     f"pops at {pops}, leave at {hook.find(LEAVE_ALT)}: {text(after[:300])}")
     else:
-        report.check(pop is not None,
+        report.check(bool(pops),
                      f"{label}: current behaviour: a keyboard pop is sent though none was pushed",
                      text(after[:300]))
     report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(after) is None,
                  f"{label}: current behaviour: the hook leaves the title set at startup", text(after[:300]))
     if setups > 1:
-        report.check(hook.count(LEAVE_ALT) == setups,
+        # Each restore is one pop and one leave, so every pop after the
+        # first leave is sent on the main screen.
+        report.check(hook.count(LEAVE_ALT) == setups and len(pops) == setups,
                      f"{label}: current behaviour: the hook restores once per setup_terminal call ({setups})",
-                     f"{hook.count(LEAVE_ALT)} restores: {text(after[:300])}")
+                     f"{hook.count(LEAVE_ALT)} restores, {len(pops)} pops: {text(after[:300])}")
 
 
 def run(path, report, renderer, mode, keyboard=True):

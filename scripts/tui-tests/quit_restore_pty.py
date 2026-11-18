@@ -8,7 +8,8 @@ before leaving it. A pop sent afterwards lands on the main screen's stack,
 which belongs to the shell: the alternate stack then keeps one entry per
 run, and the next full-screen program that sets no flags itself (`less`)
 gets every key as an escape code and cannot be driven from the keyboard.
-tmux keeps a single stack, so the order is read from the bytes on a raw PTY.
+tmux does not model per-screen keyboard stacks, so the order is read from
+the bytes on a raw PTY.
 
 Runs the real binary once per renderer (Classic and Next), quits with
 Ctrl+C twice and checks:

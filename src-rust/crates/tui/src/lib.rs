@@ -264,11 +264,12 @@ pub use file_injection_dialog::{
 /// Restore terminal capabilities (keyboard enhancement, alternate screen, mouse capture, bracketed paste).
 /// Used by both restore_terminal and the panic hook.
 ///
-/// The keyboard flags are popped first, on both platforms. A terminal keeps
-/// one keyboard-flag stack per screen and setup pushed on the alternate one,
-/// so a pop sent after leaving it lands on the main screen's stack: the
-/// alternate stack then keeps one entry per run, and the next full-screen
-/// program that sets no flags itself gets every key as an escape code.
+/// The keyboard flags are popped first. A terminal that implements the kitty
+/// keyboard protocol keeps one flag stack per screen and setup pushed on the
+/// alternate one, so a pop sent after leaving it lands on the main screen's
+/// stack: the alternate stack then keeps one entry per run, and the next
+/// full-screen program that sets no flags itself gets every key as an escape
+/// code.
 fn restore_terminal_cleanup(out: &mut impl io::Write) -> io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     execute!(
@@ -540,8 +541,8 @@ mod tests {
     // ---- terminal restore ------------------------------------------------
 
     /// Each screen has its own keyboard-flag stack and setup pushes on the
-    /// alternate one (#410). Unix only: on Windows the pop is best-effort
-    /// and goes through the console API when ANSI is not supported.
+    /// alternate one (#410). Unix only: on Windows crossterm reports the pop
+    /// as unsupported and writes nothing.
     #[cfg(unix)]
     #[test]
     fn restore_pops_keyboard_flags_before_leaving_the_alternate_screen() {

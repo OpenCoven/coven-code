@@ -8,9 +8,9 @@
 # the alternate screen, so the pop has to be sent before leaving it. A pop
 # sent afterwards lands on the main screen's stack: the alternate stack then
 # keeps one entry per run, and the next full-screen program that sets no
-# flags itself (`less`) gets every key as an escape code. tmux keeps a single
-# stack, so quit_restore_pty.py reads this from the bytes on a raw PTY, in
-# Classic and Next.
+# flags itself (`less`) gets every key as an escape code. tmux does not model
+# per-screen keyboard stacks, so quit_restore_pty.py reads this from the bytes
+# on a raw PTY, in Classic and Next.
 
 register_case tc_quit
 register_case tc_quit_keyboard_flags

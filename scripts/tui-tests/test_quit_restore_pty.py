@@ -28,7 +28,10 @@ ready = b"preview" if os.environ.get("COVEN_CODE_UI") == "next" else b"Coven v0.
 write(b"\x1b[?25l\x1b[1;1H" + ready)
 interrupts = 0
 while interrupts < 2:
-    interrupts += os.read(fd, 64).count(b"\x03")
+    data = os.read(fd, 64)
+    if not data:
+        sys.exit(1)  # the driver went away; never spin on a closed PTY
+    interrupts += data.count(b"\x03")
 termios.tcsetattr(fd, termios.TCSANOW, saved)
 pop = b"\x1b[<1u"
 leave = b"\x1b[?1049l\x1b[?1006l\x1b[?1000l\x1b[?2004l"
