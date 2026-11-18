@@ -149,9 +149,15 @@ fn serve(stream: TcpStream, requests: &Mutex<Vec<Value>>) {
         .unwrap();
     let mut reader = BufReader::new(stream);
     let mut length = 0;
+    // A connection the engine drops before its request is complete is the
+    // fire-and-forget memory extraction cut off by the engine's exit: every
+    // model round is awaited, so its request is always whole. Drop it.
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
         if line == "\r\n" {
             break;
         }
@@ -162,7 +168,9 @@ fn serve(stream: TcpStream, requests: &Mutex<Vec<Value>>) {
         }
     }
     let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
     let request: Value = serde_json::from_slice(&body).unwrap();
     // Session memory extraction starts once a conversation has 20 messages and
     // goes to the configured endpoint, so the 11-round runs reach it. It is not
