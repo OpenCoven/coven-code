@@ -14,7 +14,9 @@ the engine home. Global settings require **plain JSON**, without comments.
 
 Shared `<coven-home>/settings.json` supplies only `model`, `theme`, and
 `permission_mode` defaults when the engine-global values remain at defaults.
-Command-line overrides apply after settings loading.
+Command-line overrides apply after settings loading. The saved permission mode
+is only used by an interactive session started without `--permission-mode`;
+see [Permission Modes](#permission-modes).
 
 ### Per-project settings
 
@@ -26,11 +28,12 @@ an unreadable or invalid file does not fall back to another file or parent.
 Project settings are sanitized before merging. Provider routing and credentials,
 MCP and LSP server definitions, hooks, hosted-review policy, persisted permission
 rules, and `workspace_paths` are discarded from this layer. Configure these
-in trusted engine-global settings instead.
+in trusted engine-global settings instead. `permission_mode` is also ignored
+here: a project file neither sets the mode nor resets the one you saved.
 
 Merging is field-specific: some lists concatenate and maps merge. Omission does
 not always preserve a global value: project defaults can replace fields such as
-`permission_mode`, `theme`, and `output_format`. Keep project settings minimal
+`theme` and `output_format`. Keep project settings minimal
 and verify the effective behavior before relying on a global preference.
 
 ---
@@ -79,7 +82,7 @@ The `config` object holds runtime behaviour options.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `permission_mode` | string | `"default"` | Controls how tool permissions are enforced. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`. |
+| `permission_mode` | string | `"default"` | The mode an interactive session starts in when `--permission-mode` is not given. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`; a saved `"bypassPermissions"` is not restored. |
 
 See [Permission Modes](#permission-modes) for a full description of each value.
 
@@ -329,6 +332,23 @@ Settings use camelCase mode values; CLI flags use kebab-case:
 coven-code --permission-mode accept-edits "refactor the auth module"
 coven-code --permission-mode bypass-permissions "..."
 ```
+
+### Which mode a start uses
+
+1. `--dangerously-skip-permissions`, then `--permission-mode`, when given.
+2. Otherwise an interactive session starts in the saved `permission_mode`:
+   the one `/config set permission-mode` or `/permissions set` wrote to your
+   engine-global settings, or the shared default when that is unset. A
+   notification says that a saved `acceptEdits` or `plan` was restored.
+3. A saved `bypassPermissions` is never restored. The session starts in
+   `default` and a notification says so; pass
+   `--permission-mode bypass-permissions` to use it.
+4. Headless runs (`--print`, a prompt argument, `stream-json`) ignore the saved
+   mode: without the flag they run in `default`.
+
+A value that is not one of the four modes counts as `default`; in engine-global
+settings it also makes the whole file invalid, so its other settings are not
+loaded. The `Config` tool asks for approval before it changes the saved mode.
 
 ---
 

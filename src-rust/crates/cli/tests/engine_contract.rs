@@ -511,6 +511,61 @@ fn contract_permission_mode_reaches_the_keyless_claude_transport() {
     }
 }
 
+/// A headless run is in the mode its flags name, or `default`. A permission
+/// mode saved in the user's settings, which an interactive session restores,
+/// must not reach a run nobody is watching: not from the engine settings, the
+/// shared Coven settings or a repository's file, and with no extra output.
+#[test]
+fn contract_headless_run_ignores_a_saved_permission_mode() {
+    let saved_in = |file: &Path, body: &str| {
+        fs::create_dir_all(file.parent().expect("settings directory")).expect("settings dir");
+        fs::write(file, body).expect("write settings");
+    };
+    let reply_only = Scratch::new();
+    let expected = run_engine(
+        reply_only
+            .engine()
+            .args(["--print", "ping", "--model", FAKE_MODEL]),
+        "",
+    );
+    for mode in ["acceptEdits", "bypassPermissions", "plan"] {
+        for layer in ["engine", "shared", "repository"] {
+            for stream in [false, true] {
+                let scratch = Scratch::new();
+                let nested = format!(r#"{{"config":{{"permission_mode":"{mode}"}}}}"#);
+                match layer {
+                    "engine" => saved_in(&scratch.coven_home().join("code/settings.json"), &nested),
+                    "shared" => saved_in(
+                        &scratch.coven_home().join("settings.json"),
+                        &format!(r#"{{"permission_mode":"{mode}"}}"#),
+                    ),
+                    _ => saved_in(&scratch.cwd().join(".coven-code/settings.json"), &nested),
+                }
+                let mut engine = scratch.engine();
+                let run = if stream {
+                    engine.args(stream_json_args());
+                    run_engine(engine.args(["--model", FAKE_MODEL]), &user_frame("ping"))
+                } else {
+                    run_engine(engine.args(["--print", "ping", "--model", FAKE_MODEL]), "")
+                };
+                let case = format!("{mode} saved in {layer} settings, stream-json {stream}");
+                assert_eq!(run.code, 0, "{case}\n{run}");
+                if !stream {
+                    assert_eq!(run.stdout, expected.stdout, "{case}: stdout changed");
+                    assert_eq!(run.stderr, expected.stderr, "{case}: stderr changed");
+                }
+                let argv = scratch.claude_argv();
+                let modes: Vec<&str> = argv
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--permission-mode")
+                    .map(|pair| pair[1].as_str())
+                    .collect();
+                assert_eq!(modes, ["default"], "{case}: {argv:?}");
+            }
+        }
+    }
+}
+
 /// A headless run is one turn on coven's behalf, under that turn's
 /// permission. A prompt saved earlier for a schedule must not run inside it:
 /// it would run with this turn's permission, and nothing it did would reach
