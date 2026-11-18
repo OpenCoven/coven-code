@@ -1,4 +1,7 @@
-//! A Job Object for each foreground Windows shell command (#373).
+//! A Job Object for each Windows shell command (#373): the shell tools'
+//! foreground and background calls, worktree post-create commands and
+//! formatters. "The shell" below is the process spawned, which for a formatter
+//! is the formatter itself.
 //!
 //! Killing `cmd.exe` or `powershell.exe` does not kill what it started. So the
 //! shell is created suspended, joins a new job, and only then runs: every
@@ -82,19 +85,25 @@ impl Job {
         if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
             // Dropping the job still kills its processes.
             let error = io::Error::last_os_error();
-            tracing::warn!(%error, "Could not terminate a foreground command's job");
+            tracing::warn!(%error, "Could not terminate a command's job");
         }
+    }
+
+    /// Let what is in the job outlive the job's last handle: closing it, or
+    /// coven-code exiting, then kills nothing. [`Job::terminate`] still does.
+    /// The job keeps allowing explicit breakaway.
+    pub(crate) fn outlive_close(&self) -> io::Result<()> {
+        self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK)
     }
 
     /// Close the job without killing what the command left running when it
     /// exited, such as a process it started to outlive it. Unix keeps those
-    /// after an ordinary exit as well. Those processes stay in the job, so it
-    /// keeps allowing explicit breakaway for them.
+    /// after an ordinary exit as well.
     pub(crate) fn release(self) {
-        if let Err(error) = self.limit(JOB_OBJECT_LIMIT_BREAKAWAY_OK) {
+        if let Err(error) = self.outlive_close() {
             tracing::warn!(
                 %error,
-                "Could not release a foreground command's job; closing it kills what the command left running"
+                "Could not release a command's job; closing it kills what the command left running"
             );
         }
     }
@@ -152,7 +161,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
     let job = match Job::new() {
         Ok(job) => job,
         Err(error) => {
-            tracing::warn!(%error, "No job for a foreground command; only its shell will be stopped");
+            tracing::warn!(%error, "No job for a command; only its shell will be stopped");
             let child = command.spawn().map_err(SpawnError::NotStarted)?;
             return Ok((child, None));
         }
@@ -173,7 +182,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         Some(job)
     } else {
         let error = io::Error::last_os_error();
-        tracing::warn!(%error, "Could not put a foreground command in a job; only its shell will be stopped");
+        tracing::warn!(%error, "Could not put a command in a job; only its shell will be stopped");
         None
     };
     let resumed = match threads_of(id) {
@@ -185,7 +194,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         Resumed::NotStarted(error) => {
             // No thread of the shell has run, so starting it again cannot run
             // the command twice.
-            tracing::warn!(%error, "Could not resume a foreground command's shell; starting it again without a job");
+            tracing::warn!(%error, "Could not resume a command's shell; starting it again without a job");
             let _ = child.start_kill();
             let child = command
                 .creation_flags(0)
@@ -195,7 +204,7 @@ pub(crate) fn spawn(command: &mut Command) -> Result<(Child, Option<Job>), Spawn
         }
         Resumed::Partly(error) => {
             // The command may have started, so stop it rather than run it again.
-            tracing::warn!(%error, "A foreground command's shell started but could not be fully resumed; stopping it");
+            tracing::warn!(%error, "A command's shell started but could not be fully resumed; stopping it");
             if let Some(job) = &job {
                 job.terminate();
             }
@@ -297,9 +306,8 @@ mod tests {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
-    #[test]
-    fn a_new_job_kills_on_close_and_allows_explicit_breakaway() {
-        let job = Job::new().expect("create a job");
+    /// The job's limit flags, read back from the system.
+    fn limits(job: &Job) -> u32 {
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         // SAFETY: the pointer and size describe `limits`, the structure this
         // information class fills, and it outlives the call.
@@ -313,7 +321,20 @@ mod tests {
             )
         };
         assert_ne!(ok, 0, "query the job: {}", io::Error::last_os_error());
-        let flags = limits.BasicLimitInformation.LimitFlags;
+        limits.BasicLimitInformation.LimitFlags
+    }
+
+    #[test]
+    fn a_job_that_outlives_close_still_allows_explicit_breakaway() {
+        let job = Job::new().expect("create a job");
+        job.outlive_close().expect("drop kill on close");
+        assert_eq!(limits(&job), JOB_OBJECT_LIMIT_BREAKAWAY_OK);
+    }
+
+    #[test]
+    fn a_new_job_kills_on_close_and_allows_explicit_breakaway() {
+        let job = Job::new().expect("create a job");
+        let flags = limits(&job);
         assert_ne!(
             flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             0,
