@@ -55,6 +55,8 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+#[cfg(windows)]
+mod windows_job;
 pub mod workspace_scope;
 pub mod worktree;
 
