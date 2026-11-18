@@ -342,20 +342,20 @@ async fn run_windows_fallback(
     timeout_dur: Duration,
     timeout_ms: u64,
 ) -> ToolResult {
-    // A cancelled call drops this future; stop cmd.exe with it, as
-    // BashTool's fallback does. Its own children are not reached (#373).
-    let mut child = match Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .current_dir(effective_cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+    // The job owns cmd.exe and everything it starts. A cancelled call drops
+    // it, which kills them all, and a timeout terminates it (#373).
+    let (mut child, job) = match crate::windows_job::spawn(
+        Command::new("cmd")
+            .arg("/C")
+            .arg(command)
+            .current_dir(effective_cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true),
+    ) {
+        Ok(spawned) => spawned,
+        Err(e) => return ToolResult::error(e.report("Failed to spawn command")),
     };
 
     let stdout_handle = child.stdout.take();
@@ -377,6 +377,11 @@ async fn run_windows_fallback(
 
     match result {
         Ok((stdout_lines, stderr_lines, status)) => {
+            // An ordinary exit leaves alone what the command started to
+            // outlive it.
+            if let (Ok(_), Some(job)) = (&status, job) {
+                job.release();
+            }
             let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
             let mut output = String::new();
             if !stdout_lines.is_empty() {
@@ -395,6 +400,9 @@ async fn run_windows_fallback(
             truncate_output(output, exit_code)
         }
         Err(_) => {
+            if let Some(job) = &job {
+                job.terminate();
+            }
             let _ = child.kill().await;
             ToolResult::error(format!("Command timed out after {}ms", timeout_ms))
         }
