@@ -234,8 +234,7 @@ def check_main_panic(report, label, probe, keyboard, setups):
         # leaving the alternate screen does not empty the stack pushed on it.
         report.check(bool(match) and not any(observer.keyboard_depths.values()),
                      f"{label}: pops the keyboard flags it pushed before the panic message", text(after[:300]))
-        # One setup writes one pop, so none follows on the main screen.
-        report.check(bool(pops) and pops[0] < hook.find(LEAVE_ALT) and (setups > 1 or len(pops) == 1),
+        report.check(bool(pops) and pops[0] < hook.find(LEAVE_ALT),
                      f"{label}: the keyboard pop is sent before leaving the alternate screen",
                      f"pops at {pops}, leave at {hook.find(LEAVE_ALT)}: {text(after[:300])}")
     else:
@@ -244,7 +243,14 @@ def check_main_panic(report, label, probe, keyboard, setups):
                      text(after[:300]))
     report.check(bool(match) and TITLE.search(probe.out[:mark]) is not None and TITLE.search(after) is None,
                  f"{label}: current behaviour: the hook leaves the title set at startup", text(after[:300]))
-    if setups > 1:
+    if setups == 1:
+        # The main screen's stack is the shell's, whether or not flags were
+        # pushed here.
+        leave = hook.find(LEAVE_ALT)
+        report.check(leave >= 0 and KEYBOARD_POP.search(hook, leave) is None,
+                     f"{label}: no keyboard pop is sent on the main screen",
+                     f"pops at {pops}, leave at {leave}: {text(after[:300])}")
+    else:
         # Each restore is one pop and one leave, so every pop after the
         # first leave is sent on the main screen.
         report.check(hook.count(LEAVE_ALT) == setups and len(pops) == setups,

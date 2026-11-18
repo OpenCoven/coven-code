@@ -41,12 +41,12 @@ def run(binary, report, ui, ready, size):
     with tempfile.TemporaryDirectory(prefix="coven-quit-restore-") as root:
         engine = Engine(binary, root, size, ui=ui)
         started = engine.pump(30, until=ready) and engine.healthy()
-        report.check(started, f"{ui}: the engine starts", tail(engine))
+        report.check(started, f"{ui}: the engine starts", ascii(tail(engine)))
         depths = dict(engine.observer.keyboard_depths)
         report.check(depths == {"main": 0, "alternate": 1},
                      f"{ui}: keyboard flags are pushed on the alternate screen", repr(depths))
         code = engine.quit()
-        report.check(code == 0, f"{ui}: Ctrl+C twice exits 0", f"exit {code}: {tail(engine)}")
+        report.check(code == 0, f"{ui}: Ctrl+C twice exits 0", f"exit {code}: {ascii(tail(engine))}")
         failures = engine.observer.restoration_failures()
         report.check(not failures, f"{ui}: quitting leaves no terminal mode or keyboard flags behind",
                      ", ".join(failures))
