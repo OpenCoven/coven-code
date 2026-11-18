@@ -20,7 +20,7 @@
 # nothing registers with it. A session start does: after one turn against
 # `fake_anthropic.py` has saved the session, `/session resume <id>` binds it
 # and the second fake receives a registration for that id. It holds its
-# answer for 2 s: meanwhile Classic still reads unknown and Next reads
+# answer for 4 s: meanwhile Classic still reads unknown and Next reads
 # `registering`. Once it answers, the state reads registered and online
 # again, and a second later there is still exactly one registration. Classic
 # runs with COVEN_CODE_UI unset; needs `python3`.
@@ -239,7 +239,7 @@ _dru_steps() { # renderer, dir
 
   # The daemon is replaced: a new process, so a new pid and start time.
   _dru_stop_daemon "$sock"
-  if ! _dru_start_daemon "$sock" "$2/ready" "$second" 2; then
+  if ! _dru_start_daemon "$sock" "$2/ready" "$second" 4; then
     _fail "$r: the second fake daemon listens" "no socket at $sock"; return 0
   fi
   if wait_for "$DRU_UNKNOWN" 30; then _pass "$r: after the restart the state reads '$DRU_UNKNOWN'"
@@ -270,16 +270,22 @@ _dru_steps() { # renderer, dir
   fi
   assert_eq "$(_dru_count "$second" "$register")" "0" "$r: a turn does not register"
   tui_type "/session resume $id"; sleep 0.3; tui_keys Enter
-  # The new daemon has the registration and holds its answer for 2 s.
+  # The new daemon has the registration and holds its answer for 4 s. The
+  # frame that shows the sent registration may land a moment after the
+  # request does, so the state is polled, and must be seen before the answer.
   if ! _dru_wait_for_requests "$second" "$register" 1 10; then
     _fail "$r: the session start sends a registration to the new daemon" "$(tui_capture)"; return 0
   fi
-  s="$(tui_capture)"
-  if [ "$(_dru_count "$second" "answered $register")" = "0" ]; then
-    assert_contains "$s" "$DRU_RENEWING" "$r: until the new daemon answers, the state reads '$DRU_RENEWING'"
-    assert_absent "$s" "$DRU_REGISTERED" "$r: until the new daemon answers, it is not shown as '$DRU_REGISTERED'"
+  if wait_for "$DRU_RENEWING" 3; then
+    s="$(tui_capture)"
+    if [ "$(_dru_count "$second" "answered $register")" = "0" ]; then
+      _pass "$r: until the new daemon answers, the state reads '$DRU_RENEWING'"
+      assert_absent "$s" "$DRU_REGISTERED" "$r: until the new daemon answers, it is not shown as '$DRU_REGISTERED'"
+    else
+      _fail "$r: the new daemon was still holding its answer when the screen was read" "$(cat "$second")"
+    fi
   else
-    _fail "$r: the new daemon was still holding its answer when the screen was read" "$(cat "$second")"
+    _fail "$r: until the new daemon answers, the state reads '$DRU_RENEWING'" "$(tui_capture)"
   fi
   if wait_for "$DRU_REGISTERED" 15; then _pass "$r: the next session start reads '$DRU_REGISTERED' again"
   else _fail "$r: the next session start reads '$DRU_REGISTERED' again" "$(tui_capture)"; fi
