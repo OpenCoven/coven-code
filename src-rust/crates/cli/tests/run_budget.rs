@@ -76,8 +76,18 @@ impl Fixture {
     }
 
     fn run_format(&self, args: &[&str], stream_input: bool, format: &str) -> Output {
+        self.run_format_in(args, stream_input, format, self.root.path())
+    }
+
+    fn run_format_in(
+        &self,
+        args: &[&str],
+        stream_input: bool,
+        format: &str,
+        directory: &std::path::Path,
+    ) -> Output {
         let mut command = self.engine(format);
-        command.args(args);
+        command.current_dir(directory).args(args);
         if stream_input {
             command.args(["--input-format", "stream-json"]);
         } else {
@@ -465,4 +475,150 @@ fn resumed_session_refuses_wrong_directory_and_identity_before_work() {
     assert!(!wrong_id.status.success());
     assert!(String::from_utf8_lossy(&wrong_id.stderr).contains("Saved session identity disagrees"));
     assert_eq!(fixture.requests.lock().unwrap().len(), 10);
+}
+
+#[test]
+fn relative_cwd_cannot_rebind_a_saved_session_to_another_workspace() {
+    for stream in [false, true] {
+        let fixture = Fixture::new();
+        let first = fixture.run(
+            &[
+                "--session-id",
+                "relative-workspace",
+                "--cwd",
+                ".",
+                "--max-turns",
+                "10",
+            ],
+            stream,
+        );
+        assert_eq!(result(&first)["outcome"], "turn_budget_exhausted");
+        let other = fixture.root.path().join("other workspace");
+        std::fs::create_dir(&other).unwrap();
+        let resumed = fixture.run_format_in(
+            &["--resume", "relative-workspace", "--cwd", "."],
+            stream,
+            "stream-json",
+            &other,
+        );
+        assert!(!resumed.status.success(), "{resumed:?}");
+        assert_eq!(fixture.requests.lock().unwrap().len(), 10);
+        let error = String::from_utf8_lossy(&resumed.stderr);
+        assert!(
+            error.contains("Resume working directory differs"),
+            "{error}"
+        );
+        assert!(
+            error.contains(fixture.root.path().to_str().unwrap()),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn saved_working_directory_is_canonical() {
+    let fixture = Fixture::new();
+    fixture.run(
+        &[
+            "--session-id",
+            "absolute-workspace",
+            "--cwd",
+            ".",
+            "--max-turns",
+            "10",
+        ],
+        true,
+    );
+    let saved = fixture
+        .root
+        .path()
+        .join("coven/code/sessions/absolute-workspace.json");
+    let session: Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    assert_eq!(
+        session["working_dir"],
+        std::fs::canonicalize(fixture.root.path())
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+}
+
+#[test]
+fn ambiguous_saved_working_directories_are_refused_before_model_work() {
+    for directory in [json!("."), Value::Null] {
+        let fixture = Fixture::new();
+        fixture.run(
+            &["--session-id", "legacy-workspace", "--max-turns", "10"],
+            true,
+        );
+        let saved = fixture
+            .root
+            .path()
+            .join("coven/code/sessions/legacy-workspace.json");
+        let mut session: Value =
+            serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        session["working_dir"] = directory;
+        std::fs::write(saved, session.to_string()).unwrap();
+        let resumed = fixture.run(&["--resume", "legacy-workspace"], false);
+        assert!(!resumed.status.success(), "{resumed:?}");
+        assert_eq!(fixture.requests.lock().unwrap().len(), 10);
+        assert!(String::from_utf8_lossy(&resumed.stderr).contains("Saved working directory"));
+    }
+}
+
+#[test]
+fn text_exhaustion_reports_saved_session_and_resume_command() {
+    let fixture = Fixture::new();
+    let output = fixture.run_format(
+        &["--max-turns", "10", "--session-id", "text-continuation"],
+        false,
+        "text",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let notice = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        notice.contains("--resume") && notice.contains("text-continuation"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("--cwd") && notice.contains(fixture.root.path().to_str().unwrap()),
+        "{notice}"
+    );
+}
+
+#[test]
+fn text_exhaustion_does_not_offer_resume_after_failed_persistence() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.root.path().join("coven/code")).unwrap();
+    std::fs::write(
+        fixture.root.path().join("coven/code/sessions"),
+        "save obstruction",
+    )
+    .unwrap();
+    let output = fixture.run_format(&["--max-turns", "10"], false, "text");
+    assert_eq!(output.status.code(), Some(1));
+    let notice = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        notice.contains("Engine continuation is unavailable"),
+        "{notice}"
+    );
+    assert!(!notice.contains("--resume"), "{notice}");
+    assert!(!notice.contains("unfinished work retained"), "{notice}");
+}
+
+#[test]
+fn locally_rejected_provider_query_consumes_no_model_round() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&["--provider", "codex", "--max-turns", "10"], true);
+    let wire = result(&output);
+    assert!(
+        wire["error"]
+            .as_str()
+            .unwrap()
+            .contains("No API key for provider 'codex'"),
+        "{output:?}"
+    );
+    assert!(fixture.requests.lock().unwrap().is_empty());
+    assert_eq!(wire["num_turns"], 0, "{wire}");
+    assert_eq!(wire["turn_budget"]["consumed"], 0, "{wire}");
 }

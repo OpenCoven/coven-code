@@ -185,3 +185,88 @@ async fn model_round_receipt_does_not_read_the_shared_tool_display_counter() {
         QueryOutcome::TurnBudgetExhausted { consumed: 1, .. }
     ));
 }
+
+async fn run_dispatch_preparation_fixture(
+    client: &claurst_api::AnthropicClient,
+    provider: Option<Arc<dyn LlmProvider>>,
+    provider_id: &str,
+    cancel: tokio_util::sync::CancellationToken,
+) -> QueryRun {
+    let temp = tempfile::tempdir().unwrap();
+    let mut registry = claurst_api::ProviderRegistry::new();
+    if let Some(provider) = provider {
+        registry.register(provider);
+    }
+    let tracker = CostTracker::new();
+    let context = ToolContext {
+        working_dir: temp.path().to_owned(),
+        permission_mode: PermissionMode::BypassPermissions,
+        permission_handler: Arc::new(AutoPermissionHandler { mode: PermissionMode::BypassPermissions }),
+        cost_tracker: tracker.clone(),
+        session_id: "dispatch-preparation".into(),
+        goal_turn: Default::default(),
+        file_history: Default::default(),
+        current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        non_interactive: true,
+        mcp_manager: None,
+        config: Config { provider: Some(provider_id.into()), ..Default::default() },
+        managed_agent_config: None,
+        completion_notifier: None,
+        pending_permissions: None,
+        permission_manager: None,
+        user_question_tx: None,
+    };
+    run_query_loop_with_receipt(
+        client,
+        &mut vec![Message::user("test preparation")],
+        &[],
+        &context,
+        &QueryConfig { model: "fixture".into(), max_turns: 1, provider_registry: Some(Arc::new(registry)), ..Default::default() },
+        tracker,
+        None,
+        cancel,
+        None,
+    ).await
+}
+
+#[tokio::test]
+async fn model_dispatch_raw_client_local_rejection_consumes_zero() {
+    let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+        api_key: "unused".into(),
+        provider: claurst_api::client::Provider::Codex,
+        ..Default::default()
+    }).unwrap();
+    let run = run_dispatch_preparation_fixture(&client, None, "anthropic", tokio_util::sync::CancellationToken::new()).await;
+    assert!(matches!(run.outcome, QueryOutcome::Error(_)));
+    assert_eq!(run.num_turns, 0);
+}
+
+#[tokio::test]
+async fn model_dispatch_cancelled_adapter_preparation_consumes_zero() {
+    struct PreparingProvider { inner: ScriptedProvider, preparing: Arc<tokio::sync::Notify> }
+    #[async_trait]
+    impl LlmProvider for PreparingProvider {
+        fn id(&self) -> &ProviderId { self.inner.id() }
+        fn name(&self) -> &str { self.inner.name() }
+        async fn create_message(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> { self.inner.create_message(request).await }
+        async fn create_message_stream(&self, request: ProviderRequest) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError> { self.inner.create_message_stream(request).await }
+        async fn create_message_stream_for_goal(&self, _: ProviderRequest, _: Option<&GoalTurn>, _: GoalTurnPermission) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError> {
+            // Adapter authentication/preparation has begun, but no model send.
+            self.preparing.notify_one();
+            futures::future::pending().await
+        }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> { self.inner.list_models().await }
+        async fn health_check(&self) -> Result<ProviderStatus, ProviderError> { self.inner.health_check().await }
+        fn capabilities(&self) -> ProviderCapabilities { self.inner.capabilities() }
+    }
+    let preparing = Arc::new(tokio::sync::Notify::new());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stop = cancel.clone();
+    let started = preparing.clone();
+    let stopper = tokio::spawn(async move { started.notified().await; stop.cancel(); });
+    let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig { api_key: "unused".into(), ..Default::default() }).unwrap();
+    let run = tokio::time::timeout(std::time::Duration::from_secs(5), run_dispatch_preparation_fixture(&client, Some(Arc::new(PreparingProvider { inner: ScriptedProvider::new(vec![]), preparing })), SCRIPTED_PROVIDER_ID, cancel)).await.unwrap();
+    stopper.await.unwrap();
+    assert!(matches!(run.outcome, QueryOutcome::Cancelled));
+    assert_eq!(run.num_turns, 0);
+}

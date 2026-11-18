@@ -122,7 +122,7 @@ pub fn annotate(
 
 pub fn exhaustion_message(budget: EffectiveTurnBudget, consumed: u32) -> String {
     format!(
-        "Model-round budget exhausted ({consumed}/{}); unfinished work retained.",
+        "Model-round budget exhausted ({consumed}/{}); work is unfinished.",
         budget.max_turns
     )
 }
@@ -151,15 +151,33 @@ pub async fn session(
             session.id == id,
             "Saved session identity disagrees with requested resume id"
         );
-        if let Some(directory) = &session.working_dir {
-            anyhow::ensure!(std::fs::canonicalize(directory)? == std::fs::canonicalize(&tool_ctx.working_dir)?, "Resume working directory differs; launch with --cwd pointing at the saved session directory");
-        }
+        let directory = session
+            .working_dir
+            .as_deref()
+            .context("Saved working directory is missing; engine continuation is unavailable")?;
+        anyhow::ensure!(
+            std::path::Path::new(directory).is_absolute(),
+            "Saved working directory {directory:?} is relative; engine continuation is unavailable"
+        );
+        let saved_directory = std::fs::canonicalize(directory)
+            .with_context(|| format!("Saved working directory {directory:?} is unavailable"))?;
+        let current_directory = std::fs::canonicalize(&tool_ctx.working_dir)
+            .context("Could not resolve the requested working directory")?;
+        anyhow::ensure!(
+            saved_directory == current_directory,
+            "Resume working directory differs; saved directory is {directory:?}. Launch with --cwd pointing at that directory"
+        );
         tool_ctx.session_id = session.id.clone();
         Ok(session)
     } else {
         let mut session = ConversationSession::new(config.model.clone());
         session.id = tool_ctx.session_id.clone();
-        session.working_dir = Some(tool_ctx.working_dir.display().to_string());
+        session.working_dir = Some(
+            std::fs::canonicalize(&tool_ctx.working_dir)
+                .context("Could not resolve the session working directory")?
+                .to_string_lossy()
+                .into_owned(),
+        );
         session.hosted_review = tool_ctx.config.hosted_review_enabled();
         Ok(session)
     }

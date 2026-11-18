@@ -39,7 +39,7 @@ reqwest = { version = "0.13", features = ["json", "stream", "native-tls-vendored
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 
 # CLI
 clap = { version = "4", features = ["derive", "env", "string"] }
@@ -67,7 +67,7 @@ tempfile = "3"
 rustix = { version = "1.1.4", features = ["fs"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 dirs = "5"
-which = "7"
+which = "8"
 once_cell = "1"
 parking_lot = "0.12"
 dashmap = "6"
@@ -76,7 +76,7 @@ bytes = "1"
 base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
-getrandom = "0.2"
+getrandom = "0.4"
 enigo = "0.2"
 xcap = { version = "0.3.3", features = ["vendored"] }
 url = "2"
@@ -108,8 +108,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls-vendored"] }
 schemars = { version = "0.8", features = ["derive"] }
 
 # Runtime registry
-coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
-coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.1.3" }
+coven-runtime-spec = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.2.0" }
+coven-runtime-registry = { git = "https://github.com/OpenCoven/coven-runtimes", tag = "v0.2.0" }
 
 # Workspace crates
 claurst-core = { path = "crates/core" }

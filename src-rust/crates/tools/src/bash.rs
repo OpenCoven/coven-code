@@ -557,16 +557,24 @@ impl BashTool {
             state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
         };
 
-        let mut child = match Command::new("cmd")
+        let mut shell = Command::new("cmd");
+        shell
             .arg("/C")
             .arg(command)
             .current_dir(&effective_cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        // The job owns cmd.exe and everything it starts. A cancelled call
+        // drops it, which kills them all, and a timeout terminates it (#373).
+        #[cfg(windows)]
+        let (mut child, job) = match crate::windows_job::spawn(&mut shell) {
+            Ok(spawned) => spawned,
+            Err(e) => return ToolResult::error(e.report("Failed to spawn command")),
+        };
+        #[cfg(not(windows))]
+        let mut child = match shell.spawn() {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
         };
@@ -590,6 +598,12 @@ impl BashTool {
 
         match result {
             Ok((stdout_lines, stderr_lines, status)) => {
+                // An ordinary exit leaves alone what the command started to
+                // outlive it.
+                #[cfg(windows)]
+                if let (Ok(_), Some(job)) = (&status, job) {
+                    job.release();
+                }
                 let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
                 let mut output = String::new();
                 if !stdout_lines.is_empty() {
@@ -616,6 +630,10 @@ impl BashTool {
                 }
             }
             Err(_) => {
+                #[cfg(windows)]
+                if let Some(job) = &job {
+                    job.terminate();
+                }
                 let _ = child.kill().await;
                 ToolResult::error(format!("Command timed out after {}ms", timeout_ms))
             }

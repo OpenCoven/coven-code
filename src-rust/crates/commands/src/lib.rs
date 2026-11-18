@@ -10267,11 +10267,18 @@ impl SlashCommand for CovenCommand {
             match DaemonClient::new() {
                 Some(client) => return CommandResult::Message(coven_format_health(&client)),
                 None => {
-                    return CommandResult::Message(
-                        "Coven daemon socket not found at ~/.coven/coven.sock.\n\
-                         Start it with `/coven daemon start` (or `coven daemon start`)."
+                    let not_found = match claurst_core::coven_shared::daemon_socket_path() {
+                        Some(sock) => {
+                            format!("Coven daemon socket not found at {}.", sock.display())
+                        }
+                        None => "Coven daemon socket not found: COVEN_HOME is unset or empty and \
+                                 no home directory was found."
                             .to_string(),
-                    );
+                    };
+                    return CommandResult::Message(format!(
+                        "{not_found}\n\
+                         Start it with `/coven daemon start` (or `coven daemon start`)."
+                    ));
                 }
             }
         }
@@ -13993,6 +14000,41 @@ mod tests {
         let path = std::env::join_paths([project.as_path(), Path::new(".")]).unwrap();
 
         assert!(coven_binary_from_path(Some(path.as_os_str()), Some(&project)).is_none());
+    }
+
+    /// #514: with no daemon socket, `/coven status` must name the socket the
+    /// client checked (`$COVEN_HOME/coven.sock`), not a fixed `~/.coven` path.
+    /// The guard points HOME and COVEN_HOME at a fresh tempdir with no socket,
+    /// so this never reads the real `~/.coven` or reaches a running daemon.
+    #[test]
+    fn coven_status_names_the_socket_under_coven_home() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let expected = guard.coven_home().join("coven.sock");
+        assert!(!expected.exists());
+        let coven = find_command("coven").expect("/coven command must be registered");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for args in ["", "status"] {
+            let mut ctx = make_ctx();
+            let CommandResult::Message(msg) = runtime.block_on(coven.execute(args, &mut ctx))
+            else {
+                panic!("/coven {args:?} without a socket must return a message");
+            };
+            assert!(
+                msg.contains(&format!(
+                    "Coven daemon socket not found at {}.",
+                    expected.display()
+                )),
+                "/coven {args:?} must name the socket it checked: {msg}"
+            );
+            assert!(!msg.contains("~/.coven"), "/coven {args:?}: {msg}");
+            assert!(
+                msg.contains("Start it with `/coven daemon start`"),
+                "/coven {args:?} lost the start hint: {msg}"
+            );
+        }
     }
 
     #[test]
