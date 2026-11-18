@@ -57,6 +57,8 @@ pub mod web_fetch;
 pub mod web_search;
 #[cfg(windows)]
 mod windows_job;
+#[cfg(all(test, windows))]
+mod windows_ticker;
 pub mod workspace_scope;
 pub mod worktree;
 

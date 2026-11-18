@@ -249,7 +249,8 @@ jobs:
           restore-keys: rust-ci-windows-foreground-
 
       # No other job runs Rust tests on Windows; these cover the cmd.exe
-      # fallbacks that both Bash tools use there (#373).
+      # fallbacks that both Bash tools use there, their background tasks and
+      # the worktree post-create command (#373).
       - name: Test cancelled, timed-out and finished foreground commands
         working-directory: src-rust
         run: cargo test -p claurst-tools --locked --test foreground_windows
@@ -262,3 +263,15 @@ jobs:
         run: |
           cargo test -p claurst-tools --locked --lib windows_job | tee "$RUNNER_TEMP/windows-job-tests.txt"
           grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/windows-job-tests.txt"
+
+      # The formatter and post-create command time limits must stop the
+      # command's whole tree (#373). Their unit tests take a short limit, so
+      # they run here rather than in the integration test above. They run even
+      # if a step above failed, so one run reports every failure.
+      - name: Test formatter and post-create command time limits
+        if: ${{ !cancelled() }}
+        working-directory: src-rust
+        shell: bash
+        run: |
+          cargo test -p claurst-tools --locked --lib -- formatter::tests worktree::tests | tee "$RUNNER_TEMP/time-limit-tests.txt"
+          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/time-limit-tests.txt"

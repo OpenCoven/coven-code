@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::debug;
 
@@ -224,45 +225,11 @@ impl Tool for EnterWorktreeTool {
                 });
 
                 // Run optional post-create command in the new worktree directory
-                let post_create_output = if let Some(cmd) = params.post_create_command {
-                    let shell_result = if cfg!(target_os = "windows") {
-                        tokio::process::Command::new("cmd")
-                            .args(["/C", &cmd])
-                            .current_dir(&worktree_path)
-                            .output()
-                            .await
-                    } else {
-                        tokio::process::Command::new("sh")
-                            .args(["-c", &cmd])
-                            .current_dir(&worktree_path)
-                            .output()
-                            .await
-                    };
-                    match shell_result {
-                        Ok(out) if out.status.success() => {
-                            let stdout = String::from_utf8_lossy(&out.stdout);
-                            format!(
-                                "\nPost-create command '{}' completed successfully.{}",
-                                cmd,
-                                if stdout.trim().is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("\nOutput: {}", stdout.trim())
-                                }
-                            )
-                        }
-                        Ok(out) => {
-                            let stderr = String::from_utf8_lossy(&out.stderr);
-                            format!(
-                                "\nPost-create command '{}' exited with error.\nStderr: {}",
-                                cmd,
-                                stderr.trim()
-                            )
-                        }
-                        Err(e) => format!("\nCould not run post-create command '{}': {}", cmd, e),
+                let post_create_output = match params.post_create_command {
+                    Some(cmd) => {
+                        post_create_within(&cmd, &worktree_path, POST_CREATE_TIMEOUT).await
                     }
-                } else {
-                    String::new()
+                    None => String::new(),
                 };
 
                 ToolResult::success(format!(
@@ -460,6 +427,51 @@ impl Tool for ExitWorktreeTool {
 // Helper
 // ---------------------------------------------------------------------------
 
+/// How long a post-create command may run: the longest a foreground Bash call
+/// may.
+const POST_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Run the post-create command `cmd` in `worktree_path`, and describe how it
+/// went for the tool result. `_limit` is not applied yet.
+async fn post_create_within(cmd: &str, worktree_path: &Path, _limit: Duration) -> String {
+    let shell_result = if cfg!(target_os = "windows") {
+        tokio::process::Command::new("cmd")
+            .args(["/C", cmd])
+            .current_dir(worktree_path)
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(worktree_path)
+            .output()
+            .await
+    };
+    match shell_result {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            format!(
+                "\nPost-create command '{}' completed successfully.{}",
+                cmd,
+                if stdout.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("\nOutput: {}", stdout.trim())
+                }
+            )
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            format!(
+                "\nPost-create command '{}' exited with error.\nStderr: {}",
+                cmd,
+                stderr.trim()
+            )
+        }
+        Err(e) => format!("\nCould not run post-create command '{}': {}", cmd, e),
+    }
+}
+
 async fn run_git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let output = tokio::process::Command::new("git")
         .args(args)
@@ -472,5 +484,89 @@ async fn run_git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String>
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::post_create_within;
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    /// #373: a post-create command that runs past its limit is killed with
+    /// what it started. The subshell would write the marker 2 s in; the shell
+    /// waits for it, so the limit ends the hook first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_post_create_command_past_its_limit_is_stopped_with_its_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let report = post_create_within(
+            "(sleep 2; echo survived > marker) & wait",
+            directory.path(),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the hook outlived its limit: {:?}: {report}",
+            started.elapsed()
+        );
+        assert!(report.contains("timed out after 500ms"), "{report}");
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(
+            !directory.path().join("marker").exists(),
+            "the hook's descendant kept running after the limit"
+        );
+    }
+
+    /// An ordinary exit leaves alone a process the hook started to outlive
+    /// it, as the foreground Bash tool does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_post_create_command_that_exits_keeps_what_it_left_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let report = post_create_within(
+            "(sleep 1; echo survived > marker) >/dev/null 2>&1 & echo started",
+            directory.path(),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(
+            report.contains("completed successfully") && report.contains("started"),
+            "{report}"
+        );
+        let marker = directory.path().join("marker");
+        let survived = tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            survived.is_ok(),
+            "the process the hook left running was stopped"
+        );
+    }
+
+    /// #373 on Windows: the hook's `cmd.exe` starts another `cmd.exe` that
+    /// runs the loop.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_post_create_command_past_its_limit_is_stopped_with_its_grandchild() {
+        let ticker = crate::windows_ticker::Ticker::new();
+        let hook = format!("cmd /D /C {}", ticker.script().display());
+        // The loop runs 60 s unless it is stopped.
+        let report = tokio::time::timeout(
+            Duration::from_secs(30),
+            post_create_within(&hook, ticker.directory(), Duration::from_secs(4)),
+        )
+        .await
+        .expect("the hook was not stopped at its limit");
+        assert!(report.contains("timed out after 4000ms"), "{report}");
+        ticker
+            .assert_stopped("post-create command past its limit")
+            .await;
     }
 }

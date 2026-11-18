@@ -2,11 +2,17 @@
 //! A cancelled or timed-out call must stop the shell it started and every
 //! process below it. A finished call still returns its output and exit code,
 //! and leaves alone a process the command started on purpose to outlive it.
+//!
+//! The same holds for a background task of either Bash tool when it is
+//! cancelled or times out, and for a cancelled worktree post-create command.
 #![cfg(windows)]
 
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
-use claurst_tools::{BashTool, PowerShellTool, PtyBashTool, Tool, ToolContext};
+use claurst_core::tasks::{global_registry, TaskStatus};
+use claurst_tools::{
+    BashTool, EnterWorktreeTool, MonitorTool, PowerShellTool, PtyBashTool, Tool, ToolContext,
+};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::process::Stdio;
@@ -294,25 +300,217 @@ async fn check_detached(shell: Shell) {
         "{}",
         result.content
     );
-    let (pid, created) = result
-        .content
+    assert_detached_loop_runs(directory.path(), &result.content, shell).await;
+}
+
+/// The loop that [`DETACH`] or [`PS_DETACH`] started, named in `output`, is
+/// still ticking.
+async fn assert_detached_loop_runs(directory: &Path, output: &str, shell: Shell) {
+    let (pid, created) = output
         .lines()
         .find_map(|line| {
             let (pid, created) = line.trim().split_once(' ')?;
             Some((pid.parse::<u32>().ok()?, created.parse::<u64>().ok()?))
         })
-        .unwrap_or_else(|| panic!("no process ID and creation time in {}", result.content));
+        .unwrap_or_else(|| panic!("no process ID and creation time in {output}"));
     // `None` if the loop has already ended.
     let detached = Detached::open(pid, created);
-    let returned = ticks(directory.path());
+    let returned = ticks(directory);
     assert!(
-        reaches_ticks(directory.path(), returned + 2).await,
+        reaches_ticks(directory, returned + 2).await,
         "the detached loop stopped when the call ended ({shell:?}): {returned} ticks then, {} now",
-        ticks(directory.path())
+        ticks(directory)
     );
     assert!(
         detached.is_some(),
         "the detached loop is running, but could not be opened as process {pid} created at {created}"
+    );
+}
+
+/// Start `command` as a background task of `shell` and return the task's ID.
+async fn start_background(
+    shell: Shell,
+    command: &str,
+    timeout_ms: u64,
+    ctx: &ToolContext,
+) -> String {
+    let result = shell
+        .tool()
+        .execute(
+            serde_json::json!({ "command": command, "run_in_background": true, "timeout": timeout_ms }),
+            ctx,
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Task ID: "))
+        .unwrap_or_else(|| panic!("no task ID in {}", result.content))
+        .to_owned()
+}
+
+/// The background task's status once it has ended, within 30 s.
+async fn ended(id: &str) -> TaskStatus {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status = global_registry().get(id).unwrap().status;
+            if status != TaskStatus::Running {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the background task never ended")
+}
+
+/// Cancelling a background task with the monitor tool stops the loop its
+/// shell's child started.
+async fn check_background_cancel(shell: Shell) {
+    let directory = workspace();
+    let ctx = context(directory.path());
+    let id = start_background(shell, GRANDCHILD, 120_000, &ctx).await;
+    assert!(
+        reaches_ticks(directory.path(), 2).await,
+        "the loop never started"
+    );
+    let result = MonitorTool
+        .execute(
+            serde_json::json!({ "action": "cancel", "task_id": id }),
+            &ctx,
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    let stopped = ticks(directory.path());
+    let (settled, later) = ticks_after_stop(directory.path()).await;
+    assert_eq!(
+        settled, later,
+        "the grandchild loop kept running after the background task was cancelled ({shell:?}): \
+         {stopped} ticks at the cancel, {settled} 3 s later, {later} 6 s later"
+    );
+    assert_eq!(
+        global_registry().get(&id).unwrap().status,
+        TaskStatus::Cancelled
+    );
+}
+
+/// A background task that times out stops the loop its shell's child started.
+async fn check_background_timeout(shell: Shell) {
+    let directory = workspace();
+    let ctx = context(directory.path());
+    let id = start_background(shell, GRANDCHILD, 8000, &ctx).await;
+    assert_eq!(
+        ended(&id).await,
+        TaskStatus::Failed("timed out after 8000ms".into())
+    );
+    let stopped = ticks(directory.path());
+    assert!(stopped >= 1, "the loop never started");
+    let (settled, later) = ticks_after_stop(directory.path()).await;
+    assert_eq!(
+        settled, later,
+        "the grandchild loop kept running after the background task timed out ({shell:?}): \
+         {stopped} ticks at the timeout, {settled} 3 s later, {later} 6 s later"
+    );
+}
+
+/// A background task that exits with code 3 reports it, and leaves alone the
+/// loop it started to outlive it.
+async fn check_background_detached(shell: Shell) {
+    let directory = workspace();
+    let ctx = context(directory.path());
+    let id = start_background(shell, DETACH, 120_000, &ctx).await;
+    assert_eq!(ended(&id).await, TaskStatus::Failed("exit code 3".into()));
+    let output = global_registry().get(&id).unwrap().output.join("\n");
+    assert_detached_loop_runs(directory.path(), &output, shell).await;
+}
+
+/// A git repository whose one commit holds `ticker.cmd`, so a new worktree of
+/// it has the script too.
+fn repository() -> tempfile::TempDir {
+    let directory = workspace();
+    let commands: [&[&str]; 3] = [
+        &["init", "-q"],
+        &["add", "ticker.cmd"],
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ];
+    for args in commands {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    directory
+}
+
+#[tokio::test]
+async fn cancelled_bash_background_task_stops_its_grandchild() {
+    check_background_cancel(Shell::Bash).await;
+}
+
+#[tokio::test]
+async fn cancelled_pty_background_task_stops_its_grandchild() {
+    check_background_cancel(Shell::PtyBash).await;
+}
+
+#[tokio::test]
+async fn timed_out_bash_background_task_stops_its_grandchild() {
+    check_background_timeout(Shell::Bash).await;
+}
+
+#[tokio::test]
+async fn timed_out_pty_background_task_stops_its_grandchild() {
+    check_background_timeout(Shell::PtyBash).await;
+}
+
+#[tokio::test]
+async fn bash_background_exit_keeps_its_code_and_a_detached_process() {
+    check_background_detached(Shell::Bash).await;
+}
+
+#[tokio::test]
+async fn pty_background_exit_keeps_its_code_and_a_detached_process() {
+    check_background_detached(Shell::PtyBash).await;
+}
+
+/// A cancelled EnterWorktree call stops its post-create command's grandchild.
+#[tokio::test]
+async fn cancelled_worktree_hook_stops_its_grandchild() {
+    let repository = repository();
+    let worktree = repository.path().join(".worktrees").join("hook-cancel");
+    let ctx = context(repository.path());
+    let call = tokio::spawn(async move {
+        EnterWorktreeTool
+            .execute(
+                serde_json::json!({ "branch": "hook-cancel", "post_create_command": GRANDCHILD }),
+                &ctx,
+            )
+            .await
+    });
+    assert!(
+        reaches_ticks(&worktree, 2).await,
+        "the hook's loop never started"
+    );
+    assert!(!call.is_finished(), "the hook ended on its own");
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    let stopped = ticks(&worktree);
+    let (settled, later) = ticks_after_stop(&worktree).await;
+    assert_eq!(
+        settled, later,
+        "the hook's grandchild loop kept running after the call was cancelled: \
+         {stopped} ticks at the cancel, {settled} 3 s later, {later} 6 s later"
     );
 }
 

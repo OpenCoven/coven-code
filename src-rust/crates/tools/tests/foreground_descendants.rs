@@ -1,9 +1,10 @@
-//! #373: the workload must remain a descendant of the ordinary Bash wrapper.
+//! #373: the workload must remain a descendant of the ordinary Bash wrapper,
+//! and cancelling a call must stop it. The same holds for a worktree hook.
 #![cfg(unix)]
 
 use claurst_core::config::{Config, PermissionMode};
 use claurst_core::permissions::AutoPermissionHandler;
-use claurst_tools::{BashTool, PtyBashTool, Tool, ToolContext};
+use claurst_tools::{BashTool, EnterWorktreeTool, PtyBashTool, Tool, ToolContext};
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 use std::sync::{atomic::AtomicUsize, Arc};
@@ -213,4 +214,67 @@ async fn ordinary_completion_preserves_shell_cwd_and_exports() {
             second.content
         );
     }
+}
+
+/// A git repository with one commit, as EnterWorktree needs.
+fn repository() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let commands: [&[&str]; 2] = [
+        &["init", "-q"],
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    ];
+    for args in commands {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    directory
+}
+
+/// A cancelled EnterWorktree call stops its post-create command and what that
+/// started. The subshell would write the marker 2 s in.
+#[tokio::test]
+async fn cancelled_worktree_hook_owns_its_descendant() {
+    let repository = repository();
+    let worktree = repository.path().join(".worktrees").join("hook-cancel");
+    let ctx = context(repository.path());
+    let call = tokio::spawn(async move {
+        EnterWorktreeTool
+            .execute(
+                serde_json::json!({
+                    "branch": "hook-cancel",
+                    "post_create_command": "(sleep 2; echo survived > marker) & echo started > started; wait",
+                }),
+                &ctx,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !worktree.join("started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the post-create command starts");
+    assert!(!call.is_finished(), "the hook ended on its own");
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !worktree.join("marker").exists(),
+        "the post-create command's descendant kept running after the call was cancelled"
+    );
 }
