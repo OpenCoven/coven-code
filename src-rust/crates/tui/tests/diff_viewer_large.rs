@@ -11,9 +11,18 @@ use ratatui::Terminal;
 use std::time::{Duration, Instant};
 
 /// Far above a frame that formats only what is visible, and far below one that
-/// formats every line of [`LARGE_PAIRS`] pairs, even in a debug build on a busy
-/// runner.
-const FRAME_BUDGET: Duration = Duration::from_secs(1);
+/// formats every line of [`LARGE_PAIRS`] pairs or word-diffs a whole long line.
+/// Debug build, macOS arm64, load average 12, slowest frame of each test:
+/// - a large diff: about 7 ms; 5.3 s if a frame formats the whole diff;
+/// - one enormous line: 18 ms; 9.7 s without the word-diff limit;
+/// - a screen of long lines: 200 ms (1.06 s once at load 46); without the
+///   word-diff limit, about forty times the enormous line.
+const FRAME_BUDGET: Duration = Duration::from_secs(2);
+/// A busy host can stall any one attempt; an accidental quadratic or a frame
+/// that formats the whole diff is slow in every attempt.
+const ATTEMPTS: usize = 3;
+/// An attempt this slow is a regression, not load: no further attempts.
+const CLEARLY_TOO_SLOW: Duration = Duration::from_secs(8);
 const LARGE_PAIRS: usize = 500_000;
 
 fn app_showing(files: Vec<FileDiffStats>, renderer: UiRenderer) -> App {
@@ -43,6 +52,21 @@ fn slowest_frame(app: &mut App, frames: usize) -> Duration {
     slowest
 }
 
+/// The slowest of `frames` frames, from the fastest of up to [`ATTEMPTS`]
+/// attempts that each draw a fresh `app()`. Stops at the first attempt
+/// within [`FRAME_BUDGET`], or at one beyond [`CLEARLY_TOO_SLOW`].
+fn slowest_frame_of_best_attempt(app: impl Fn() -> App, frames: usize) -> Duration {
+    let mut best = Duration::MAX;
+    for _ in 0..ATTEMPTS {
+        let slowest = slowest_frame(&mut app(), frames);
+        best = best.min(slowest);
+        if best < FRAME_BUDGET || slowest > CLEARLY_TOO_SLOW {
+            break;
+        }
+    }
+    best
+}
+
 fn large_diff() -> String {
     let mut diff = String::from("diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n");
     diff.push_str(&format!("@@ -1,{LARGE_PAIRS} +1,{LARGE_PAIRS} @@\n"));
@@ -57,12 +81,15 @@ fn a_frame_of_a_large_diff_formats_only_what_is_visible() {
     warm_up_highlighter();
     let files = parse_unified_diff(&large_diff());
     for renderer in [UiRenderer::Classic, UiRenderer::Next] {
-        let mut app = app_showing(files.clone(), renderer);
-        app.diff_viewer.active_pane = DiffPane::Detail;
-        let slowest = slowest_frame(&mut app, 3);
+        let app = || {
+            let mut app = app_showing(files.clone(), renderer);
+            app.diff_viewer.active_pane = DiffPane::Detail;
+            app
+        };
+        let slowest = slowest_frame_of_best_attempt(app, 3);
         assert!(
             slowest < FRAME_BUDGET,
-            "{renderer:?}: slowest frame took {slowest:?}"
+            "{renderer:?}: slowest frame took {slowest:?} in the best of up to {ATTEMPTS} attempts"
         );
     }
 }
@@ -90,9 +117,13 @@ fn a_frame_of_one_enormous_changed_line_stays_quick() {
         "diff --git a/min.js b/min.js\n--- a/min.js\n+++ b/min.js\n@@ -1 +1 @@\n{}",
         changed_pair(8_000)
     );
-    let mut app = app_showing(parse_unified_diff(&diff), UiRenderer::Classic);
-    let slowest = slowest_frame(&mut app, 1);
-    assert!(slowest < FRAME_BUDGET, "slowest frame took {slowest:?}");
+    let files = parse_unified_diff(&diff);
+    let slowest =
+        slowest_frame_of_best_attempt(|| app_showing(files.clone(), UiRenderer::Classic), 1);
+    assert!(
+        slowest < FRAME_BUDGET,
+        "slowest frame took {slowest:?} in the best of up to {ATTEMPTS} attempts"
+    );
 }
 
 #[test]
@@ -103,7 +134,11 @@ fn a_screen_full_of_long_changed_lines_stays_quick() {
     for _ in 0..40 {
         diff.push_str(&changed_pair(8_000));
     }
-    let mut app = app_showing(parse_unified_diff(&diff), UiRenderer::Classic);
-    let slowest = slowest_frame(&mut app, 1);
-    assert!(slowest < FRAME_BUDGET, "slowest frame took {slowest:?}");
+    let files = parse_unified_diff(&diff);
+    let slowest =
+        slowest_frame_of_best_attempt(|| app_showing(files.clone(), UiRenderer::Classic), 1);
+    assert!(
+        slowest < FRAME_BUDGET,
+        "slowest frame took {slowest:?} in the best of up to {ATTEMPTS} attempts"
+    );
 }

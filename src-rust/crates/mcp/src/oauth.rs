@@ -2322,53 +2322,70 @@ mod tests {
     #[tokio::test]
     async fn valid_callback_exchanges_once_persists_and_cannot_replay() {
         let _home = TokenHomeGuard::new();
-        let token_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let token_endpoint = format!("http://{}/token", token_listener.local_addr().unwrap());
-        let callback_port = oauth_port_alloc().unwrap();
-        let callback_address: std::net::SocketAddr =
-            format!("127.0.0.1:{callback_port}").parse().unwrap();
-        let redirect_uri = format!("http://{callback_address}/callback");
-        let state = "fixture-state".to_string();
-        let session = McpAuthSession {
-            plugin: None,
-            caller: None,
-            server_name: "callback-exchange-fixture".into(),
-            server_url: "https://mcp.example/fixture".into(),
-            auth_url: "https://auth.example/unused".into(),
-            redirect_uri: redirect_uri.clone(),
-            verifier: "fixture-verifier".into(),
-            state: state.clone(),
-            metadata: McpOAuthMetadata {
-                authorization_endpoint: "https://auth.example/unused".into(),
-                token_endpoint: token_endpoint.clone(),
-            },
-        };
-        let token_server = tokio::spawn(async move {
-            let (mut socket, _) = token_listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let read = socket.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.starts_with("POST /token HTTP/1.1"));
-            let body = r#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-        });
-        let callback_request = callback_request(
-            &callback_address.to_string(),
-            &format!("/callback?code=fixture-code&state={state}"),
-        );
-        let flow = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
-            tokio::spawn(async move {
-                let response = send_callback(callback_address, &callback_request).await;
-                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        // `oauth_port_alloc` frees its port before the flow binds it, so on a
+        // busy host another test can take it in between. The flow then fails
+        // to bind before it opens the browser, and the scenario runs again on
+        // a fresh port.
+        let mut attempts = 0;
+        let (result, token_server, callback_address) = loop {
+            attempts += 1;
+            let token_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let token_endpoint = format!("http://{}/token", token_listener.local_addr().unwrap());
+            let callback_port = oauth_port_alloc().unwrap();
+            let callback_address: std::net::SocketAddr =
+                format!("127.0.0.1:{callback_port}").parse().unwrap();
+            let redirect_uri = format!("http://{callback_address}/callback");
+            let state = "fixture-state".to_string();
+            let session = McpAuthSession {
+                plugin: None,
+                caller: None,
+                server_name: "callback-exchange-fixture".into(),
+                server_url: "https://mcp.example/fixture".into(),
+                auth_url: "https://auth.example/unused".into(),
+                redirect_uri: redirect_uri.clone(),
+                verifier: "fixture-verifier".into(),
+                state: state.clone(),
+                metadata: McpOAuthMetadata {
+                    authorization_endpoint: "https://auth.example/unused".into(),
+                    token_endpoint: token_endpoint.clone(),
+                },
+            };
+            let token_server = tokio::spawn(async move {
+                let (mut socket, _) = token_listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.starts_with("POST /token HTTP/1.1"));
+                let body = r#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
             });
-            Ok(())
-        }));
-
-        let result = flow.await.unwrap().unwrap();
+            let callback_request = callback_request(
+                &callback_address.to_string(),
+                &format!("/callback?code=fixture-code&state={state}"),
+            );
+            let flow = tokio::spawn(run_mcp_auth_session_with(session, move |_| {
+                tokio::spawn(async move {
+                    let response = send_callback(callback_address, &callback_request).await;
+                    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                });
+                Ok(())
+            }));
+            match flow.await.unwrap() {
+                Err(error)
+                    if attempts < 3
+                        && error
+                            .to_string()
+                            .starts_with("Failed to bind OAuth callback listener") =>
+                {
+                    token_server.abort();
+                }
+                result => break (result.unwrap(), token_server, callback_address),
+            }
+        };
         token_server.await.unwrap();
         assert_eq!(result.server_name, "callback-exchange-fixture");
         assert_eq!(
@@ -2377,7 +2394,25 @@ mod tests {
                 .access_token,
             "fixture-access"
         );
-        assert!(TcpStream::connect(callback_address).await.is_err());
+        // The flow's listener is gone once the callback address can be bound
+        // again; a listener the flow kept would hold it for good. The port is
+        // free once the flow ends, so another test in this process may bind
+        // it first and hold it for a while: retry until that test lets go. A
+        // connect proves nothing either way: it can reach another test's
+        // listener, and on macOS a kept listener that never accepts was seen
+        // to refuse once its backlog filled.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let rebound = TcpListener::bind(callback_address).await;
+            if rebound.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{callback_address} still in use 10s after the flow returned: {rebound:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
