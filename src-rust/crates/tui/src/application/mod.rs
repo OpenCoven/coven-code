@@ -83,8 +83,9 @@ pub const QUERY_EVENT_QUEUE_CAPACITY: usize = 1024;
 /// Capacity of one turn's buffer between the query loop and its forwarder.
 ///
 /// The query loop waits for space here rather than dropping or growing, so a
-/// stalled interactive loop pauses the turn: at most this many events plus
-/// [`QUERY_EVENT_QUEUE_CAPACITY`] are held for it. 256 matches the API
+/// stalled interactive loop pauses the turn: about this many events plus
+/// [`QUERY_EVENT_QUEUE_CAPACITY`] are held for it (plus the one event the
+/// forwarder holds and one per concurrent tool call waiting to send). 256 matches the API
 /// client's own stream channel, which feeds most of these events one for one,
 /// so a full upstream stream fits without the loop waiting in normal use.
 pub const QUERY_PRODUCER_CAPACITY: usize = 256;

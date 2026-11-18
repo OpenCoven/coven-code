@@ -6826,25 +6826,57 @@ mod tests {
 
     #[tokio::test]
     async fn quitting_frees_a_turn_blocked_on_the_full_queue_and_keeps_its_messages() {
+        // The producer stands in for the query loop: it sends more than the
+        // per-turn buffer and the queue hold, so it ends up waiting on a full
+        // per-turn buffer (#408 D2) behind a forwarder waiting on the queue.
+        const BACKLOG: usize = claurst_tui::application::QUERY_PRODUCER_CAPACITY + 16;
         let (turn_tx, turn_rx) =
             tokio::sync::mpsc::channel(claurst_tui::application::QUERY_PRODUCER_CAPACITY);
         let (events, queue) = tokio::sync::mpsc::channel(1);
-        for _ in 0..3 {
-            turn_tx
-                .try_send(claurst_query::QueryEvent::Status("backlog".into()))
-                .unwrap();
-        }
-        drop(turn_tx);
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let producer_sent = sent.clone();
+        let producer = async move {
+            let sink = claurst_query::QueryEventSink::from(turn_tx);
+            for _ in 0..BACKLOG {
+                if sink
+                    .emit(claurst_query::QueryEvent::Status("backlog".into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                producer_sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
         let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let worker_messages = messages.clone();
         let handle = tokio::spawn(async move {
-            forward_scoped_events(turn_rx, events, Default::default()).await;
+            tokio::join!(
+                producer,
+                forward_scoped_events(turn_rx, events, Default::default())
+            );
             *worker_messages.lock().await =
                 vec![claurst_core::types::Message::user("kept".to_string())];
             claurst_query::QueryOutcome::Cancelled
         });
-        // Let the forwarder fill the queue and block on it.
-        tokio::task::yield_now().await;
+        // Let the producer fill both buffers and block.
+        let filled = async {
+            while sent.load(std::sync::atomic::Ordering::SeqCst)
+                < claurst_tui::application::QUERY_PRODUCER_CAPACITY
+            {
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), filled)
+            .await
+            .expect("the producer fills the per-turn buffer");
+        assert!(
+            sent.load(std::sync::atomic::Ordering::SeqCst) < BACKLOG,
+            "the producer waits on the full per-turn buffer"
+        );
 
         let wait = std::time::Duration::from_secs(30);
         let kept = tokio::time::timeout(
