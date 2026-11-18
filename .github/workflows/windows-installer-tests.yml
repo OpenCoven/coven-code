@@ -6,6 +6,7 @@ on:
       - install.ps1
       - scripts/test_install_powershell.py
       - scripts/install-ps1-rollback.test.ps1
+      - scripts/install-ps1-consent.test.ps1
       - .github/workflows/windows-installer-tests.yml
   push:
     branches: [main]
@@ -13,7 +14,9 @@ on:
       - install.ps1
       - scripts/test_install_powershell.py
       - scripts/install-ps1-rollback.test.ps1
+      - scripts/install-ps1-consent.test.ps1
       - .github/workflows/windows-installer-tests.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import pty
 import subprocess
 import tarfile
 import tempfile
@@ -65,10 +66,10 @@ fi
 ''')
         curl.chmod(0o755)
 
-    def run_install(self, *args):
+    def run_install(self, *args, stdin=subprocess.DEVNULL):
         return subprocess.run(
             ["/bin/bash", str(INSTALLER), "--install-dir", str(self.target), *args],
-            env=self.env, text=True, capture_output=True, timeout=10,
+            env=self.env, text=True, capture_output=True, timeout=10, stdin=stdin,
         )
 
     def assert_installed(self, result):
@@ -130,10 +131,80 @@ exec /bin/mv "$@"
                          ["coven-cave", "coven-code"])
 
     def test_local_alias_failure_preserves_install(self):
-        self.assert_alias_failure_preserves_install("--binary", str(self.local))
+        self.assert_alias_failure_preserves_install("--binary", str(self.local), "--force")
 
     def test_download_alias_failure_preserves_install(self):
-        self.assert_alias_failure_preserves_install("--version", "1.2.3")
+        self.assert_alias_failure_preserves_install("--version", "1.2.3", "--force")
+
+    # #369: an existing engine that differs from the one being installed is
+    # replaced only with consent.
+    OTHER = b"#!/bin/sh\nprintf 'fixture 1.0.0\\n'\n"
+    SAME_VERSION = b"#!/bin/sh\n# another build\nprintf 'fixture 1.2.3\\n'\n"
+
+    def existing(self, contents):
+        self.target.mkdir()
+        (self.target / "coven-code").write_bytes(contents)
+        (self.target / "coven-code").chmod(0o755)
+        (self.target / "coven-cave").symlink_to("coven-code")
+
+    def assert_kept(self, result, contents):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Left the existing coven-code in place", result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertIn("COVEN_CODE_INSTALL_FORCE=1", result.stderr)
+        self.assertNotIn("installed to", result.stdout)
+        self.assertEqual((self.target / "coven-code").read_bytes(), contents)
+        self.assertEqual(os.readlink(self.target / "coven-cave"), "coven-code")
+        self.assertEqual(sorted(path.name for path in self.target.iterdir()),
+                         ["coven-cave", "coven-code"])
+        self.assertFalse((self.home / ".bashrc").exists(), "a refused install edited the shell profile")
+
+    def test_a_different_local_engine_is_kept_without_consent(self):
+        self.existing(self.OTHER)
+        self.assert_kept(self.run_install("--binary", str(self.local)), self.OTHER)
+
+    def test_a_different_downloaded_engine_is_kept_without_consent(self):
+        self.existing(self.OTHER)
+        result = self.run_install("--version", "1.2.3")
+        self.assert_kept(result, self.OTHER)
+        self.assertIn("v1.0.0", result.stderr)
+
+    def test_force_replaces_a_different_engine(self):
+        self.existing(self.OTHER)
+        self.assert_installed(self.run_install("--binary", str(self.local), "--force"))
+
+    def test_force_variable_replaces_a_different_engine(self):
+        self.existing(self.OTHER)
+        self.env["COVEN_CODE_INSTALL_FORCE"] = "1"
+        self.assert_installed(self.run_install("--version", "1.2.3"))
+
+    def test_the_same_engine_is_reinstalled_without_asking(self):
+        self.existing(BINARY)
+        self.assert_installed(self.run_install("--binary", str(self.local)))
+        self.assert_installed(self.run_install("--version", "1.2.3"))
+
+    def test_the_same_version_is_reinstalled_without_asking(self):
+        self.existing(self.SAME_VERSION)
+        self.assert_installed(self.run_install("--version", "1.2.3"))
+
+    def run_on_terminal(self, answer, *args):
+        primary, secondary = pty.openpty()
+        try:
+            # The terminal holds the answer until the installer reads it.
+            os.write(primary, answer)
+            return self.run_install(*args, stdin=secondary)
+        finally:
+            os.close(secondary)
+            os.close(primary)
+
+    def test_a_terminal_answer_decides(self):
+        self.existing(self.OTHER)
+        result = self.run_on_terminal(b"n\n", "--binary", str(self.local))
+        self.assertIn("Replace it? [y/N]", result.stderr)
+        self.assert_kept(result, self.OTHER)
+        result = self.run_on_terminal(b"y\n", "--binary", str(self.local))
+        self.assertIn("Replace it? [y/N]", result.stderr)
+        self.assert_installed(result)
 
     # A release binary that the system cannot run: the loader prints why and
     # the process exits 127. These are the two messages a Linux system without
