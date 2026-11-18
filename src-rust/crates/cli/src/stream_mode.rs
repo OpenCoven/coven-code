@@ -148,43 +148,13 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
         resume_id,
     } = params;
 
-    // Resolve the session: --resume loads an existing transcript and keeps
-    // its id; otherwise start fresh under the pre-assigned id
-    // (--session-id, already threaded into tool_ctx.session_id by main).
     let scoped = claurst_tools::workspace_scope::active();
-    let resume_id = if scoped {
-        // Chat owns continuity and sends its replay in the single user frame.
-        // A native session must not change the admitted working directory.
-        None
-    } else if resume_id.as_deref() == Some("__last__") {
-        claurst_core::history::list_sessions()
-            .await
-            .first()
-            .map(|s| s.id.clone())
-    } else {
-        resume_id
-    };
-    let mut session = if let Some(ref id) = resume_id {
-        match claurst_core::history::load_session(id).await {
-            Ok(s) => {
-                if let Some(dir) = s.working_dir.as_ref() {
-                    let saved = std::path::PathBuf::from(dir);
-                    if saved.exists() {
-                        tool_ctx.working_dir = saved;
-                    }
-                }
-                tool_ctx.session_id = s.id.clone();
-                s
-            }
-            Err(e) => {
-                eprintln!("Warning: could not load session {id}: {e}. Starting a new session.");
-                new_session(&tool_ctx, &model)
-            }
-        }
-    } else {
-        new_session(&tool_ctx, &model)
-    };
+    let mut session =
+        crate::run_budget::session(&mut tool_ctx, &query_config, resume_id.as_deref()).await?;
     let session_id = session.id.clone();
+    let budget = query_config
+        .effective_turn_budget()
+        .map_err(anyhow::Error::msg)?;
 
     emit(&serde_json::json!({
         "type": "system",
@@ -195,6 +165,8 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
         "agent_mode": serde_json::Value::Null,
         "model": model,
         "permission": serde_json::Value::Null,
+        "run_budget_version": 1,
+        "turn_budget": budget,
     }));
 
     let mut messages: Vec<Message> = session.messages.clone();
@@ -240,7 +212,7 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
         };
 
         messages.push(prompt);
-        messages = run_turn(
+        let (updated_messages, mut result) = run_turn(
             messages,
             &client,
             &tools,
@@ -249,20 +221,13 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
             &cost_tracker,
             &session_id,
         )
-        .await;
+        .await?;
 
-        // Persist so a later relaunch with --resume <id> continues this chat.
-        session.messages = messages.clone();
-        session.updated_at = chrono::Utc::now();
-        if session.title.is_none() {
-            session.title = messages
-                .iter()
-                .find(|m| m.role == claurst_core::types::Role::User)
-                .map(|m| m.get_all_text().chars().take(80).collect());
-        }
-        if let Err(e) = claurst_core::history::save_session(&session).await {
-            eprintln!("Warning: failed to persist session {session_id}: {e}");
-        }
+        // The terminal receipt follows the persistence attempt.
+        let saved = crate::run_budget::persist(&mut session, updated_messages).await;
+        messages = session.messages.clone();
+        result.budget.continuation.resumable = saved && !scoped && result.transcript_complete;
+        emit(&serde_json::to_value(result)?);
         if scoped {
             // Any temporary folder approval belongs to this reply only.
             break;
@@ -270,13 +235,6 @@ pub async fn run_stream_loop(params: StreamLoopParams) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn new_session(tool_ctx: &ToolContext, model: &str) -> claurst_core::history::ConversationSession {
-    let mut session = claurst_core::history::ConversationSession::new(model.to_string());
-    session.id = tool_ctx.session_id.clone();
-    session.working_dir = Some(tool_ctx.working_dir.display().to_string());
-    session
 }
 
 async fn await_transcript_task<T>(
@@ -305,11 +263,14 @@ async fn run_turn(
     query_config: &claurst_query::QueryConfig,
     cost_tracker: &Arc<CostTracker>,
     session_id: &str,
-) -> Vec<Message> {
+) -> anyhow::Result<(Vec<Message>, crate::run_budget::TurnResult)> {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     let started = Instant::now();
+    let budget = query_config
+        .effective_turn_budget()
+        .map_err(anyhow::Error::msg)?;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
     let cancel = CancellationToken::new();
     // Compaction temporarily moves the transcript out of the shared vector.
@@ -328,14 +289,14 @@ async fn run_turn(
 
     let handle = tokio::spawn(async move {
         let mut msgs = task_messages.lock().await;
-        claurst_query::run_query_loop(
+        claurst_query::run_query_loop_with_receipt(
             client_clone.as_ref(),
             &mut msgs,
             tools_clone.as_slice(),
             &tool_ctx_clone,
             &qcfg,
             tracker,
-            Some(event_tx),
+            Some(event_tx.into()),
             cancel,
             None,
         )
@@ -343,7 +304,7 @@ async fn run_turn(
     });
 
     let mut full_text = String::new();
-    let mut num_turns: u32 = 0;
+
     while let Some(event) = event_rx.recv().await {
         match &event {
             QueryEvent::Stream(claurst_api::AnthropicStreamEvent::ContentBlockDelta {
@@ -382,7 +343,7 @@ async fn run_turn(
                     "session_id": session_id,
                 }));
             }
-            QueryEvent::TurnComplete { turn, .. } => num_turns = (*turn).max(num_turns),
+
             QueryEvent::Error(msg) => {
                 eprintln!("Error: {msg}");
             }
@@ -391,12 +352,17 @@ async fn run_turn(
     }
 
     let (result, msgs) = await_transcript_task(handle, messages, panic_fallback).await;
-    let outcome = match result {
-        Ok(outcome) => outcome,
-        Err(e) => QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
-            "query task panicked: {e}"
-        ))),
+    let transcript_complete = result.is_ok();
+    let run = match result {
+        Ok(run) => run,
+        Err(e) => claurst_query::QueryRun {
+            outcome: QueryOutcome::Error(claurst_core::error::ClaudeError::Other(format!(
+                "query task panicked: {e}"
+            ))),
+            num_turns: 0,
+        },
     };
+    let claurst_query::QueryRun { outcome, num_turns } = run;
 
     let (subtype, stop_reason, is_error, error): (&str, &str, bool, Option<String>) = match &outcome
     {
@@ -418,6 +384,12 @@ async fn run_turn(
             Some(format!(
                 "budget limit ${limit_usd:.4} reached (spent ${cost_usd:.4})"
             )),
+        ),
+        QueryOutcome::TurnBudgetExhausted { budget, consumed } => (
+            "error_during_execution",
+            "max_turns",
+            true,
+            Some(crate::run_budget::exhaustion_message(*budget, *consumed)),
         ),
         QueryOutcome::Error(e) => (
             "error_during_execution",
@@ -446,17 +418,20 @@ async fn run_turn(
         );
     }
 
-    emit(&serde_json::json!({
-        "type": "result",
-        "subtype": subtype,
-        "duration_ms": started.elapsed().as_millis() as u64,
-        "is_error": is_error,
-        "num_turns": num_turns,
-        "session_id": session_id,
-        "error": error,
-    }));
-
-    msgs
+    let frame = crate::run_budget::TurnResult {
+        kind: "result",
+        subtype,
+        duration_ms: started.elapsed().as_millis() as u64,
+        is_error,
+        num_turns,
+        session_id: session_id.to_owned(),
+        error,
+        transcript_complete,
+        budget: crate::run_budget::BudgetMetadata::new(
+            budget, num_turns, &outcome, session_id, false,
+        ),
+    };
+    Ok((msgs, frame))
 }
 
 #[cfg(test)]
