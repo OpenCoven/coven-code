@@ -1540,7 +1540,7 @@ impl SlashCommand for StatusCommand {
             perm = ctx.config.permission_mode,
             fast = if fast_mode { "on" } else { "off" },
             editor = editor_mode,
-            sid = utf8_byte_prefix(&ctx.session_id, 12),
+            sid = ctx.session_id,
             title = ctx.session_title.as_deref().unwrap_or("(untitled)"),
             msgs = ctx.messages.len(),
             wd = ctx.working_dir.display(),
