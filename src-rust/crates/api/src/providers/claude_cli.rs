@@ -779,6 +779,7 @@ impl ClaudeCliProvider {
             turn.mark_request_attempted();
         }
         let mut child = command.spawn().map_err(|e| self.spawn_error(e))?;
+        crate::model_dispatch::mark_attempted();
 
         let mut stdin = child.stdin.take().ok_or_else(|| ProviderError::Other {
             provider: self.id.clone(),
@@ -1457,45 +1458,83 @@ mod tests {
             if message.contains("printed nothing for"))
     }
 
+    /// The pid a stand-in CLI wrote to `dir`, if it got that far. The
+    /// provider kills the CLI at its 1 s quiet limit, and a stand-in that a
+    /// busy host keeps off the CPU until then is killed before it writes:
+    /// the file then never appears, so waiting for it cannot help.
+    #[cfg(unix)]
+    fn recorded_pid(dir: &std::path::Path) -> Option<String> {
+        let pid = std::fs::read_to_string(dir.join("pid")).ok()?;
+        let pid = pid.trim();
+        pid.parse::<u32>().is_ok().then(|| pid.to_string())
+    }
+
+    /// Runs of a pid-recording scenario before giving up. A run whose
+    /// stand-in was killed before it wrote its pid shows nothing about
+    /// whether a killed CLI is left running, so the scenario runs again.
+    #[cfg(unix)]
+    const PID_ATTEMPTS: usize = 3;
+
+    #[cfg(unix)]
+    fn no_pid_recorded() -> ! {
+        panic!(
+            "in {PID_ATTEMPTS} runs the stand-in CLI had not written its pid when the turn \
+             ended at the 1 s quiet limit; the host is likely too busy to run this test"
+        )
+    }
+
+    /// Checks that the stand-in CLI in `dir` is no longer running, and
+    /// removes `dir`. Returns false, having checked nothing, when the
+    /// stand-in wrote no pid.
+    #[cfg(unix)]
+    async fn assert_recorded_cli_stopped(dir: std::path::PathBuf) -> bool {
+        let Some(pid) = recorded_pid(&dir) else {
+            let _ = std::fs::remove_dir_all(dir);
+            return false;
+        };
+        let running = still_running_after_a_wait(&pid).await;
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!running, "the hung CLI (pid {pid}) is still running");
+        true
+    }
+
     /// The keepalive tells the query loop a silent CLI is busy for as long as
     /// its process lives. A CLI that has hung is alive too, so without a
     /// limit of the provider's own the turn would wait on it for ever.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_running_cli_silent_past_the_limit_ends_the_turn_with_an_error() {
-        // The CLI records its pid, then hangs: one process, alive and silent.
-        let (dir, items, took) = run_with_quiet_limit(
-            "echo $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n",
-            Some(std::time::Duration::from_secs(1)),
-        )
-        .await;
-        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        for _ in 0..PID_ATTEMPTS {
+            // The CLI records its pid, then hangs: one process, alive and silent.
+            let (dir, items, took) = run_with_quiet_limit(
+                "echo $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n",
+                Some(std::time::Duration::from_secs(1)),
+            )
+            .await;
 
-        // It was kept alive up to the limit, then failed once, and the stream
-        // ended there instead of waiting out the minute.
-        assert!(
-            took >= std::time::Duration::from_secs(1),
-            "ended after {took:?}"
-        );
-        assert!(
-            took < std::time::Duration::from_secs(30),
-            "ended after {took:?}"
-        );
-        let (last, before) = items.split_last().unwrap();
-        assert!(is_quiet_limit_error(last), "last item was {last:?}");
-        assert!(before.iter().all(Result::is_ok));
-        assert!(before
-            .iter()
-            .any(|item| matches!(item, Ok(StreamEvent::Ping))));
+            // It was kept alive up to the limit, then failed once, and the
+            // stream ended there instead of waiting out the minute.
+            assert!(
+                took >= std::time::Duration::from_secs(1),
+                "ended after {took:?}"
+            );
+            assert!(
+                took < std::time::Duration::from_secs(30),
+                "ended after {took:?}"
+            );
+            let (last, before) = items.split_last().unwrap();
+            assert!(is_quiet_limit_error(last), "last item was {last:?}");
+            assert!(before.iter().all(Result::is_ok));
+            assert!(before
+                .iter()
+                .any(|item| matches!(item, Ok(StreamEvent::Ping))));
 
-        // Ending the stream stopped the CLI: nothing is left running.
-        let running = still_running_after_a_wait(pid.trim()).await;
-        let _ = std::fs::remove_dir_all(dir);
-        assert!(
-            !running,
-            "the hung CLI (pid {}) is still running",
-            pid.trim()
-        );
+            // Ending the stream stopped the CLI: nothing is left running.
+            if assert_recorded_cli_stopped(dir).await {
+                return;
+            }
+        }
+        no_pid_recorded();
     }
 
     /// A CLI can hang before it prints anything. No stream exists yet at
@@ -1504,44 +1543,42 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cli_silent_from_the_start_fails_the_turn_at_the_limit() {
-        let dir = std::env::temp_dir().join(format!("mute-claude-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let script =
-            "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\ncat >/dev/null\nexec sleep 60\n";
-        let binary = fixture_binary(&dir, script);
-        let provider = ClaudeCliProvider {
-            id: ProviderId::new(ProviderId::ANTHROPIC),
-            binary: Some(binary),
-            heartbeat: std::time::Duration::from_millis(50),
-            quiet_limit: Some(std::time::Duration::from_secs(1)),
-            goal_authority: None,
-        };
-        let request = request_with(vec![Message::user("fixture prompt")]);
-        let started = std::time::Instant::now();
-        let error = match provider.create_message_stream(request).await {
-            Ok(_) => panic!("a CLI that printed nothing produced a stream"),
-            Err(error) => error,
-        };
-        let took = started.elapsed();
-        let error_result = Err(error);
-        assert!(is_quiet_limit_error(&error_result), "{error_result:?}");
-        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        for _ in 0..PID_ATTEMPTS {
+            let dir = std::env::temp_dir().join(format!("mute-claude-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let script =
+                "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\ncat >/dev/null\nexec sleep 60\n";
+            let binary = fixture_binary(&dir, script);
+            let provider = ClaudeCliProvider {
+                id: ProviderId::new(ProviderId::ANTHROPIC),
+                binary: Some(binary),
+                heartbeat: std::time::Duration::from_millis(50),
+                quiet_limit: Some(std::time::Duration::from_secs(1)),
+                goal_authority: None,
+            };
+            let request = request_with(vec![Message::user("fixture prompt")]);
+            let started = std::time::Instant::now();
+            let error = match provider.create_message_stream(request).await {
+                Ok(_) => panic!("a CLI that printed nothing produced a stream"),
+                Err(error) => error,
+            };
+            let took = started.elapsed();
+            let error_result = Err(error);
+            assert!(is_quiet_limit_error(&error_result), "{error_result:?}");
+            assert!(
+                took >= std::time::Duration::from_secs(1),
+                "failed after {took:?}"
+            );
+            assert!(
+                took < std::time::Duration::from_secs(30),
+                "failed after {took:?}"
+            );
 
-        assert!(
-            took >= std::time::Duration::from_secs(1),
-            "failed after {took:?}"
-        );
-        assert!(
-            took < std::time::Duration::from_secs(30),
-            "failed after {took:?}"
-        );
-        let running = still_running_after_a_wait(pid.trim()).await;
-        let _ = std::fs::remove_dir_all(dir);
-        assert!(
-            !running,
-            "the hung CLI (pid {}) is still running",
-            pid.trim()
-        );
+            if assert_recorded_cli_stopped(dir).await {
+                return;
+            }
+        }
+        no_pid_recorded();
     }
 
     /// The limit is on unbroken silence, not on the length of the turn: each

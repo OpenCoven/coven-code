@@ -1540,7 +1540,7 @@ impl SlashCommand for StatusCommand {
             perm = ctx.config.permission_mode,
             fast = if fast_mode { "on" } else { "off" },
             editor = editor_mode,
-            sid = utf8_byte_prefix(&ctx.session_id, 12),
+            sid = ctx.session_id,
             title = ctx.session_title.as_deref().unwrap_or("(untitled)"),
             msgs = ctx.messages.len(),
             wd = ctx.working_dir.display(),
@@ -2494,15 +2494,9 @@ impl SlashCommand for PluginSlashCommandAdapter {
                 } else {
                     format!("{} {}", command, args)
                 };
-                let cmd_result =
-                    std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-                        .args(if cfg!(windows) {
-                            vec!["/C", &full_cmd]
-                        } else {
-                            vec!["-c", &full_cmd]
-                        })
-                        .env("CLAUDE_PLUGIN_ROOT", plugin_root)
-                        .output();
+                let cmd_result = claurst_core::shell::command(&full_cmd)
+                    .env("CLAUDE_PLUGIN_ROOT", plugin_root)
+                    .output();
                 match cmd_result {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2883,7 +2877,16 @@ impl SlashCommand for DoctorCommand {
         lines.push("Coven Substrate".to_string());
         match claurst_core::coven_shared::DaemonClient::new() {
             None => {
-                lines.push("  • Daemon not installed (no ~/.coven/coven.sock)".to_string());
+                // Name the socket path the client uses, which follows
+                // COVEN_HOME. On Unix that is the file `DaemonClient::new`
+                // just looked for; elsewhere it opens no socket and always
+                // lands here.
+                lines.push(match claurst_core::coven_shared::daemon_socket_path() {
+                    Some(sock) => format!("  • Daemon not installed (no {})", sock.display()),
+                    None => "  • Daemon not installed (no socket path: COVEN_HOME is unset or \
+                             empty and no home directory was found)"
+                        .to_string(),
+                });
                 lines.push(
                     "    Install: npm install -g @opencoven/coven  →  coven daemon start"
                         .to_string(),
@@ -2922,7 +2925,7 @@ impl SlashCommand for DoctorCommand {
                                 Ok(sessions) => {
                                     lines.push(format!(
                                         "  • Active daemon sessions: {}",
-                                        sessions.len()
+                                        sessions.iter().filter(|s| s.is_live()).count()
                                     ));
                                 }
                                 Err(e) => {
@@ -9703,7 +9706,10 @@ fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> Str
         }
     }
     match client.active_sessions() {
-        Ok(active) => out.push_str(&format!("  active sessions: {}\n", active.len())),
+        Ok(sessions) => out.push_str(&format!(
+            "  active sessions: {}\n",
+            sessions.iter().filter(|s| s.is_live()).count()
+        )),
         Err(e) => out.push_str(&format!("  active sessions: ? ({e})\n")),
     }
     out
@@ -14037,6 +14043,52 @@ mod tests {
         }
     }
 
+    /// #527: with no daemon socket, the Coven Substrate section of
+    /// `/status doctor` must name the socket the client checked
+    /// (`$COVEN_HOME/coven.sock`), not a fixed `~/.coven` path. The guard
+    /// points HOME and COVEN_HOME at a fresh tempdir with no socket, so this
+    /// never reads the real `~/.coven` or reaches a running daemon.
+    #[test]
+    fn doctor_names_the_socket_under_coven_home() {
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let expected = guard.coven_home().join("coven.sock");
+        assert!(!expected.exists());
+        let status = find_command("status").expect("/status command must be registered");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // First with an empty COVEN_HOME directory, then with COVEN_HOME
+        // naming a directory that does not exist.
+        for coven_home_exists in [true, false] {
+            if !coven_home_exists {
+                std::fs::remove_dir_all(guard.coven_home()).unwrap();
+            }
+            let mut ctx = make_ctx();
+            let CommandResult::Message(msg) = runtime.block_on(status.execute("doctor", &mut ctx))
+            else {
+                panic!("/status doctor must return a message");
+            };
+            let substrate = msg
+                .split_once("Coven Substrate\n")
+                .map(|(_, section)| section)
+                .unwrap_or_else(|| {
+                    panic!("/status doctor lost its Coven Substrate section: {msg}")
+                });
+            assert_eq!(
+                substrate.lines().next(),
+                Some(format!("  • Daemon not installed (no {})", expected.display()).as_str()),
+                "/status doctor must name the socket it checked \
+                 (COVEN_HOME exists: {coven_home_exists}): {msg}"
+            );
+            assert!(!msg.contains("~/.coven"), "{msg}");
+            assert!(
+                substrate.contains("Install: npm install -g @opencoven/coven"),
+                "/status doctor lost the install hint: {msg}"
+            );
+        }
+    }
+
     #[test]
     fn coven_calls_ledger_returns_message_when_file_missing() {
         let _guard = CommandEnvGuard::with_coven_home(None);
@@ -14205,6 +14257,91 @@ mod tests {
                 other => panic!("expected Message from /coven sessions, got {other:?}"),
             }
             std::fs::remove_file(&sock_path).ok();
+        }
+    }
+
+    /// `/coven status` and `/status doctor` count only live sessions as
+    /// active (#528). The fake daemon lists one running, one idle, one
+    /// completed, one failed and one archived running session: two are live.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn coven_status_and_doctor_count_only_live_sessions() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const HEALTH: &str = "{\"ok\":true,\"apiVersion\":\"coven.daemon.v1\",\
+                              \"covenVersion\":\"0.5.0\",\"daemon\":{\"pid\":77}}";
+        const SESSIONS: &str = "[\
+            {\"id\":\"s-running\",\"status\":\"running\"},\
+            {\"id\":\"s-idle\",\"status\":\"idle\"},\
+            {\"id\":\"s-completed\",\"status\":\"completed\"},\
+            {\"id\":\"s-failed\",\"status\":\"failed\"},\
+            {\"id\":\"s-archived\",\"status\":\"running\",\
+             \"archived_at\":\"2026-11-18T00:00:00Z\"}]";
+
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let sock_path = guard.coven_home().join("coven.sock");
+        let listener = UnixListener::bind(&sock_path).expect("bind socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                    };
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = [0_u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let body = if request.starts_with("GET /api/v1/health ") {
+                        HEALTH
+                    } else if request.starts_with("GET /api/v1/sessions ") {
+                        SESSIONS
+                    } else {
+                        "[]"
+                    };
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            })
+        };
+
+        let mut ctx = make_ctx();
+        let coven = find_command("coven").expect("/coven command must be registered");
+        let status = coven.execute("status", &mut ctx).await;
+        let status_cmd = find_command("status").expect("/status must be registered");
+        let doctor = status_cmd.execute("doctor", &mut ctx).await;
+        stop.store(true, Ordering::SeqCst);
+        let _ = server.join();
+
+        match status {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("active sessions: 2\n"), "{msg}");
+            }
+            other => panic!("expected Message from /coven status, got {other:?}"),
+        }
+        match doctor {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Active daemon sessions: 2\n"), "{msg}");
+            }
+            other => panic!("expected Message from /status doctor, got {other:?}"),
         }
     }
 

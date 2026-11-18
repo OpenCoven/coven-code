@@ -217,14 +217,9 @@ pub fn run_hook_sync(hook: &RegisteredHook, event_json: &str, working_dir: &Path
         ));
     }
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = match Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-        .args(if cfg!(windows) {
-            vec!["/C", &hook.command]
-        } else {
-            vec!["-c", &hook.command]
-        })
+    let mut child = match claurst_core::shell::command(&hook.command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -388,12 +383,7 @@ fn run_post_tool_hook(
         ));
     }
     let command = hook.command.as_str();
-    let output = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-        .args(if cfg!(windows) {
-            vec!["/C", command]
-        } else {
-            vec!["-c", command]
-        })
+    let output = claurst_core::shell::command(command)
         .env("CLAUDE_TOOL_NAME", tool_name)
         .env("CLAUDE_TOOL_INPUT", tool_input_json)
         .env("CLAUDE_TOOL_RESULT", tool_result_json)
