@@ -133,7 +133,9 @@ pub async fn handle(
         QueryOutcome::EndTurn { .. } => acp::StopReason::EndTurn,
         QueryOutcome::MaxTokens { .. } => acp::StopReason::MaxTokens,
         QueryOutcome::Cancelled => acp::StopReason::Cancelled,
-        QueryOutcome::BudgetExceeded { .. } => acp::StopReason::MaxTurnRequests,
+        QueryOutcome::BudgetExceeded { .. } | QueryOutcome::TurnBudgetExhausted { .. } => {
+            acp::StopReason::MaxTurnRequests
+        }
         QueryOutcome::Error(e) => {
             error!(error = ?e, "ACP: query loop errored");
             acp::StopReason::Refusal
