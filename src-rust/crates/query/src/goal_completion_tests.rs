@@ -2389,7 +2389,9 @@ mod goal_completion {
             run.outcome
         );
         // The turn request is the first; the detached extraction request is
-        // the second and must arrive at the same fixture.
+        // the second and must arrive at the same fixture. Retries are off and
+        // there is no fallback model, so a second request can only be the
+        // extraction.
         let seen = wait_for_requests(&count, 2).await;
         stop.cancel();
         server.await.unwrap();
