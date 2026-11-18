@@ -414,6 +414,7 @@ impl CodexProvider {
         if let Some((turn, _)) = &self.goal_authority {
             turn.mark_request_attempted();
         }
+        crate::model_dispatch::mark_attempted();
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
             message: format!("HTTP request failed: {}", e),
@@ -481,6 +482,7 @@ impl CodexProvider {
         if let Some((turn, _)) = &self.goal_authority {
             turn.mark_request_attempted();
         }
+        crate::model_dispatch::mark_attempted();
         let resp = builder.send().await.map_err(|e| ProviderError::Other {
             provider: self.id.clone(),
             message: format!("HTTP request failed: {}", e),

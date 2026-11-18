@@ -96,6 +96,9 @@ pub trait LlmProvider: Send + Sync {
             }
             turn.mark_request_attempted();
         }
+        // Built-in adapters override this method and mark their actual sends.
+        // An opaque custom adapter exposes only this invocation boundary.
+        crate::model_dispatch::mark_attempted();
         self.create_message_stream(request).await
     }
 
