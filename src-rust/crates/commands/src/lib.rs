@@ -2922,7 +2922,7 @@ impl SlashCommand for DoctorCommand {
                                 Ok(sessions) => {
                                     lines.push(format!(
                                         "  • Active daemon sessions: {}",
-                                        sessions.len()
+                                        sessions.iter().filter(|s| s.is_live()).count()
                                     ));
                                 }
                                 Err(e) => {
@@ -9703,7 +9703,10 @@ fn coven_format_health(client: &claurst_core::coven_shared::DaemonClient) -> Str
         }
     }
     match client.active_sessions() {
-        Ok(active) => out.push_str(&format!("  active sessions: {}\n", active.len())),
+        Ok(sessions) => out.push_str(&format!(
+            "  active sessions: {}\n",
+            sessions.iter().filter(|s| s.is_live()).count()
+        )),
         Err(e) => out.push_str(&format!("  active sessions: ? ({e})\n")),
     }
     out
@@ -14205,6 +14208,89 @@ mod tests {
                 other => panic!("expected Message from /coven sessions, got {other:?}"),
             }
             std::fs::remove_file(&sock_path).ok();
+        }
+    }
+
+    /// `/coven status` and `/status doctor` count only live sessions as
+    /// active (#528). The fake daemon lists one running, one idle, one
+    /// completed, one failed and one archived running session: two are live.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn coven_status_and_doctor_count_only_live_sessions() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const HEALTH: &str = "{\"ok\":true,\"apiVersion\":\"coven.daemon.v1\",\
+                              \"covenVersion\":\"0.5.0\",\"daemon\":{\"pid\":77}}";
+        const SESSIONS: &str = "[\
+            {\"id\":\"s-running\",\"status\":\"running\"},\
+            {\"id\":\"s-idle\",\"status\":\"idle\"},\
+            {\"id\":\"s-completed\",\"status\":\"completed\"},\
+            {\"id\":\"s-failed\",\"status\":\"failed\"},\
+            {\"id\":\"s-archived\",\"status\":\"running\",\
+             \"archived_at\":\"2026-11-18T00:00:00Z\"}]";
+
+        let guard = CommandEnvGuard::with_coven_home(None);
+        let sock_path = guard.coven_home().join("coven.sock");
+        let listener = UnixListener::bind(&sock_path).expect("bind socket");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                    };
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = [0_u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let body = if request.starts_with("GET /api/v1/health ") {
+                        HEALTH
+                    } else if request.starts_with("GET /api/v1/sessions ") {
+                        SESSIONS
+                    } else {
+                        "[]"
+                    };
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            })
+        };
+
+        let mut ctx = make_ctx();
+        let coven = find_command("coven").expect("/coven command must be registered");
+        let status = coven.execute("status", &mut ctx).await;
+        let status_cmd = find_command("status").expect("/status must be registered");
+        let doctor = status_cmd.execute("doctor", &mut ctx).await;
+        stop.store(true, Ordering::SeqCst);
+        let _ = server.join();
+
+        match status {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("active sessions: 2\n"), "{msg}");
+            }
+            other => panic!("expected Message from /coven status, got {other:?}"),
+        }
+        match doctor {
+            CommandResult::Message(msg) => {
+                assert!(msg.contains("Active daemon sessions: 2\n"), "{msg}");
+            }
+            other => panic!("expected Message from /status doctor, got {other:?}"),
         }
     }
 
