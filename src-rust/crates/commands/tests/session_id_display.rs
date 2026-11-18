@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 fn session_id_displays_preserve_utf8_and_storage() {
     let mut failures = Vec::new();
     for operation in ["status", "list", "recent", "search"] {
-        for case in ["two", "three", "four", "ascii", "exact", "short"] {
+        for case in ["two", "three", "four", "ascii", "exact", "short", "uuid"] {
             let temp = tempfile::tempdir().unwrap();
             let home = temp.path().join("home");
             let empty_path = temp.path().join("empty-path");
@@ -79,6 +79,7 @@ fn session_id_worker() {
         "ascii" => "a".repeat(budget + 1),
         "exact" => format!("{}界", "a".repeat(budget - 3)),
         "short" => "é界".into(),
+        "uuid" => "123e4567-e89b-42d3-a456-426614174000".into(),
         _ => panic!("unknown case"),
     };
     if matches!(case.as_str(), "two" | "three" | "four") {
@@ -133,12 +134,10 @@ fn session_id_worker() {
         };
         match operation.as_str() {
             "status" => {
-                assert!(
-                    message
-                        .lines()
-                        .any(|line| line == format!("Session ID:     {prefix}")),
-                    "{message}"
-                );
+                // /status prints the whole id (#532): a prefix cannot be used
+                // to load the session. The lists below still shorten it.
+                let row = format!("Session ID:     {id}");
+                assert!(message.lines().any(|line| line == row), "{message}");
                 assert!(message.contains("Auth:           Not authenticated\n"));
                 assert!(message.contains("Git branch:     n/a\n"));
             }
