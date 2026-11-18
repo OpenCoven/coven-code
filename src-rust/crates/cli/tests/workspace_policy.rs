@@ -904,8 +904,9 @@ fn a_downgraded_scope_refuses_every_file_edit_tool() {
 /// the project to `d-moved` and, with `symlink`, then points the project's
 /// path at an ungranted folder. The engine checks every saved folder again
 /// before each shell launch, so it refuses the next shell outright, even that
-/// shell's write to the workspace. It also refuses the Write tool, whose file
-/// changes run through the same sandboxed shell. Nothing lands. When given,
+/// shell's write to the workspace. The Write tool is refused too, by the scope
+/// decision or by the same pre-launch check on its sandboxed write (see each
+/// test). Nothing lands. When given,
 /// `shell_refusal` and `write_refusal` are the errors those two calls report.
 fn granted_folder_changes_mid_reply(
     symlink: bool,

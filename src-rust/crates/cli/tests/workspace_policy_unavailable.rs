@@ -5,7 +5,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::Write,
-    process::{Command, Output, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -15,7 +15,8 @@ use workspace_policy_fixture::{final_text, messages_fixture, scope, user_frame};
 
 /// Only macOS has a native workspace sandbox (#460). On any other platform a
 /// valid policy is still refused: the kernel check entrypoint and a scoped
-/// Chat stream both exit non-zero, write no output and never ask the model.
+/// Chat stream both exit non-zero, write nothing on stdout and never ask the
+/// model.
 /// The policy has the same shape as the ones the macOS tests admit, and the
 /// refusal asserted is the platform's, so the policy is not what is refused.
 #[test]
@@ -31,7 +32,11 @@ fn a_scoped_launch_without_a_sandbox_backend_is_refused() {
     )
     .unwrap();
     let (api, requests) = messages_fixture(vec![final_text("Unscoped reply.")]);
-    let run = |args: &[&OsStr]| -> Output {
+    // Output goes to files, so a run that writes a lot cannot fill a pipe and
+    // stall until the time limit.
+    let run = |log: &str, args: &[&OsStr]| -> (ExitStatus, String, String) {
+        let capture =
+            |stream: &str| fs::File::create(base.join(format!("{log}.{stream}"))).unwrap();
         let mut engine = Command::new(env!("CARGO_BIN_EXE_coven-code"))
             .env_clear()
             // Windows cannot start a networked process without SystemRoot.
@@ -52,8 +57,8 @@ fn a_scoped_launch_without_a_sandbox_backend_is_refused() {
             .current_dir(temp.path().join("a-work"))
             .args(args)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(capture("stdout"))
+            .stderr(capture("stderr"))
             .spawn()
             .unwrap();
         if let Some(mut stdin) = engine.stdin.take() {
@@ -61,14 +66,20 @@ fn a_scoped_launch_without_a_sandbox_backend_is_refused() {
             let _ = stdin.write_all(&user_frame("Write the files"));
         }
         let deadline = Instant::now() + Duration::from_secs(30);
-        while engine.try_wait().unwrap().is_none() {
+        let status = loop {
+            if let Some(status) = engine.try_wait().unwrap() {
+                break status;
+            }
             if Instant::now() >= deadline {
                 let _ = engine.kill();
-                break;
+                break engine.wait().unwrap();
             }
             thread::sleep(Duration::from_millis(20));
-        }
-        engine.wait_with_output().unwrap()
+        };
+        let read = |stream: &str| {
+            fs::read_to_string(base.join(format!("{log}.{stream}"))).unwrap_or_default()
+        };
+        (status, read("stdout"), read("stderr"))
     };
     let check = [
         OsStr::new("--verify-workspace-policy-v1"),
@@ -86,24 +97,22 @@ fn a_scoped_launch_without_a_sandbox_backend_is_refused() {
     ]
     .map(OsStr::new);
     let stream: Vec<&OsStr> = stream.into_iter().chain([policy.as_os_str()]).collect();
-    for (launch, args) in [
-        ("the kernel check", &check[..]),
-        ("a scoped stream", &stream[..]),
+    for (launch, log, args) in [
+        ("the policy check entrypoint", "check", &check[..]),
+        ("a scoped stream", "stream", &stream[..]),
     ] {
-        let output = run(args);
+        let (status, stdout, stderr) = run(log, args);
+        let output = format!("{status:?}\n--- stdout\n{stdout}\n--- stderr\n{stderr}");
         assert!(
-            !output.status.success(),
-            "{launch} ran without a sandbox backend: {output:?}"
+            !status.success(),
+            "{launch} ran without a sandbox backend: {output}"
         );
+        assert!(stdout.is_empty(), "{launch} wrote output: {output}");
         assert!(
-            output.stdout.is_empty(),
-            "{launch} wrote output: {output:?}"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(
+            stderr.contains(
                 "This Coven Code build cannot establish a workspace sandbox on this platform."
             ),
-            "{launch} was not refused for want of a sandbox: {output:?}"
+            "{launch} was not refused for want of a sandbox: {output}"
         );
     }
     let requests: Vec<String> = requests.try_iter().collect();
