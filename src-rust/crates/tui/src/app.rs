@@ -1100,8 +1100,12 @@ pub struct App {
     pub exit_key_sequence_start: Option<char>,
 
     // ---- Coven daemon integration ----------------------------------------
+    /// Last daemon reachability reading, drawn by Classic's footer and used
+    /// for the palette's suggestions. [`App::refresh_daemon_status`] keeps it
+    /// current.
     pub daemon_online: bool,
-    pub daemon_last_checked: u64,
+    /// When `daemon_online` was last read.
+    pub daemon_last_checked: std::time::Instant,
 
     // ---- Familiar switcher (F2) ------------------------------------------
     pub familiar_switcher_open: bool,
@@ -1202,6 +1206,12 @@ Move immutable borrow out of scope first, then take mutable. Good good good afte
         ),
     }
 }
+
+/// How often the event loop re-reads daemon reachability into
+/// [`App::daemon_online`]. The read is a cached lookup that never waits on the
+/// socket ([`crate::coven_status::daemon_looks_online`], whose own TTL paces
+/// the probes); this interval only bounds how far the footer trails it.
+const DAEMON_STATUS_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Accent color for build mode (default pink).
 pub const ACCENT_BUILD: Color = crate::overlays::COVEN_CODE_ACCENT;
@@ -1524,7 +1534,7 @@ impl App {
             last_exit_key_warning: None,
             exit_key_sequence_start: None,
             daemon_online: crate::coven_status::daemon_looks_online(),
-            daemon_last_checked: 0,
+            daemon_last_checked: std::time::Instant::now(),
             familiar_switcher_open: false,
             familiar_switcher_list: Self::default_familiar_switcher_list(),
             familiar_switcher_idx: 0,
@@ -2065,6 +2075,16 @@ impl App {
         }
 
         None
+    }
+
+    /// Re-read daemon reachability into [`Self::daemon_online`], at most once
+    /// per `DAEMON_STATUS_REFRESH` (1 s). The event loop calls this every
+    /// iteration, before drawing, whichever renderer draws.
+    pub fn refresh_daemon_status(&mut self, now: std::time::Instant) {
+        if now.saturating_duration_since(self.daemon_last_checked) >= DAEMON_STATUS_REFRESH {
+            self.daemon_last_checked = now;
+            self.daemon_online = crate::coven_status::daemon_looks_online();
+        }
     }
 
     /// Update the familiar pose for this render frame.
@@ -8370,13 +8390,7 @@ impl App {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
-            // Re-check daemon reachability ~every 30 seconds (300 frames at
-            // 10fps). The probe is cached and non-blocking; it also honors
-            // COVEN_HOME, unlike a hardcoded ~/.coven/coven.sock check.
-            if self.frame_count.wrapping_sub(self.daemon_last_checked) >= 300 {
-                self.daemon_last_checked = self.frame_count;
-                self.daemon_online = crate::coven_status::daemon_looks_online();
-            }
+            self.refresh_daemon_status(std::time::Instant::now());
 
             self.poll_session_list();
 
@@ -9151,6 +9165,132 @@ mod tests {
 
         let list = App::default_familiar_switcher_list();
         assert!(list.is_empty());
+    }
+
+    /// #513: the refresh the event loop calls each iteration makes
+    /// `daemon_online` follow the daemon, and reads it no more often than
+    /// `DAEMON_STATUS_REFRESH`.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_refresh_follows_the_daemon_socket() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        // Advance the loop's clock one interval per call, as a running loop
+        // would, until the reading matches. The probe itself runs on a
+        // background thread, so allow real time for it to land.
+        fn refresh_until(app: &mut App, now: &mut Instant, online: bool) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                *now += DAEMON_STATUS_REFRESH;
+                app.refresh_daemon_status(*now);
+                if app.daemon_online == online {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let coven_home = temp.path().join("coven");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&coven_home).expect("coven home dir");
+        let _guard = EnvGuard::set(&home, &coven_home);
+        let socket = coven_home.join("coven.sock");
+
+        // A fake daemon that reads each request, then answers it. Answering
+        // before the request arrives could close the stream under the
+        // probe's write and read as offline.
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = Arc::new(AtomicBool::new(false));
+        let daemon = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    // Accepted streams inherit O_NONBLOCK on macOS.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 256];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n[]");
+                }
+                // Dropping the listener leaves the socket file in place.
+            })
+        };
+
+        crate::coven_status::forget_daemon_probe();
+        let mut app = make_app();
+        let mut now = app.daemon_last_checked;
+        // Until a probe lands, the reading falls back to socket-file presence.
+        // Wait for the probe itself to find the daemon alive.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::coven_status::cached_daemon_probe().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            crate::coven_status::cached_daemon_probe(),
+            Some(true),
+            "the probe did not find the fake daemon"
+        );
+        assert!(
+            refresh_until(&mut app, &mut now, true),
+            "daemon_online never turned on while the daemon answered"
+        );
+
+        // The daemon dies and leaves its socket behind. Only the probe can
+        // tell: the socket file still exists, so connecting is refused.
+        stop.store(true, Ordering::Release);
+        daemon.join().expect("fake daemon thread");
+        assert!(socket.exists(), "the stale socket file stays");
+        crate::coven_status::forget_daemon_probe();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::coven_status::daemon_looks_online() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !crate::coven_status::daemon_looks_online(),
+            "the probe never saw the daemon go"
+        );
+
+        // The cache now says offline, but inside the interval the last
+        // reading stands: the refresh does not read every frame.
+        app.refresh_daemon_status(now + DAEMON_STATUS_REFRESH / 2);
+        assert!(
+            app.daemon_online,
+            "refresh read the daemon inside the interval"
+        );
+
+        assert!(
+            refresh_until(&mut app, &mut now, false),
+            "daemon_online stayed on after the daemon stopped answering"
+        );
+
+        // `coven daemon stop` removes the socket. A guard, not a refresh
+        // check (the reading is already off): with no socket file, neither
+        // the fallback nor a probe turns it back on.
+        std::fs::remove_file(&socket).expect("remove socket");
+        crate::coven_status::forget_daemon_probe();
+        for _ in 0..5 {
+            now += DAEMON_STATUS_REFRESH;
+            app.refresh_daemon_status(now);
+            assert!(!app.daemon_online, "daemon_online came back with no socket");
+        }
     }
 
     #[test]
