@@ -27,8 +27,9 @@ an unreadable or invalid file does not fall back to another file or parent.
 Project settings are sanitized before merging. Provider routing and credentials,
 MCP and LSP server definitions, hooks, hosted-review policy, persisted permission
 rules, and `workspace_paths` are discarded from this layer. Configure these
-in trusted engine-global settings instead. `permission_mode` is also ignored
-here: a project file neither sets the mode nor resets the one you saved.
+in trusted engine-global settings instead. `permission_mode` is not taken from
+this file either: a project file neither sets the mode nor resets the one you
+saved.
 
 Merging is field-specific: some lists concatenate and maps merge. Omission does
 not always preserve a global value: project defaults can replace fields such as
@@ -342,24 +343,30 @@ coven-code --permission-mode bypass-permissions "..."
    notification says that a saved `acceptEdits` or `plan` was restored.
 3. A saved `bypassPermissions` is never restored at startup. The session
    starts in `default` and a notification says so; pass
-   `--permission-mode bypass-permissions` to use it, or save another mode to
-   stop the notification.
+   `--permission-mode bypass-permissions` to use it. The notification stops
+   when the saved mode is no longer `bypassPermissions`.
 4. Headless runs (`--print`, `--headless` or a prompt argument, whatever the
    output format) ignore the saved mode: without the flag they run in
    `default`.
 
 A value that is not one of the four modes counts as `default`; in engine-global
 settings it also makes the whole file invalid, so its other settings are not
-loaded. The `Config` tool asks for approval before it changes the saved mode.
+loaded. Changing the saved mode with the `Config` tool needs the same approval
+as any other write; a session in `bypassPermissions` gives it without asking.
+The settings screen never saves the session's mode.
 
 Two limits to know about:
 
 - `coven-code acp` takes no `--permission-mode` and is not covered by the list
-  above: it runs in the mode saved in engine-global settings, including a saved
-  `bypassPermissions`, with `plan` treated as `default`.
+  above: it loads the mode saved in engine-global settings, including a saved
+  `bypassPermissions`, with `plan` treated as `default`. Its tool approvals
+  still go to the connected client; the saved mode reaches the keyless
+  `claude` transport and the PowerShell risk gate.
 - An engine-global `default` cannot be told apart from no saved mode, so it
-  does not override a shared `acceptEdits` or `plan`. Change the shared file,
-  or pass `--permission-mode default`.
+  does not override an `acceptEdits`, `plan` or `bypassPermissions` in the
+  shared file: `/config set permission-mode default` reports success and the
+  next start still uses the shared mode. Change the shared file, or pass
+  `--permission-mode default`.
 
 ---
 

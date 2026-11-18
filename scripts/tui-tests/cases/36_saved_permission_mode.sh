@@ -89,6 +89,7 @@ _saved_mode_renderer() {
   fi
   if _saved_mode_start --permission-mode default; then
     _saved_mode_get Default "$name: --permission-mode default wins over saved acceptEdits"
+    assert_absent "$(tui_capture)" "restored" "$name: a default flag start announces nothing"
     tui_stop
   fi
 
