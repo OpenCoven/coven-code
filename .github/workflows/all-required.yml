@@ -12,9 +12,10 @@ name: All required
 #     success, skipped or neutral (failed, cancelled, timed out, ...);
 #   - passes once all of them have completed and the set is unchanged
 #     across two polls.
-# Only the latest run of each workflow per event (this PR's pull_request
-# run, a manual dispatch on the branch, CodeQL's dynamic run), and only that
-# run's jobs, count. Commit statuses (the statuses API) are not read.
+# Only the latest run of each workflow per event (the pull_request run, a
+# manual dispatch on the branch, CodeQL's dynamic run), and only that run's
+# jobs, count. Runs are found by head commit, so two pull requests with the
+# same head share them. Commit statuses (the statuses API) are not read.
 #
 # The result is final for its run. After re-running a job elsewhere, re-run
 # this workflow too; it waits for the re-run to finish (a failed job from the
@@ -44,7 +45,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
       SELF_RUN_ID: ${{ github.run_id }}
       # Seconds to wait before the first look, between polls, and before
       # confirming that a fully completed set did not change. Each poll
@@ -80,8 +80,7 @@ jobs:
           fi
 
           # Prints one JSON array: the latest run of every other workflow on
-          # the head (per event; pull_request runs of another PR with the
-          # same head are left out), then the check runs that belong to
+          # the head (per event), then the check runs that belong to
           # those runs (latest per job name) or to another app (latest per
           # name). A failed job from an earlier attempt of a run that is
           # running again is reported as pending, because a re-run job that
@@ -91,11 +90,8 @@ jobs:
             local runs checks
             runs=$(gh api --paginate "$api/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
                      --jq '.workflow_runs[]' |
-                   jq -s --argjson self "$self_workflow" --argjson pr "$PR_NUMBER" '
-                     map(select(.workflow_id != $self
-                                and (.event != "pull_request"
-                                     or (.pull_requests | length) == 0
-                                     or any(.pull_requests[]; .number == $pr))))
+                   jq -s --argjson self "$self_workflow" '
+                     map(select(.workflow_id != $self))
                      | group_by([.workflow_id, .event]) | map(max_by(.id))
                      | map({kind: "workflow", id, status, conclusion,
                             name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
