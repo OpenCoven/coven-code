@@ -1110,6 +1110,10 @@ fn vim_g(
                 while i > 0 && chars[i - 1].is_whitespace() {
                     i -= 1;
                 }
+                if i == 0 {
+                    *cursor = 0;
+                    break;
+                }
                 while i > 1 && !chars[i - 2].is_whitespace() {
                     i -= 1;
                 }
@@ -2211,6 +2215,12 @@ impl PromptInputState {
             .find('\n')
             .map(|p| self.cursor + p)
             .unwrap_or(self.text.len());
+        // A CRLF line ends at its CR, which belongs to the line break.
+        let line_end = if line_end > self.cursor && self.text[..line_end].ends_with('\r') {
+            line_end - 1
+        } else {
+            line_end
+        };
 
         if line_end > self.cursor {
             let killed = self.text.drain(self.cursor..line_end).collect::<String>();
