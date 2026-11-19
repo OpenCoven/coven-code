@@ -280,13 +280,12 @@ fn restore_terminal_cleanup(out: &mut impl io::Write) -> io::Result<()> {
         DisableBracketedPaste,
     )?;
 
-    // On Windows, KeyboardEnhancementFlags may not have been pushed
-    // (conhost / older terminals reject the escape).  Pop is harmless
-    // whether it succeeded or not — ignore errors on restore.
+    // On Windows, crossterm 0.29 never sends the pop: the command reports no
+    // ANSI support there, so `execute!` takes the WinAPI path, which always
+    // returns `Unsupported`. The error is ignored so cleanup goes on; nothing
+    // was pushed (see `setup_terminal`).
     #[cfg(target_os = "windows")]
     {
-        // Pop may fail on legacy Windows conhost where the push was a no-op;
-        // do it best-effort so cleanup never errors out the process.
         let _ = execute!(out, PopKeyboardEnhancementFlags);
         execute!(out, LeaveAlternateScreen, DisableMouseCapture)?;
     }
@@ -341,17 +340,15 @@ pub fn setup_terminal(renderer: application::UiRenderer) -> io::Result<AppTermin
         }
     }
 
-    // On Windows, keyboard enhancement is best-effort: conhost and older
-    // terminal builds do not support the kitty keyboard protocol.
-    // crossterm 0.29 improved detection but may still reject in some
-    // configurations.  Warn the user when it fails, then continue.
+    // On Windows, crossterm 0.29 never sends the keyboard enhancement push,
+    // whatever the terminal: the command reports no ANSI support there, so
+    // `execute!` takes the WinAPI path, which always returns `Unsupported`
+    // ("Keyboard progressive enhancement not implemented for the legacy
+    // Windows API"). The error is ignored without a warning, so the TUI
+    // starts without the kitty keyboard protocol.
     #[cfg(target_os = "windows")]
     {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        // Kitty keyboard protocol is unsupported on legacy Windows conhost;
-        // best-effort — modern Windows Terminal accepts it, conhost returns
-        // "Keyboard progressive enhancement not implemented for the legacy
-        // Windows API" which we ignore so the TUI can still start.
         if should_push_keyboard_enhancement_for_process() {
             let _ = execute!(
                 stdout,
