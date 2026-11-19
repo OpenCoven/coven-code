@@ -3030,31 +3030,13 @@ async fn persist_interactive_session(
         let db_path = claurst_core::config::Settings::config_dir().join("sessions.db");
         if let Ok(store) = claurst_core::SqliteSessionStore::open(&db_path) {
             let _ = store.save_session(&session.id, session.title.as_deref(), &session.model);
-            for msg in &session.messages {
-                if pending_uuid.is_some() && msg.uuid.as_deref() == pending_uuid {
-                    continue;
-                }
-                let content_str = match &msg.content {
-                    claurst_core::types::MessageContent::Text(t) => t.clone(),
-                    claurst_core::types::MessageContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| {
-                            if let claurst_core::types::ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                let role = match msg.role {
-                    claurst_core::types::Role::User => "user",
-                    claurst_core::types::Role::Assistant => "assistant",
-                };
-                let msg_id = msg.uuid.as_deref().unwrap_or("unknown");
-                let _ = store.save_message(&session.id, msg_id, role, &content_str, None);
-            }
+            let _ = store.index_messages(
+                &session.id,
+                session
+                    .messages
+                    .iter()
+                    .filter(|msg| pending_uuid.is_none() || msg.uuid.as_deref() != pending_uuid),
+            );
         }
     }
     saved

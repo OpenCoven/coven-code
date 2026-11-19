@@ -4,7 +4,13 @@
 // the default JSONL storage.  Enabled by adding `rusqlite` to the
 // crate's dependencies (already done via `features = ["bundled"]`).
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use rusqlite::OptionalExtension;
+
+use crate::crypto_utils::sha256_hex_str;
+use crate::types::{ContentBlock, Message, MessageContent, Role};
 
 /// A persistent SQLite session + message store.
 pub struct SqliteSessionStore {
@@ -40,8 +46,62 @@ impl SqliteSessionStore {
                 ON sessions(updated_at);
             ",
         )?;
+        // Best effort: an index this step cannot fix still opens.
+        if let Err(error) = rename_legacy_unknown_message(&conn) {
+            tracing::warn!(%error, "Could not rekey the legacy \"unknown\" session index row");
+        }
 
         Ok(Self { conn })
+    }
+
+    /// Index a session's messages for search, one row per message.
+    ///
+    /// A message with a uuid is stored under it. A message without one (every
+    /// user message) is stored under an id derived from the session, its role,
+    /// its text and how many earlier uuid-less messages in the session have the
+    /// same role and text. Saving the same session again derives the same ids,
+    /// so it adds no rows; the same text sent twice is two rows.
+    ///
+    /// Best effort per message: every message is tried, and the first error is
+    /// returned.
+    pub fn index_messages<'a>(
+        &self,
+        session_id: &str,
+        messages: impl IntoIterator<Item = &'a Message>,
+    ) -> anyhow::Result<()> {
+        let mut earlier: HashMap<(&str, String), usize> = HashMap::new();
+        let mut first_error = None;
+        for message in messages {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let content = match &message.content {
+                MessageContent::Text(text) => text.clone(),
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
+            let id = match message.uuid.as_deref() {
+                Some(uuid) => uuid.to_owned(),
+                None => {
+                    let hash = sha256_hex_str(&content);
+                    let occurrence = earlier.entry((role, hash.clone())).or_insert(0);
+                    let id = derived_message_id(session_id, role, &hash, *occurrence);
+                    *occurrence += 1;
+                    id
+                }
+            };
+            if let Err(error) = self.save_message(session_id, &id, role, &content, None) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Insert or replace a session record.  `created_at` is preserved on
@@ -144,6 +204,51 @@ impl SqliteSessionStore {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// The index id of the `occurrence`-th uuid-less message (counting from 0)
+/// in `session_id` with this role and text, given the SHA-256 of the text.
+fn derived_message_id(
+    session_id: &str,
+    role: &str,
+    content_hash: &str,
+    occurrence: usize,
+) -> String {
+    format!("{session_id}:{role}:{content_hash}:{occurrence}")
+}
+
+/// Builds before #566 stored every message without a uuid under the id
+/// "unknown", so the index kept only the first such message ever, and no
+/// later one. That row was the first uuid-less message of its session, so
+/// give it the id `index_messages` derives for it: the next save of that
+/// session then finds it instead of adding a second copy. If that id is
+/// already taken the row is left as it is; no row is deleted.
+fn rename_legacy_unknown_message(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let legacy = conn
+        .query_row(
+            "SELECT session_id, role, content FROM messages WHERE id = 'unknown'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((session_id, role, content)) = legacy {
+        conn.execute(
+            "UPDATE OR IGNORE messages SET id = ?1 WHERE id = 'unknown'",
+            rusqlite::params![derived_message_id(
+                &session_id,
+                &role,
+                &sha256_hex_str(&content),
+                0
+            )],
+        )?;
+    }
+    Ok(())
 }
 
 /// Summary row returned by `list_sessions` and `search_sessions`.
@@ -292,5 +397,99 @@ mod tests {
             stored_message,
             ("user".to_owned(), "original content".to_owned(), Some(0.25))
         );
+    }
+
+    fn stored_rows(store: &SqliteSessionStore) -> Vec<(String, String)> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT id, content FROM messages ORDER BY content, id")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn index_messages_keeps_each_message_once_across_saves() {
+        let (_dir, store) = store_with_session();
+        let mut answer = Message::assistant_blocks(vec![
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+            ContentBlock::Text {
+                text: "text".into(),
+            },
+        ]);
+        answer.uuid = Some("answer-uuid".into());
+        let messages = vec![
+            Message::user("hello"),
+            answer,
+            Message::user("again"),
+            Message::user("hello"),
+        ];
+        for _ in 0..2 {
+            store.index_messages("session-1", &messages).unwrap();
+        }
+
+        let rows = stored_rows(&store);
+        let contents: Vec<_> = rows.iter().map(|(_, content)| content.as_str()).collect();
+        assert_eq!(contents, ["again", "answer text", "hello", "hello"]);
+        assert!(rows.iter().any(|(id, _)| id == "answer-uuid"));
+        assert!(rows.iter().all(|(id, _)| id != "unknown"));
+        assert_eq!(session_state(&store).1, 4);
+        for text in ["hello", "again", "answer"] {
+            assert_eq!(store.search_sessions(text).unwrap().len(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn open_rekeys_the_legacy_unknown_row_without_losing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        {
+            let store = SqliteSessionStore::open(&path).unwrap();
+            store.save_session("session-1", None, "test-model").unwrap();
+            store
+                .save_message("session-1", "unknown", "user", "first ever", None)
+                .unwrap();
+        }
+
+        let store = SqliteSessionStore::open(&path).unwrap();
+        assert_eq!(stored_message_count(&store, "unknown"), 0);
+        store
+            .index_messages(
+                "session-1",
+                &[Message::user("first ever"), Message::user("second")],
+            )
+            .unwrap();
+
+        let contents: Vec<_> = stored_rows(&store)
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect();
+        assert_eq!(contents, ["first ever", "second"]);
+        assert_eq!(session_state(&store).1, 2);
+    }
+
+    #[test]
+    fn open_keeps_the_legacy_unknown_row_when_its_new_id_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        {
+            let store = SqliteSessionStore::open(&path).unwrap();
+            store.save_session("session-1", None, "test-model").unwrap();
+            store
+                .index_messages("session-1", &[Message::user("first ever")])
+                .unwrap();
+            store
+                .save_message("session-1", "unknown", "user", "first ever", None)
+                .unwrap();
+        }
+
+        let store = SqliteSessionStore::open(&path).unwrap();
+        assert_eq!(stored_message_count(&store, "unknown"), 1);
+        assert_eq!(stored_rows(&store).len(), 2);
     }
 }
