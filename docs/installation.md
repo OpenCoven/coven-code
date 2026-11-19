@@ -86,36 +86,46 @@ The local-binary path does not authenticate the file for you. Verify its origin
 and digest before installing it. The shell installer may still resolve the
 latest release if no `--version` is supplied, even with `--binary`.
 
-### Windows PowerShell 5.1 started from PowerShell 7
+### Windows PowerShell 5.1 started through another program from PowerShell 7
 
 `install.ps1` runs under PowerShell 7 (`pwsh`) and under Windows PowerShell 5.1
-(`powershell`). A Windows PowerShell 5.1 started from inside a PowerShell 7
-session inherits PowerShell 7's `PSModulePath` and cannot load its own modules,
-including the one that provides `Get-FileHash`. The installer then fails at the
-checksum step with an error such as:
+(`powershell`). Typing `powershell` at a PowerShell 7 prompt is fine: PowerShell
+7 removes its own module paths from `PSModulePath` for a Windows PowerShell it
+starts directly. A Windows PowerShell started through another program that
+PowerShell 7 launched, such as `cmd.exe`, Python, a build tool or an editor
+task, inherits PowerShell 7's `PSModulePath` unchanged. It then finds PowerShell
+7's copies of built-in modules first, cannot load them, and cannot auto-load some
+commands, including `Get-FileHash`. See
+[about_PSModulePath](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath).
+
+The installer then fails at the checksum step with output such as:
 
 ```
 Download failed: The term 'Get-FileHash' is not recognized as the name of a cmdlet, ...
 Check that release v<version> exists for windows-x86_64:
+  https://github.com/OpenCoven/coven-code/releases/tag/v<version>
 ```
 
 The release exists; the shell is the problem. The installer stops before it
-extracts the archive, so nothing is installed and an existing install is left
-as it was. Run it in one of these ways instead:
+extracts the archive: no executable is installed, an existing install is left
+as it was, and the user PATH is not changed. Run it in one of these ways
+instead:
 
 - Run it under PowerShell 7: `pwsh -NoProfile -File .\install.ps1`.
-- Start Windows PowerShell 5.1 from the Start menu or from a Command Prompt that
-  was not itself started from PowerShell 7, then run `.\install.ps1` there.
-- From PowerShell 7, start Windows PowerShell 5.1 without the inherited
-  variable, so it builds its own module path:
+- Start Windows PowerShell 5.1 from the Start menu, or from a Command Prompt
+  that was not itself started from PowerShell 7, and run it there.
+- Clear the variable for the Windows PowerShell you start, so it builds its own
+  module path. This works from any shell:
 
-  ```powershell
-  $saved = $env:PSModulePath
-  $env:PSModulePath = $null
-  try { powershell -NoProfile -File .\install.ps1 } finally { $env:PSModulePath = $saved }
+  ```
+  cmd /c "set PSModulePath=&& powershell -NoProfile -File .\install.ps1"
   ```
 
-Pass the installer's parameters after `.\install.ps1` in each case.
+Pass the installer's parameters after `.\install.ps1`. If running scripts is
+disabled on the system, add `-ExecutionPolicy Bypass` to that one command after
+you have inspected the script. Installs with `-Binary` do not use
+`Get-FileHash` and are not affected, but check that binary's digest in a shell
+that can load `Get-FileHash`, such as PowerShell 7.
 
 ### Archive verification
 
