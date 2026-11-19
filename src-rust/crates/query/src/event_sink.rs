@@ -1,6 +1,11 @@
-//! Typed event delivery with an optional connection-wide byte budget. A bounded
-//! consumer which cannot keep up cancels its producer and records overload;
-//! it must report that failure rather than claim complete streaming output.
+//! Typed event delivery. Three shapes:
+//! - unbounded, for consumers that print as fast as events arrive (headless);
+//! - backpressured, where the producer waits for queue space, so a slow
+//!   consumer pauses the turn instead of growing a buffer and nothing is
+//!   dropped (the interactive terminal);
+//! - bounded with a connection-wide byte budget, where a consumer which cannot
+//!   keep up cancels its producer and records overload; it must report that
+//!   failure rather than claim complete streaming output (ACP).
 use std::fmt::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -24,6 +29,7 @@ pub struct QueryEventSink {
 #[derive(Clone)]
 enum Channel {
     Unbounded(mpsc::UnboundedSender<QueryEvent>),
+    Backpressured(mpsc::Sender<QueryEvent>),
     Bounded {
         sender: mpsc::Sender<(QueryEvent, OwnedSemaphorePermit)>,
         budget: Arc<Semaphore>,
@@ -47,6 +53,15 @@ impl From<mpsc::UnboundedSender<QueryEvent>> for QueryEventSink {
     fn from(sender: mpsc::UnboundedSender<QueryEvent>) -> Self {
         Self {
             channel: Channel::Unbounded(sender),
+        }
+    }
+}
+
+/// The producer waits for space in the channel; it never drops an event.
+impl From<mpsc::Sender<QueryEvent>> for QueryEventSink {
+    fn from(sender: mpsc::Sender<QueryEvent>) -> Self {
+        Self {
+            channel: Channel::Backpressured(sender),
         }
     }
 }
@@ -75,14 +90,19 @@ impl QueryEventSink {
 
     pub fn is_overloaded(&self) -> bool {
         match &self.channel {
-            Channel::Unbounded(_) => false,
+            Channel::Unbounded(_) | Channel::Backpressured(_) => false,
             Channel::Bounded { overloaded, .. } => overloaded.load(Ordering::Acquire),
         }
     }
 
-    pub fn send(&self, event: QueryEvent) -> Result<(), EventSendError> {
+    /// Deliver one event. Only a backpressured sink waits, and only while its
+    /// channel is full; the other shapes complete without suspending.
+    pub async fn emit(&self, event: QueryEvent) -> Result<(), EventSendError> {
         match &self.channel {
             Channel::Unbounded(sender) => sender.send(event).map_err(|_| EventSendError::Closed),
+            Channel::Backpressured(sender) => {
+                sender.send(event).await.map_err(|_| EventSendError::Closed)
+            }
             Channel::Bounded {
                 sender,
                 budget,
@@ -157,14 +177,43 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn backpressured_sink_waits_for_space_and_never_drops() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sink = QueryEventSink::from(sender);
+        sink.emit(QueryEvent::Status("first".into())).await.unwrap();
+        let second = sink.emit(QueryEvent::Status("second".into()));
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
+                .await
+                .is_err(),
+            "a full sink waits instead of dropping or queueing more"
+        );
+        assert!(!sink.is_overloaded());
+        assert!(matches!(receiver.recv().await, Some(QueryEvent::Status(text)) if text == "first"));
+        second.await.unwrap();
+        assert!(
+            matches!(receiver.recv().await, Some(QueryEvent::Status(text)) if text == "second")
+        );
+        drop(receiver);
+        assert!(matches!(
+            sink.emit(QueryEvent::Status("orphan".into())).await,
+            Err(EventSendError::Closed)
+        ));
+    }
+
+    #[tokio::test]
     async fn saturated_consumer_cancels_without_growing_or_claiming_success() {
         let cancel = CancellationToken::new();
         let budget = Arc::new(Semaphore::new(4096));
         let (sink, mut receiver) = QueryEventSink::bounded(2, budget.clone(), 4096, cancel.clone());
         for text in ["first", "second"] {
-            sink.send(QueryEvent::Status(text.into())).unwrap();
+            sink.emit(QueryEvent::Status(text.into())).await.unwrap();
         }
-        assert!(sink.send(QueryEvent::Status("excess".into())).is_err());
+        assert!(sink
+            .emit(QueryEvent::Status("excess".into()))
+            .await
+            .is_err());
         assert!(cancel.is_cancelled() && sink.is_overloaded());
         for text in ["first", "second"] {
             assert!(
@@ -173,20 +222,26 @@ mod tests {
         }
         assert_eq!(budget.available_permits(), 4096);
         assert!(
-            sink.send(QueryEvent::Status("later".into())).is_err(),
+            sink.emit(QueryEvent::Status("later".into())).await.is_err(),
             "overload is latched"
         );
     }
 
-    #[test]
-    fn byte_budget_is_shared_across_producers_and_returned_on_receiver_drop() {
+    #[tokio::test]
+    async fn byte_budget_is_shared_across_producers_and_returned_on_receiver_drop() {
         let budget = Arc::new(Semaphore::new(1024));
         let (first, receiver) =
             QueryEventSink::bounded(16, budget.clone(), 1024, CancellationToken::new());
         let (second, _other) =
             QueryEventSink::bounded(16, budget.clone(), 1024, CancellationToken::new());
-        first.send(QueryEvent::Status("a".repeat(500))).unwrap();
-        assert!(second.send(QueryEvent::Status("b".repeat(500))).is_err());
+        first
+            .emit(QueryEvent::Status("a".repeat(500)))
+            .await
+            .unwrap();
+        assert!(second
+            .emit(QueryEvent::Status("b".repeat(500)))
+            .await
+            .is_err());
         assert!(second.is_overloaded());
         drop(receiver);
         assert_eq!(budget.available_permits(), 1024);
@@ -199,33 +254,41 @@ mod tests {
         let (sink, mut receiver) = QueryEventSink::bounded(1, budget.clone(), 4096, cancel.clone());
         for _ in 0..8 {
             let tool_id = "toolu_1".to_string();
-            sink.send(QueryEvent::ToolQueued {
+            sink.emit(QueryEvent::ToolQueued {
                 tool_id: tool_id.clone(),
             })
+            .await
             .unwrap();
-            sink.send(QueryEvent::ToolRunning {
+            sink.emit(QueryEvent::ToolRunning {
                 tool_id: tool_id.clone(),
             })
+            .await
             .unwrap();
-            sink.send(QueryEvent::ToolFinished {
+            sink.emit(QueryEvent::ToolFinished {
                 tool_id,
                 is_error: false,
             })
+            .await
             .unwrap();
         }
-        sink.send(QueryEvent::Status("delivered".into())).unwrap();
+        sink.emit(QueryEvent::Status("delivered".into()))
+            .await
+            .unwrap();
         assert!(!sink.is_overloaded() && !cancel.is_cancelled());
         assert!(
             matches!(receiver.recv().await, Some(QueryEvent::Status(value)) if value == "delivered")
         );
     }
 
-    #[test]
-    fn oversized_event_is_not_queued() {
+    #[tokio::test]
+    async fn oversized_event_is_not_queued() {
         let budget = Arc::new(Semaphore::new(1024));
         let cancel = CancellationToken::new();
         let (sink, _receiver) = QueryEventSink::bounded(16, budget.clone(), 1024, cancel.clone());
-        assert!(sink.send(QueryEvent::Status("x".repeat(2048))).is_err());
+        assert!(sink
+            .emit(QueryEvent::Status("x".repeat(2048)))
+            .await
+            .is_err());
         assert!(sink.is_overloaded() && cancel.is_cancelled());
         assert_eq!(budget.available_permits(), 1024);
     }
