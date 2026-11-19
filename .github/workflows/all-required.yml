@@ -8,10 +8,10 @@ name: All required
 # request. Its single job waits for every other workflow run on the head
 # commit (the repository's workflows and CodeQL default setup) and every
 # check run from another app, then:
-#   - fails as soon as any of them ends failed, cancelled, timed out,
-#     stale, action_required or startup_failure;
-#   - passes once all of them have completed (success, skipped or neutral)
-#     and the set is unchanged across two polls.
+#   - fails as soon as any of them completes with a conclusion other than
+#     success, skipped or neutral (failed, cancelled, timed out, ...);
+#   - passes once all of them have completed and the set is unchanged
+#     across two polls.
 # Only the latest run of each workflow per event (pull_request, a manual
 # dispatch on the branch, CodeQL's dynamic run), and only that run's jobs,
 # count. Commit statuses (the statuses API) are not read.
@@ -45,21 +45,31 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       SELF_RUN_ID: ${{ github.run_id }}
       # Seconds to wait before the first look, between polls, and before
-      # confirming that a fully completed set did not change.
+      # confirming that a fully completed set did not change. Each poll
+      # makes two API calls against the repository's shared GITHUB_TOKEN
+      # budget, so keep POLL long.
       SETTLE: '30'
-      POLL: '60'
+      POLL: '90'
       CONFIRM: '90'
+      # Consecutive failed polls (API or parse errors) before giving up.
+      MAX_ERRORS: '10'
     steps:
       - name: Wait for every other check on the head, then fail if any failed
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           api="repos/${GITHUB_REPOSITORY}"
-          bad='["failure","cancelled","timed_out","action_required","startup_failure","stale"]'
+          good='["success","skipped","neutral"]'
 
+          # gh prints an error body to stdout on HTTP errors, so accept only
+          # a number.
           self_workflow=""
           for _ in 1 2 3; do
-            self_workflow=$(gh api "$api/actions/runs/$SELF_RUN_ID" --jq .workflow_id) && break
+            if id=$(gh api "$api/actions/runs/$SELF_RUN_ID" --jq .workflow_id) &&
+               [[ $id =~ ^[0-9]+$ ]]; then
+              self_workflow=$id
+              break
+            fi
             sleep 10
           done
           if [ -z "$self_workflow" ]; then
@@ -79,7 +89,7 @@ jobs:
                      map(select(.workflow_id != $self))
                      | group_by([.workflow_id, .event]) | map(max_by(.id))
                      | map({kind: "workflow", id, status, conclusion,
-                            name: (.name | gsub("[\\r\\n|\\[\\]]"; " ")),
+                            name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
                             url: .html_url, suite: .check_suite_id})') || return 1
             checks=$(gh api --paginate "$api/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" \
                        --jq '.check_runs[]' |
@@ -92,7 +102,7 @@ jobs:
                                   else [.app.id, .name] end)
                        | map(max_by(.id))
                        | map({kind: "check", id, status, conclusion,
-                              name: (.name | gsub("[\\r\\n|\\[\\]]"; " ")),
+                              name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
                               url: .html_url})') || return 1
             jq -n --argjson a "$runs" --argjson b "$checks" '$a + $b'
           }
@@ -109,18 +119,25 @@ jobs:
           echo "Head $HEAD_SHA"
           sleep "$SETTLE"
           previous=""
+          errors=0
           while :; do
             if ! now=$(snapshot); then
-              echo "::warning::A GitHub API call failed; trying again."
+              errors=$((errors + 1))
+              if [ "$errors" -ge "$MAX_ERRORS" ]; then
+                echo "::error::$errors polls in a row failed to read the head's runs and checks."
+                exit 1
+              fi
+              echo "::warning::A GitHub API call failed ($errors in a row); trying again."
               sleep "$POLL"
               continue
             fi
+            errors=0
 
-            failed=$(jq --argjson bad "$bad" \
-              'map(select(.status == "completed" and (.conclusion as $c | any($bad[]; . == $c))))' <<<"$now")
+            failed=$(jq --argjson good "$good" \
+              'map(select(.status == "completed" and (.conclusion as $c | any($good[]; . == $c) | not)))' <<<"$now")
             if [ "$(jq length <<<"$failed")" -gt 0 ]; then
               report "$now"
-              jq -r '.[] | "::error::\(.kind) \"\(.name)\" ended \(.conclusion): \(.url)"' <<<"$failed"
+              jq -r '.[] | "::error::\(.kind) \"\(.name)\" ended \(.conclusion // "with no conclusion"): \(.url)"' <<<"$failed"
               exit 1
             fi
 
