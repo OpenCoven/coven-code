@@ -9610,10 +9610,16 @@ mod tests {
             Ok("late sessions".to_string())
         });
         listings.settle(&mut app, Instant::now() + DAEMON_LISTING_NOTICE_AFTER);
-        assert!(app.notifications.current().is_some());
+        let waiting = |app: &claurst_tui::app::App| {
+            app.notifications
+                .notifications
+                .iter()
+                .any(|shown| shown.message.starts_with("Waiting for the Coven daemon"))
+        };
+        assert!(waiting(&app), "a waiting notice");
         listings.forget(&mut app);
         assert!(listings.pending.is_none());
-        assert!(app.notifications.current().is_none(), "the notice is gone");
+        assert!(!waiting(&app), "the waiting notice is gone");
         let count = app.messages.len();
         listings.start(&mut app, "/coven familiars", || Ok("familiars".to_string()));
         let deadline = Instant::now() + Duration::from_secs(5);
