@@ -9,21 +9,39 @@ import zero_size_pty as tiny
 class TerminalObserverTests(unittest.TestCase):
     def test_cleanup_before_reenable_does_not_prove_restoration(self):
         observer = tiny.TerminalObserver(40, 12)
-        observer.feed(b"\x1b[?1049l\x1b[?25h\x1b[?1000;1006;2004l\x1b[<u")
+        observer.feed(b"\x1b[<u\x1b[?1049l\x1b[?25h\x1b[?1000;1006;2004l")
         observer.feed(b"\x1b[?1049h\x1b[?25l\x1b[?1000;1006;2004h\x1b[>1u")
         self.assertEqual(set(observer.restoration_failures()), {
             "alternate screen active", "cursor hidden", "mouse mode 1000 active",
-            "mouse mode 1006 active", "bracketed paste active", "keyboard stack depth 1",
+            "mouse mode 1006 active", "bracketed paste active",
+            "keyboard stack depth 1 on the alternate screen",
         })
-        observer.feed(b"\x1b[?1049l\x1b[?25h\x1b[?1000;1006;2004l\x1b[<u")
+        observer.feed(b"\x1b[<u\x1b[?1049l\x1b[?25h\x1b[?1000;1006;2004l")
         self.assertEqual(observer.restoration_failures(), [])
 
     def test_every_keyboard_push_requires_a_later_pop(self):
         observer = tiny.TerminalObserver(40, 12)
         observer.feed(b"\x1b[>1u\x1b[>2u\x1b[<u")
-        self.assertIn("keyboard stack depth 1", observer.restoration_failures())
+        self.assertIn("keyboard stack depth 1 on the main screen", observer.restoration_failures())
         observer.feed(b"\x1b[<u")
         self.assertEqual(observer.restoration_failures(), [])
+
+    def test_a_pop_after_leaving_the_alternate_screen_does_not_undo_its_push(self):
+        # Each screen has its own keyboard stack (#410): this is the order
+        # that left kitty's alternate screen with stale flags after a quit.
+        observer = tiny.TerminalObserver(40, 12)
+        observer.feed(b"\x1b[?1049h\x1b[>9u")
+        self.assertEqual(observer.keyboard_depths, {"main": 0, "alternate": 1})
+        observer.feed(b"\x1b[?1049l\x1b[<1u")
+        self.assertEqual(observer.restoration_failures(), ["keyboard stack depth 1 on the alternate screen"])
+        # Going back and popping there does.
+        observer.feed(b"\x1b[?1049h\x1b[<1u\x1b[?1049l")
+        self.assertEqual(observer.restoration_failures(), [])
+
+    def test_a_push_on_the_main_screen_is_not_undone_on_the_alternate_screen(self):
+        observer = tiny.TerminalObserver(40, 12)
+        observer.feed(b"\x1b[>1u\x1b[?1049h\x1b[<1u\x1b[?1049l")
+        self.assertEqual(observer.restoration_failures(), ["keyboard stack depth 1 on the main screen"])
 
     def test_current_screen_rejects_canary_erased_by_a_later_frame(self):
         observer = tiny.TerminalObserver(40, 12)

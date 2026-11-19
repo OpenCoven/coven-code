@@ -2,8 +2,14 @@
 
 Issue: [#412](https://github.com/OpenCoven/coven-code/issues/412), under
 [epic #406](https://github.com/OpenCoven/coven-code/issues/406). Inspected
-2026-11-16. Status: options for a decision by Val. This note changes no
-behavior.
+2026-11-16. Status: decided on 2026-11-18 (policy B, see
+[Decision](#decision-2026-11-18)). Its first part is implemented, see
+[Implemented](#implemented-epoch-comparison-unknown-and-registration-at-the-next-session-start);
+the rest is listed under [Deferred](#deferred).
+
+The sections "The problem" to "Decision for Val", and "First slice once B is
+chosen", are the analysis as written on 2026-11-16. Their citations and their
+account of coven-code describe the code before the implemented part.
 
 Sources, cited as `path:line` at these commits:
 
@@ -259,6 +265,204 @@ needs to follow daemon events.
    `docs/API-CONTRACT.md:3411` sentence conflicts with Coven's own main-session
    contract and code and could be raised with Coven.
 
+## Decision (2026-11-18)
+
+Val decided, in the maintainer's decision sheet:
+
+1. Policy **B**.
+2. **(a)**: after a daemon restart or replacement, show the ledger state as
+   unknown and register again only at the next session start.
+3. Defer the request for D's validated cursor.
+
+## Implemented: epoch comparison, "unknown", and registration at the next session start
+
+This is the part of B that concerns the ledger registration and the daemon
+indicator. It adds no daemon event cursor and needs nothing new from Coven.
+
+**What identifies a daemon instance.** Coven v0.5.0's health response names
+the serving process: `daemon.pid` and `daemon.startedAt`. The engine keeps
+those two, `apiVersion`, `covenVersion`, and the device and inode of the
+socket file read before connecting (`DaemonInstance` in
+`src-rust/crates/core/src/coven_daemon.rs`). Two readings that differ in any
+of them are different instances. A health answer that names neither a pid nor
+a start time is not an instance: it could not be told from its successor.
+
+**One look at the daemon** (`DaemonClient::sight`) is one of:
+
+- gone: no socket file, a connection that is refused or otherwise fails, or
+  one that fails or closes before any byte of an answer;
+- unidentified: a connection was made (or was still waiting to be accepted
+  when the budget ended) but gave no complete health answer within the
+  budget, answered with an error status, or named no process;
+- an instance.
+
+The background reachability probe behind the daemon indicator (at most one
+every 10 s, as before) now reads `GET /api/v1/health` to the end instead of
+the first byte of `GET /api/v1/familiars`. Its 2 s budget now covers the whole
+read once connected, so a peer that keeps sending bytes cannot hold it. The
+connect itself is not timed (it never was): on a Unix socket it returns at
+once unless the daemon's listen queue is full, which on Linux blocks it and on
+macOS refuses it. "Online" still means anything but gone, so a busy daemon is
+not shown as offline.
+
+**Registration is tied to an instance.** With `daemonLedger` on, the
+registration reads health before and after its `POST /api/v1/sessions/external`
+(2 s budget each, off the UI thread). If both name the same instance, that
+instance holds the registration. If the daemon accepted the registration but
+the two readings differ or either names no instance, the registration is
+unknown from the start. A health read that takes longer than its budget names
+no instance, so a daemon that is slow at that moment starts as unknown
+without having restarted.
+
+**Comparison.** Once a second the interactive loop compares the last
+completed probe with the instance that holds the registration:
+
+| The probe found | Registration | Indicator |
+|---|---|---|
+| The same instance | kept | online |
+| A different instance | unknown, and it stays unknown | unknown |
+| Gone | kept | offline |
+| Gone, then the same instance again | kept | online |
+| Gone, then a different instance | unknown | unknown |
+| Unidentified (busy, error status, no process named) | kept: no evidence either way | online |
+
+A probe that began before the registration was recorded is ignored, since it
+may show the daemon from before a restart. A restart is therefore noticed at
+the first probe that begins after it and finds the new daemon: within about
+14 s (10 s cache, 2 s budget, and a loop tick each to start the probe and to
+read it). A probe that lands between the stop and the start reads gone and
+adds one more cycle.
+
+**What "unknown" looks like.**
+
+- Next: the header and the Session page read `engine-local, ledger unknown`
+  instead of `engine-local, ledger-registered`.
+- Classic, and every frame Next hands to Classic (the command palette, for
+  one): the welcome line reads `unknown` instead of `online`, and the footer
+  shows `◌ coven (unknown)` instead of `✦ coven`. While nothing answers, both
+  read offline, as before.
+
+**Registration at the next session start.** Nothing is sent when the state
+turns unknown, and no probe, turn or command sends anything later. A session
+start does:
+
+- a new process (a fresh launch or `--resume`) registers the session it
+  binds, as it always did, and now records the instance;
+- inside a running process, `/session resume` registers the session it binds
+  when, and only when, the state is unknown. It is the only place a running
+  process binds a session: `/clear` and rewinding keep the session and its id.
+
+Until a named instance has accepted the new registration, the indicator keeps
+reading unknown. If the new registration is refused, lost, or accepted by a
+daemon that names no process, the state stays unknown and the session start
+after that tries again. A first registration that failed is not retried, as
+before.
+
+At exit the engine sends one completion for every session id it sent a
+registration for, to whichever daemon answers then, including after the state
+became unknown. A registration still in flight gets up to 2 s to finish
+first. That is best effort: against a daemon slower than that, a completion
+can still arrive ahead of its registration and leave the row `running`.
+
+**Sessions that never registered** (`daemonLedger` off, the default) remember
+no instance. Their indicator reads online or offline as before, and nothing
+is registered at any time.
+
+**Not changed.** `--print`, stream-json and ACP still never contact the
+daemon.
+
+**What this does not prove.**
+
+- `pid` and `startedAt` are what the daemon says about itself. The engine
+  does not yet read the peer's credentials from the connection, so a different
+  process that answered with the same values would not be told apart.
+- A health answer that names a pid and no start time still counts as an
+  instance. A restart that got the same pid would then be noticed only
+  through the socket file.
+- The socket file's device and inode are enough to read as changed, and not
+  enough to prove the same daemon: some file systems reuse an inode number at
+  once.
+- A daemon whose health never names a process reads unknown from the first
+  registration on, and each `/session resume` sends another registration.
+- "Unknown" is about which daemon holds the registration. The engine does not
+  ask the new daemon whether the session row exists; with the same store it
+  usually does, and registering again returns that row.
+- A store replaced or vacuumed under a daemon that keeps running is not
+  noticed. That is option D's store check.
+- Between a restart and the next probe (up to about 14 s) the old label is
+  still shown.
+- While nothing answers, Next's header keeps the last registration label;
+  Next's own frames have no daemon indicator.
+- The indicator and Next's label answer different questions. The indicator is
+  about the registration this process sent, whichever session is bound.
+  Next's label is about the bound session: after `/session resume` to a
+  session this process did not register, it reads plain `engine-local`, while
+  Classic's indicator still reads unknown after a restart.
+- A registration whose answer was lost (a timeout after the request was
+  written) is still shown as failed, not as unknown.
+- A daemon replaced by one that never names a process (or always answers with
+  an error status) reads unidentified on every probe, so the registration
+  stays registered, even when the socket file's inode shows a different file.
+- A second `/session resume` while a registration sent again is still waiting
+  for its answer sends nothing: once that answer lands the state reads
+  registered for the session sent first, and the session bound last is not
+  registered until a later session start finds the state unknown.
+- The registration and completion requests keep their old transport: each read
+  waits up to 5 s, and that timer restarts with every byte, so a peer that
+  trickles bytes can hold them longer, and the connect is not timed (see the
+  probe above). Only the probe's whole read has a deadline.
+
+**Observed on 2026-11-18** with Coven v0.5.0 in a disposable `HOME` and
+`COVEN_HOME`, `daemonLedger` on, Classic and Next at 120x40:
+
+| Step | Classic | Next |
+|---|---|---|
+| Launch | `online`, `✦ coven` | `ledger-registered` |
+| `coven daemon stop`, then `start` (new pid and start time) | `unknown`, `◌ coven (unknown)` after 9.8 s | `ledger unknown` after 10.7 s |
+| 25 s later, then after a turn | still unknown; the daemon's session row is untouched | the same |
+| `/session resume <id>` | `online`, `✦ coven` at once | `ledger-registered` at once |
+| The daemon stopped with `SIGSTOP` for 26 s, then continued | online throughout | registered throughout |
+| `SIGKILL` (socket file left behind) | `offline`, `○ coven` | still `ledger-registered` |
+| `coven daemon start` | `unknown`, `◌ coven (unknown)` | `ledger unknown` |
+| Quit | completion reached the new daemon; the row reads `completed` | the same |
+
+The session row survived each restart, because the store was the same.
+
+**A daemon that accepts and never answers** (a listener on the socket that
+reads and stays silent), same date and sizes. Every wait measured here ended
+within the request timeout:
+
+- Launch is not delayed. The registration gives up after 7 s on its own task
+  (2 s health, 5 s request) and Next reads `ledger unavailable`; Classic reads
+  online, since something accepted the connection.
+- `/coven sessions`, `/coven familiars` and `/familiar list` each freeze input
+  and drawing for 5 s: they read the daemon on the event loop with the 5 s
+  request timeout. `/coven status` and `/status doctor` take 0.3 s.
+- Quitting waits 5 s for the completion request. The completions now run
+  side by side, so this stays one timeout when two ids were registered.
+
+Those 5 s waits were there before this change and are not changed by it. A
+quit within the first seconds after a launch or a `/session resume` waits up
+to 2 s for the registration still in flight before it sends the completions,
+and the process then still waits for that registration's own task to end
+(at most its 7 s against a silent daemon).
+
+## Deferred
+
+- Decision 3: the request to Coven for a validated session-event cursor (D).
+- From the first slice below: the peer credential and socket check on every
+  request with an "instance changed" error; refusing dependent operations on
+  another `apiVersion`; keeping typed `capabilities` and gating session and
+  event reads on them; reporting a lost answer to a registration or handoff
+  as "outcome unknown".
+- Tagging the Memory snapshot and familiar statuses with the daemon instance
+  and the engine identity, and clearing them on a change, a familiar switch
+  or an account switch. Today an open Memory page still shows rows read from
+  the previous daemon until its next 10 s refresh.
+- An explicit action to register again without a session start.
+- The later slices: branch and HEAD in the identity tag, and familiar root
+  and revision from the ledger.
+
 ## First slice once B is chosen
 
 - Core: keep typed `capabilities` in `DaemonHealth`; add the daemon epoch as
@@ -300,22 +504,19 @@ needs to follow daemon events.
 
 ## Real-daemon recovery journey
 
-Not run. Blocked on this machine under the isolation rule that the disposable
-daemon home and socket live under the session's notes folder in
-`.git/maintenance-audits/`.
+Run on 2026-11-18 against Coven v0.5.0, with the implemented part in place.
+The results are in the table under
+[Implemented](#implemented-epoch-comparison-unknown-and-registration-at-the-next-session-start).
 
 - The daemon binds `$COVEN_HOME/coven.sock` and refuses a socket path longer than
   103 bytes on macOS, after resolving symlinks (`crates/coven-cli/src/daemon.rs:2385-2421`
-  at v0.5.0). coven-code also connects only to `$COVEN_HOME/coven.sock`.
-- The notes-folder home gives a 126-byte socket path. With `HOME` and
-  `COVEN_HOME` both inside the notes folder, the installed v0.5.0 binary refused
-  `daemon start` with exit 1 ("socket path ... is 126 bytes, but Unix sockets on
-  this platform allow at most 103"). It spawned no daemon; the running daemon
-  processes were unchanged and Val's daemon and `~/.coven` were not touched.
-- Unblocking needs Val's approval for a disposable `COVEN_HOME` whose canonical
-  path is at most 92 bytes, outside the notes folder, with `HOME` also
-  disposable, removed afterwards.
-- Run before the first slice, the journey would record current behavior:
-  registration once at startup and no re-check after a daemon restart. It
-  should be run again after the slice, with the coven-code and Coven SHAs,
-  binary hashes and the disposable paths recorded.
+  at v0.5.0). coven-code also connects only to `$COVEN_HOME/coven.sock`. A
+  disposable home inside `.git/maintenance-audits/` gives a 126-byte socket
+  path, which the daemon refuses, so the journey used a disposable `HOME` and
+  `COVEN_HOME` under the system temporary directory (a 32-byte socket path),
+  removed afterwards.
+- Val's daemon processes and the `~/.coven` listing were recorded before and
+  after: the same processes, and the same entries and sizes.
+- The behavior before the change is recorded on #412: on 2026-11-17 a
+  restarted daemon was used silently, the label stayed `ledger-registered`,
+  and nothing registered again.
