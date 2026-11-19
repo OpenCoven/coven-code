@@ -29,7 +29,10 @@
 //! Semantic, but different by design (#411): how a permission request opens.
 //! Next focuses deny and ignores keys other than Escape until
 //! `PERMISSION_ARM_DELAY` of quiet has passed; Classic opens on the first
-//! option and takes keys at once. So the same relative keys (Up, Down, Enter)
+//! option and takes keys at once. (Classic guards a follow-up request, opened
+//! right after another was decided, as Next does; the interactive loop's
+//! `open_permission_panel` decides that, and these tests open first
+//! requests.) So the same relative keys (Up, Down, Enter)
 //! decide differently, and on Next keys pressed as the request opens decide
 //! nothing. `permission_requests_open_differently_by_design` pins those
 //! outcomes; the outgoing-operations comparison uses keys that choose an
@@ -570,8 +573,9 @@ fn bash_request(id: &str) -> PermissionRequest {
     )
 }
 
-/// A permission request opened the way the interactive loop opens it: Next
-/// guards it against stray keys (#411); Classic keeps its dialog as it was.
+/// A first permission request opened the way the interactive loop opens it:
+/// Next guards it against stray keys (#411); Classic keeps its dialog as it
+/// was, and guards only a follow-up request.
 fn opened_request(renderer: UiRenderer, id: &str) -> PermissionRequest {
     let request = bash_request(id);
     if renderer == UiRenderer::Next {
@@ -918,6 +922,10 @@ fn next_draws_permission_requests_itself_unless_another_surface_is_open() {
     // With another input-owning surface open, Classic's precedence applies.
     app.help_overlay.visible = true;
     assert!(claurst_tui::next::delegates_to_classic(&app));
+    // The turn is still running. The help overlay hides its elapsed time
+    // today; clear it so that a layout change cannot let the two draws show
+    // different seconds, as the next test's other surfaces can.
+    app.turn_start = None;
     assert_eq!(
         draw(&app, UiRenderer::Next, 120, 40),
         draw(&app, UiRenderer::Classic, 120, 40)
@@ -943,6 +951,10 @@ fn next_hands_every_input_owning_surface_to_classic() {
         );
         open(&mut app);
         assert!(claurst_tui::next::delegates_to_classic(&app), "{name}");
+        // The turn is still running, so the status line shows its elapsed
+        // time, rounded to a second; on a busy host the two draws can round
+        // apart.
+        app.turn_start = None;
         assert_eq!(
             draw(&app, UiRenderer::Next, 120, 40),
             draw(&app, UiRenderer::Classic, 120, 40),

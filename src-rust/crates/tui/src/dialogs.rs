@@ -86,9 +86,10 @@ impl PermissionRequest {
         self
     }
 
-    /// Guard the request against stray keys (Next renderer, #411): focus
-    /// the deny option, so the default action is never destructive, and
-    /// ignore keys other than Escape until a quiet gap has passed.
+    /// Guard the request against stray keys (#411; every Next panel, and a
+    /// Classic follow-up panel): focus the deny option, so the default action
+    /// is never destructive, and ignore keys other than Escape until a quiet
+    /// gap has passed.
     pub fn guarded(mut self) -> Self {
         self.selected_option = self
             .options
