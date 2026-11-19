@@ -2700,6 +2700,45 @@ async fn stop_turn_for_exit(
     messages.lock().await.clone()
 }
 
+/// What quitting mid-turn prints once the terminal is restored: lines for
+/// stdout, then at most one warning for stderr. Only Next reports on the turn
+/// and says how to resume it (#408). Both renderers warn when the save failed
+/// (decision 6 on #496): the in-app warning is gone with the terminal, and an
+/// earlier save on disk would lack this turn. Stopping compaction leaves the
+/// copy saved when the last turn ended complete.
+fn exit_output(
+    renderer: claurst_tui::application::UiRenderer,
+    exit_report: &claurst_tui::next::TurnExitReport,
+    saved: bool,
+    session: &claurst_core::history::ConversationSession,
+) -> (Vec<String>, Option<&'static str>) {
+    let next = renderer == claurst_tui::application::UiRenderer::Next;
+    let mut lines = if next {
+        exit_report.lines(&session.messages)
+    } else {
+        Vec::new()
+    };
+    let warning = if saved {
+        None
+    } else if exit_report.is_turn() {
+        Some("Session not saved; any earlier saved copy lacks this turn.")
+    } else {
+        Some("Session not saved.")
+    };
+    if next && saved && !session.messages.is_empty() {
+        let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
+        lines.push(format!(
+            "Pick it up with: {}",
+            resume_command(
+                &session.id,
+                &claurst_core::config::Settings::config_dir(),
+                standalone.as_deref(),
+            )
+        ));
+    }
+    (lines, warning)
+}
+
 /// Quitting mid-turn, in either renderer (#408): cancel the turn, wait up to
 /// `TURN_EXIT_WAIT` for it to stop, and bring `session` up to date with what
 /// it delivered, removing a goal continuation's synthetic prompt if no request
@@ -6348,28 +6387,12 @@ async fn run_interactive(
         .await;
         let saved =
             persist_interactive_session(&session, goal_turn.as_ref(), &mut app.notifications).await;
-        if app.renderer == claurst_tui::application::UiRenderer::Next {
-            for line in exit_report.lines(&session.messages) {
-                println!("{line}");
-            }
-            // The in-app warning is gone once the terminal is restored, and an
-            // earlier save on disk would lack this turn. Stopping compaction
-            // leaves the copy saved when the last turn ended complete.
-            if !saved && exit_report.is_turn() {
-                eprintln!("Session not saved; any earlier saved copy lacks this turn.");
-            } else if !saved {
-                eprintln!("Session not saved.");
-            } else if !session.messages.is_empty() {
-                let standalone = dirs::home_dir().map(|home| home.join(".coven-code"));
-                println!(
-                    "Pick it up with: {}",
-                    resume_command(
-                        &session.id,
-                        &claurst_core::config::Settings::config_dir(),
-                        standalone.as_deref(),
-                    )
-                );
-            }
+        let (lines, warning) = exit_output(app.renderer, &exit_report, saved, &session);
+        for line in lines {
+            println!("{line}");
+        }
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
         }
     }
     if let Some(mut runtime) = bridge_runtime.take() {
@@ -7210,6 +7233,50 @@ mod tests {
         .await
         .expect("a closed queue must free the worker, not run out the wait");
         assert_eq!(kept.len(), 1);
+    }
+
+    /// Decision 6 on #496: when the save at exit fails, Classic prints the
+    /// one-line warning Next prints, and nothing else. The save fails for a
+    /// session id the store refuses as a file name, so no directory is
+    /// touched.
+    #[tokio::test]
+    async fn quitting_after_a_failed_save_warns_in_both_renderers() {
+        use claurst_tui::application::UiRenderer;
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        let mut session = claurst_core::history::ConversationSession::new("model".into());
+        session.id = "not/a/file/name".into();
+        session
+            .messages
+            .push(claurst_core::types::Message::user("the prompt".to_string()));
+        let saved =
+            save_session_with_warning(&session, &mut app.notifications, "transcript update").await;
+        assert!(!saved, "the save fails");
+
+        let turn = claurst_tui::next::TurnExitReport::capture(&app);
+        let compaction = claurst_tui::next::TurnExitReport::default();
+        let after_turn = Some("Session not saved; any earlier saved copy lacks this turn.");
+        let (lines, warning) = exit_output(UiRenderer::Classic, &turn, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), after_turn));
+        let (lines, warning) = exit_output(UiRenderer::Classic, &compaction, saved, &session);
+        assert_eq!((lines, warning), (Vec::new(), Some("Session not saved.")));
+
+        // Next prints the same warning after its report, and no way back.
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, saved, &session);
+        assert_eq!(warning, after_turn);
+        assert!(lines[0].starts_with("Quit during a turn."), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.starts_with("Pick it up with")));
+
+        // A save that succeeds prints nothing in Classic; Next gives the way
+        // back.
+        assert_eq!(
+            exit_output(UiRenderer::Classic, &turn, true, &session),
+            (Vec::new(), None)
+        );
+        let (lines, warning) = exit_output(UiRenderer::Next, &turn, true, &session);
+        assert_eq!(warning, None);
+        assert!(lines
+            .last()
+            .is_some_and(|line| line.starts_with("Pick it up with")));
     }
 
     /// #408: quitting during a turn stops it and keeps the prompt and the
