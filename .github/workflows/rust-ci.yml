@@ -272,7 +272,7 @@ jobs:
       # background command started still holds the command's output pipes
       # (#535). On Windows the runtime reads those pipes on its blocking pool.
       # This step runs even if an earlier step failed, and requires both
-      # tests to pass.
+      # tests to pass; a test added to the file needs the count raised.
       - name: Test that coven-code exits while a background command's descendant runs
         if: ${{ !cancelled() }}
         working-directory: src-rust

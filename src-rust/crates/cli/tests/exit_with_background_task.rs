@@ -6,6 +6,10 @@
 //!
 //! The process keeps running after coven-code exits: a background command
 //! outlives the turn and coven-code until it is stopped (#521, #554).
+//!
+//! Unix was not affected, because child pipes are not read on the blocking
+//! pool there; on Unix these tests guard only that the descendant outlives
+//! coven-code. The Windows job runs them too.
 
 use serde_json::{json, Value};
 use std::{
@@ -21,7 +25,7 @@ use std::{
 /// How long a run may take, from start to exit.
 const RUN_LIMIT: Duration = Duration::from_secs(60);
 /// How long the holder runs if nothing stops it.
-const HOLDER_LIFETIME: Duration = Duration::from_secs(180);
+const HOLDER_LIFETIME: Duration = Duration::from_secs(90);
 /// The holder runs only in a folder that holds this file.
 const MARKER: &str = "holder-535";
 const FINAL_TEXT: &str = "The holder is running.";
@@ -68,7 +72,8 @@ impl Run {
         let work = base.join("work");
         fs::create_dir(&work).unwrap();
         let api = serve(holder_command(&holder), holder.clone());
-        // Output goes to files: the holder inherits no handle of the test's.
+        // Output goes to files, not pipes the test reads, so the holder
+        // cannot keep a read of the test's waiting.
         let capture = |stream: &str| fs::File::create(base.join(stream)).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_coven-code"));
         command
@@ -274,7 +279,17 @@ fn answer(socket: TcpStream, command: &str, holder: &Path) {
                 .iter()
                 .any(|block| block["type"] == "tool_result" && block["tool_use_id"] == "holder")
         });
-    let (block, delta, stop_reason) = if answered {
+    // Only the turn's own requests offer tools; any other gets plain text.
+    let turn = request["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty());
+    let (block, delta, stop_reason) = if !turn {
+        (
+            json!({"type": "text", "text": ""}),
+            json!({"type": "text_delta", "text": "fixture"}),
+            "end_turn",
+        )
+    } else if answered {
         // The run must not end before the holder has started.
         let deadline = Instant::now() + Duration::from_secs(30);
         while !holder.join("ticks").exists() && Instant::now() < deadline {

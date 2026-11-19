@@ -497,9 +497,11 @@ fn abandon_interactive_turn(
 /// output pipes, and on Windows such a read ends only when every process
 /// holding the pipe has exited. A process that a background command started
 /// can hold it for as long as it runs; dropping the runtime used to wait for
-/// it, and an exit in that state now takes this long. What the engine's
-/// output depends on is awaited before `run` returns; what is left is work
-/// started without waiting for it, such as an append to the prompt history.
+/// it, and an exit in that state now takes this long. Saved state and the
+/// output of `--print` and stream-json are complete before `run` returns.
+/// What is left is work started without waiting for it, such as an append
+/// to the prompt history, or, for ACP, a write to stdout that a client which
+/// has stopped reading still holds up.
 const RUNTIME_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
