@@ -216,6 +216,80 @@ fn brand_contrast_pairs_meet_their_profile_minimums() {
     }
 }
 
+/// One row per role that carries text or a mark: what it is read against and
+/// the measured ratio in each color mode that has known colors.
+fn contrast_rows() -> String {
+    let measure = |role: Role, scheme: Scheme, mode: ColorMode| -> f64 {
+        match mode {
+            ColorMode::TrueColor => {
+                let pair = paint(role, scheme);
+                contrast_ratio(pair.fg, pair.bg.unwrap_or_else(|| canvas(scheme)))
+            }
+            _ => {
+                let look = Appearance {
+                    color: mode,
+                    scheme,
+                    glyphs: Glyphs::Unicode,
+                    motion: Motion::Full,
+                };
+                let style = look.style(role);
+                let rgb = |color: Option<Color>| match color {
+                    Some(Color::Indexed(index)) => Some(xterm256_rgb(index)),
+                    _ => None,
+                };
+                let page = xterm256_rgb(claurst_tui::next::style::nearest_xterm256(canvas(scheme)));
+                contrast_ratio(
+                    rgb(style.fg).expect("an indexed foreground"),
+                    rgb(style.bg).unwrap_or(page),
+                )
+            }
+        }
+    };
+    let mut rows = String::from(
+        "| Role | Read against | Truecolor dark | Truecolor light | 256 dark | 256 light |\n\
+         |---|---|---:|---:|---:|---:|\n",
+    );
+    for role in ALL_ROLES {
+        if role == Role::Border {
+            continue;
+        }
+        let against = if paint(role, Scheme::Dark).bg.is_some() {
+            "its own fill"
+        } else {
+            "the canvas"
+        };
+        rows.push_str(&format!(
+            "| {role:?} | {against} | {:.2} | {:.2} | {:.2} | {:.2} |\n",
+            measure(role, Scheme::Dark, ColorMode::TrueColor),
+            measure(role, Scheme::Light, ColorMode::TrueColor),
+            measure(role, Scheme::Dark, ColorMode::Ansi256),
+            measure(role, Scheme::Light, ColorMode::Ansi256),
+        ));
+    }
+    rows
+}
+
+#[test]
+fn the_contrast_record_matches_what_next_draws() {
+    const BEGIN: &str = "<!-- measured: begin -->\n";
+    const END: &str = "<!-- measured: end -->";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/tui-v2/contrast.md");
+    let document = fs::read_to_string(&path).expect("the contrast record exists");
+    let start = document.find(BEGIN).expect("begin marker") + BEGIN.len();
+    let end = document.find(END).expect("end marker");
+    let rows = contrast_rows();
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        let updated = format!("{}{rows}{}", &document[..start], &document[end..]);
+        fs::write(&path, updated).expect("write the record");
+        return;
+    }
+    assert_eq!(
+        &document[start..end],
+        rows,
+        "regenerate with: UPDATE_GOLDENS=1 cargo test -p claurst-tui --test next_primitives"
+    );
+}
+
 #[test]
 fn xterm256_approximations_keep_every_text_bearing_role_legible() {
     let indexed = |color: Option<Color>, role: Role| match color {
