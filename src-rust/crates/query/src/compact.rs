@@ -748,6 +748,13 @@ pub async fn auto_compact_if_needed(
     if !should_auto_compact(input_tokens, model, state) {
         return AutoCompactOutcome::NotNeeded;
     }
+    if !has_messages_to_compact(messages) {
+        debug!(
+            count = messages.len(),
+            "Auto-compact needed, but too few messages to compact"
+        );
+        return AutoCompactOutcome::NothingToCompact;
+    }
 
     info!(
         input_tokens,
