@@ -3256,6 +3256,14 @@ struct LedgerRegistrations {
 /// also slow to take the request itself.
 const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long the exit waits for the completions once they are sent (#580).
+/// A daemon on a local socket answers one in milliseconds, so one that has
+/// not answered within a second is not going to soon; the exit goes on and
+/// the completion is lost, as it would be against a daemon that is down
+/// (its row stays `running`). A quit is therefore delayed by the daemon by
+/// at most this plus [`LEDGER_EXIT_WAIT`], however it behaves.
+const LEDGER_COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl LedgerRegistrations {
     /// Send a registration for session `id` off the UI thread and show it
     /// as waiting for its answer. `register` is the blocking daemon call.
@@ -3270,7 +3278,10 @@ impl LedgerRegistrations {
         use claurst_tui::application::SessionOwnership;
 
         let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
-        tokio::task::spawn_blocking(move || {
+        // A thread of its own, not the runtime's blocking pool: the runtime
+        // waits for that pool when it shuts down, so a registration still
+        // waiting for a silent daemon would hold the process at exit (#580).
+        std::thread::spawn(move || {
             let _ = answer_tx.send(register().into());
         });
         self.answer = Some(answer_rx);
@@ -3325,9 +3336,9 @@ impl LedgerRegistrations {
     /// A registration still in flight gets up to `wait` to finish first;
     /// if it has not, the completions go out anyway and one may reach the
     /// daemon ahead of its registration. The completions run side by side,
-    /// so a daemon that accepts and never answers delays the exit by one
-    /// request timeout, however many ids there are. `complete` is the
-    /// blocking daemon call.
+    /// and the exit waits for them for [`LEDGER_COMPLETION_WAIT`] at most,
+    /// however many ids there are and however the daemon behaves. `complete`
+    /// is the blocking daemon call.
     async fn complete_all(
         self,
         wait: std::time::Duration,
@@ -3337,16 +3348,121 @@ impl LedgerRegistrations {
             let _ = tokio::time::timeout(wait, answer).await;
         }
         let complete = Arc::new(complete);
-        let completions: Vec<_> = self
-            .sent
-            .into_iter()
-            .map(|id| {
-                let complete = Arc::clone(&complete);
-                tokio::task::spawn_blocking(move || complete(&id))
-            })
-            .collect();
-        for completion in completions {
-            let _ = completion.await;
+        // Each completion holds a sender; once every one has returned (or
+        // given up) the channel closes.
+        let (running, mut finished) = tokio::sync::mpsc::channel::<()>(1);
+        for id in self.sent {
+            let complete = Arc::clone(&complete);
+            let running = running.clone();
+            // Threads of their own, not the runtime's blocking pool, which
+            // the runtime waits for when it shuts down.
+            std::thread::spawn(move || {
+                complete(&id);
+                drop(running);
+            });
+        }
+        drop(running);
+        let _ = tokio::time::timeout(LEDGER_COMPLETION_WAIT, finished.recv()).await;
+    }
+}
+
+/// How long a daemon listing may run before the loop says it is waiting.
+/// A daemon that answers at all answers well within this, so a healthy one
+/// shows no notice.
+const DAEMON_LISTING_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The one Coven daemon listing (`/coven sessions`, `/coven familiars`,
+/// `/familiar list`) running off the UI loop's thread (#580), until its
+/// answer lands. A second listing started meanwhile is not sent: against a
+/// daemon that never answers, every one would wait out its whole request
+/// timeout.
+#[derive(Default)]
+struct DaemonListings {
+    pending: Option<PendingListing>,
+}
+
+struct PendingListing {
+    command: &'static str,
+    started: std::time::Instant,
+    /// The waiting notice, once shown.
+    notice: Option<String>,
+    answer: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
+impl DaemonListings {
+    /// Run `listing`, the blocking daemon call for `command`, on a thread of
+    /// its own, unless another listing is still waiting.
+    fn start(
+        &mut self,
+        app: &mut claurst_tui::App,
+        command: &'static str,
+        listing: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        use claurst_tui::notifications::NotificationKind;
+
+        if let Some(pending) = &self.pending {
+            app.push_notification(
+                NotificationKind::Warning,
+                format!(
+                    "Still waiting for the Coven daemon to answer {}; {command} was not sent.",
+                    pending.command
+                ),
+                Some(5),
+            );
+            return;
+        }
+        let (answer_tx, answer) = std::sync::mpsc::channel();
+        // Not the runtime's blocking pool, which the runtime waits for at
+        // exit: a listing may still be waiting for the daemon then.
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(listing());
+        });
+        self.pending = Some(PendingListing {
+            command,
+            started: std::time::Instant::now(),
+            notice: None,
+            answer,
+        });
+    }
+
+    /// Show the listing's outcome once it has landed, and say the daemon is
+    /// being waited for once it has taken longer than
+    /// [`DAEMON_LISTING_NOTICE_AFTER`].
+    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant) {
+        use claurst_tui::notifications::NotificationKind;
+        use std::sync::mpsc::TryRecvError;
+
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        let answer = match pending.answer.try_recv() {
+            Ok(answer) => answer,
+            Err(TryRecvError::Disconnected) => {
+                Err(format!("{} stopped without an answer", pending.command))
+            }
+            Err(TryRecvError::Empty) => {
+                if pending.notice.is_none()
+                    && now.saturating_duration_since(pending.started) >= DAEMON_LISTING_NOTICE_AFTER
+                {
+                    let notice = format!(
+                        "Waiting for the Coven daemon to answer {}…",
+                        pending.command
+                    );
+                    app.push_notification(NotificationKind::Info, notice.clone(), None);
+                    pending.notice = Some(notice);
+                }
+                return;
+            }
+        };
+        if let Some(notice) = pending.notice.take() {
+            app.notifications
+                .notifications
+                .retain(|shown| shown.message != notice);
+        }
+        self.pending = None;
+        match answer {
+            Ok(message) => app.push_message(claurst_core::types::Message::assistant(message)),
+            Err(error) => app.show_command_error(format!("Error: {error}")),
         }
     }
 }
@@ -3983,6 +4099,7 @@ async fn run_interactive(
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
     let mut work_goal_read: Option<(std::time::Instant, String)> = None;
     let mut memory_poll = MemoryPoll::default();
+    let mut daemon_listings = DaemonListings::default();
     // When the loop last saw a permission panel open, or closed one; cleared
     // when a turn ends. See `open_permission_panel`.
     let mut panel_last_open: Option<std::time::Instant> = None;
@@ -4040,6 +4157,7 @@ async fn run_interactive(
             &mut memory_poll,
             spawn_memory_read,
         );
+        daemon_listings.settle(&mut app, std::time::Instant::now());
 
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
@@ -4551,6 +4669,11 @@ async fn run_interactive(
                                         "MCP OAuth — '{}' started. Complete authentication in your browser.\nURL: {}\nCallback URL: {}",
                                         server_name, auth_url, redirect_uri
                                     ));
+                                }
+                                Some(CommandResult::DaemonListing(listing)) => {
+                                    daemon_listings.start(&mut app, listing.command(), move || {
+                                        listing.run()
+                                    });
                                 }
                                 Some(CommandResult::Message(msg)) => {
                                     // Suppress text output when TUI already opened an
@@ -9306,6 +9429,98 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert_eq!(*log.lock().unwrap(), ["complete session-a"]);
         drop(release);
+    }
+
+    /// #580: a daemon listing runs off the loop's thread. Starting one
+    /// returns at once and the loop's own steps keep returning while it
+    /// waits; after [`DAEMON_LISTING_NOTICE_AFTER`] a notice says what is
+    /// waited for; a second listing meanwhile is not run; the answer lands as
+    /// the command's message and takes the notice away.
+    #[test]
+    fn a_daemon_listing_waits_off_the_loop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut listings = DaemonListings::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        listings.start(&mut app, "/coven sessions", move || {
+            let _ = held.recv();
+            Ok("the daemon's sessions".to_string())
+        });
+        listings.settle(&mut app, Instant::now());
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "starting and checking a listing took {:?}",
+            started.elapsed()
+        );
+        assert!(app.notifications.current().is_none(), "no notice at once");
+
+        listings.settle(&mut app, Instant::now() + DAEMON_LISTING_NOTICE_AFTER);
+        let notice = app.notifications.current().expect("a waiting notice");
+        assert_eq!(
+            notice.message,
+            "Waiting for the Coven daemon to answer /coven sessions…"
+        );
+
+        let second_ran = Arc::new(AtomicBool::new(false));
+        {
+            let second_ran = Arc::clone(&second_ran);
+            listings.start(&mut app, "/coven familiars", move || {
+                second_ran.store(true, Ordering::Release);
+                Ok(String::new())
+            });
+        }
+        assert_eq!(
+            app.notifications
+                .current()
+                .map(|shown| shown.message.as_str()),
+            Some(
+                "Still waiting for the Coven daemon to answer /coven sessions; \
+                 /coven familiars was not sent."
+            )
+        );
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.messages.last().map(|message| message.get_all_text()),
+            Some("the daemon's sessions".to_string())
+        );
+        assert!(
+            !app.notifications
+                .notifications
+                .iter()
+                .any(|shown| shown.message.starts_with("Waiting for the Coven daemon")),
+            "the waiting notice is gone"
+        );
+        assert!(
+            !second_ran.load(Ordering::Acquire),
+            "the second listing ran"
+        );
+
+        // A failed listing is the command's error, and the next one runs.
+        listings.start(&mut app, "/coven familiars", || {
+            Err("Coven daemon offline. Try `/coven daemon start`.".to_string())
+        });
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Error: Coven daemon offline. Try `/coven daemon start`.")
+        );
     }
 
     /// #580: a completion the daemon never answers holds the exit only for

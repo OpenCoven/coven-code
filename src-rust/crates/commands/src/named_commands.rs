@@ -59,73 +59,7 @@ impl NamedCommand for AgentsCommand {
 
     fn execute_named(&self, args: &[&str], ctx: &CommandContext) -> CommandResult {
         match args.first().copied().unwrap_or("list") {
-            "list" => {
-                let defs = claurst_tui::agents_view::load_agent_definitions(&ctx.working_dir);
-
-                let (familiar_defs, user_defs): (Vec<_>, Vec<_>) = defs
-                    .iter()
-                    .partition(|d| d.source.starts_with("coven:familiar"));
-
-                if defs.is_empty() {
-                    return CommandResult::Message(
-                        "Available Agents (0)\n\n\
-                         No custom agents defined. Create one with /familiar create <name>\n\
-                         or run: coven-code agents create <name>\n\n\
-                         No Coven familiars found. Install the Coven daemon to\n\
-                         automatically surface familiars here."
-                            .to_string(),
-                    );
-                }
-
-                let mut out = format!("Available Agents ({})\n", defs.len());
-
-                if !user_defs.is_empty() {
-                    out.push_str(&format!("\nWorkspace Agents ({})\n", user_defs.len()));
-                    for def in &user_defs {
-                        let model_str = def.model.as_deref().unwrap_or("default");
-                        if def.description.is_empty() {
-                            out.push_str(&format!(
-                                "  \u{2022} {} (model: {})\n",
-                                def.name, model_str
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "  \u{2022} {}: {}\n    Model: {}\n",
-                                def.name, def.description, model_str
-                            ));
-                        }
-                    }
-                }
-
-                if !familiar_defs.is_empty() {
-                    out.push_str(&format!(
-                        "\n\u{2728} Coven Familiars ({})\n",
-                        familiar_defs.len()
-                    ));
-                    for def in &familiar_defs {
-                        let id = def.source.trim_start_matches("coven:familiar:");
-                        let desc_short = def
-                            .description
-                            .split(" \u{2014} ")
-                            .nth(1)
-                            .unwrap_or(&def.description)
-                            .trim();
-                        let access = def.access.as_deref().unwrap_or("read-only");
-                        out.push_str(&format!(
-                            "  \u{2605} {} (id: {}, access: {})\n    {}\n",
-                            def.name, id, access, desc_short
-                        ));
-                    }
-                    out.push_str("\nSwitch active familiar: /familiar <name>");
-                }
-
-                if user_defs.is_empty() {
-                    out.push_str(
-                        "\nUse 'coven-code agents create <name>' to add a workspace agent.",
-                    );
-                }
-                CommandResult::Message(out)
-            }
+            "list" => CommandResult::Message(agents_listing(&ctx.working_dir)),
             "familiars" => {
                 // Shorthand: list only Coven familiars.
                 let defs = claurst_tui::agents_view::load_agent_definitions(&ctx.working_dir);
@@ -216,6 +150,71 @@ impl NamedCommand for AgentsCommand {
             )),
         }
     }
+}
+
+/// The agent list `coven-code agents list` and `/familiar list` print:
+/// workspace agents, then Coven familiars with their live daemon status.
+/// Reading those statuses can wait for the daemon, so the interactive loop
+/// runs this off its own thread (#580).
+pub(crate) fn agents_listing(working_dir: &std::path::Path) -> String {
+    let defs = claurst_tui::agents_view::load_agent_definitions(working_dir);
+
+    let (familiar_defs, user_defs): (Vec<_>, Vec<_>) = defs
+        .iter()
+        .partition(|d| d.source.starts_with("coven:familiar"));
+
+    if defs.is_empty() {
+        return "Available Agents (0)\n\n\
+                No custom agents defined. Create one with /familiar create <name>\n\
+                or run: coven-code agents create <name>\n\n\
+                No Coven familiars found. Install the Coven daemon to\n\
+                automatically surface familiars here."
+            .to_string();
+    }
+
+    let mut out = format!("Available Agents ({})\n", defs.len());
+
+    if !user_defs.is_empty() {
+        out.push_str(&format!("\nWorkspace Agents ({})\n", user_defs.len()));
+        for def in &user_defs {
+            let model_str = def.model.as_deref().unwrap_or("default");
+            if def.description.is_empty() {
+                out.push_str(&format!("  \u{2022} {} (model: {})\n", def.name, model_str));
+            } else {
+                out.push_str(&format!(
+                    "  \u{2022} {}: {}\n    Model: {}\n",
+                    def.name, def.description, model_str
+                ));
+            }
+        }
+    }
+
+    if !familiar_defs.is_empty() {
+        out.push_str(&format!(
+            "\n\u{2728} Coven Familiars ({})\n",
+            familiar_defs.len()
+        ));
+        for def in &familiar_defs {
+            let id = def.source.trim_start_matches("coven:familiar:");
+            let desc_short = def
+                .description
+                .split(" \u{2014} ")
+                .nth(1)
+                .unwrap_or(&def.description)
+                .trim();
+            let access = def.access.as_deref().unwrap_or("read-only");
+            out.push_str(&format!(
+                "  \u{2605} {} (id: {}, access: {})\n    {}\n",
+                def.name, id, access, desc_short
+            ));
+        }
+        out.push_str("\nSwitch active familiar: /familiar <name>");
+    }
+
+    if user_defs.is_empty() {
+        out.push_str("\nUse 'coven-code agents create <name>' to add a workspace agent.");
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
