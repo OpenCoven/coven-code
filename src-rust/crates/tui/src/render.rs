@@ -3835,10 +3835,7 @@ mod welcome_tests {
             ("abcdefgé", "[session:abcdefgé]"),
             ("abcdefgéh", "[session:abcdefgé]"),
             ("日本語セッション名", "[session:日本語セッション]"),
-            (
-                "0f8e2c1a-7b6d-4e5f-9a8b-1c2d3e4f5a6b",
-                "[session:0f8e2c1a]",
-            ),
+            ("0f8e2c1a-7b6d-4e5f-9a8b-1c2d3e4f5a6b", "[session:0f8e2c1a]"),
         ] {
             let data = StatusLineData {
                 session_id: Some(id.to_string()),
