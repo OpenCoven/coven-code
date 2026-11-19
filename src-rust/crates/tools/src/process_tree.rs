@@ -18,13 +18,20 @@ pub(crate) struct ForegroundGroup {
 impl ForegroundGroup {
     pub(crate) fn terminate(&mut self) -> Result<(), nix::errno::Errno> {
         match self.group.take() {
-            Some(group) => match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL)
-            {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-                Err(error) => Err(error),
-            },
+            Some(group) => kill_group(group),
             None => Ok(()),
         }
+    }
+}
+
+/// Kill every process in `group`. A group that has already gone is not an
+/// error. Call it only while the group's leader is unreaped, so the ID cannot
+/// have been reused.
+#[cfg(unix)]
+pub(crate) fn kill_group(group: nix::unistd::Pid) -> Result<(), nix::errno::Errno> {
+    match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
