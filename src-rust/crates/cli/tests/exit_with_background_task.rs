@@ -127,11 +127,18 @@ impl Run {
         self.directory.path().join("holder")
     }
 
+    /// The holder's last count. A read can fail while the holder replaces
+    /// the file on Windows, so a few are tried.
     fn ticks(&self) -> Option<u64> {
-        fs::read_to_string(self.holder().join("ticks"))
-            .ok()?
-            .parse()
-            .ok()
+        (0..10).find_map(|_| {
+            let ticks = fs::read_to_string(self.holder().join("ticks"))
+                .ok()
+                .and_then(|text| text.parse().ok());
+            if ticks.is_none() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            ticks
+        })
     }
 
     /// Wait for the engine to exit, then check that the holder still runs
@@ -257,7 +264,17 @@ fn answer(socket: TcpStream, command: &str, holder: &Path) {
     if reader.read_exact(&mut body).is_err() {
         return;
     }
-    let (block, delta, stop_reason) = if String::from_utf8_lossy(&body).contains("tool_result") {
+    let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let answered = request["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message["content"].as_array())
+        .is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block["type"] == "tool_result" && block["tool_use_id"] == "holder")
+        });
+    let (block, delta, stop_reason) = if answered {
         // The run must not end before the holder has started.
         let deadline = Instant::now() + Duration::from_secs(30);
         while !holder.join("ticks").exists() && Instant::now() < deadline {
@@ -316,6 +333,8 @@ fn holder() {
     if !folder.join(MARKER).exists() {
         return;
     }
+    // Leave the run's folders, so that they can be removed while this runs.
+    let _ = std::env::set_current_dir(std::env::temp_dir());
     let started = Instant::now();
     let mut ticks = 0u64;
     while started.elapsed() < HOLDER_LIFETIME && !folder.join("stop").exists() {

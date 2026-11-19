@@ -496,18 +496,21 @@ fn abandon_interactive_turn(
 /// once the engine is done (#535). The pool also reads child processes'
 /// output pipes, and on Windows such a read ends only when every process
 /// holding the pipe has exited. A process that a background command started
-/// can hold it for as long as it runs, and dropping the runtime used to wait
-/// for it. Anything the engine still needs is awaited before `run` returns,
-/// so what is left here is work it chose not to wait for.
+/// can hold it for as long as it runs; dropping the runtime used to wait for
+/// it, and an exit in that state now takes this long. What the engine's
+/// output depends on is awaited before `run` returns; what is left is work
+/// started without waiting for it, such as an append to the prompt history.
 const RUNTIME_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(run());
+    // A panic in `run` would drop the runtime while unwinding, which waits
+    // without a limit; shut it down first, then go on unwinding.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(run())));
     runtime.shutdown_timeout(RUNTIME_EXIT_GRACE);
-    result
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 async fn run() -> anyhow::Result<()> {
