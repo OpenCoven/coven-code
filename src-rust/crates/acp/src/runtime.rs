@@ -208,6 +208,12 @@ mod tests {
                 "--nocapture",
             ])
             .env_clear()
+            // Windows needs these to start a process and open sockets.
+            .envs(
+                ["SystemRoot", "PATH"]
+                    .into_iter()
+                    .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+            )
             .env("HOME", &root_path)
             .env("USERPROFILE", &root_path)
             .env("COVEN_HOME", root_path.join("coven"))

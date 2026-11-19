@@ -81,6 +81,7 @@ fn run_with_input(
         "COVEN_CODE_API_BASE",
         "COVEN_CODE_CLAUDE_BIN",
         "COVEN_PARENT",
+        "COVEN_CODE_ACP_LOG",
     ] {
         command.env_remove(key);
     }
@@ -236,7 +237,6 @@ fn saved_bypass_mode_is_refused_on_stderr_without_changing_the_wire() {
         stdout, plain_stdout,
         "the saved mode must not change the protocol stream"
     );
-    assert!(!stdout.contains("restored"), "{stdout}");
 }
 
 #[test]

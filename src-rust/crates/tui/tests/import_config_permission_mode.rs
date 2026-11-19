@@ -39,8 +39,7 @@ fn import_config_permission_mode_child() {
     // (the session's mode, whether a launch flag chose it, the saved mode,
     // the session's mode after the import, the notice it shows)
     let cases = [
-        // No flag: a saved bypass is not applied; the session falls back to
-        // default and says so.
+        // No flag: a saved bypass is not applied, and the session says so.
         (
             PermissionMode::Default,
             false,
@@ -48,12 +47,44 @@ fn import_config_permission_mode_child() {
             PermissionMode::Default,
             bypass_refused,
         ),
+        // A refused bypass leaves a mode the session chose as it is.
         (
             PermissionMode::AcceptEdits,
             false,
             "bypassPermissions",
-            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
             bypass_refused,
+        ),
+        (
+            PermissionMode::Plan,
+            false,
+            "bypassPermissions",
+            PermissionMode::Plan,
+            bypass_refused,
+        ),
+        // A session that chose bypass itself keeps it; nothing was refused.
+        (
+            PermissionMode::BypassPermissions,
+            false,
+            "bypassPermissions",
+            PermissionMode::BypassPermissions,
+            None,
+        ),
+        // A saved default is indistinguishable from nothing saved, so it
+        // neither loosens a read-only session nor resets accept-edits.
+        (
+            PermissionMode::Plan,
+            false,
+            "default",
+            PermissionMode::Plan,
+            None,
+        ),
+        (
+            PermissionMode::AcceptEdits,
+            false,
+            "default",
+            PermissionMode::AcceptEdits,
+            None,
         ),
         // No flag: another saved mode applies, as at a start, and says so
         // when it changes the session.
