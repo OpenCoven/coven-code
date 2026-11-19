@@ -65,6 +65,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
+unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
