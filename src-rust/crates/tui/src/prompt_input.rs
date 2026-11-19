@@ -3465,12 +3465,16 @@ impl PromptInputState {
             let rows = wrap_ranges(line, width);
             if let Some(range) = rows.get(target_row - row) {
                 // The last character edge at or before the target column,
-                // so the cursor never lands inside a wide character.
+                // so the cursor never lands inside a wide character. The end
+                // of any row but a line's last is the start of the next row,
+                // where the cursor would be drawn, so it stops one character
+                // short of it.
+                let last_row = target_row - row + 1 == rows.len();
                 let mut at = range.start;
                 let mut col = 0usize;
                 for cluster in line[range.clone()].graphemes(true) {
                     col += UnicodeWidthStr::width(cluster);
-                    if col > target_col {
+                    if col > target_col || (!last_row && at + cluster.len() == range.end) {
                         break;
                     }
                     at += cluster.len();
