@@ -145,9 +145,11 @@ struct Cli {
     #[arg(short = 'm', long = "model")]
     model: Option<String>,
 
-    /// Permission mode
-    #[arg(long = "permission-mode", value_enum, default_value_t = CliPermissionMode::Default)]
-    permission_mode: CliPermissionMode,
+    /// Permission mode. When omitted, an interactive session starts in the
+    /// mode saved in your settings (a saved bypass-permissions is never
+    /// restored) and a headless run starts in default
+    #[arg(long = "permission-mode", value_enum)]
+    permission_mode: Option<CliPermissionMode>,
 
     /// Resume a previous session by ID (omit ID to resume the most recent session)
     #[arg(long = "resume", num_args(0..=1), default_missing_value("__last__"))]
@@ -352,15 +354,53 @@ impl From<CliPermissionMode> for PermissionMode {
     }
 }
 
+/// The permission mode a start runs in, and what an interactive session
+/// should say about the saved mode.
+#[derive(Debug, PartialEq, Eq)]
+struct StartupPermissionMode {
+    mode: PermissionMode,
+    /// What to show once when the saved mode decided `mode` or was refused,
+    /// short enough for the one-row notification both renderers draw. Always
+    /// `None` for a headless run, which prints nothing extra.
+    notice: Option<&'static str>,
+}
+
+/// Decide the permission mode for a start without
+/// `--dangerously-skip-permissions`.
+///
+/// `--permission-mode` wins when given. Without it an interactive session
+/// starts in `saved`, the mode in the user's own settings, so that
+/// `/config set permission-mode` lasts across restarts. Two limits keep a
+/// settings file from loosening approvals unseen: a saved bypass mode is
+/// never restored, and a headless run, which has nowhere to say what it
+/// restored, keeps `default`.
 fn permission_mode_for_invocation(
-    cli_mode: CliPermissionMode,
+    flag: Option<CliPermissionMode>,
+    saved: &PermissionMode,
     has_github_context: bool,
-) -> PermissionMode {
-    if has_github_context {
-        PermissionMode::BypassPermissions
+    is_headless: bool,
+) -> StartupPermissionMode {
+    let (mode, notice) = if has_github_context {
+        (PermissionMode::BypassPermissions, None)
+    } else if let Some(flag) = flag {
+        (flag.into(), None)
+    } else if is_headless {
+        (PermissionMode::Default, None)
     } else {
-        cli_mode.into()
-    }
+        match saved {
+            PermissionMode::Default => (PermissionMode::Default, None),
+            PermissionMode::AcceptEdits => (
+                PermissionMode::AcceptEdits,
+                Some("Saved accept-edits mode restored"),
+            ),
+            PermissionMode::Plan => (PermissionMode::Plan, Some("Saved plan mode restored")),
+            PermissionMode::BypassPermissions => (
+                PermissionMode::Default,
+                Some("Saved bypass mode not restored"),
+            ),
+        }
+    };
+    StartupPermissionMode { mode, notice }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -705,6 +745,7 @@ async fn main() -> anyhow::Result<()> {
         config.hosted_review.allow_plugins = false;
         config.hosted_review.allow_auto_memory_persistence = false;
     }
+    let mut permission_mode_notice = None;
     if cli.dangerously_skip_permissions {
         // Mirror TS setup.ts: block bypass mode when running as root/sudo.
         #[cfg(unix)]
@@ -715,8 +756,14 @@ async fn main() -> anyhow::Result<()> {
         }
         config.permission_mode = PermissionMode::BypassPermissions;
     } else {
-        config.permission_mode =
-            permission_mode_for_invocation(cli.permission_mode, github_context.is_some());
+        let startup = permission_mode_for_invocation(
+            cli.permission_mode,
+            &config.permission_mode,
+            github_context.is_some(),
+            is_headless,
+        );
+        config.permission_mode = startup.mode;
+        permission_mode_notice = startup.notice;
     }
     config.additional_dirs = cli.add_dir.clone();
     if cli.no_auto_compact {
@@ -1190,6 +1237,7 @@ async fn main() -> anyhow::Result<()> {
         model_registry,
         user_question_rx,
         diagnostic_log,
+        permission_mode_notice,
     )
     .await;
 
@@ -1597,6 +1645,36 @@ fn spawn_models_cache_refresh() {
         let _ = std::fs::write(&legacy_cache_path, &text);
         tracing::info!(path = %cache_path.display(), "Models cache refreshed from {}", url);
     });
+}
+
+/// Turns off the startup release check when present, whatever its value
+/// (`0` and the empty string included), like `COVEN_CODE_DISABLE_MODELS_FETCH`
+/// for the model list.
+const UPDATE_CHECK_OPT_OUT_ENV: &str = "COVEN_CODE_DISABLE_UPDATE_CHECK";
+
+/// Start an interactive session's background release check and return where
+/// its answer arrives: the newer version, if there is one.
+///
+/// `opt_out` is the value of [`UPDATE_CHECK_OPT_OUT_ENV`]. When it is set,
+/// `check` is never called, so no request is made and no update is announced.
+/// `/update` and `coven-code upgrade` make their own requests and do not come
+/// through here.
+fn spawn_update_check<F>(
+    opt_out: Option<&std::ffi::OsStr>,
+    check: impl FnOnce() -> F,
+) -> tokio::sync::mpsc::Receiver<Option<String>>
+where
+    F: std::future::Future<Output = Option<claurst_core::UpdateInfo>> + Send + 'static,
+{
+    let (update_tx, update_rx) = tokio::sync::mpsc::channel(1);
+    if opt_out.is_none() {
+        let check = check();
+        tokio::spawn(async move {
+            let version = check.await.map(|info| info.latest_version);
+            let _ = update_tx.send(version).await;
+        });
+    }
+    update_rx
 }
 
 async fn remove_file_if_exists(path: &std::path::Path) -> anyhow::Result<()> {
@@ -3297,6 +3375,7 @@ async fn run_interactive(
         tokio::sync::mpsc::UnboundedReceiver<claurst_tools::UserQuestionEvent>,
     >,
     diagnostic_log: Option<diagnostics::DiagnosticLog>,
+    permission_mode_notice: Option<&'static str>,
 ) -> anyhow::Result<()> {
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
     use claurst_commands::{execute_command, CommandContext, CommandResult};
@@ -3407,6 +3486,17 @@ async fn run_interactive(
     let mut terminal = setup_terminal(renderer)?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
+    // What the saved permission mode did to this session, said once in a
+    // notification, which both renderers draw. The newest notification is
+    // the one shown, so this goes in before the renderer warning and outlasts
+    // it: the warning shows first and this is still up when it has gone.
+    if let Some(notice) = permission_mode_notice {
+        app.notifications.push(
+            claurst_tui::NotificationKind::Warning,
+            notice.to_string(),
+            Some(30),
+        );
+    }
     // The stderr warning is covered by the alternate screen; repeat it where
     // the user can read it.
     if let Some(warning) = renderer_selection.warning {
@@ -3717,13 +3807,12 @@ async fn run_interactive(
     // goal-absolute token total only after a successful EndTurn.
     let mut goal_turn: Option<InteractiveTurn> = None;
 
-    // Background update check: spawned once at startup; result delivered via channel.
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
-    tokio::spawn(async move {
-        let info = claurst_core::check_for_updates().await;
-        let version = info.map(|i| i.latest_version);
-        let _ = update_tx.send(version).await;
-    });
+    // Background update check: spawned once at startup unless the user opted
+    // out; result delivered via channel.
+    let mut update_rx = spawn_update_check(
+        std::env::var_os(UPDATE_CHECK_OPT_OUT_ENV).as_deref(),
+        claurst_core::check_for_updates,
+    );
 
     // Device code / OAuth auth channel — background tasks send events here
     // so the main loop can update the device_auth_dialog state.
@@ -7971,20 +8060,123 @@ mod tests {
         .is_err());
     }
 
+    const ALL_PERMISSION_MODES: [PermissionMode; 4] = [
+        PermissionMode::Default,
+        PermissionMode::AcceptEdits,
+        PermissionMode::BypassPermissions,
+        PermissionMode::Plan,
+    ];
+
+    fn startup_mode(mode: PermissionMode) -> StartupPermissionMode {
+        StartupPermissionMode { mode, notice: None }
+    }
+
+    /// Classic and Next each draw a notification on one row of a 52-column
+    /// box and cut what does not fit after the kind and the dismiss hint.
+    fn assert_fits_one_notification_row(notice: &str) {
+        assert!(
+            notice.is_ascii() && notice.len() <= 34 && !notice.contains('\n'),
+            "{notice:?} would be cut"
+        );
+    }
+
     #[test]
     fn github_context_forces_noninteractive_permission_bypass() {
+        for saved in &ALL_PERMISSION_MODES {
+            for flag in [
+                None,
+                Some(CliPermissionMode::Default),
+                Some(CliPermissionMode::Plan),
+            ] {
+                assert_eq!(
+                    permission_mode_for_invocation(flag, saved, true, true),
+                    startup_mode(PermissionMode::BypassPermissions),
+                    "flag {flag:?}, saved {saved:?}"
+                );
+            }
+        }
+    }
+
+    // --- saved permission mode at startup (#515) ---
+
+    #[test]
+    fn the_permission_mode_flag_wins_over_any_saved_mode_and_says_nothing() {
+        for (flag, expected) in [
+            (CliPermissionMode::Default, PermissionMode::Default),
+            (CliPermissionMode::AcceptEdits, PermissionMode::AcceptEdits),
+            (
+                CliPermissionMode::BypassPermissions,
+                PermissionMode::BypassPermissions,
+            ),
+            (CliPermissionMode::Plan, PermissionMode::Plan),
+        ] {
+            for saved in &ALL_PERMISSION_MODES {
+                for is_headless in [false, true] {
+                    assert_eq!(
+                        permission_mode_for_invocation(Some(flag), saved, false, is_headless),
+                        startup_mode(expected.clone()),
+                        "flag {flag:?}, saved {saved:?}, headless {is_headless}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_interactive_start_without_the_flag_restores_a_saved_mode_and_says_so() {
         assert_eq!(
-            permission_mode_for_invocation(CliPermissionMode::Default, true),
-            PermissionMode::BypassPermissions
+            permission_mode_for_invocation(None, &PermissionMode::Default, false, false),
+            startup_mode(PermissionMode::Default),
+            "nothing saved: default, with nothing to say"
         );
-        assert_eq!(
-            permission_mode_for_invocation(CliPermissionMode::Plan, true),
-            PermissionMode::BypassPermissions
+        for (saved, name) in [
+            (PermissionMode::AcceptEdits, "accept-edits"),
+            (PermissionMode::Plan, "plan"),
+        ] {
+            let startup = permission_mode_for_invocation(None, &saved, false, false);
+            assert_eq!(startup.mode, saved);
+            let notice = startup.notice.expect("a restored mode is announced");
+            assert!(
+                notice.contains(name) && notice.ends_with("mode restored"),
+                "{notice}"
+            );
+            assert_fits_one_notification_row(notice);
+        }
+    }
+
+    #[test]
+    fn a_saved_bypass_mode_is_never_restored_and_the_session_says_so_in_one_line() {
+        let startup =
+            permission_mode_for_invocation(None, &PermissionMode::BypassPermissions, false, false);
+        assert_eq!(startup.mode, PermissionMode::Default);
+        let notice = startup.notice.expect("the fallback is announced");
+        assert!(
+            notice.contains("bypass") && notice.ends_with("not restored"),
+            "{notice}"
         );
-        assert_eq!(
-            permission_mode_for_invocation(CliPermissionMode::AcceptEdits, false),
-            PermissionMode::AcceptEdits
-        );
+        assert_fits_one_notification_row(notice);
+    }
+
+    /// Headless, stream-json and scoped runs keep "the flag or default": a
+    /// saved mode neither loosens an unattended run nor adds output to it.
+    #[test]
+    fn a_headless_run_without_the_flag_is_default_whatever_is_saved() {
+        for saved in &ALL_PERMISSION_MODES {
+            assert_eq!(
+                permission_mode_for_invocation(None, saved, false, true),
+                startup_mode(PermissionMode::Default),
+                "saved {saved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_permission_mode_flag_is_optional_so_leaving_it_out_is_visible() {
+        let cli = Cli::try_parse_from(["coven-code"]).expect("no flags");
+        assert_eq!(cli.permission_mode, None);
+        let cli = Cli::try_parse_from(["coven-code", "--permission-mode", "default"])
+            .expect("explicit default");
+        assert_eq!(cli.permission_mode, Some(CliPermissionMode::Default));
     }
 
     // NOTE: the coven-github headless-contract types + behavior moved to the
@@ -8101,7 +8293,7 @@ mod tests {
 
             let cli = Cli::try_parse_from(&argv)
                 .unwrap_or_else(|e| panic!("{permission:?} sandbox argv rejected: {e}"));
-            assert_eq!(cli.permission_mode, expected);
+            assert_eq!(cli.permission_mode, Some(expected));
         }
     }
 
@@ -8141,6 +8333,46 @@ mod tests {
     fn engine_notice_suppressed_when_not_a_tty() {
         // Piped stdout/stderr (e.g. CI, script)
         assert!(!should_show_engine_notice(true, false, false));
+    }
+
+    // --- startup release check (#516) ---
+
+    fn newer_release(version: &str) -> Option<claurst_core::UpdateInfo> {
+        Some(claurst_core::UpdateInfo {
+            current_version: "0.0.1".to_string(),
+            latest_version: version.to_string(),
+            release_url: String::new(),
+            has_update: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_startup_release_check_runs_once_and_reports_the_newer_version_by_default() {
+        let calls = std::cell::Cell::new(0);
+        let mut answer = spawn_update_check(None, || {
+            calls.set(calls.get() + 1);
+            async { newer_release("9.9.9") }
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(answer.recv().await, Some(Some("9.9.9".to_string())));
+    }
+
+    /// The opt-out is presence-based: `0` and an empty value disable the
+    /// check as well. A check that had run would deliver its answer; here
+    /// the channel closes with nothing sent.
+    #[tokio::test]
+    async fn the_startup_release_check_never_runs_once_the_opt_out_variable_is_present() {
+        for value in ["1", "0", ""] {
+            let calls = std::cell::Cell::new(0);
+            let mut answer = spawn_update_check(Some(std::ffi::OsStr::new(value)), || {
+                calls.set(calls.get() + 1);
+                async { newer_release("9.9.9") }
+            });
+
+            assert_eq!(calls.get(), 0, "opt-out value {value:?}");
+            assert_eq!(answer.recv().await, None, "opt-out value {value:?}");
+        }
     }
 
     fn accounting_goal(
