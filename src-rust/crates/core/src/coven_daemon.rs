@@ -424,12 +424,16 @@ impl DaemonClient {
         use std::os::fd::OwnedFd;
 
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
-        socket.set_write_timeout(Some(time_left(deadline)?))?;
+        // socket2 passes a timeout under 1 µs as zero, which means none.
+        socket.set_write_timeout(Some(time_left(deadline)?.max(Duration::from_millis(1))))?;
         socket.connect(&SockAddr::unix(&self.sock_path)?)?;
         let stream = UnixStream::from(OwnedFd::from(socket));
+        // A daemon that has already answered and closed makes these fail on
+        // macOS (EINVAL); its answer is still there to read, and reading a
+        // closed connection does not wait.
         let left = time_left(deadline)?;
-        stream.set_read_timeout(Some(left))?;
-        stream.set_write_timeout(Some(left))?;
+        let _ = stream.set_read_timeout(Some(left));
+        let _ = stream.set_write_timeout(Some(left));
         Ok(stream)
     }
 

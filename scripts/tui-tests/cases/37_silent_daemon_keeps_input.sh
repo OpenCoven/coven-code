@@ -12,13 +12,15 @@
 # `/coven sessions`, `/coven familiars` and `/familiar list` each ask the
 # daemon. Right after each one, text typed into the prompt is drawn within
 # 2.5 s (the request itself waits 5 s), and the toast says the daemon is
-# being waited for. Each then ends with its result once the request's 5 s
-# deadline passes: an error for the two `/coven` listings, the familiar
-# list (without live statuses) for `/familiar list`. A second listing
-# typed while one is still waiting is not sent: the toast says so and the
-# daemon never sees its request. Ctrl+C twice then exits within 2.5 s,
-# although the daemon never answers the session's completion. Classic runs
-# with COVEN_CODE_UI unset and no provider; needs `python3`.
+# being waited for. Each sends exactly one request to the daemon, and ends
+# with its result once the request's 5 s deadline passes, not before 4 s:
+# an error for the two `/coven` listings, the familiar list (without live
+# statuses) for `/familiar list`. A second listing typed while one is still
+# waiting is not sent: the toast says so and the daemon never sees its
+# request. Ctrl+C twice then exits within 3.5 s (the exit waits up to 2 s
+# for the completion), although the daemon never answers the session's
+# completion. Classic runs with COVEN_CODE_UI unset and no provider; needs
+# `python3`.
 
 register_case tc_silent_daemon_keeps_input
 
@@ -92,8 +94,10 @@ _sdk_seen_within() { # text, tenths
 
 # One listing: the prompt keeps taking input while it waits, then its result lands.
 _sdk_listing() { # renderer, command, marker, result text, request log, request line
-  local r="$1" cmd="$2" marker="$3" result="$4" log="$5" line="$6"
+  local r="$1" cmd="$2" marker="$3" result="$4" log="$5" line="$6" before sent
+  before="$(_sdk_count "$log" "$line")"
   tui_type "$cmd"; sleep 0.3; tui_keys Enter
+  sent="$(tui_now_tenths)"
   tui_type "$marker"
   if _sdk_seen_within "$marker" 25; then
     _pass "$r: after $cmd, typed text is drawn within 2.5 s (about $((SDK_TENTHS / 10)).$((SDK_TENTHS % 10)) s)"
@@ -105,13 +109,16 @@ _sdk_listing() { # renderer, command, marker, result text, request log, request 
   else
     _fail "$r: while $cmd waits, the toast says the daemon is being waited for" "$(tui_capture)"
   fi
-  if [ "$(_sdk_count "$log" "$line")" -ge 1 ]; then
-    _pass "$r: $cmd reached the daemon"
-  else
-    _fail "$r: $cmd reached the daemon" "$(cat "$log" 2>/dev/null)"
-  fi
-  if wait_for "$result" 12; then
-    _pass "$r: $cmd ends with its result once the request's deadline passes"
+  assert_eq "$(_sdk_count "$log" "$line")" "$((before + 1))" \
+    "$r: $cmd sent one request to the daemon"
+  if _sdk_seen_within "$result" 120; then
+    SDK_TENTHS=$(($(tui_now_tenths) - sent))
+    if [ "$SDK_TENTHS" -ge 40 ]; then
+      _pass "$r: $cmd ends with its result once the request's deadline passes (after about $((SDK_TENTHS / 10)) s)"
+    else
+      _fail "$r: $cmd ends with its result once the request's deadline passes" \
+        "the result came after $((SDK_TENTHS / 10)).$((SDK_TENTHS % 10)) s, before the 5 s deadline"
+    fi
   else
     _fail "$r: $cmd ends with its result once the request's deadline passes" "$(tui_capture)"
   fi
@@ -128,6 +135,7 @@ _sdk_journey() { # renderer, dir
   printf '%s\n' '[[familiar]]' 'id = "wisp"' >"$dir/coven/familiars.toml"
   if ! _sdk_start_daemon "$sock" "$dir/ready" "$log"; then
     _fail "$r: the silent fake daemon listens" "no socket at $sock (a path of ${#sock} characters)"
+    _sdk_stop_daemon "$sock"
     return 0
   fi
 
@@ -173,10 +181,10 @@ _sdk_journey() { # renderer, dir
     assert_eq "$(_sdk_count "$log" "POST /api/v1/sessions/external ")" "1" \
       "$r: the session sent its registration at launch"
     tui_quit_and_check "$r: Ctrl+C twice with a silent daemon" C-c C-c
-    if [ "${TUI_QUIT_TENTHS:-999}" -le 25 ]; then
-      _pass "$r: the exit waits at most 2.5 s for the unanswered completion"
+    if [ "${TUI_QUIT_TENTHS:-999}" -le 35 ]; then
+      _pass "$r: the exit waits at most 3.5 s for the unanswered completion"
     else
-      _fail "$r: the exit waits at most 2.5 s for the unanswered completion" \
+      _fail "$r: the exit waits at most 3.5 s for the unanswered completion" \
         "the exit took $((TUI_QUIT_TENTHS / 10)).$((TUI_QUIT_TENTHS % 10)) s"
     fi
     sleep 0.5

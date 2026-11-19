@@ -3256,13 +3256,16 @@ struct LedgerRegistrations {
 /// also slow to take the request itself.
 const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long the exit waits for the completions once they are sent (#580).
-/// A daemon on a local socket answers one in milliseconds, so one that has
-/// not answered within a second is not going to soon; the exit goes on and
-/// the completion is lost, as it would be against a daemon that is down
-/// (its row stays `running`). A quit is therefore delayed by the daemon by
-/// at most this plus [`LEDGER_EXIT_WAIT`], however it behaves.
-const LEDGER_COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long the exit waits for the completions once they are sent (#580):
+/// the 2 s the engine gives a busy daemon elsewhere (the reachability
+/// probe, the health reads around a registration). A daemon on a local
+/// socket answers a completion in milliseconds. Past this the exit goes on
+/// without the answer; whether the daemon still records the completion
+/// depends on it finishing before the connection closes, and a row it never
+/// records stays `running`, as against a daemon that is down. A quit is
+/// therefore delayed by the daemon by at most this plus
+/// [`LEDGER_EXIT_WAIT`], however it behaves.
+const LEDGER_COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl LedgerRegistrations {
     /// Send a registration for session `id` off the UI thread and show it
@@ -3390,6 +3393,16 @@ struct PendingListing {
 }
 
 impl DaemonListings {
+    /// Forget a listing still waiting, and its notice, when the transcript
+    /// it was typed into is replaced: its answer would land in another one.
+    fn forget(&mut self, app: &mut claurst_tui::App) {
+        if let Some(notice) = self.pending.take().and_then(|pending| pending.notice) {
+            app.notifications
+                .notifications
+                .retain(|shown| shown.message != notice);
+        }
+    }
+
     /// Run `listing`, the blocking daemon call for `command`, on a thread of
     /// its own, unless another listing is still waiting.
     fn start(
@@ -4494,6 +4507,7 @@ async fn run_interactive(
                             match cli_result {
                                 Some(CommandResult::Exit) => break 'main,
                                 Some(CommandResult::ClearConversation) => {
+                                    daemon_listings.forget(&mut app);
                                     replace_conversation(
                                         &mut session_scope,
                                         Vec::new(),
@@ -4504,6 +4518,7 @@ async fn run_interactive(
                                     app.status_message = Some("Conversation cleared.".to_string());
                                 }
                                 Some(CommandResult::SetMessages(new_msgs)) => {
+                                    daemon_listings.forget(&mut app);
                                     let removed = messages.len().saturating_sub(new_msgs.len());
                                     replace_conversation(
                                         &mut session_scope,
@@ -4540,6 +4555,7 @@ async fn run_interactive(
                                         Some("Select what to import from ~/.claude.".to_string());
                                 }
                                 Some(CommandResult::ResumeSession(resumed_session)) => {
+                                    daemon_listings.forget(&mut app);
                                     session_scope.advance();
                                     session = resumed_session;
                                     app.enter_session_scope(&session.id);
@@ -9449,7 +9465,7 @@ mod tests {
         let (release, held) = std::sync::mpsc::channel::<()>();
         let started = Instant::now();
         listings.start(&mut app, "/coven sessions", move || {
-            let _ = held.recv();
+            let _ = held.recv_timeout(Duration::from_secs(5));
             Ok("the daemon's sessions".to_string())
         });
         listings.settle(&mut app, Instant::now());
@@ -9521,6 +9537,32 @@ mod tests {
             app.status_message.as_deref(),
             Some("Error: Coven daemon offline. Try `/coven daemon start`.")
         );
+
+        // A listing still waiting when the transcript is replaced is
+        // forgotten with its notice; the next listing runs.
+        let (_release, held) = std::sync::mpsc::channel::<()>();
+        listings.start(&mut app, "/coven sessions", move || {
+            let _ = held.recv_timeout(Duration::from_secs(5));
+            Ok("late sessions".to_string())
+        });
+        listings.settle(&mut app, Instant::now() + DAEMON_LISTING_NOTICE_AFTER);
+        assert!(app.notifications.current().is_some());
+        listings.forget(&mut app);
+        assert!(listings.pending.is_none());
+        assert!(app.notifications.current().is_none(), "the notice is gone");
+        let count = app.messages.len();
+        listings.start(&mut app, "/coven familiars", || Ok("familiars".to_string()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while listings.pending.is_some() {
+            assert!(Instant::now() < deadline, "the listing never landed");
+            listings.settle(&mut app, Instant::now());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.messages.len(), count + 1);
+        assert_eq!(
+            app.messages.last().map(|message| message.get_all_text()),
+            Some("familiars".to_string())
+        );
     }
 
     /// #580: a completion the daemon never answers holds the exit only for
@@ -9551,7 +9593,7 @@ mod tests {
         let elapsed = started.elapsed();
         drop(release);
         assert!(
-            elapsed < Duration::from_secs(3),
+            elapsed < Duration::from_secs(4),
             "the exit waited {elapsed:?} for the completion"
         );
     }
@@ -9583,7 +9625,7 @@ mod tests {
                 Err("no answer".to_string())
             });
             let _ = tokio::time::timeout(
-                Duration::from_secs(3),
+                Duration::from_secs(5),
                 ledger.complete_all(Duration::from_millis(100), move |_| {
                     let _ = completion
                         .lock()

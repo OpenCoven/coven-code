@@ -363,11 +363,12 @@ registration for, to whichever daemon answers then, including after the state
 became unknown. A registration still in flight gets up to 2 s to finish
 first. That is best effort: against a daemon slower than that, a completion
 can still arrive ahead of its registration and leave the row `running`.
-Since #580 the exit then waits at most 1 s for the completions, which run
-side by side on threads of their own; a completion the daemon has not
-answered by then is lost, as it is against a daemon that is down. Neither a
-registration nor a completion still waiting keeps the process alive after
-that.
+Since #580 the exit then waits at most 2 s for the completions, which run
+side by side on threads of their own. Past that the exit goes on without the
+answer: whether the daemon still records a completion depends on it
+finishing before the connection closes, and a row it never records stays
+`running`, as against a daemon that is down. Neither a registration nor a
+completion still waiting keeps the process alive after that.
 
 **Sessions that never registered** (`daemonLedger` off, the default) remember
 no instance. Their indicator reads online or offline as before, and nothing
@@ -459,7 +460,7 @@ ask the daemon on a thread of their own, one at a time. Input and drawing go
 on; after 300 ms a notice says the daemon is being waited for, and the
 listing's result (here, the 5 s deadline's error) lands when it arrives. A
 second listing typed meanwhile is not sent, and the notice says so. Quitting
-waits at most 1 s for the completion, plus up to 2 s for a registration still
+waits at most 2 s for the completion, plus up to 2 s for a registration still
 in flight, and the process then ends at once.
 
 ## Deferred
