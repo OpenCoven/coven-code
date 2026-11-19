@@ -918,8 +918,9 @@ fn next_draws_permission_requests_itself_unless_another_surface_is_open() {
     // With another input-owning surface open, Classic's precedence applies.
     app.help_overlay.visible = true;
     assert!(claurst_tui::next::delegates_to_classic(&app));
-    // The turn is still running, so the status line shows its elapsed time,
-    // rounded to a second; on a busy host the two draws can round apart.
+    // The turn is still running. The help overlay hides its elapsed time
+    // today; clear it so that a layout change cannot let the two draws show
+    // different seconds, as the next test's other surfaces can.
     app.turn_start = None;
     assert_eq!(
         draw(&app, UiRenderer::Next, 120, 40),
