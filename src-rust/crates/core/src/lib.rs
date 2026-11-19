@@ -40,6 +40,7 @@ pub mod shell;
 pub mod spinner;
 pub mod status_notices;
 pub mod token_budget;
+pub mod traffic_opt_out;
 pub mod truncate;
 pub use spinner::{
     sample_completion_verb, sample_spinner_verb, SPINNER_VERBS, TURN_COMPLETION_VERBS,

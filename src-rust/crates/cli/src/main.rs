@@ -1589,13 +1589,18 @@ fn cache_is_fresh(path: &std::path::Path, ttl: std::time::Duration) -> bool {
 /// Background-refresh the models cache from the configured source URL.
 ///
 /// Honors:
-/// * `COVEN_CODE_DISABLE_MODELS_FETCH` — skips the network call entirely.
+/// * `COVEN_CODE_DISABLE_MODELS_FETCH` or
+///   `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` — skips the network call entirely.
 /// * `COVEN_CODE_MODELS_URL` / `MODELS_DEV_URL` — overrides the source URL.
 /// * 5-minute mtime-based freshness check — avoids hammering models.dev
 ///   on every CLI invocation.
 fn spawn_models_cache_refresh() {
-    if std::env::var("COVEN_CODE_DISABLE_MODELS_FETCH").is_ok() {
-        tracing::debug!("COVEN_CODE_DISABLE_MODELS_FETCH set — skipping models.dev refresh");
+    if claurst_core::traffic_opt_out::traffic_opted_out(
+        claurst_core::traffic_opt_out::DISABLE_MODELS_FETCH_ENV,
+    ) {
+        tracing::debug!(
+            "Model catalog refresh turned off by environment — skipping models.dev refresh"
+        );
         return;
     }
 
@@ -1647,27 +1652,22 @@ fn spawn_models_cache_refresh() {
     });
 }
 
-/// Turns off the startup release check when present, whatever its value
-/// (`0` and the empty string included), like `COVEN_CODE_DISABLE_MODELS_FETCH`
-/// for the model list.
-const UPDATE_CHECK_OPT_OUT_ENV: &str = "COVEN_CODE_DISABLE_UPDATE_CHECK";
-
 /// Start an interactive session's background release check and return where
 /// its answer arrives: the newer version, if there is one.
 ///
-/// `opt_out` is the value of [`UPDATE_CHECK_OPT_OUT_ENV`]. When it is set,
-/// `check` is never called, so no request is made and no update is announced.
-/// `/update` and `coven-code upgrade` make their own requests and do not come
-/// through here.
+/// When `opted_out` is true (`COVEN_CODE_DISABLE_UPDATE_CHECK` or
+/// `COVEN_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is present), `check` is never
+/// called, so no request is made and no update is announced. `/update` and
+/// `coven-code upgrade` make their own requests and do not come through here.
 fn spawn_update_check<F>(
-    opt_out: Option<&std::ffi::OsStr>,
+    opted_out: bool,
     check: impl FnOnce() -> F,
 ) -> tokio::sync::mpsc::Receiver<Option<String>>
 where
     F: std::future::Future<Output = Option<claurst_core::UpdateInfo>> + Send + 'static,
 {
     let (update_tx, update_rx) = tokio::sync::mpsc::channel(1);
-    if opt_out.is_none() {
+    if !opted_out {
         let check = check();
         tokio::spawn(async move {
             let version = check.await.map(|info| info.latest_version);
@@ -3983,7 +3983,9 @@ async fn run_interactive(
     // Background update check: spawned once at startup unless the user opted
     // out; result delivered via channel.
     let mut update_rx = spawn_update_check(
-        std::env::var_os(UPDATE_CHECK_OPT_OUT_ENV).as_deref(),
+        claurst_core::traffic_opt_out::traffic_opted_out(
+            claurst_core::traffic_opt_out::DISABLE_UPDATE_CHECK_ENV,
+        ),
         claurst_core::check_for_updates,
     );
 
@@ -8830,7 +8832,7 @@ mod tests {
     #[tokio::test]
     async fn the_startup_release_check_runs_once_and_reports_the_newer_version_by_default() {
         let calls = std::cell::Cell::new(0);
-        let mut answer = spawn_update_check(None, || {
+        let mut answer = spawn_update_check(false, || {
             calls.set(calls.get() + 1);
             async { newer_release("9.9.9") }
         });
@@ -8839,21 +8841,19 @@ mod tests {
         assert_eq!(answer.recv().await, Some(Some("9.9.9".to_string())));
     }
 
-    /// The opt-out is presence-based: `0` and an empty value disable the
-    /// check as well. A check that had run would deliver its answer; here
-    /// the channel closes with nothing sent.
+    /// Which variables opt out is tested in `claurst_core::traffic_opt_out`.
+    /// A check that had run would deliver its answer; here the channel closes
+    /// with nothing sent.
     #[tokio::test]
-    async fn the_startup_release_check_never_runs_once_the_opt_out_variable_is_present() {
-        for value in ["1", "0", ""] {
-            let calls = std::cell::Cell::new(0);
-            let mut answer = spawn_update_check(Some(std::ffi::OsStr::new(value)), || {
-                calls.set(calls.get() + 1);
-                async { newer_release("9.9.9") }
-            });
+    async fn the_startup_release_check_never_runs_once_opted_out() {
+        let calls = std::cell::Cell::new(0);
+        let mut answer = spawn_update_check(true, || {
+            calls.set(calls.get() + 1);
+            async { newer_release("9.9.9") }
+        });
 
-            assert_eq!(calls.get(), 0, "opt-out value {value:?}");
-            assert_eq!(answer.recv().await, None, "opt-out value {value:?}");
-        }
+        assert_eq!(calls.get(), 0);
+        assert_eq!(answer.recv().await, None);
     }
 
     fn accounting_goal(
