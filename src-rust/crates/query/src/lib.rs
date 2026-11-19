@@ -1846,6 +1846,8 @@ pub async fn run_query_loop_with_receipt(
     cancel_token: tokio_util::sync::CancellationToken,
     pending_messages: Option<&mut Vec<String>>,
 ) -> QueryRun {
+    // A backpressured consumer must not hold a cancelled turn (#572).
+    let event_tx = event_tx.map(|sink| sink.watching(cancel_token.clone()));
     let overload_observer = event_tx.clone();
     let mut retrievals = retrieval_journal::RetrievalJournal::default();
     let mut num_turns = 0;

@@ -2,16 +2,19 @@
 //! - unbounded, for consumers that print as fast as events arrive (headless);
 //! - backpressured, where the producer waits for queue space, so a slow
 //!   consumer pauses the turn instead of growing a buffer and nothing is
-//!   dropped (the interactive terminal);
+//!   dropped (the interactive terminal). Once the turn is cancelled it stops
+//!   waiting on a consumer that does not drain (see `emit`);
 //! - bounded with a connection-wide byte budget, where a consumer which cannot
 //!   keep up cancels its producer and records overload; it must report that
 //!   failure rather than claim complete streaming output (ACP).
 use std::fmt::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::QueryEvent;
 
@@ -26,10 +29,23 @@ pub struct QueryEventSink {
     channel: Channel,
 }
 
+/// How long, after its turn is cancelled, a backpressured sink waits for room
+/// for an event that is not display-only. The first wait that runs out marks
+/// the consumer stalled, and later events of the turn no longer wait at all,
+/// so a cancelled turn spends at most this long on a consumer that has
+/// stopped draining (#572).
+const CANCELLED_DELIVERY_WAIT: Duration = Duration::from_millis(200);
+
 #[derive(Clone)]
 enum Channel {
     Unbounded(mpsc::UnboundedSender<QueryEvent>),
-    Backpressured(mpsc::Sender<QueryEvent>),
+    Backpressured {
+        sender: mpsc::Sender<QueryEvent>,
+        /// The turn's token, once the query loop has given it one.
+        cancel: CancellationToken,
+        /// Shared by every clone: a wait after cancel ran out.
+        stalled: Arc<AtomicBool>,
+    },
     Bounded {
         sender: mpsc::Sender<(QueryEvent, OwnedSemaphorePermit)>,
         budget: Arc<Semaphore>,
@@ -57,13 +73,32 @@ impl From<mpsc::UnboundedSender<QueryEvent>> for QueryEventSink {
     }
 }
 
-/// The producer waits for space in the channel; it never drops an event.
+/// The producer waits for space in the channel and drops nothing until its
+/// turn is cancelled; `watching` gives it the turn's token.
 impl From<mpsc::Sender<QueryEvent>> for QueryEventSink {
     fn from(sender: mpsc::Sender<QueryEvent>) -> Self {
         Self {
-            channel: Channel::Backpressured(sender),
+            channel: Channel::Backpressured {
+                sender,
+                cancel: CancellationToken::new(),
+                stalled: Arc::new(AtomicBool::new(false)),
+            },
         }
     }
+}
+
+/// Events that only drive a local display. After cancel a backpressured sink
+/// drops these when its channel is full rather than wait for the consumer.
+fn is_display_only(event: &QueryEvent) -> bool {
+    matches!(
+        event,
+        QueryEvent::Stream(_)
+            | QueryEvent::Status(_)
+            | QueryEvent::TokenWarning { .. }
+            | QueryEvent::ToolQueued { .. }
+            | QueryEvent::ToolRunning { .. }
+            | QueryEvent::ToolFinished { .. }
+    )
 }
 
 impl QueryEventSink {
@@ -88,20 +123,83 @@ impl QueryEventSink {
         )
     }
 
+    /// This sink, watching `cancel`: a backpressured sink stops waiting on its
+    /// consumer once `cancel` is cancelled. The other shapes never wait, so
+    /// they are returned unchanged.
+    pub fn watching(self, cancel: CancellationToken) -> Self {
+        match self.channel {
+            Channel::Backpressured {
+                sender, stalled, ..
+            } => Self {
+                channel: Channel::Backpressured {
+                    sender,
+                    cancel,
+                    stalled,
+                },
+            },
+            channel => Self { channel },
+        }
+    }
+
     pub fn is_overloaded(&self) -> bool {
         match &self.channel {
-            Channel::Unbounded(_) | Channel::Backpressured(_) => false,
+            Channel::Unbounded(_) | Channel::Backpressured { .. } => false,
             Channel::Bounded { overloaded, .. } => overloaded.load(Ordering::Acquire),
         }
     }
 
     /// Deliver one event. Only a backpressured sink waits, and only while its
     /// channel is full; the other shapes complete without suspending.
+    ///
+    /// A backpressured sink stops waiting when its turn is cancelled (#572).
+    /// From then on a full channel drops display-only events at once, and
+    /// waits at most `CANCELLED_DELIVERY_WAIT` for any other event, once per
+    /// turn; an event it could not deliver returns `Capacity`.
     pub async fn emit(&self, event: QueryEvent) -> Result<(), EventSendError> {
         match &self.channel {
             Channel::Unbounded(sender) => sender.send(event).map_err(|_| EventSendError::Closed),
-            Channel::Backpressured(sender) => {
-                sender.send(event).await.map_err(|_| EventSendError::Closed)
+            Channel::Backpressured {
+                sender,
+                cancel,
+                stalled,
+            } => {
+                if !cancel.is_cancelled() {
+                    tokio::select! {
+                        biased;
+                        permit = sender.reserve() => {
+                            return match permit {
+                                Ok(permit) => {
+                                    permit.send(event);
+                                    Ok(())
+                                }
+                                Err(_) => Err(EventSendError::Closed),
+                            };
+                        }
+                        _ = cancel.cancelled() => {}
+                    }
+                }
+                let event = match sender.try_send(event) {
+                    Ok(()) => return Ok(()),
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        return Err(EventSendError::Closed)
+                    }
+                    Err(mpsc::error::TrySendError::Full(event)) => event,
+                };
+                if is_display_only(&event) || stalled.load(Ordering::Acquire) {
+                    return Err(EventSendError::Capacity);
+                }
+                match tokio::time::timeout(CANCELLED_DELIVERY_WAIT, sender.send(event)).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(_)) => Err(EventSendError::Closed),
+                    Err(_) => {
+                        stalled.store(true, Ordering::Release);
+                        warn!(
+                            "Cancelled turn's event consumer is not draining; \
+                             its remaining events are dropped"
+                        );
+                        Err(EventSendError::Capacity)
+                    }
+                }
             }
             Channel::Bounded {
                 sender,
@@ -200,6 +298,113 @@ mod tests {
             sink.emit(QueryEvent::Status("orphan".into())).await,
             Err(EventSendError::Closed)
         ));
+    }
+
+    fn durable(text: &str) -> QueryEvent {
+        QueryEvent::DurableMessage {
+            message: claurst_core::types::Message::user(text),
+        }
+    }
+
+    /// #572: once its turn is cancelled, a backpressured sink whose consumer
+    /// has stopped draining returns instead of waiting. Display-only events
+    /// are dropped at once; the first other event waits a short time, and
+    /// after that nothing waits. With room again, events are delivered.
+    #[tokio::test]
+    async fn cancelled_backpressured_sink_stops_waiting_on_a_stalled_consumer() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let sink = QueryEventSink::from(sender).watching(cancel.clone());
+        sink.emit(QueryEvent::Status("first".into())).await.unwrap();
+        let waiting = sink.emit(durable("waiting"));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "before cancel a full sink waits"
+        );
+        cancel.cancel();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("cancel ends the wait");
+        assert!(
+            matches!(result, Err(EventSendError::Capacity)),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        for event in [
+            QueryEvent::Status("late".into()),
+            QueryEvent::Stream(claurst_api::AnthropicStreamEvent::MessageStop),
+            durable("lost"),
+            QueryEvent::TurnComplete {
+                turn: 1,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        ] {
+            let result = tokio::time::timeout(Duration::from_millis(50), sink.emit(event))
+                .await
+                .expect("nothing waits once the consumer is known to be stalled");
+            assert!(
+                matches!(result, Err(EventSendError::Capacity)),
+                "{result:?}"
+            );
+        }
+        assert!(matches!(receiver.recv().await, Some(QueryEvent::Status(text)) if text == "first"));
+        sink.emit(durable("room again")).await.unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(QueryEvent::DurableMessage { message }) if message.get_all_text() == "room again"
+        ));
+    }
+
+    /// #572: after cancel, an event that is not display-only still reaches a
+    /// consumer that makes room within the short wait.
+    #[tokio::test]
+    async fn cancelled_backpressured_sink_delivers_to_a_consumer_that_drains_in_time() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let sink = QueryEventSink::from(sender).watching(cancel.clone());
+        sink.emit(QueryEvent::Status("first".into())).await.unwrap();
+        cancel.cancel();
+        assert!(matches!(
+            sink.emit(QueryEvent::Status("dropped".into())).await,
+            Err(EventSendError::Capacity)
+        ));
+        let consumer = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            receiver.recv().await
+        };
+        let (sent, first) = tokio::join!(sink.emit(durable("kept")), consumer);
+        sent.unwrap();
+        assert!(matches!(first, Some(QueryEvent::Status(text)) if text == "first"));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(QueryEvent::DurableMessage { message }) if message.get_all_text() == "kept"
+        ));
+    }
+
+    /// Headless and stream-json use the unbounded sink: a cancelled token
+    /// changes nothing there, and every event is delivered.
+    #[tokio::test]
+    async fn unbounded_sink_ignores_the_cancel_token() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let sink = QueryEventSink::from(sender).watching(cancel);
+        for n in 0..300 {
+            sink.emit(QueryEvent::Status(format!("event {n}")))
+                .await
+                .unwrap();
+        }
+        for n in 0..300 {
+            let expected = format!("event {n}");
+            assert!(
+                matches!(receiver.try_recv(), Ok(QueryEvent::Status(text)) if text == expected)
+            );
+        }
     }
 
     #[tokio::test]
