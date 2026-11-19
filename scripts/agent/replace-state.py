@@ -68,7 +68,7 @@ RISKY = re.compile(
     r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<|\[[^\]]+\]:)"
 )
 # HTML anywhere in a line: a tag, comment, declaration or processing instruction.
-HTML = re.compile(r"<[A-Za-z!/?]|-->")
+HTML = re.compile(r"<[A-Za-z!/?]|--!?>")
 # A link or footnote definition applies to the whole body, even inside a quote
 # or list item, so any "]:" is refused. A footnote reference decides whether
 # and in what order footnotes further down render, so "[^" is refused too, and

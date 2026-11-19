@@ -149,6 +149,11 @@ class ReplaceSectionTests(unittest.TestCase):
         old = "## Current state: 2026-11-01\n\n- a\n**Next action:** x\n\n- tail item\n"
         self.refused(old, pattern="blank line")
 
+    def test_both_comment_closers_are_html(self):
+        for closer in ("a --> b", "a --!> b"):
+            self.refused(OLD.replace("Old facts.", closer))
+            self.refused(closer + "\n\n" + OLD, pattern="after HTML")
+
     def test_html_heading_inside_a_line_of_the_old_section_is_refused(self):
         self.refused(OLD.replace("Old facts.", "state <h2>Original report</h2>"))
         self.refused(OLD.replace("Old facts.", "a rule <hr> here"))
