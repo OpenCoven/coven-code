@@ -230,9 +230,18 @@ fn ownership_is_engine_local_and_a_registration_covers_only_its_session() {
     };
     assert!(header(&app).contains("engine-local, registering"));
 
-    app.ownership = SessionOwnership::LedgerRegistered {
+    let registered = || SessionOwnership::LedgerRegistered {
         session_id: "session-a".to_string(),
+        instance: claurst_core::coven_daemon::DaemonInstance {
+            pid: Some(100),
+            started_at: Some("2026-11-18T05:00:00Z".to_string()),
+            api_version: "coven.daemon.v1".to_string(),
+            coven_version: "0.5.0".to_string(),
+            socket_file: None,
+        },
+        since: std::time::Instant::now(),
     };
+    app.ownership = registered();
     assert!(header(&app).contains("engine-local, ledger-registered"));
 
     app.ownership = SessionOwnership::LedgerFailed {
@@ -240,10 +249,21 @@ fn ownership_is_engine_local_and_a_registration_covers_only_its_session() {
     };
     assert!(header(&app).contains("engine-local, ledger unavailable"));
 
-    // The registration was for A; after resuming B it says nothing about B.
-    app.ownership = SessionOwnership::LedgerRegistered {
+    // #412, policy B: after another daemon instance answered, the header
+    // stops saying the session is registered, and the Session page says why.
+    app.ownership = SessionOwnership::LedgerUnknown {
         session_id: "session-a".to_string(),
     };
+    let shown = header(&app);
+    assert!(shown.contains("engine-local, ledger unknown"), "{shown}");
+    assert!(!shown.contains("ledger-registered"), "{shown}");
+    app.next_shell.inspector = Some(InspectorPage::Session);
+    let frame = draw(&app, 160, 40);
+    assert!(frame.contains("until the next session start"), "{frame}");
+    app.next_shell.inspector = None;
+
+    // The registration was for A; after resuming B it says nothing about B.
+    app.ownership = registered();
     app.enter_session_scope("session-b");
     let shown = header(&app);
     assert!(shown.contains("engine-local"), "{shown}");
