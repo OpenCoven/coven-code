@@ -6,10 +6,13 @@
 #   check                cargo check --workspace --locked
 #   clippy               cargo clippy --workspace --all-targets --locked -- -D warnings
 #   clippy-computer-use  the same for claurst-tools with --features computer-use
+#                        (macOS only, as in CI; its dependencies need extra
+#                        libraries elsewhere)
 #   test                 cargo test --workspace --locked --no-fail-fast
 #   alloc                the next_frame_perf allocation gate, serial
 # Each gate's output goes to <outdir>/<gate>.log. <outdir>/summary.txt gets one
-# line per gate ("<gate> rc=<n> <seconds>s") and the workspace test counts;
+# line per gate ("<gate> rc=<n> <seconds>s", or "<gate> skipped") and the
+# workspace test counts;
 # <outdir>/identity.txt records the head, tree and dirty files tested.
 # --dry-run prints the commands and writes nothing.
 #
@@ -23,6 +26,12 @@
 #                     gates, which run with a scratch HOME under <outdir>
 #   RUSTUP            rustup binary (rustup on PATH, else $CARGO_HOME/bin/rustup)
 #   ONLY_TESTS=1      run only the test and alloc gates
+#   GATES_COMPUTER_USE  1 or 0 to force the computer-use clippy gate on or off
+#                     (on when uname -s is Darwin)
+#
+# Not run here: the macOS job's computer_use::tests and workspace_policy
+# steps, the Windows job, the contract fixtures by name, and the Coven
+# engine contract. Hosted CI runs those.
 #
 # Exit status: 0 when every gate passed, 1 when any failed, 2 on usage errors.
 set -u
@@ -32,7 +41,7 @@ usage() { echo "usage: $0 [--dry-run] <worktree> <outdir>" >&2; exit 2; }
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
 [ $# -eq 2 ] || usage
-case "$1$2" in -*) usage ;; esac
+for arg in "$1" "$2"; do case "$arg" in -*) usage ;; esac; done
 
 WORKTREE="$(cd "$1" 2>/dev/null && pwd -P)" || { echo "gates: no such worktree: $1" >&2; exit 2; }
 [ -d "$WORKTREE/src-rust" ] || { echo "gates: $WORKTREE has no src-rust directory" >&2; exit 2; }
@@ -48,6 +57,12 @@ fi
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
+# Colour codes would break the test-count summary.
+export CARGO_TERM_COLOR=never
+COMPUTER_USE="${GATES_COMPUTER_USE:-}"
+if [ -z "$COMPUTER_USE" ]; then
+  if [ "$(uname -s)" = Darwin ]; then COMPUTER_USE=1; else COMPUTER_USE=0; fi
+fi
 RUSTUP="${RUSTUP:-$(command -v rustup || echo "$CARGO_HOME/bin/rustup")}"
 CARGO=("$RUSTUP" run "$TOOLCHAIN" cargo)
 
@@ -92,8 +107,14 @@ if [ "${ONLY_TESTS:-}" != 1 ]; then
   run fmt "${CARGO[@]}" fmt --all -- --check
   run check "${CARGO[@]}" check --workspace --locked
   run clippy "${CARGO[@]}" clippy --workspace --all-targets --locked -- -D warnings
-  run clippy-computer-use "${CARGO[@]}" clippy --package claurst-tools --all-targets \
-    --features computer-use --locked -- -D warnings
+  if [ "$COMPUTER_USE" = 1 ]; then
+    run clippy-computer-use "${CARGO[@]}" clippy --package claurst-tools --all-targets \
+      --features computer-use --locked -- -D warnings
+  elif [ "$DRY_RUN" = 1 ]; then
+    echo "clippy-computer-use: skipped (not macOS; set GATES_COMPUTER_USE=1 to run it)"
+  else
+    echo "clippy-computer-use skipped" | tee -a "$OUT/summary.txt"
+  fi
 fi
 run test "${TEST_ENV[@]}" "${CARGO[@]}" test --workspace --locked --no-fail-fast
 run alloc "${TEST_ENV[@]}" "${CARGO[@]}" test -p claurst-tui --locked --test next_frame_perf \

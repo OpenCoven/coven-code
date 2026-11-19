@@ -44,16 +44,26 @@ def run(id, name, conclusion="success", status="completed", suite=1, started="20
 
 
 AHEAD = {"status": "ahead", "ahead_by": 2, "behind_by": 0}
+def workflow(id, name, suite, conclusion="success", status="completed"):
+    return {
+        "id": id,
+        "name": name,
+        "check_suite_id": suite,
+        "status": status,
+        "conclusion": conclusion if status == "completed" else None,
+    }
+
+
 WORKFLOWS = [
-    {"check_suite_id": 1, "name": "Rust CI"},
-    {"check_suite_id": 2, "name": "Rust CI"},
-    {"check_suite_id": 3, "name": "Release marker tests"},
+    workflow(101, "Rust CI", 1, "cancelled"),
+    workflow(102, "Rust CI", 2),
+    workflow(103, "Release marker tests", 3),
 ]
 
 
-def verdict(p=None, compare=AHEAD, checks=(), statuses=(), tries=1, min_checks=1):
+def verdict(p=None, compare=AHEAD, checks=(), statuses=(), tries=1, min_checks=1, workflows=WORKFLOWS):
     _, reasons = pr_ready.evaluate(
-        p or pull(), compare, list(checks), list(statuses), WORKFLOWS, tries, min_checks
+        p or pull(), compare, list(checks), list(statuses), list(workflows), tries, min_checks
     )
     return pr_ready.verdict_line(reasons)
 
@@ -79,6 +89,27 @@ class VerdictTests(unittest.TestCase):
     def test_same_started_at_falls_back_to_the_higher_id(self):
         checks = [run(11, "job", "success"), run(10, "job", "failure")]
         self.assertEqual(verdict(checks=checks), "READY")
+
+    def test_queued_rerun_without_started_at_is_the_latest(self):
+        checks = [
+            run(10, "job", "success", started="2026-11-19T01:00:00Z"),
+            run(11, "job", status="queued", started=None),
+        ]
+        self.assertEqual(verdict(checks=checks), "NOT READY: Rust CI / job: queued")
+
+    def test_workflow_run_with_no_check_runs_yet_is_not_ready(self):
+        workflows = WORKFLOWS + [workflow(104, "TUI Tests", 4, status="queued")]
+        result = verdict(checks=[run(1, "a")], workflows=workflows)
+        self.assertEqual(result, "NOT READY: workflow TUI Tests: queued")
+
+    def test_workflow_that_failed_without_jobs_is_not_ready(self):
+        workflows = WORKFLOWS + [workflow(104, "TUI Tests", 4, "startup_failure")]
+        result = verdict(checks=[run(1, "a")], workflows=workflows)
+        self.assertEqual(result, "NOT READY: workflow TUI Tests: startup_failure")
+
+    def test_rerun_workflow_supersedes_a_cancelled_one(self):
+        # WORKFLOWS holds a cancelled Rust CI run (101) and a later green one (102).
+        self.assertEqual(verdict(checks=[run(1, "a")]), "READY")
 
     def test_pending_run_is_not_ready(self):
         checks = [run(1, "Format, lint, and test"), run(2, "Analyze (rust)", status="in_progress")]
@@ -125,6 +156,10 @@ class VerdictTests(unittest.TestCase):
             verdict(checks=[run(1, "a")], statuses=statuses[:1]), "NOT READY: status Vercel: pending"
         )
 
+    def test_merged_pr_reports_only_that(self):
+        result = verdict(p=pull(None, "unknown", state="closed", merged=True), checks=[run(1, "a")])
+        self.assertEqual(result, "NOT READY: already merged")
+
     def test_closed_draft_pr_lists_every_reason(self):
         result = verdict(p=pull(merge_state="draft", draft=True, state="closed"), checks=[run(1, "a")])
         self.assertIn("PR is closed", result)
@@ -170,7 +205,14 @@ class ScriptTests(unittest.TestCase):
         gh.write_text(FAKE_GH)
         gh.chmod(0o755)
         self.write("compare.json", AHEAD)
-        self.write("check-runs.json", [{"total_count": 1, "check_runs": [run(1, "Format, lint, and test")]}])
+        # Two pages, as `gh api --paginate --slurp` returns them.
+        self.write(
+            "check-runs.json",
+            [
+                {"total_count": 2, "check_runs": [run(1, "Format, lint, and test")]},
+                {"total_count": 2, "check_runs": [run(2, "Analyze (rust)", suite=9)]},
+            ],
+        )
         self.write("statuses.json", [[]])
         self.write("runs.json", [{"workflow_runs": WORKFLOWS}])
 
@@ -202,6 +244,8 @@ class ScriptTests(unittest.TestCase):
         self.assertIn(f"head:      {HEAD}", result.stdout)
         self.assertIn("mergeable: true (clean) after 3 tries", result.stdout)
         self.assertIn("success          Rust CI / Format, lint, and test", result.stdout)
+        self.assertIn("success          Analyze (rust)", result.stdout)
+        self.assertIn("checks:    2 check names", result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith("READY"))
 
     def test_null_after_every_retry_is_not_ready(self):
@@ -213,14 +257,18 @@ class ScriptTests(unittest.TestCase):
 
     def test_only_reads_through_rest(self):
         self.write("pulls.json", [pull()])
-        self.script("7", "--repo", "Example/repo")
+        result = self.script("7", "--repo", "Example/repo")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
-        self.assertTrue(calls)
+        self.assertEqual(len(calls), 5)
         for call in calls:
             self.assertEqual(call[0], "api")
             self.assertTrue(call[1].startswith("repos/Example/repo/"), call)
             self.assertNotIn("graphql", call[1])
             self.assertFalse({"-X", "--method", "-f", "-F", "--input"} & set(call), call)
+            if any(part in call[1] for part in ("/check-runs", "/statuses", "/actions/runs")):
+                self.assertIn("--paginate", call, call)
+                self.assertIn("--slurp", call, call)
 
     def test_api_failure_exits_2(self):
         self.write("pulls.json", [pull()])

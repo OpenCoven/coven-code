@@ -7,7 +7,9 @@ Reads the pull request through the REST API (`gh api`) and prints:
 - the head SHA;
 - whether the base branch (origin/main) is an ancestor of the head;
 - mergeable and mergeable_state, retried while GitHub reports them as unknown;
-- the latest run for each check name, and the latest commit status per context;
+- the latest run for each check name, the latest run of each workflow (which
+  catches a workflow whose jobs have not started), and the latest commit
+  status per context;
 then one verdict line, READY or NOT READY with the reasons.
 
 A check name is keyed by its workflow ("Rust CI / Format, lint, and test"), so
@@ -112,22 +114,26 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
     state = pull.get("mergeable_state")
     shown = "null" if mergeable is None else str(mergeable).lower()
     lines.append(f"mergeable: {shown} ({state}) after {tries} tr{'y' if tries == 1 else 'ies'}")
-    if mergeable is None or state == "unknown":
-        reasons.append(f"mergeable still unknown after {tries} tries")
-    elif mergeable is False:
-        reasons.append(f"not mergeable (mergeable_state={state})")
-    elif state not in MERGEABLE_OK:
-        reasons.append(f"mergeable_state={state}")
+    # A closed PR already has its reason; GitHub stops computing mergeability.
+    if pull.get("state") == "open":
+        if mergeable is None or state == "unknown":
+            reasons.append(f"mergeable still unknown after {tries} tries")
+        elif mergeable is False:
+            reasons.append(f"not mergeable (mergeable_state={state})")
+        elif state not in MERGEABLE_OK:
+            reasons.append(f"mergeable_state={state}")
 
     workflows = {
         run.get("check_suite_id"): run.get("name")
         for run in workflow_runs
         if run.get("check_suite_id") is not None
     }
+    # Ids only increase, so the highest id is the newest run, even for a
+    # queued rerun that has no started_at yet.
     runs = latest(
         check_runs,
         key=lambda run: check_key(run, workflows),
-        order=lambda run: (run.get("started_at") or "", run.get("id") or 0),
+        order=lambda run: run.get("id") or 0,
     )
     lines.append(f"checks:    {len(runs)} check names ({len(check_runs)} runs on the head)")
     for name in sorted(runs):
@@ -143,10 +149,29 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
     if len(runs) < min_checks:
         reasons.append(f"{len(runs)} check names on the head, expected at least {min_checks}")
 
+    # A workflow run can exist before its jobs have check runs (queued, or a
+    # workflow_run trigger), or fail without any job (startup_failure).
+    newest_workflows = latest(
+        workflow_runs,
+        key=lambda run: run.get("name") or "?",
+        order=lambda run: run.get("id") or 0,
+    )
+    if newest_workflows:
+        lines.append(f"workflows: {len(newest_workflows)} workflow runs")
+    for name in sorted(newest_workflows):
+        run = newest_workflows[name]
+        if run.get("status") != "completed":
+            result = run.get("status") or "pending"
+        else:
+            result = run.get("conclusion") or "none"
+        if run.get("status") != "completed" or result not in PASSING:
+            reasons.append(f"workflow {name}: {result}")
+        lines.append(f"  {result:<16} {name}")
+
     contexts = latest(
         statuses,
         key=lambda s: s.get("context") or "?",
-        order=lambda s: (s.get("created_at") or "", s.get("id") or 0),
+        order=lambda s: s.get("id") or 0,
     )
     if contexts:
         lines.append(f"statuses:  {len(contexts)} contexts")

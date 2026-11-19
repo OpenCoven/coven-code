@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """Rewrite an issue's "## Current state: YYYY-MM-DD" section.
 
-usage: replace-state.py <issue> <section-file> [--apply] [--insert]
+usage: replace-state.py <issue> <section-file> [--apply] [--insert] [--to-end]
                         [--repo OWNER/NAME] [--out-dir DIR]
 
 The section file must start with its own "## Current state: YYYY-MM-DD"
-heading. The old section runs from its heading to the end of its first
-"**Next action:**" paragraph; without one, to the next "#", "##" or "###"
-heading or "<details>" line, or to the end of the body. Text after it (the
+heading. The old section starts at its heading and ends:
+- after its first "**Next action:**" paragraph, if it has one before the next
+  "#" or "##" heading, "<details" line or "---" rule;
+- otherwise at the first of those, or at a "###" to "######" heading;
+- otherwise, with --to-end only, at the end of the body. Without --to-end
+  that is an error, so text with no marker after the section is never lost.
+Lines inside fenced code blocks are not markers. Text after the section (the
 original report, acceptance, prompts) is kept.
 
-By default it only previews: it writes <issue>.before.md and <issue>.after.md
-into --out-dir (default: the current directory) and prints a unified diff.
---apply also writes the new body with `gh api -X PATCH`. --insert puts the
-section at the top of a body that has none; without it, a missing section is
-an error.
+By default it only previews: it prints a unified diff and writes
+<issue>.<UTC time>.before.md and .after.md into --out-dir (default: the
+current directory), so earlier copies are never overwritten. --apply also
+writes the new body with `gh api -X PATCH`, after checking that the issue has
+not changed since it was read. --insert puts the section at the top of a body
+that has none; without it, a missing section is an error.
 
-Exit status: 0 on success (or no change), 1 when the body or section file
-cannot be handled, 2 on usage or API errors.
+Exit status: 0 on success (or no change), 1 when the body or the section's
+content cannot be handled, 2 on usage errors, an unreadable section file, an
+issue that changed before --apply, or API errors.
 """
 import argparse
+import datetime
 import difflib
 import json
 import pathlib
@@ -29,8 +36,10 @@ import sys
 
 DEFAULT_REPO = "OpenCoven/coven-code"
 HEADING = re.compile(r"^## Current state: \d{4}-\d{2}-\d{2}[ \t]*$", re.M)
-NEXT_ACTION = re.compile(r"^\*\*Next action:\*\*", re.M)
-STOP = re.compile(r"^(#{1,3} |<details>)", re.M)
+NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
+HARD_STOP = re.compile(r"#{1,2}\s|<details\b|(-{3,}|\*{3,}|_{3,})\s*$")
+SOFT_STOP = re.compile(r"#{3,6}\s")
+FENCE = re.compile(r" {0,3}(```|~~~)")
 
 
 class SectionError(Exception):
@@ -49,7 +58,46 @@ def normalize_section(text):
     return text + "\n"
 
 
-def replace_section(body, section, insert=False):
+def markers(text):
+    """Yield (offset, line) for each line of text outside fenced code blocks."""
+    offset = 0
+    fenced = False
+    for line in text.splitlines(True):
+        if FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            yield offset, line
+        offset += len(line)
+
+
+def section_end(rest, to_end):
+    """Offset in rest (the text after the heading line) where the old section ends."""
+    hard = soft = action = None
+    for offset, line in markers(rest):
+        if HARD_STOP.match(line):
+            hard = offset
+            break
+        if soft is None and SOFT_STOP.match(line):
+            soft = offset
+        if action is None and NEXT_ACTION.match(line):
+            action = offset
+    limit = len(rest) if hard is None else hard
+    if action is not None:
+        paragraph_end = rest.find("\n\n", action, limit)
+        return limit if paragraph_end == -1 else paragraph_end
+    for stop in (soft, hard):
+        if stop is not None:
+            return stop
+    if to_end:
+        return len(rest)
+    raise SectionError(
+        "the Current state section has no **Next action:** paragraph and no heading, "
+        "<details> or --- after it, so its end is unclear; pass --to-end to replace "
+        "it through the end of the body"
+    )
+
+
+def replace_section(body, section, insert=False, to_end=False):
     """Return body with its dated Current state section replaced by section."""
     body = (body or "").replace("\r\n", "\n")
     section = normalize_section(section)
@@ -67,15 +115,7 @@ def replace_section(body, section, insert=False):
     start = found[0].start()
     after_heading = found[0].end()
     rest = body[after_heading:]
-    stop = STOP.search(rest)
-    stop_at = stop.start() if stop else len(rest)
-    action = NEXT_ACTION.search(rest, 0, stop_at)
-    if action:
-        paragraph_end = rest.find("\n\n", action.start(), stop_at)
-        end = paragraph_end if paragraph_end != -1 else stop_at
-    else:
-        end = stop_at
-    tail = rest[end:].lstrip("\n")
+    tail = rest[section_end(rest, to_end):].lstrip("\n")
     return body[:start] + section + ("\n" + tail if tail else "")
 
 
@@ -95,6 +135,11 @@ def main(argv=None):
     parser.add_argument("section_file", type=pathlib.Path)
     parser.add_argument("--apply", action="store_true", help="write the new body to GitHub")
     parser.add_argument("--insert", action="store_true", help="add the section when none exists")
+    parser.add_argument(
+        "--to-end",
+        action="store_true",
+        help="let a section with no Next action and nothing after it run to the end of the body",
+    )
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--out-dir", type=pathlib.Path, default=pathlib.Path.cwd())
     args = parser.parse_args(argv)
@@ -111,13 +156,19 @@ def main(argv=None):
         return 2
     before = (issue.get("body") or "").replace("\r\n", "\n")
     try:
-        after = replace_section(before, section, insert=args.insert)
+        after = replace_section(before, section, insert=args.insert, to_end=args.to_end)
     except SectionError as error:
         print(f"replace-state: #{args.issue}: {error}", file=sys.stderr)
         return 1
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    before_file = args.out_dir / f"{args.issue}.before.md"
-    after_file = args.out_dir / f"{args.issue}.after.md"
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    prefix = args.out_dir / f"{args.issue}.{stamp}"
+    suffix = 1
+    while prefix.with_name(prefix.name + ".before.md").exists():
+        suffix += 1
+        prefix = args.out_dir / f"{args.issue}.{stamp}-{suffix}"
+    before_file = prefix.with_name(prefix.name + ".before.md")
+    after_file = prefix.with_name(prefix.name + ".after.md")
     before_file.write_text(before, encoding="utf-8")
     after_file.write_text(after, encoding="utf-8")
     sys.stdout.writelines(
@@ -136,8 +187,15 @@ def main(argv=None):
         print(f"#{args.issue}: preview only; wrote {before_file} and {after_file}; rerun with --apply")
         return 0
     try:
+        current = json.loads(gh([endpoint], capture_output=True).stdout)
+        if current.get("updated_at") != issue.get("updated_at"):
+            print(
+                f"replace-state: #{args.issue} changed while it was being rewritten; rerun",
+                file=sys.stderr,
+            )
+            return 2
         gh(["-X", "PATCH", endpoint, "-F", f"body=@{after_file}", "--jq", ".html_url"])
-    except RuntimeError as error:
+    except (RuntimeError, json.JSONDecodeError) as error:
         print(f"replace-state: {error}", file=sys.stderr)
         return 2
     return 0

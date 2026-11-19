@@ -41,9 +41,39 @@ class ReplaceSectionTests(unittest.TestCase):
         body = "## Current state: 2026-11-18\n\nOld.\n<details>\nlog\n</details>\n"
         self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\n<details>\nlog\n</details>\n")
 
-    def test_section_at_end_of_body(self):
+    def test_section_at_end_of_body_needs_to_end(self):
         body = "## What happens\n\nKeep.\n\n## Current state: 2026-11-18\n\nOld facts.\n"
-        self.assertEqual(replace_state.replace_section(body, NEW), "## What happens\n\nKeep.\n\n" + NEW)
+        with self.assertRaisesRegex(replace_state.SectionError, "--to-end"):
+            replace_state.replace_section(body, NEW)
+        self.assertEqual(
+            replace_state.replace_section(body, NEW, to_end=True), "## What happens\n\nKeep.\n\n" + NEW
+        )
+
+    def test_unmarked_trailing_text_is_never_swallowed(self):
+        body = "## Current state: 2026-11-18\n\nOld facts.\n\nPR #360 documents the original report.\n"
+        with self.assertRaises(replace_state.SectionError):
+            replace_state.replace_section(body, NEW)
+
+    def test_rule_and_deep_heading_and_details_attributes_end_the_section(self):
+        for marker in ("---", "#### Notes", "<details open>"):
+            body = f"## Current state: 2026-11-18\n\nOld.\n\n{marker}\nKeep.\n"
+            self.assertEqual(replace_state.replace_section(body, NEW), NEW + f"\n{marker}\nKeep.\n", marker)
+
+    def test_headings_inside_a_code_fence_are_not_markers(self):
+        body = (
+            "## Current state: 2026-11-18\n\nOld.\n```\n## not a heading\n**Next action:** no\n```\n\n"
+            "**Next action:** review #1.\n\nKeep.\n"
+        )
+        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\nKeep.\n")
+
+    def test_subsections_before_the_next_action_belong_to_the_section(self):
+        body = (
+            "## Current state: 2026-11-18\n\n### Done\n\n- a\n\n### Next\n\n- b\n\n"
+            "**Next action:** review #1.\n\n### Long-running goal prompt\n\nKeep.\n"
+        )
+        self.assertEqual(
+            replace_state.replace_section(body, NEW), NEW + "\n### Long-running goal prompt\n\nKeep.\n"
+        )
 
     def test_next_action_paragraph_at_end_of_body(self):
         body = "Intro.\n\n" + OLD.rstrip("\n")
@@ -85,13 +115,18 @@ FAKE_GH = textwrap.dedent(
     with open(os.path.join(root, "calls.log"), "a") as log:
         log.write(json.dumps(args) + "\\n")
     if "-X" in args:
+        assert args[args.index("-X") + 1] == "PATCH", args
         field = args[args.index("-F") + 1]
         assert field.startswith("body=@"), field
         with open(field[len("body=@"):]) as src, open(os.path.join(root, "patched.md"), "w") as dst:
             dst.write(src.read())
         print("https://github.com/example/issues/1")
     else:
-        with open(os.path.join(root, "issue.json")) as f:
+        counter = os.path.join(root, "get-count")
+        n = int(open(counter).read()) if os.path.exists(counter) else 0
+        open(counter, "w").write(str(n + 1))
+        name = "issue-reread.json" if n and os.path.exists(os.path.join(root, "issue-reread.json")) else "issue.json"
+        with open(os.path.join(root, name)) as f:
             sys.stdout.write(f.read())
     """
 )
@@ -105,7 +140,9 @@ class ScriptTests(unittest.TestCase):
         gh.write_text(FAKE_GH)
         gh.chmod(0o755)
         self.body = "Intro.\n\n" + OLD + "\nKeep.\n"
-        (self.dir / "issue.json").write_text(json.dumps({"number": 5, "body": self.body}))
+        (self.dir / "issue.json").write_text(
+            json.dumps({"number": 5, "body": self.body, "updated_at": "2026-11-19T01:00:00Z"})
+        )
         self.section = self.dir / "section.md"
         self.section.write_text(NEW)
         self.out = self.dir / "out"
@@ -132,8 +169,10 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("-## Current state: 2026-11-18", result.stdout)
         self.assertIn("+## Current state: 2026-11-19", result.stdout)
-        self.assertEqual((self.out / "5.before.md").read_text(), self.body)
-        self.assertEqual((self.out / "5.after.md").read_text(), "Intro.\n\n" + NEW + "\nKeep.\n")
+        [before] = self.out.glob("5.*.before.md")
+        [after] = self.out.glob("5.*.after.md")
+        self.assertEqual(before.read_text(), self.body)
+        self.assertEqual(after.read_text(), "Intro.\n\n" + NEW + "\nKeep.\n")
         self.assertFalse((self.dir / "patched.md").exists())
         self.assertEqual([c for c in self.calls() if "-X" in c], [])
 
@@ -144,6 +183,20 @@ class ScriptTests(unittest.TestCase):
         patch = [c for c in self.calls() if "-X" in c]
         self.assertEqual(len(patch), 1)
         self.assertEqual(patch[0][:4], ["api", "-X", "PATCH", "repos/Example/repo/issues/5"])
+
+    def test_a_second_run_keeps_the_first_copies(self):
+        self.assertEqual(self.script().returncode, 0)
+        self.assertEqual(self.script().returncode, 0)
+        self.assertEqual(len(list(self.out.glob("5.*.before.md"))), 2)
+
+    def test_apply_refuses_when_the_issue_changed_after_it_was_read(self):
+        (self.dir / "issue-reread.json").write_text(
+            json.dumps({"number": 5, "body": "edited", "updated_at": "2026-11-19T02:00:00Z"})
+        )
+        result = self.script("--apply")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("changed", result.stderr)
+        self.assertFalse((self.dir / "patched.md").exists())
 
     def test_apply_without_a_change_does_not_patch(self):
         (self.dir / "issue.json").write_text(json.dumps({"body": NEW}))

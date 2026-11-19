@@ -5,6 +5,8 @@ on:
     paths:
       - 'scripts/agent/**'
       - '.github/workflows/agent-tools-tests.yml'
+      # test_gates.py checks gates.sh against the cargo commands in Rust CI.
+      - '.github/workflows/rust-ci.yml'
   workflow_dispatch:
 
 permissions:
