@@ -32,6 +32,9 @@ _vim_escape_journey() { # renderer
   TUI_LAUNCH_PREFIX+=" $(printf '%q ' "HOME=$scratch/home" "COVEN_HOME=$scratch/home/.coven" $ui)"
 
   if tui_start; then
+    # With vim still off, an Escape takes any startup notice away and does
+    # nothing else, so the Escapes below reach vim.
+    tui_keys Escape; sleep 0.3
     tui_type "/vim"; sleep 0.3; tui_keys Enter
     sleep 1
     if [ "$r" = classic ]; then
@@ -45,8 +48,16 @@ _vim_escape_journey() { # renderer
       else _fail "$r: Escape leaves Insert" "$(tui_capture)"; fi
     fi
     tui_type "0"; sleep 0.2; tui_type "i"; sleep 0.2
+    if [ "$r" = classic ]; then
+      if wait_for "-- INSERT --" 10; then _pass "$r: 0 and i are vim commands and enter Insert"
+      else _fail "$r: 0 and i are vim commands and enter Insert" "$(tui_capture)"; fi
+    fi
     tui_type "say "; sleep 0.3
     tui_keys Escape; sleep 0.5
+    if [ "$r" = classic ]; then
+      if wait_for "-- NORMAL --" 10; then _pass "$r: Escape after an insert before the end leaves Insert"
+      else _fail "$r: Escape after an insert before the end leaves Insert" "$(tui_capture)"; fi
+    fi
     tui_type "A"; sleep 0.2
     tui_type " world"
     if wait_for "say hello world" 10; then

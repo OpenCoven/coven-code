@@ -2031,9 +2031,9 @@ pub struct PromptInputState {
     pub vim_marks: std::collections::HashMap<char, (String, usize)>,
     /// The last modifying command for dot-repeat.
     pub vim_dot_action: Option<DotRepeatAction>,
-    /// The cursor and the text length when Insert was last entered from a
-    /// vim command, for dot-repeat of what is typed before Escape.
-    vim_insert_start: Option<(usize, usize)>,
+    /// The cursor and the text when Insert was last entered from a vim
+    /// command, for dot-repeat of what is typed before Escape.
+    vim_insert_start: Option<(usize, String)>,
     /// Command-line buffer for `:` command mode.
     pub vim_command_buf: String,
     /// In-prompt search buffer for `/` search mode.
@@ -2444,19 +2444,21 @@ impl PromptInputState {
         // ---- Escape always cancels recording, pending state, returns to Normal ----
         if key == "Escape" {
             // Leaving Insert records what was typed since entering it, for
-            // dot-repeat: the text from the cursor at entry to the cursor now.
-            // That span is only the typed text while it is exactly what the
-            // text grew by; after the cursor moved away from the insert, or
-            // a delete before it, nothing is recorded.
+            // dot-repeat: the text from the cursor at entry to the cursor
+            // now. It is recorded only when the text before the entry cursor
+            // and the text after the cursor are both as they were at entry,
+            // so the edit was that one insertion. After any other edit, such
+            // as a delete before the insert or typing after moving away,
+            // nothing is recorded.
             if self.vim_mode == VimMode::Insert {
-                if let Some((start, len_at_entry)) = self.vim_insert_start.take() {
-                    let grown = self.text.len().checked_sub(len_at_entry);
-                    let typed = self.cursor.checked_sub(start);
-                    let inserted = match (grown, typed) {
-                        (Some(grown), Some(typed)) if grown == typed => {
-                            self.text.get(start..self.cursor)
-                        }
-                        _ => None,
+                if let Some((start, before)) = self.vim_insert_start.take() {
+                    let one_insertion = self.cursor >= start
+                        && self.text.get(..start) == before.get(..start)
+                        && self.text.get(self.cursor..) == before.get(start..);
+                    let inserted = if one_insertion {
+                        self.text.get(start..self.cursor)
+                    } else {
+                        None
                     };
                     if let Some(inserted) = inserted.filter(|text| !text.is_empty()) {
                         self.vim_dot_action = Some(DotRepeatAction::Insert {
@@ -2830,7 +2832,7 @@ impl PromptInputState {
                         self.cursor = sel_start;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_start = Some((self.cursor, self.text.len()));
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2874,7 +2876,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_start = Some((self.cursor, self.text.len()));
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2917,7 +2919,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_start = Some((self.cursor, self.text.len()));
+                        self.vim_insert_start = Some((self.cursor, self.text.clone()));
                         self.normalize();
                         return;
                     }
@@ -2962,7 +2964,7 @@ impl PromptInputState {
         // If we just entered insert mode from normal mode, record where the
         // insert starts for dot-repeat
         if was_normal && self.vim_mode == VimMode::Insert {
-            self.vim_insert_start = Some((self.cursor, self.text.len()));
+            self.vim_insert_start = Some((self.cursor, self.text.clone()));
         }
 
         // Handle `r` replace pending → after confirm, store dot action
@@ -3144,6 +3146,8 @@ impl PromptInputState {
         self.visual_anchor = None;
         self.vim_command_buf.clear();
         self.vim_search_buf.clear();
+        // An insert into the old text is not one into the new text.
+        self.vim_insert_start = None;
         // Placeholders live in `text`, so once that is gone the stored paste
         // contents are unreachable. `paste_counter` stays monotonic so a
         // stale placeholder (e.g. restored via undo) can never collide with
@@ -5493,6 +5497,42 @@ mod tests {
         s.backspace();
         s.vim_command("Escape");
         assert_eq!(s.text, "ac");
+        assert_eq!(recorded_insert(&s), None);
+
+        // A delete before the insert, then typing as much as was deleted
+        // and one more, so the text grew by as much as the cursor moved.
+        let mut s = vim_composer("abc", 2);
+        s.vim_command("i");
+        s.backspace();
+        for c in "xy".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "axyc");
+        assert_eq!(recorded_insert(&s), None);
+
+        // Typing before the entry cursor, then moving back to where the
+        // text grew by as much as the cursor moved.
+        let mut s = vim_composer("abc", 1);
+        s.vim_command("i");
+        s.move_left();
+        s.insert_char('x');
+        s.move_right();
+        s.vim_command("Escape");
+        assert_eq!(s.text, "xabc");
+        assert_eq!(recorded_insert(&s), None);
+
+        // An insert into a draft that was then sent is not one into the
+        // next draft, even when the old draft was empty.
+        let mut s = vim_composer("", 0);
+        s.vim_command("i");
+        s.insert_char('d');
+        s.take();
+        for c in "hi".chars() {
+            s.insert_char(c);
+        }
+        s.vim_command("Escape");
+        assert_eq!(s.text, "hi");
         assert_eq!(recorded_insert(&s), None);
     }
 

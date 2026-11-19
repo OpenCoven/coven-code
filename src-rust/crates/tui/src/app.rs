@@ -9888,6 +9888,11 @@ role = "Research"
             assert!(!app.handle_key_event(esc));
             assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
             assert_eq!(app.prompt_input.text, "xab", "{renderer:?}");
+            // Visual mode is left the same way.
+            app.handle_key_event(press_key(KeyCode::Char('v'), KeyModifiers::NONE));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Visual, "{renderer:?}");
+            assert!(!app.handle_key_event(esc));
+            assert_eq!(app.prompt_input.vim_mode, VimMode::Normal, "{renderer:?}");
         }
     }
 
@@ -9922,7 +9927,8 @@ role = "Research"
         assert_eq!(app.prompt_input.vim_mode, VimMode::Insert);
     }
 
-    /// With vim off, Escape on an idle composer still changes nothing.
+    /// With vim off, Escape on an idle composer still changes nothing, as
+    /// before vim took Escape.
     #[test]
     fn escape_without_vim_leaves_the_idle_composer_alone() {
         let mut app = make_app();
