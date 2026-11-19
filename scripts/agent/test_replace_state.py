@@ -19,154 +19,146 @@ OLD = "## Current state: 2026-11-18\n\nOld facts.\n- a bullet\n\n**Next action:*
 
 
 class ReplaceSectionTests(unittest.TestCase):
-    def test_section_ends_after_next_action_paragraph(self):
-        body = "## Review: 2026-11-06\n\nKeep.\n\n" + OLD + "\nOriginal report text.\n\n### Prompt\n\nKeep too.\n"
-        self.assertEqual(
-            replace_state.replace_section(body, NEW),
-            "## Review: 2026-11-06\n\nKeep.\n\n" + NEW + "\nOriginal report text.\n\n### Prompt\n\nKeep too.\n",
+    def replaced(self, body, section=NEW, **kw):
+        return replace_state.replace_section(body, section, **kw)
+
+    def refused(self, body, section=NEW, pattern="", **kw):
+        with self.assertRaisesRegex(replace_state.SectionError, pattern, msg=repr(body)):
+            replace_state.replace_section(body, section, **kw)
+
+    def test_section_ends_after_its_next_action_line_and_the_rest_is_kept(self):
+        prefix = "## Review: 2026-11-06\n\nKeep.\n\n"
+        tail = "Original report text.\n\n### Prompt\n\nKeep too.\n"
+        self.assertEqual(self.replaced(prefix + OLD + "\n" + tail), prefix + NEW + "\n" + tail)
+
+    def test_next_action_at_end_of_body(self):
+        self.assertEqual(self.replaced("Intro.\n\n" + OLD.rstrip("\n")), "Intro.\n\n" + NEW)
+
+    def test_heading_details_or_whitespace_right_after_the_blank_line_is_kept(self):
+        for tail in ("## Outcome\n\nKeep.\n", "<details>\nlog\n</details>\n", "   \nKeep.\n", "- keep\n"):
+            self.assertEqual(self.replaced(OLD + "\n" + tail), NEW + "\n" + tail, tail)
+
+    def test_section_without_a_next_action_is_refused(self):
+        for body in (
+            "## Current state: 2026-11-18\n\nOld facts.\n",
+            "## Current state: 2026-11-18\n\nOld.\n\nPlain original text.\n",
+            "## Current state: 2026-11-18\n\nOld.\n\n## Outcome\n\nKeep.\n",
+        ):
+            self.refused(body, pattern="Next action")
+
+    def test_structure_before_the_next_action_is_refused(self):
+        # Each of these could be original text that GitHub renders as its own block.
+        risky = (
+            "## Original report", "### Done", "#### Notes", "Original\n===", "TITLE\n-----",
+            "---", "- - -", "* * *", "```", "```x``` is the command", "~~~", "<h2>Original</h2>",
+            "<DETAILS>", "<details open>", "<!-- note -->", "end -->", "<pre>",
         )
+        for line in risky:
+            body = f"## Current state: 2026-11-18\n\nOld.\n\n{line}\n\nKEEP\n\n**Next action:** x.\n\nKeep.\n"
+            self.refused(body, pattern="edit it by hand")
 
-    def test_section_followed_by_another_heading(self):
-        body = "## Current state: 2026-11-18\n\nOld facts, no next action.\n\n## Outcome\n\nKeep.\n"
-        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\n## Outcome\n\nKeep.\n")
+    def test_next_action_paragraph_running_on_is_refused(self):
+        for after in ("KEEP original text.", "Col | Col2", "### Heading", "- item"):
+            body = f"## Current state: 2026-11-18\n\nOld.\n\n**Next action:** x\n{after}\n\nKeep.\n"
+            self.refused(body, pattern="runs on")
 
-    def test_next_action_after_the_next_heading_is_not_part_of_the_section(self):
-        body = "## Current state: 2026-11-18\n\nOld.\n\n## Outcome\n\n**Next action:** not ours.\n"
-        self.assertEqual(
-            replace_state.replace_section(body, NEW),
-            NEW + "\n## Outcome\n\n**Next action:** not ours.\n",
-        )
+    def test_heading_inside_a_comment_or_details_is_refused(self):
+        for opener, closer in (("<!--", "-->"), ("<details>", "</details>")):
+            body = f"Intro.\n{opener}\n{OLD}{closer}\n\nKEEP\n"
+            self.refused(body, pattern="unclosed")
 
-    def test_details_block_ends_the_section(self):
-        body = "## Current state: 2026-11-18\n\nOld.\n<details>\nlog\n</details>\n"
-        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\n<details>\nlog\n</details>\n")
-
-    def test_section_at_end_of_body_needs_to_end(self):
-        body = "## What happens\n\nKeep.\n\n## Current state: 2026-11-18\n\nOld facts.\n"
-        with self.assertRaisesRegex(replace_state.SectionError, "--to-end"):
-            replace_state.replace_section(body, NEW)
-        self.assertEqual(
-            replace_state.replace_section(body, NEW, to_end=True), "## What happens\n\nKeep.\n\n" + NEW
-        )
-
-    def test_unmarked_trailing_text_is_never_swallowed(self):
-        body = "## Current state: 2026-11-18\n\nOld facts.\n\nPR #360 documents the original report.\n"
-        with self.assertRaises(replace_state.SectionError):
-            replace_state.replace_section(body, NEW)
-
-    def test_rule_and_deep_heading_and_details_attributes_end_the_section(self):
-        for marker in ("---", "#### Notes", "<details open>"):
-            body = f"## Current state: 2026-11-18\n\nOld.\n\n{marker}\nKeep.\n"
-            self.assertEqual(replace_state.replace_section(body, NEW), NEW + f"\n{marker}\nKeep.\n", marker)
-
-    def test_headings_inside_a_code_fence_are_not_markers(self):
-        body = (
-            "## Current state: 2026-11-18\n\nOld.\n```\n## not a heading\n**Next action:** no\n```\n\n"
-            "**Next action:** review #1.\n\nKeep.\n"
-        )
-        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\nKeep.\n")
-
-    def test_subsection_before_a_next_action_is_refused(self):
-        body = (
-            "## Current state: 2026-11-18\n\n### Done\n\n- a\n\n"
-            "**Next action:** review #1.\n\n### Long-running goal prompt\n\nKeep.\n"
-        )
-        with self.assertRaisesRegex(replace_state.SectionError, "edit it by hand"):
-            replace_state.replace_section(body, NEW)
-
-    def test_later_template_next_action_is_not_the_section_end(self):
-        body = (
-            "## Current state: 2026-11-18\n\nOld, no next action.\n\n### Acceptance\n\n- keep\n\n"
-            "## Template\n\n**Next action:** example.\n"
-        )
-        kept = "### Acceptance\n\n- keep\n\n## Template\n\n**Next action:** example.\n"
-        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\n" + kept)
-
-    def test_next_action_paragraph_ends_at_the_next_block(self):
-        for after in ("   \nKeep.\n", "\t\nKeep.\n", "### Keep\nKeep.\n", "```\ncode\n```\n", "- keep\n", "> keep\n"):
-            body = "## Current state: 2026-11-18\n\nOld.\n\n**Next action:** x\ncontinued.\n" + after
-            out = replace_state.replace_section(body, NEW)
-            self.assertTrue(out.endswith(after), (after, out))
-            self.assertNotIn("continued.", out)
-
-    def test_next_action_paragraph_at_end_of_body(self):
-        body = "Intro.\n\n" + OLD.rstrip("\n")
-        self.assertEqual(replace_state.replace_section(body, NEW), "Intro.\n\n" + NEW)
+    def test_unusual_line_separators_do_not_split_lines(self):
+        body = OLD + "\nOld. ```\n\n## Original\n\nKEEP\n"
+        out = self.replaced(body)
+        self.assertTrue(out.endswith("\nOld. ```\n\n## Original\n\nKEEP\n"))
 
     def test_absent_section_is_an_error_without_insert(self):
         body = "## What happens\n\nKeep.\n"
-        with self.assertRaisesRegex(replace_state.SectionError, "--insert"):
-            replace_state.replace_section(body, NEW)
-        self.assertEqual(replace_state.replace_section(body, NEW, insert=True), NEW + "\n" + body)
+        self.refused(body, pattern="--insert")
+        self.assertEqual(self.replaced(body, insert=True), NEW + "\n" + body)
 
     def test_insert_into_empty_body(self):
-        self.assertEqual(replace_state.replace_section(None, NEW, insert=True), NEW)
+        self.assertEqual(self.replaced(None, insert=True), NEW)
 
     def test_crlf_body_is_normalized(self):
         body = (OLD + "\nKeep.\n").replace("\n", "\r\n")
-        self.assertEqual(replace_state.replace_section(body, NEW), NEW + "\nKeep.\n")
+        self.assertEqual(self.replaced(body), NEW + "\nKeep.\n")
 
-    def test_two_sections_are_refused(self):
-        with self.assertRaisesRegex(replace_state.SectionError, "2 Current state headings"):
-            replace_state.replace_section(OLD + "\n" + OLD, NEW)
+    def test_two_sections_are_refused_even_if_one_is_fenced(self):
+        self.refused(OLD + "\n" + OLD, pattern="2 Current state headings")
+        self.refused(OLD + "\n```\n## Current state: 2026-01-01\n```\n", pattern="2 Current state headings")
 
-    def test_section_file_must_end_with_one_next_action_paragraph(self):
+    def test_loose_heading_is_not_duplicated_by_insert(self):
+        for body in (
+            "## Current state: 2026-11-18 (sweep v4)\n\nOld.\n",
+            "### Current state\n\nOld.\n",
+            "<h2>Current state</h2>\n\nOld.\n",
+        ):
+            self.refused(body, pattern="another form", insert=True)
+
+    def test_section_file_rules(self):
         bad = (
+            "New facts only.\n",
+            "## Current state\n\nundated\n\n**Next action:** a.\n",
+            "Intro\n" + NEW,
             "## Current state: 2026-11-19\n\nA.\n",
             "## Current state: 2026-11-19\n\n**Next action:** a.\n\nTrailing.\n",
-            "## Current state: 2026-11-19\n\n**Next action:** a.\n\n**Next action:** b.\n",
-            "## Current state: 2026-11-19\n\n## Inner\n\n**Next action:** a.\n",
-            "## Current state: 2026-11-19\n\n---\n\n**Next action:** a.\n",
+            "## Current state: 2026-11-19\n\n**Next action:** a.\ncontinued.\n",
             "## Current state: 2026-11-19\n\n### Done\n\n**Next action:** a.\n",
-            "## Current state: 2026-11-19\n\n**Next action:** a.\n   \nTrailing.\n",
-            "## Current state: 2026-11-19\n\n**Next action:** a.\n- list\n",
+            "## Current state: 2026-11-19\n\n---\n\n**Next action:** a.\n",
+            "## Current state: 2026-11-19\n\n```\ncode\n```\n\n**Next action:** a.\n",
         )
         for section in bad:
             # normalize_section itself, not only the second-rewrite guard behind it.
-            with self.assertRaisesRegex(replace_state.SectionError, "section file", msg=section):
+            with self.assertRaises(replace_state.SectionError, msg=section):
                 replace_state.normalize_section(section)
             with self.assertRaises(replace_state.SectionError, msg=section):
                 replace_state.replace_section(OLD, section)
-        ok = "## Current state: 2026-11-19\n\n- done\n\n```\n## fenced\n```\n\n**Next action:** a.\n"
-        self.assertTrue(replace_state.replace_section(OLD, ok).startswith(ok))
+        ok = "﻿## Current state: 2026-11-19\n\n- done\n| a | b |\n\n**Next action:** a.\n"
+        self.assertEqual(self.replaced(OLD), NEW)
+        self.assertEqual(self.replaced(OLD, ok), ok.lstrip("﻿"))
 
     def test_every_result_survives_a_second_rewrite(self):
         bodies = (
             "Intro.\n\n" + OLD + "\nOriginal text.\n\n### Prompt\n",
             "## What happens\n\nNo headings below.\n",
-            "## Current state: 2026-11-18\n\nOld.\n\n## Outcome\n",
+            "",
         )
         other = NEW.replace("New facts.", "Newer facts.")
         for body in bodies:
-            once = replace_state.replace_section(body, NEW, insert=True)
-            twice = replace_state.replace_section(once, other)
-            self.assertEqual(twice, once.replace("New facts.", "Newer facts."), body)
+            once = self.replaced(body, insert=True)
+            self.assertEqual(self.replaced(once, other), once.replace("New facts.", "Newer facts."), body)
 
-    def test_loose_heading_is_not_duplicated_by_insert(self):
-        for body in ("## Current state: 2026-11-18 (sweep v4)\n\nOld.\n", "### Current state\n\nOld.\n"):
-            with self.assertRaisesRegex(replace_state.SectionError, "another form"):
-                replace_state.replace_section(body, NEW, insert=True)
+    def test_random_bodies_either_refuse_or_keep_prefix_and_tail(self):
+        import random
 
-    def test_fence_closes_only_on_its_own_marker(self):
-        body = OLD + "\n````\n```\n## Current state: 2026-01-01\n```\n~~~\n````\n"
-        out = replace_state.replace_section(body, NEW)
-        self.assertTrue(out.startswith(NEW))
-        self.assertIn("## Current state: 2026-01-01", out)
-
-    def test_fenced_example_heading_is_not_counted(self):
-        body = OLD + "\n```\n## Current state: 2026-01-01\n```\n"
-        self.assertEqual(
-            replace_state.replace_section(body, NEW), NEW + "\n```\n## Current state: 2026-01-01\n```\n"
-        )
-
-    def test_section_file_must_start_with_the_dated_heading(self):
-        for bad in ("New facts only.\n", "## Current state\n\nundated\n", "Intro\n" + NEW):
-            with self.assertRaises(replace_state.SectionError):
-                replace_state.replace_section(OLD, bad)
+        blocks = [
+            "Plain.", "- item", "## Heading", "### Sub", "Title\n===", "Title\n---", "---", "* * *",
+            "```\n## fenced\n```", "~~~\ncode\n~~~", "<details>\nx\n</details>", "<!-- c -->",
+            "<h2>H</h2>", "| a | b |", "> quote", "**Next action:** stray.", "   ", "\t",
+        ]
+        rng = random.Random(406)
+        for _ in range(2000):
+            prefix = "\n\n".join(rng.sample(blocks, rng.randint(0, 3)))
+            middle = "\n\n".join(rng.sample(blocks, rng.randint(0, 3)))
+            tail = "\n\n".join(rng.sample(blocks, rng.randint(0, 4)))
+            old = "## Current state: 2026-11-18\n\nOld.\n\n" + (middle + "\n\n" if middle else "")
+            old += "**Next action:** old.\n" if rng.random() < 0.8 else ""
+            body = (prefix + "\n\n" if prefix else "") + old + ("\n" + tail + "\n" if tail else "")
+            try:
+                out = self.replaced(body)
+            except replace_state.SectionError:
+                continue
+            # Everything before the heading and after the first Next action
+            # line it accepted must survive verbatim.
+            start = body.index("## Current state:")
+            action_end = body.index("\n", body.index("**Next action:**", start))
+            kept = body[action_end + 1 :].lstrip("\n")
+            self.assertEqual(out, body[:start] + NEW + ("\n" + kept if kept else ""), body)
 
     def test_same_section_is_unchanged(self):
         body = NEW + "\nKeep.\n"
-        self.assertEqual(replace_state.replace_section(body, NEW), body)
+        self.assertEqual(self.replaced(body), body)
 
 
 FAKE_GH = textwrap.dedent(

@@ -5,7 +5,7 @@ usage: pr-ready.sh <pr> [--repo OWNER/NAME] [--min-checks N]
 
 Reads the pull request through the REST API (`gh api`) and prints:
 - the head SHA;
-- whether the base branch (origin/main) is an ancestor of the head;
+- whether the PR's base branch on GitHub (main) is an ancestor of the head;
 - mergeable and mergeable_state, retried while GitHub reports them as unknown;
 - the latest run for each check name, the latest run of each workflow (which
   catches a workflow whose jobs have not started), and the latest commit
@@ -81,7 +81,11 @@ def check_key(run, workflows):
     suite = (run.get("check_suite") or {}).get("id")
     workflow = workflows.get(suite)
     name = run.get("name") or "?"
-    return f"{workflow} / {name}" if workflow else name
+    if workflow:
+        return f"{workflow} / {name}"
+    # Not an Actions job: two apps may use the same check name.
+    app = (run.get("app") or {}).get("slug")
+    return f"{name} ({app})" if app and app != "github-actions" else name
 
 
 def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_checks=1):

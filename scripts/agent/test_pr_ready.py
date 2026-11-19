@@ -120,6 +120,11 @@ class VerdictTests(unittest.TestCase):
         checks = [run(1, "test", "success", suite=1), run(2, "test", "failure", suite=3)]
         self.assertEqual(verdict(checks=checks), "NOT READY: Release marker tests / test: failure")
 
+    def test_same_check_name_from_two_apps_is_kept_apart(self):
+        a = dict(run(1, "Review", "success", suite=90), app={"slug": "app-one"})
+        b = dict(run(2, "Review", "failure", suite=91), app={"slug": "app-two"})
+        self.assertEqual(verdict(checks=[b, a]), "NOT READY: Review (app-two): failure")
+
     def test_skipped_and_neutral_pass(self):
         checks = [run(1, "a", "skipped"), run(2, "b", "neutral")]
         self.assertEqual(verdict(checks=checks), "READY")

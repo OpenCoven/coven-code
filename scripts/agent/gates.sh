@@ -46,6 +46,9 @@ for arg in "$1" "$2"; do case "$arg" in -*) usage ;; esac; done
 WORKTREE="$(cd "$1" 2>/dev/null && pwd -P)" || { echo "gates: no such worktree: $1" >&2; exit 2; }
 [ -d "$WORKTREE/src-rust" ] || { echo "gates: $WORKTREE has no src-rust directory" >&2; exit 2; }
 case "$2" in /*) OUT="$2" ;; *) OUT="$PWD/$2" ;; esac
+# Resolve symlinks and .. in the existing part of the path.
+OUT_PARENT="$(dirname "$OUT")"
+if [ -d "$OUT_PARENT" ]; then OUT="$(cd "$OUT_PARENT" && pwd -P)/$(basename "$OUT")"; fi
 # Inside the worktree the logs would show up in identity.txt's git status.
 case "$OUT/" in "$WORKTREE"/*) echo "gates: put <outdir> outside the worktree" >&2; exit 2 ;; esac
 
@@ -79,13 +82,15 @@ else
   SCRATCH_HOME="$(mktemp -d "$OUT/home.XXXXXX")" || exit 2
   trap 'rm -rf "$SCRATCH_HOME"' EXIT
   # Logs from an earlier run into the same outdir would look current.
-  rm -f "$OUT"/*.log
+  rm -f "$OUT"/fmt.log "$OUT"/check.log "$OUT"/clippy.log "$OUT"/clippy-computer-use.log \
+    "$OUT"/test.log "$OUT"/alloc.log
   : >"$OUT/summary.txt"
   {
     echo "head $(git -C "$WORKTREE" rev-parse HEAD) tree $(git -C "$WORKTREE" rev-parse 'HEAD^{tree}')"
     echo "toolchain $TOOLCHAIN target $CARGO_TARGET_DIR jobs ${CARGO_BUILD_JOBS:-default}"
     git -C "$WORKTREE" status --porcelain
   } >"$OUT/identity.txt"
+  IDENTITY="$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)"
 fi
 TEST_ENV=(env HOME="$SCRATCH_HOME")
 
@@ -148,5 +153,8 @@ print(f"tests passed={passed} failed={failed} ignored={ignored}")
 for failure in failures:
     print("  ", failure)
 PY
+if [ "$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)" != "$IDENTITY" ]; then
+  echo "warning: the worktree's head or dirty files changed during the run" | tee -a "$OUT/summary.txt"
+fi
 echo "result $([ "$FAILED" = 0 ] && echo pass || echo FAIL)" | tee -a "$OUT/summary.txt"
 exit "$FAILED"
