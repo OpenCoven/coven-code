@@ -13,7 +13,8 @@
 # Each gate's output goes to <outdir>/<gate>.log. <outdir>/summary.txt gets one
 # line per gate ("<gate> rc=<n> <seconds>s", or "<gate> skipped") and the
 # workspace test counts;
-# <outdir>/identity.txt records the head, tree and dirty files tested.
+# <outdir>/identity.txt records the head, tree, a fingerprint of the changes
+# and untracked files, and the dirty files tested.
 # --dry-run prints the commands and writes nothing.
 # <outdir> must be new, empty, or an earlier gates outdir (one holding
 # identity.txt), since a run replaces the logs it names.
@@ -85,6 +86,17 @@ fi
 RUSTUP="${RUSTUP:-$(command -v rustup || echo "$CARGO_HOME/bin/rustup")}"
 CARGO=("$RUSTUP" run "$TOOLCHAIN" cargo)
 
+# The head, the tracked changes and the untracked files' contents, so an edit
+# to an already dirty file during the run is noticed too. Writes no objects.
+fingerprint() {
+  {
+    git -C "$WORKTREE" rev-parse HEAD
+    git -C "$WORKTREE" diff HEAD --binary
+    git -C "$WORKTREE" ls-files -o --exclude-standard
+    git -C "$WORKTREE" ls-files -o --exclude-standard | (cd "$WORKTREE" && git hash-object --stdin-paths)
+  } 2>&1 | cksum
+}
+
 if [ "$DRY_RUN" = 1 ]; then
   SCRATCH_HOME="$OUT/home.XXXXXX"
 else
@@ -102,9 +114,10 @@ else
   {
     echo "head $(git -C "$WORKTREE" rev-parse HEAD) tree $(git -C "$WORKTREE" rev-parse 'HEAD^{tree}')"
     echo "toolchain $TOOLCHAIN target $CARGO_TARGET_DIR jobs ${CARGO_BUILD_JOBS:-default}"
-    git -C "$WORKTREE" status --porcelain
+    IDENTITY="$(fingerprint)"
+    echo "fingerprint $IDENTITY"
+    git -C "$WORKTREE" status --porcelain --untracked-files=all
   } >"$OUT/identity.txt"
-  IDENTITY="$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)"
 fi
 TEST_ENV=(env HOME="$SCRATCH_HOME")
 
@@ -179,8 +192,8 @@ if [ "$FAILED" != 0 ]; then
   echo "result FAIL" | tee -a "$OUT/summary.txt"
   exit 1
 fi
-if [ "$(git -C "$WORKTREE" rev-parse HEAD) $(git -C "$WORKTREE" status --porcelain | cksum)" != "$IDENTITY" ]; then
-  echo "result CHANGED (the worktree's head or dirty files changed during the run)" | tee -a "$OUT/summary.txt"
+if [ "$(fingerprint)" != "$IDENTITY" ]; then
+  echo "result CHANGED (the worktree's head or files changed during the run)" | tee -a "$OUT/summary.txt"
   exit 3
 fi
 echo "result pass" | tee -a "$OUT/summary.txt"

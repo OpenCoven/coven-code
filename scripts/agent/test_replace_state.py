@@ -100,6 +100,16 @@ class ReplaceSectionTests(unittest.TestCase):
                 replace_state.normalize_section(NEW.replace("New facts.", line))
             self.refused(OLD.replace("Old facts.", line))
 
+    def test_lines_of_unusual_whitespace_are_refused(self):
+        for space in ("\u00a0", "\x0b", "\u3000", " \u00a0 "):
+            self.refused(
+                "Intro\n\n" + OLD + space + "\nTail para.\n", pattern="unusual whitespace"
+            )
+            self.refused(OLD.replace("Old facts.\n", "- item\n" + space + "\n") + "\nlazy\n")
+            with self.assertRaises(replace_state.SectionError):
+                replace_state.normalize_section(NEW.replace("New facts.", "a\n" + space + "\nb"))
+        self.assertEqual(self.replaced(OLD + " \t\nKeep.\n"), NEW + "\n \t\nKeep.\n")
+
     def test_nested_definitions_are_refused(self):
         for line in ("> [spec]: https://example.com/spec", "- [x]: url", "> [^1]: note", "text [a] : b", "Old[^n].", "$$"):
             with self.assertRaises(replace_state.SectionError, msg=line):

@@ -142,6 +142,19 @@ def evaluate(
         elif state not in MERGEABLE_OK:
             reasons.append(f"mergeable_state={state}")
 
+    # Another PR with the same head SHA (a stacked branch) has its own
+    # pull_request runs, which tested a different merge; leave them out.
+    number = pull.get("number")
+    foreign = {
+        run.get("check_suite_id")
+        for run in workflow_runs
+        if run.get("pull_requests")
+        and number not in [pr.get("number") for pr in run["pull_requests"]]
+    }
+    workflow_runs = [run for run in workflow_runs if run.get("check_suite_id") not in foreign]
+    check_runs = [
+        run for run in check_runs if (run.get("check_suite") or {}).get("id") not in foreign
+    ]
     # A dispatched or pushed run of the same workflow is kept apart from the
     # pull_request run, so it cannot stand in for a failed one.
     workflows = {

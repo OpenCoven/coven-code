@@ -72,7 +72,16 @@ def lines_of(text):
     """Split on "\n" only; str.splitlines also splits on form feeds and others."""
     if "\r" in text:
         raise SectionError("a lone carriage return is a line break on GitHub; fix it by hand")
-    return text.split("\n")
+    lines = text.split("\n")
+    # Only spaces and tabs make a blank line on GitHub; a line of other
+    # whitespace (a no-break space, say) is text, but str.strip() empties it.
+    for line in lines:
+        if line and not line.strip() and line.strip(" \t"):
+            raise SectionError(
+                f"a line holds only unusual whitespace ({line!r}), which GitHub does not "
+                "treat as blank; edit it by hand"
+            )
+    return lines
 
 
 def risky(line):
@@ -132,8 +141,8 @@ def contained(prefix_lines):
     refused. No real Current state section has either before it.
     """
     for line in prefix_lines:
-        if "```" in line or "~~~" in line:
-            return "after a code fence"
+        if "```" in line or "~~~" in line or "$$" in line:
+            return "after a code fence or math block"
         if HTML.search(line):
             return "after HTML"
     if prefix_lines and prefix_lines[-1].strip():
@@ -260,7 +269,7 @@ def main(argv=None):
     try:
         # The exact original, CRLF and all, so it can be restored byte for byte.
         before_file.write_text(original, encoding="utf-8", newline="")
-        after_file.write_text(after, encoding="utf-8")
+        after_file.write_text(after, encoding="utf-8", newline="")
     except OSError as error:
         print(f"replace-state: cannot write the copies: {error}", file=sys.stderr)
         return 2

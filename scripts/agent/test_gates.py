@@ -246,6 +246,17 @@ class GatesRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertTrue(self.summary()[-1].startswith("result CHANGED"))
 
+    def test_edit_to_an_already_dirty_or_untracked_file_exits_3(self):
+        for name in ("README", "notes/new.txt"):
+            path = self.worktree / "src-rust" / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("dirty before the run\n")
+            shutil.rmtree(self.out, ignore_errors=True)
+            result = self.gates(FAKE_TOUCH=str(path))
+            self.assertEqual(result.returncode, 3, name + result.stdout + result.stderr)
+        shutil.rmtree(self.out)
+        self.assertEqual(self.gates().returncode, 0)
+
     def test_only_tests_runs_two_gates(self):
         result = self.gates(ONLY_TESTS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

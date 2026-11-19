@@ -183,6 +183,19 @@ class VerdictTests(unittest.TestCase):
         result = verdict(checks=[run(1, "a")], workflows=failed_pr_run + workflows[-1:])
         self.assertEqual(result, "NOT READY: workflow Rust CI: failure")
 
+    def test_runs_for_another_pr_on_the_same_head_are_left_out(self):
+        failing = [w for w in WORKFLOWS if w["id"] != 102] + [
+            dict(workflow(102, "Rust CI", 2, "failure"), pull_requests=[{"number": 7}])
+        ]
+        other = dict(workflow(130, "Rust CI", 13), pull_requests=[{"number": 8}])
+        checks = [
+            run(1, "Format, lint, and test", "failure", suite=2),
+            run(9, "Format, lint, and test", "success", suite=13),
+        ]
+        result = verdict(checks=checks, workflows=failing + [other])
+        self.assertIn("Rust CI / Format, lint, and test: failure", result)
+        self.assertIn("workflow Rust CI: failure", result)
+
     def test_required_workflow_without_a_run_is_not_ready(self):
         self.assertEqual(
             verdict(checks=[run(1, "a")], required=["TUI Tests"]),
