@@ -3493,9 +3493,8 @@ pub fn render_full_status_line(
 
     // Session ID
     if let Some(sid) = &data.session_id {
-        let short = &sid[..sid.len().min(8)];
         spans.push(Span::styled(
-            format!("[session:{}]", short),
+            format!("[session:{}]", claurst_core::truncate::short_id(sid)),
             Style::default().fg(Color::DarkGray),
         ));
     }
