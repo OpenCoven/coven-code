@@ -5778,7 +5778,7 @@ mod tests {
         };
         let mut messages = vec![Message::user("test a stalled consumer")];
         // One slot, and the receiver is never read: the consumer is stalled.
-        let (event_tx, _stalled_consumer) = mpsc::channel(1);
+        let (event_tx, mut stalled_consumer) = mpsc::channel(1);
         let probe = event_tx.clone();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let query_config = make_config(None, None);
@@ -5811,6 +5811,28 @@ mod tests {
             .await
             .expect("a cancelled turn ends without waiting for the consumer");
         assert!(matches!(outcome, QueryOutcome::Cancelled), "{outcome:?}");
+        // The consumer catches up: what the turn handed over after the cancel
+        // arrives, no stream event follows a durable one, and the channel
+        // then closes, so nothing is left holding it.
+        drop(probe);
+        let mut seen = Vec::new();
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stalled_consumer.recv())
+                .await
+                .expect("the channel closes once the turn's events are delivered")
+        {
+            seen.push(event);
+        }
+        let first_durable = seen
+            .iter()
+            .position(|event| !matches!(event, QueryEvent::Stream(_)))
+            .unwrap_or(seen.len());
+        assert!(
+            seen[first_durable..]
+                .iter()
+                .all(|event| !matches!(event, QueryEvent::Stream(_))),
+            "{seen:?}"
+        );
     }
 
     async fn run_anthropic_sse_sequence_in_worktree(

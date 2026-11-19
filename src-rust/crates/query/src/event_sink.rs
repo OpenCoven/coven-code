@@ -69,7 +69,8 @@ impl From<mpsc::UnboundedSender<QueryEvent>> for QueryEventSink {
 }
 
 /// The producer waits for space in the channel and never drops an event
-/// until its turn is cancelled; `watching` gives it the turn's token.
+/// until its turn is cancelled. Only a sink given its turn's token by
+/// `watching`, as `run_query_loop_with_receipt` does, stops waiting on cancel.
 impl From<mpsc::Sender<QueryEvent>> for QueryEventSink {
     fn from(sender: mpsc::Sender<QueryEvent>) -> Self {
         Self {
@@ -153,7 +154,9 @@ impl QueryEventSink {
     /// message, a tool's end, the turn's completion) is handed to a relay
     /// task that delivers it, in order, once the consumer makes room. After
     /// the first such event, later ones also go through the relay, so their
-    /// order is kept, and display-only events are dropped.
+    /// order is kept, and display-only events are dropped. `Ok` for a relayed
+    /// event means it was handed to the relay; it is lost only if the
+    /// consumer closes the channel first.
     pub async fn emit(&self, event: QueryEvent) -> Result<(), EventSendError> {
         match &self.channel {
             Channel::Unbounded(sender) => sender.send(event).map_err(|_| EventSendError::Closed),
@@ -177,15 +180,15 @@ impl QueryEventSink {
                         _ = cancel.cancelled() => {}
                     }
                 }
-                let mut relay = match relay.lock() {
-                    Ok(relay) => relay,
+                let mut guard = match relay.lock() {
+                    Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                if let Some(relay) = relay.as_ref() {
+                if let Some(relay_tx) = guard.as_ref() {
                     if is_display_only(&event) {
                         return Err(EventSendError::Capacity);
                     }
-                    return relay.send(event).map_err(|_| EventSendError::Closed);
+                    return relay_tx.send(event).map_err(|_| EventSendError::Closed);
                 }
                 let event = match sender.try_send(event) {
                     Ok(()) => return Ok(()),
@@ -198,18 +201,20 @@ impl QueryEventSink {
                     return Err(EventSendError::Capacity);
                 }
                 let (relay_tx, mut relay_rx) = mpsc::unbounded_channel();
-                let channel = sender.clone();
+                let sender = sender.clone();
                 // Ends once every clone of this sink is gone and the relayed
                 // events are queued, or when the consumer closes the channel.
+                // Until then it keeps the channel open, so a consumer that
+                // reads to the end still gets every relayed event.
                 tokio::spawn(async move {
                     while let Some(event) = relay_rx.recv().await {
-                        if channel.send(event).await.is_err() {
+                        if sender.send(event).await.is_err() {
                             break;
                         }
                     }
                 });
                 let sent = relay_tx.send(event).map_err(|_| EventSendError::Closed);
-                *relay = Some(relay_tx);
+                *guard = Some(relay_tx);
                 sent
             }
             Channel::Bounded {
@@ -326,20 +331,22 @@ mod tests {
         let cancel = CancellationToken::new();
         let sink = QueryEventSink::from(sender).watching(cancel.clone());
         sink.emit(QueryEvent::Status("first".into())).await.unwrap();
-        let waiting = sink.emit(durable("waiting"));
-        tokio::pin!(waiting);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
-                .await
-                .is_err(),
-            "before cancel a full sink waits"
-        );
-        cancel.cancel();
         let wait = std::time::Duration::from_secs(5);
-        tokio::time::timeout(wait, waiting)
-            .await
-            .expect("cancel ends the wait")
-            .unwrap();
+        {
+            let waiting = sink.emit(durable("waiting"));
+            tokio::pin!(waiting);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
+                    .await
+                    .is_err(),
+                "before cancel a full sink waits"
+            );
+            cancel.cancel();
+            tokio::time::timeout(wait, waiting)
+                .await
+                .expect("cancel ends the wait")
+                .unwrap();
+        }
         for (event, delivered) in [
             (QueryEvent::Status("late".into()), false),
             (
