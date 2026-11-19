@@ -1,0 +1,185 @@
+name: All required
+
+# One status that means "every check on this pull request head passed".
+#
+# The other pull_request workflows are path-filtered, so a given head runs
+# anywhere from none of them to all of them, and `needs:` cannot reach across
+# workflows. This workflow has no path filter, so it reports on every pull
+# request. Its single job waits for every other workflow run on the head
+# commit (the repository's workflows and CodeQL default setup) and every
+# check run from another app, then:
+#   - fails as soon as any of them completes with a conclusion other than
+#     success, skipped or neutral (failed, cancelled, timed out, ...);
+#   - passes once all of them have completed and the set is unchanged
+#     across two polls.
+# Only the latest run of each workflow per event (the pull_request run, a
+# manual dispatch on the branch, CodeQL's dynamic run), and only that run's
+# jobs, count. Runs are found by head commit, so two pull requests with the
+# same head share them. Commit statuses (the statuses API) are not read.
+#
+# The result is final for its run. After re-running a job elsewhere, re-run
+# this workflow too; it waits for the re-run to finish (a failed job from the
+# earlier attempt counts as pending while its workflow is running again). A
+# new push starts it again on its own.
+#
+# A pull_request run uses this file as the PR changed it, so a PR that edits
+# this file can change what the check enforces. Review such PRs as you would
+# any change to the merge gate.
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  checks: read
+
+concurrency:
+  group: all-required-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  all-required:
+    name: all-required
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SELF_RUN_ID: ${{ github.run_id }}
+      # Seconds to wait before the first look, between polls, and before
+      # confirming that a fully completed set did not change. Each poll
+      # makes two API calls against the repository's shared GITHUB_TOKEN
+      # budget, so keep POLL long.
+      SETTLE: '30'
+      POLL: '90'
+      CONFIRM: '90'
+      # Consecutive failed polls (API or parse errors) before giving up.
+      MAX_ERRORS: '10'
+    steps:
+      - name: Wait for every other check on the head, then fail if any failed
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}"
+          good='["success","skipped","neutral"]'
+
+          # gh prints an error body to stdout on HTTP errors, so accept only
+          # a number.
+          self_workflow=""
+          for _ in 1 2 3; do
+            if id=$(gh api "$api/actions/runs/$SELF_RUN_ID" --jq .workflow_id) &&
+               [[ $id =~ ^[0-9]+$ ]]; then
+              self_workflow=$id
+              break
+            fi
+            sleep 10
+          done
+          if [ -z "$self_workflow" ]; then
+            echo "::error::Could not read this run's workflow id."
+            exit 1
+          fi
+
+          # Prints one JSON array: the latest run of every other workflow on
+          # the head (per event), then the check runs that belong to
+          # those runs (latest per job name) or to another app (latest per
+          # name). A failed job from an earlier attempt of a run that is
+          # running again is reported as pending, because a re-run job that
+          # waits on `needs:` gets its new check run only when it is queued.
+          # Names are flattened so they print safely in the log and table.
+          snapshot() {
+            local runs checks
+            runs=$(gh api --paginate "$api/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
+                     --jq '.workflow_runs[]' |
+                   jq -s --argjson self "$self_workflow" '
+                     map(select(.workflow_id != $self))
+                     | group_by([.workflow_id, .event]) | map(max_by(.id))
+                     | map({kind: "workflow", id, status, conclusion,
+                            name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
+                            url: .html_url, suite: .check_suite_id,
+                            started: (.run_started_at // "")})') || return 1
+            checks=$(gh api --paginate "$api/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" \
+                       --jq '.check_runs[]' |
+                     jq -s --argjson runs "$runs" --argjson good "$good" '
+                       ($runs | map({key: (.suite | tostring), value: .}) | from_entries) as $parent
+                       | map(select(.app.slug != "github-actions"
+                                    or $parent[.check_suite.id | tostring] != null))
+                       | group_by(if .app.slug == "github-actions"
+                                  then [.check_suite.id, .name]
+                                  else [.app.id, .name] end)
+                       | map(max_by(.id))
+                       | map($parent[.check_suite.id | tostring] as $p
+                             | if $p != null and $p.status != "completed"
+                                  and .status == "completed"
+                                  and (.conclusion as $c | any($good[]; . == $c) | not)
+                                  and (.started_at // "") < $p.started
+                               then .status = "waiting for its re-run" | .conclusion = null
+                               else . end)
+                       | map({kind: "check", id, status, conclusion,
+                              name: ((.name // "") | gsub("[\\r\\n|\\[\\]]"; " ")),
+                              url: .html_url})') || return 1
+            jq -n --argjson a "$runs" --argjson b "$checks" '$a + $b'
+          }
+
+          report() {
+            {
+              echo "| Kind | Name | Result |"
+              echo "| --- | --- | --- |"
+              jq -r '.[] | "| \(.kind) | [\(.name)](\(.url)) | \(.conclusion // .status) |"' <<<"$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.[] | "\(.kind)\t\(.conclusion // .status)\t\(.name)\t\(.url)"' <<<"$1"
+          }
+
+          echo "Head $HEAD_SHA"
+          sleep "$SETTLE"
+          previous=""
+          errors=0
+          while :; do
+            if ! now=$(snapshot); then
+              # An exhausted token budget is not an error: wait for its
+              # reset (the rate_limit endpoint does not count against it).
+              reset=$(gh api rate_limit \
+                        --jq 'if .resources.core.remaining == 0 then .resources.core.reset else 0 end' \
+                        2>/dev/null) || reset=0
+              if [[ $reset =~ ^[0-9]+$ ]] && [ "$reset" -gt 0 ]; then
+                pause=$((reset - $(date +%s) + 5))
+                [ "$pause" -ge "$POLL" ] || pause=$POLL
+                echo "::warning::The API rate limit is used up; waiting ${pause}s for it to reset."
+                sleep "$pause"
+                continue
+              fi
+              errors=$((errors + 1))
+              if [ "$errors" -ge "$MAX_ERRORS" ]; then
+                echo "::error::$errors polls in a row failed to read the head's runs and checks."
+                exit 1
+              fi
+              echo "::warning::A GitHub API call failed ($errors in a row); trying again."
+              sleep "$POLL"
+              continue
+            fi
+            errors=0
+
+            failed=$(jq --argjson good "$good" \
+              'map(select(.status == "completed" and (.conclusion as $c | any($good[]; . == $c) | not)))' <<<"$now")
+            if [ "$(jq length <<<"$failed")" -gt 0 ]; then
+              report "$now"
+              jq -r '.[] | "::error::\(.kind) \"\(.name)\" ended \(.conclusion // "with no conclusion"): \(.url)"' <<<"$failed"
+              exit 1
+            fi
+
+            pending=$(jq 'map(select(.status != "completed"))' <<<"$now")
+            if [ "$(jq length <<<"$pending")" -eq 0 ]; then
+              signature=$(jq -c 'map([.kind, .id, .conclusion]) | sort' <<<"$now")
+              if [ "$signature" = "$previous" ]; then
+                report "$now"
+                echo "All $(jq length <<<"$now") other workflow runs and checks on $HEAD_SHA passed."
+                exit 0
+              fi
+              previous=$signature
+              sleep "$CONFIRM"
+              continue
+            fi
+
+            previous=""
+            echo "Waiting on $(jq length <<<"$pending"): $(jq -r 'map(.name) | join(", ")' <<<"$pending")"
+            sleep "$POLL"
+          done
