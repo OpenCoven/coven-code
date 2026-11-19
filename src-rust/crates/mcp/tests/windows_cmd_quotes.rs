@@ -2,6 +2,9 @@
 //! which must get the whole URL. Before, the URL reached `cmd.exe` unquoted,
 //! and `cmd.exe` ended the command at the URL's first `&`.
 //!
+//! `cmd.exe` also replaces `%NAME%` with the variable's value, which can be
+//! a `"` that ends the quoting around the URL.
+//!
 //! A URL scheme registered for the current user stands in for the browser:
 //! Windows runs this test binary with the URL it was asked to open. Whether a
 //! real browser then shows the page can only be seen on a desktop.
@@ -14,6 +17,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const CAPTURE: &str = "capture";
+
+// The registry helpers are repeated in claurst-tui's `windows_open_tests`:
+// test crates cannot share a module.
 
 /// A registry key under `HKCU\Software\Classes`, removed on drop.
 struct Registered(String);
@@ -77,10 +83,19 @@ fn xaa_login_opens_the_whole_url() {
     let capture = directory.path().join(format!("url.{CAPTURE}"));
     let scheme = format!("coven-test-517-{}", std::process::id());
     let _registered = register_scheme(&scheme, &capture);
-    // The login appends four parameters with `&`.
-    let endpoint = format!("{scheme}://authorize?audience=mcp%2Btools");
+    // The login appends four parameters with `&`. `%PATH%` is set, and
+    // `cmd.exe` would replace it with its value.
+    let endpoint = format!("{scheme}://authorize?audience=mcp%2Btools&note=%PATH%");
 
-    let state = initiate_xaa_login("fixture", &endpoint).unwrap();
+    // The launch waits for `cmd.exe`; bound it, should Windows ask anything.
+    let (sent, launched) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(initiate_xaa_login("fixture", &endpoint));
+    });
+    let state = launched
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the login did not return within 60 s")
+        .unwrap();
 
     let opened = wait_for(&capture);
     let url = url::Url::parse(&opened).unwrap();
@@ -88,6 +103,7 @@ fn xaa_login_opens_the_whole_url() {
     let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let expected = BTreeMap::from([
         ("audience".to_string(), "mcp+tools".to_string()),
+        ("note".to_string(), "%PATH%".to_string()),
         ("response_type".to_string(), "code".to_string()),
         (
             "code_challenge".to_string(),

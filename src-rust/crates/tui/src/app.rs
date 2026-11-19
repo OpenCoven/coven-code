@@ -11057,6 +11057,8 @@ role = "Research"
 /// which must get the file's path whole. Before, `Command::arg` wrote the
 /// quotes around the path as `\"`, which `cmd.exe` does not unescape.
 ///
+/// `cmd.exe` also replaces `%NAME%` with the variable's value.
+///
 /// A file type registered for the current user stands in for the user's
 /// editor: Windows runs this test binary with the path it was asked to open.
 /// Whether a real editor then shows the file can only be seen on a desktop.
@@ -11068,6 +11070,9 @@ mod windows_open_tests {
 
     const HANDLER: &str = "app::windows_open_tests::file_open_handler";
     const CAPTURE: &str = "capture";
+
+    // The registry helpers are repeated in claurst-mcp's
+    // `tests/windows_cmd_quotes.rs`: test crates cannot share a module.
 
     /// Registry keys under `HKCU\Software\Classes`, removed on drop.
     struct Registered(Vec<String>);
@@ -11134,7 +11139,9 @@ mod windows_open_tests {
     #[tokio::test]
     async fn file_opener_passes_the_whole_path() {
         let directory = tempfile::tempdir().unwrap();
-        let folder = directory.path().join("with space & ampersand");
+        // The opener's `cmd.exe` has `SystemRoot` set, and would replace
+        // `%SystemRoot%` with its value.
+        let folder = directory.path().join("with space & %SystemRoot%");
         std::fs::create_dir(&folder).unwrap();
         let extension = format!(".coventest517x{}", std::process::id());
         let file = folder.join(format!("keybindings{extension}"));
