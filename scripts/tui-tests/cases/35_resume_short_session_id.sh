@@ -4,7 +4,7 @@
 # Resuming a session whose id is not a UUID (#573), in Classic and in Next.
 # `--session-id` takes any string, and the history keeps it as given. Two
 # sessions are saved, one with the 2-byte id `ab` and one with
-# `日本語セッション`, whose byte 8 falls inside its third character. A third
+# `日本語セッション`, whose byte 8 falls inside its third character. A fresh
 # launch resumes each with `/session resume <id>`, which replaced `/resume`.
 # The app keeps running and shows the resumed transcript; Next also shows the
 # shortened id in its status. A fake
@@ -38,9 +38,12 @@ _rss_save() { # renderer, id, prompt
   tui_stop
 }
 
-# Resume one saved session in the running app.
-_rss_resume() { # renderer, id, prompt of that session, running process name
-  local r="$1" id="$2" prompt="$3" running="$4"
+# Resume one saved session in a fresh launch, so each id is tried on a
+# running app.
+_rss_resume() { # renderer, id, prompt of that session
+  local r="$1" id="$2" prompt="$3" running
+  if ! tui_start; then return 0; fi
+  running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
   tui_type "/session resume $id"; sleep 0.3; tui_keys Enter
   if wait_for "$prompt" 10; then _pass "$r: /session resume $id shows that session's transcript"
   else _fail "$r: /session resume $id shows that session's transcript" "$(tui_capture)"; fi
@@ -52,6 +55,7 @@ _rss_resume() { # renderer, id, prompt of that session, running process name
     if wait_for "Resumed session $id." 5; then _pass "$r: the status names session $id"
     else _fail "$r: the status names session $id" "$(tui_capture)"; fi
   fi
+  tui_stop
 }
 
 _rss_journey() { # renderer
@@ -77,13 +81,8 @@ _rss_journey() { # renderer
   _rss_save "$r" ab "alpha question"
   _rss_save "$r" "日本語セッション" "beta question"
 
-  if tui_start; then
-    local running
-    running="$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')"
-    _rss_resume "$r" ab "alpha question" "$running"
-    _rss_resume "$r" "日本語セッション" "beta question" "$running"
-  fi
-  tui_stop
+  _rss_resume "$r" ab "alpha question"
+  _rss_resume "$r" "日本語セッション" "beta question"
 
   TUI_LAUNCH_PREFIX="$saved_prefix"
   TUI_BOOT_STRING="$saved_boot"
