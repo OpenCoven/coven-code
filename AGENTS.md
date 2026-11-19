@@ -1,6 +1,6 @@
 # Development Rules
 
-Agent-facing rules for working on Coven Code. Mirrors and extends `src-rust/.claude/CLAUDE.md`; when the two disagree, the rule closer to the code wins.
+Agent-facing rules for working on Coven Code. `CLAUDE.md` points here; there is no other rules file.
 
 ## Conversational Style
 
@@ -131,7 +131,7 @@ This repo runs parallel agents in worktrees under `.claude/worktrees/`. Multiple
 
 ### Committing
 
-- **ONLY commit files YOU changed in THIS session.** Never commit unless the user has explicitly asked you to commit (see `src-rust/.claude/CLAUDE.md` — the rule is "NEVER EVER commit").
+- **ONLY commit files YOU changed in THIS session.** Commit only when the user has asked you to.
 - ALWAYS include `fixes #<number>` or `closes #<number>` in the commit message when there is a related issue or PR.
 - NEVER use `git add -A` or `git add .` — these sweep up changes from other agents.
 - ALWAYS use `git add <specific-file-paths>` listing only files you modified.
@@ -149,7 +149,8 @@ These can destroy other agents' work:
 - `git stash` — stashes ALL changes including other agents' work
 - `git add -A` / `git add .` — stages other agents' uncommitted work
 - `git commit --no-verify` — bypasses required checks; never allowed
-- Force-push to `main` — never allowed; the patch-release workflow is the only thing that may force-move tags, and it does so via the workflow runner, not from your shell
+- `git rebase` of a branch that has been pushed — rewrites history other agents and reviewers have fetched
+- Force-push (`--force`, `--force-with-lease`) to any branch — never allowed; the patch-release workflow is the only thing that may force-move tags, and it does so via the workflow runner, not from your shell
 
 ### Safe Workflow
 
@@ -164,15 +165,16 @@ git add docs/providers.md
 # 3. Commit (only when the user has asked)
 git commit -m "feat(api): add foo provider"
 
-# 4. Push (pull --rebase if needed, but NEVER reset/checkout)
-git pull --rebase && git push
+# 4. Bring in main by merging (never rebase), then push
+git fetch origin && git merge origin/main
+git push origin HEAD
 ```
 
-### If Rebase Conflicts Occur
+### If Merge Conflicts Occur
 
 - Resolve conflicts in YOUR files only.
-- If a conflict touches a file you didn't modify, abort the rebase and ask the user.
-- NEVER force-push.
+- If a conflict touches a file you didn't modify, run `git merge --abort` and ask the user.
+- Never rebase a branch that has been pushed, and never force-push.
 
 ### Contributor Attribution
 
@@ -186,6 +188,38 @@ Co-authored-by: Name <ID+username@users.noreply.github.com>
 - Never use a machine or `.local` email in a co-author trailer; it links to no account and gives zero credit.
 - When a squash-merge collapses a contributor's PR into an internal branch, preserve their `Co-authored-by:` line in the squash commit message.
 - This applies to human contributors only. Do not add trailers or credit lines naming an AI model, assistant, vendor, or coding harness.
+
+## Parallel Worktrees
+
+Several agents share one host and one clone. Give each change its own worktree, build directory and processes.
+
+- One worktree per change, under `.claude/worktrees/`, from `origin/main`: `git fetch origin && git worktree add --no-track -b <branch> .claude/worktrees/<name> origin/main`. Never edit the main checkout; another session may have it on its own branch with staged files.
+- One `CARGO_TARGET_DIR` per worktree; never share one. Cargo's fingerprints for workspace path crates do not include the worktree path, so a shared target directory reuses units another branch built, judged by mtime, and you test code that is not in your tree. Each worktree's default `src-rust/target` is separate; a `CARGO_TARGET_DIR` exported globally is how one gets shared by accident.
+- On a shared host set `CARGO_BUILD_JOBS` (for example `4`) and check `uptime` before a build. When the load is high, run the gates on hosted CI instead (below).
+- Toolchain: CI pins `dtolnay/rust-toolchain@1.100.0` in `.github/workflows/rust-ci.yml` (there is no `rust-toolchain` file). Run `rustup run 1.100.0 cargo <command>` from `src-rust/`, and follow the pin when it changes. With a scratch `HOME`, also set `RUSTUP_HOME` and `CARGO_HOME` to your real ones, or rustup cannot find the toolchain.
+- The binary reads `.coven-code/settings.json` from every directory above its working directory (`Settings::find_project_settings`), skipping only the file of its own `HOME`. A scratch `HOME` with a working directory inside your real home therefore still loads your real `~/.coven-code/settings.json`. For manual runs, use a scratch `HOME` and a working directory outside `$HOME`.
+- `scripts/tui-tests/run.sh` does this itself: it makes a scratch directory under `TMPDIR`, starts the cases with a scratch `HOME` from a scratch working directory, and refuses to start (exit `2`) when that directory is inside your home or below a `.coven-code` directory. If it refuses, set `TMPDIR` to a directory outside your home. See `scripts/tui-tests/README.md`.
+- Kill only process IDs you started and recorded (`$!`, a pid file, a tmux server on a socket you named with `-L`). Never `pkill -f`, `killall` or `tmux kill-server` by pattern or on the default socket; that kills other agents' tmux servers and builds.
+- Never edit a shell script while it runs. Bash reads a script as it goes, so the running copy executes your edit. Run long scripts from a copy you leave alone.
+
+### Reading Hosted Checks
+
+- Count only the latest run for each check name on the head SHA. Cancelled duplicates can appear on the same SHA; a later run of the same name supersedes them.
+- `mergeable` reads `null` (and `mergeable_state` `unknown`) for up to about two minutes after the PR or `main` moves. Poll again instead of treating it as a conflict.
+- Which workflows run is set by the `pull_request` `paths` filters in `.github/workflows/*.yml`:
+
+| A PR that touches | Runs |
+| --- | --- |
+| `src-rust/**` | Rust CI (8 jobs) and TUI Tests (2); also Version stamp tests for `Cargo.toml`/`Cargo.lock`, Viewer tests for `crates/core/src/share_export/**`, Release candidate for `crates/acp/registry-template/agent.json` |
+| `scripts/tui-tests/**` | TUI Tests |
+| `install.sh`, `install.ps1`, `scripts/*checksums*`, `scripts/package-release.py`, the release workflows | Rust CI, plus the installer or release test workflows that name those files |
+| files under `npm/`, `session/**`, `marketplace/**` | the npm, Viewer or Marketplace tests that name those files |
+| `README.md`, `docs/index.md`, `docs/installation.md` | Version stamp tests |
+| any other `scripts/` file | only a workflow whose `paths` names it; usually none |
+| other docs, `AGENTS.md`, `CLAUDE.md` | none |
+
+- Every PR also gets CodeQL code scanning (four `Analyze (...)` jobs and `CodeQL`) and a Vercel status. A `src-rust/` PR therefore shows 15 check runs. Recount from the workflow files when they change.
+- Rust CI and TUI Tests also run on `workflow_dispatch`, so `gh workflow run rust-ci.yml --ref <branch>` (or `tui-tests.yml`) runs them on a pushed branch without a PR. Use that for hosted fail-first evidence, or when the local host is too loaded to build.
 
 ## User Override
 
