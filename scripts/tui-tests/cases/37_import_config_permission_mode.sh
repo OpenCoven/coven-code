@@ -17,8 +17,8 @@ register_case tc_import_config_permission_mode
 # scrolled away) and judge only the newest.
 _import_mode_get() {
   tui_type "/config get permission-mode"; tui_keys Enter
-  local shot i
-  for i in $(seq 1 50); do
+  local shot
+  for _ in $(seq 1 50); do
     shot="$(tui_capture)"
     [ "$(grep -c 'permission-mode = ' <<<"$shot")" -ge "$3" ] && break
     sleep 0.2
@@ -38,7 +38,12 @@ _import_mode_run() {
   # Only the preview shows the target file; the picker shows sources.
   if ! wait_for "Target" 10; then _fail "$1: the preview opens" "$(tui_capture)"; return 1; fi
   tui_settle 0.3; tui_keys Enter
-  tui_settle 1
+  # The preview closes once the import has run, whether or not it worked.
+  if ! wait_absent "Target" 10; then _fail "$1: the import runs" "$(tui_capture)"; return 1; fi
+  if grep -q "Import failed" <<<"$(tui_capture)"; then
+    _fail "$1: the import runs" "$(tui_capture)"; return 1
+  fi
+  _pass "$1: the import runs"
   return 0
 }
 
@@ -75,13 +80,15 @@ _import_mode_renderer() {
     _import_mode_get Default "$name: the session starts in default" 1
     printf '%s\n' '{"hasCompletedOnboarding": true, "config": {"permission_mode": "bypassPermissions"}}' >"$settings"
     if _import_mode_run "$name"; then
-      local shot; shot="$(tui_capture)"
-      assert_contains "$shot" "Saved bypass mode not restored" \
-        "$name: the reload says the saved bypass mode was not restored"
-      assert_eq "$(grep -c "not restored" <<<"$shot")" "1" "$name: it says so once"
-      tui_keys Escape
-      if wait_absent "not restored" 10; then _pass "$name: the notification can be dismissed"
-      else _fail "$name: the notification can be dismissed" "$(tui_capture)"; fi
+      if wait_for "Saved bypass mode not restored" 10; then
+        _pass "$name: the reload says the saved bypass mode was not restored"
+        assert_eq "$(grep -c "not restored" <<<"$(tui_capture)")" "1" "$name: it says so once"
+        tui_keys Escape
+        if wait_absent "not restored" 10; then _pass "$name: the notification can be dismissed"
+        else _fail "$name: the notification can be dismissed" "$(tui_capture)"; fi
+      else
+        _fail "$name: the reload says the saved bypass mode was not restored" "$(tui_capture)"
+      fi
       _import_mode_get Default "$name: the session is still in default after the reload" 2
     fi
     tui_stop

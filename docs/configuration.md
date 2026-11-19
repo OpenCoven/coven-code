@@ -358,10 +358,11 @@ The settings screen never saves the session's mode.
 `/config import` reloads your engine-global settings into the open session
 under the same rule. A mode chosen at launch (`--permission-mode` or
 `--dangerously-skip-permissions`) stays. Otherwise a saved `acceptEdits` or
-`plan` applies, and a saved `default` or `bypassPermissions` leaves the
-session's mode as it is, so the reload never loosens it to `default` or to
-bypass. A notification says when the mode changed or a saved bypass was not
-restored.
+`plan` applies, as at a start, even over a mode chosen in the session (a
+saved `acceptEdits` replaces a session's `plan`). A saved `default` or
+`bypassPermissions` leaves the session's mode as it is, so the reload never
+moves it to `default` or to bypass. A notification says when the mode changed
+or a saved bypass was not restored.
 
 `coven-code acp` takes no `--permission-mode` and reads no setting or variable
 that opts in to bypass. It loads the mode saved in engine-global settings: a

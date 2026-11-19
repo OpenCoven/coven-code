@@ -103,6 +103,14 @@ fn import_config_permission_mode_child() {
             PermissionMode::Plan,
             None,
         ),
+        // As at a start, a saved accept-edits applies over a session's plan.
+        (
+            PermissionMode::Plan,
+            false,
+            "acceptEdits",
+            PermissionMode::AcceptEdits,
+            Some("Saved accept-edits mode restored"),
+        ),
         // A mode chosen at launch survives the reload, whatever is saved.
         (
             PermissionMode::AcceptEdits,

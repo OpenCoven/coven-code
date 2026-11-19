@@ -1077,7 +1077,7 @@ pub mod config {
         /// `acceptEdits` or `plan` applies. A saved `bypassPermissions` is
         /// never restored: the session runs in `default` and says so, so a
         /// settings file cannot turn approvals off unseen. Every place that
-        /// applies a saved mode (an interactive start, `/import-config`, ACP)
+        /// applies a saved mode (an interactive start, `/config import`, ACP)
         /// goes through this one rule.
         pub fn restored_from_settings(&self) -> RestoredPermissionMode {
             let (mode, notice) = match self {
