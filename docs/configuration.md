@@ -357,16 +357,18 @@ The settings screen never saves the session's mode.
 
 `/import-config` reloads your engine-global settings into the open session
 under the same rule: a mode chosen at launch (`--permission-mode` or
-`--dangerously-skip-permissions`) stays. Otherwise the saved mode applies,
-except that a saved `bypassPermissions` leaves the session in `default`; a
-notification says what changed.
+`--dangerously-skip-permissions`) stays. Otherwise a saved `acceptEdits` or
+`plan` applies, and a saved `default` or `bypassPermissions` leaves the
+session's mode as it is, so the reload never loosens it to `default` or to
+bypass. A notification says when the mode changed or a saved bypass was not
+restored.
 
 `coven-code acp` takes no `--permission-mode` and reads no setting or variable
 that opts in to bypass. It loads the mode saved in engine-global settings: a
 saved `acceptEdits` applies, `plan` runs as `default` (ACP has no interactive
 plan approval), and a saved `bypassPermissions` is never restored. ACP then
-runs in `default` and logs `Saved bypass mode not restored` to stderr; the
-protocol stream is unchanged. The mode decides which tool calls ask the
+runs in `default` and logs `Saved bypass mode not restored` to stderr (at the
+default `COVEN_CODE_ACP_LOG` level); the protocol stream is unchanged. The mode decides which tool calls ask the
 connected client, and reaches the keyless `claude` transport and the
 PowerShell risk gate.
 

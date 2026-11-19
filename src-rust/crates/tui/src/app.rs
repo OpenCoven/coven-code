@@ -1773,26 +1773,36 @@ impl App {
     }
 
     /// The session's permission mode once the saved settings, now in
-    /// `self.config`, have been reloaded. The rule is the one a start
-    /// follows: a mode chosen at launch stays, and otherwise the saved mode
-    /// applies, except that a saved bypass mode is never restored. A change
-    /// to the session's mode, or a refused bypass, is said once.
+    /// `self.config`, have been reloaded, under the rule a start follows. A
+    /// mode chosen at launch stays. Otherwise a saved `acceptEdits` or `plan`
+    /// applies. A saved bypass mode is never restored and a saved `default`
+    /// cannot be told apart from nothing saved, so both leave the session's
+    /// mode as it is: a reload never loosens it to `default` or to bypass.
+    /// Each reload that changes the mode or refuses a saved bypass says so.
     fn permission_mode_after_reload(
         &mut self,
         session_mode: claurst_core::config::PermissionMode,
     ) -> claurst_core::config::PermissionMode {
+        use claurst_core::config::PermissionMode;
         if self.permission_mode_from_launch {
             return session_mode;
         }
         let saved = self.config.permission_mode.clone();
         let restored = saved.restored_from_settings();
-        if restored.mode != session_mode || restored.mode != saved {
+        let refused = restored.mode != saved;
+        let mode = if refused || saved == PermissionMode::Default {
+            session_mode.clone()
+        } else {
+            restored.mode
+        };
+        // A session already in bypass, chosen in the session, was not refused.
+        if mode != session_mode || (refused && session_mode != saved) {
             if let Some(notice) = restored.notice {
                 self.notifications
                     .push(NotificationKind::Warning, notice.to_string(), Some(30));
             }
         }
-        restored.mode
+        mode
     }
 
     pub(crate) fn current_user_turn_index(&self) -> Option<usize> {
