@@ -3087,6 +3087,130 @@ fn spawn_memory_read() -> std::sync::mpsc::Receiver<claurst_tui::application::me
     receiver
 }
 
+/// This process's registrations in the Coven daemon ledger: opt-in and best
+/// effort, so a dead or absent daemon never affects the session.
+#[derive(Default)]
+struct LedgerRegistrations {
+    /// Every session a registration was sent for, accepted or not; each is
+    /// marked complete at exit, whichever session is bound by then.
+    sent: Vec<String>,
+    /// The latest registration's answer, until it arrives.
+    answer: Option<tokio::sync::oneshot::Receiver<claurst_tui::application::RegistrationAnswer>>,
+}
+
+/// How long the exit waits for a registration still in flight before it
+/// sends the completions. Best effort: it covers the health read that
+/// precedes the registration request (2 s at most), not a daemon that is
+/// also slow to take the request itself.
+const LEDGER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl LedgerRegistrations {
+    /// Send a registration for session `id` off the UI thread and show it
+    /// as waiting for its answer. `register` is the blocking daemon call.
+    fn register(
+        &mut self,
+        app: &mut claurst_tui::App,
+        id: &str,
+        register: impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String>
+            + Send
+            + 'static,
+    ) {
+        use claurst_tui::application::SessionOwnership;
+
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = answer_tx.send(register().into());
+        });
+        self.answer = Some(answer_rx);
+        if !self.sent.iter().any(|sent| sent == id) {
+            self.sent.push(id.to_string());
+        }
+        let session_id = id.to_string();
+        app.ownership = if app.ownership.registration_is_unknown() {
+            SessionOwnership::LedgerRenewing { session_id }
+        } else {
+            SessionOwnership::LedgerPending { session_id }
+        };
+    }
+
+    /// A session start after the first. Policy B (#412): a registration
+    /// that became unknown, because another daemon instance answered or the
+    /// one that took it was never identified, is sent again here for the
+    /// session now bound. The loop calls this where `/session resume` binds
+    /// a session, the only place a running process binds one.
+    fn session_started(
+        &mut self,
+        app: &mut claurst_tui::App,
+        id: &str,
+        register: impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String>
+            + Send
+            + 'static,
+    ) {
+        if app.ownership.registration_is_unknown() {
+            self.register(app, id, register);
+        }
+    }
+
+    /// Apply the latest registration's answer once it has arrived.
+    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant) {
+        use claurst_tui::application::RegistrationAnswer;
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let Some(answer) = &mut self.answer else {
+            return;
+        };
+        let answer = match answer.try_recv() {
+            Ok(answer) => answer,
+            // The registration task ended without answering.
+            Err(TryRecvError::Closed) => RegistrationAnswer::Failed,
+            Err(TryRecvError::Empty) => return,
+        };
+        self.answer = None;
+        app.ownership.settle_registration(answer, now);
+    }
+
+    /// At exit: mark every session a registration was sent for complete.
+    /// A registration still in flight gets up to `wait` to finish first;
+    /// if it has not, the completions go out anyway and one may reach the
+    /// daemon ahead of its registration. The completions run side by side,
+    /// so a daemon that accepts and never answers delays the exit by one
+    /// request timeout, however many ids there are. `complete` is the
+    /// blocking daemon call.
+    async fn complete_all(
+        self,
+        wait: std::time::Duration,
+        complete: impl Fn(&str) + Send + Sync + 'static,
+    ) {
+        if let Some(answer) = self.answer {
+            let _ = tokio::time::timeout(wait, answer).await;
+        }
+        let complete = Arc::new(complete);
+        let completions: Vec<_> = self
+            .sent
+            .into_iter()
+            .map(|id| {
+                let complete = Arc::clone(&complete);
+                tokio::task::spawn_blocking(move || complete(&id))
+            })
+            .collect();
+        for completion in completions {
+            let _ = completion.await;
+        }
+    }
+}
+
+/// The blocking ledger registration of `session`, run under `root`.
+fn ledger_registration(
+    session: &claurst_core::history::ConversationSession,
+    root: &std::path::Path,
+) -> impl FnOnce() -> Result<Option<claurst_core::coven_daemon::DaemonInstance>, String> + Send + 'static
+{
+    let id = session.id.clone();
+    let root = root.to_path_buf();
+    let title = session.title.clone().unwrap_or_default();
+    move || claurst_core::coven_ledger::notify_session_start(&id, &root, &title)
+}
+
 /// How often an open Work page re-reads the session goal from SQLite.
 const WORK_GOAL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -3415,28 +3539,6 @@ async fn run_interactive(
         }
     }
 
-    // Register this session in the Coven daemon ledger (best-effort, opt-in).
-    // The id is captured here so that a mid-run /resume (which rebinds session.id)
-    // does not leave this registration uncompleted — the exit hook uses this local
-    // rather than session.id, which may have changed to a different session by then.
-    let (ledger_tx, mut ledger_rx) = tokio::sync::oneshot::channel::<bool>();
-    let ledger_session_id: Option<String> = if settings.daemon_ledger {
-        let id = session.id.clone();
-        let root = tool_ctx.working_dir.clone();
-        let title = session.title.clone().unwrap_or_default();
-        let id_for_task = id.clone();
-        tokio::task::spawn_blocking(move || {
-            let accepted =
-                claurst_core::coven_ledger::notify_session_start(&id_for_task, &root, &title)
-                    .is_ok();
-            let _ = ledger_tx.send(accepted);
-        });
-        Some(id)
-    } else {
-        drop(ledger_tx);
-        None
-    };
-
     // Background: refresh the model registry from models.dev.
     // The fetched JSON is saved as a cache file; the App will reload it from
     // disk whenever the /model picker opens.
@@ -3460,12 +3562,17 @@ async fn run_interactive(
     if app.renderer == claurst_tui::application::UiRenderer::Next {
         app.session_title = session.title.clone();
     }
-    app.ownership = match &ledger_session_id {
-        Some(id) => claurst_tui::application::SessionOwnership::LedgerPending {
-            session_id: id.clone(),
-        },
-        None => claurst_tui::application::SessionOwnership::EngineLocal,
-    };
+    // Register this session in the Coven daemon ledger (best-effort, opt-in).
+    // A mid-run /resume rebinds session.id; the ids registered here are kept
+    // so the exit hook completes each of them.
+    let mut ledger = LedgerRegistrations::default();
+    if settings.daemon_ledger {
+        ledger.register(
+            &mut app,
+            &session.id,
+            ledger_registration(&session, &tool_ctx.working_dir),
+        );
+    }
     if let Some(log) = &diagnostic_log {
         app.diagnostic_log_path = log.path().map(std::path::Path::to_path_buf);
         app.diagnostic_buffer = log.take_snapshot();
@@ -3817,28 +3924,11 @@ async fn run_interactive(
             );
         }
         app.settle_scroll_anchor();
+        ledger.settle(&mut app, std::time::Instant::now());
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
         // unless an auto-submit (queued message) is pending — in which case
         // synthesize an Enter event to dequeue and submit it.
-        if let claurst_tui::application::SessionOwnership::LedgerPending { session_id } =
-            &app.ownership
-        {
-            let outcome = match ledger_rx.try_recv() {
-                Ok(accepted) => Some(accepted),
-                // The registration task ended without answering.
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some(false),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-            };
-            if let Some(accepted) = outcome {
-                let session_id = session_id.clone();
-                app.ownership = if accepted {
-                    claurst_tui::application::SessionOwnership::LedgerRegistered { session_id }
-                } else {
-                    claurst_tui::application::SessionOwnership::LedgerFailed { session_id }
-                };
-            }
-        }
         // A session chosen in the browser resumes through `/session resume`, exactly
         // as if typed, once no turn is running. If that did not switch
         // sessions, the current one gets its draft back.
@@ -4214,6 +4304,11 @@ async fn run_interactive(
                                     app.attach_turn_diff_state(
                                         tool_ctx.file_history.clone(),
                                         tool_ctx.current_turn.clone(),
+                                    );
+                                    ledger.session_started(
+                                        &mut app,
+                                        &session.id,
+                                        ledger_registration(&session, &tool_ctx.working_dir),
                                     );
                                     let title = session
                                         .title
@@ -6222,12 +6317,15 @@ async fn run_interactive(
         }
     }
 
-    // Mark the session complete in the Coven daemon ledger (best-effort, opt-in).
-    // Use the id captured at registration time, not session.id, which may have been
-    // rebound by a mid-run /resume to a completely different session.
-    if let Some(id) = &ledger_session_id {
-        claurst_core::coven_ledger::notify_session_complete(id, Some(0));
-    }
+    // Mark every session this process sent a registration for complete in the
+    // Coven daemon ledger (best-effort, opt-in). The ids were captured at
+    // registration time: session.id may have been rebound by a mid-run
+    // /resume to a completely different session.
+    ledger
+        .complete_all(LEDGER_EXIT_WAIT, |id| {
+            claurst_core::coven_ledger::notify_session_complete(id, Some(0));
+        })
+        .await;
 
     terminal_result?;
     Ok(())
@@ -8483,6 +8581,302 @@ mod tests {
         let mut again_rx = Some(again_rx);
         refresh_memory_snapshot(&mut app, true, &mut poll, || again_rx.take().unwrap());
         assert!(poll.in_flight.is_some(), "re-read after the interval");
+    }
+
+    fn ledger_test_instance(pid: u32) -> claurst_core::coven_daemon::DaemonInstance {
+        claurst_core::coven_daemon::DaemonInstance {
+            pid: Some(pid),
+            started_at: Some(format!("2026-11-18T05:00:{:02}Z", pid % 60)),
+            api_version: "coven.daemon.v1".to_string(),
+            coven_version: "0.5.0".to_string(),
+            socket_file: Some((1, u64::from(pid))),
+        }
+    }
+
+    /// Run the loop's ledger step until the pending registration is answered.
+    async fn settle_ledger(ledger: &mut LedgerRegistrations, app: &mut claurst_tui::app::App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ledger.answer.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the registration never answered"
+            );
+            ledger.settle(app, std::time::Instant::now());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// #412, policy B: a session start sends a registration again only when
+    /// the earlier one is unknown, and then once, for the session it binds.
+    /// The loop's own ledger steps (settling an answer, comparing a probe)
+    /// send nothing. That no other part of the loop registers is checked on
+    /// the real binary by the tmux case `33_daemon_restart_unknown.sh`.
+    #[tokio::test]
+    async fn a_session_start_registers_again_only_when_the_registration_is_unknown() {
+        use claurst_core::coven_daemon::DaemonSighting;
+        use claurst_tui::application::SessionOwnership;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let mut ledger = LedgerRegistrations::default();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let accepted_by = |pid: u32| {
+            let sent = Arc::clone(&sent);
+            move || {
+                sent.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(ledger_test_instance(pid)))
+            }
+        };
+        let unknown = SessionOwnership::LedgerUnknown {
+            session_id: "session-a".to_string(),
+        };
+
+        // Launch: session A registers with daemon 100.
+        ledger.register(&mut app, "session-a", accepted_by(100));
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerPending {
+                session_id: "session-a".to_string()
+            }
+        );
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, instance, .. }
+                if session_id == "session-a" && instance == &ledger_test_instance(100)),
+            "{:?}",
+            app.ownership
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+
+        // The same daemon keeps answering: a session start sends nothing.
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        app.ownership
+            .observe_daemon(&DaemonSighting::Instance(ledger_test_instance(100)), later);
+        let registered = app.ownership.clone();
+        ledger.session_started(&mut app, "session-a", accepted_by(100));
+        assert_eq!(app.ownership, registered);
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+
+        // The daemon is restarted: daemon 200 answers the probe.
+        let restarted = DaemonSighting::Instance(ledger_test_instance(200));
+        app.ownership.observe_daemon(&restarted, later);
+        assert_eq!(app.ownership, unknown);
+
+        // The loop's ledger steps between session starts: probes keep
+        // landing, and the daemon goes away and comes back. They send
+        // nothing.
+        for sighting in [
+            &restarted,
+            &DaemonSighting::Gone,
+            &DaemonSighting::Unidentified,
+            &restarted,
+        ] {
+            for _ in 0..10 {
+                ledger.settle(&mut app, std::time::Instant::now());
+                app.ownership.observe_daemon(sighting, later);
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(app.ownership, unknown);
+        assert!(ledger.answer.is_none(), "a registration is in flight");
+        assert_eq!(
+            sent.load(Ordering::Acquire),
+            1,
+            "a ledger step registered again"
+        );
+
+        // The next session start registers the session it binds, once. Until
+        // the answer arrives the indicator still reads unknown.
+        ledger.session_started(&mut app, "session-b", accepted_by(200));
+        assert_eq!(
+            app.ownership,
+            SessionOwnership::LedgerRenewing {
+                session_id: "session-b".to_string()
+            }
+        );
+        assert_eq!(
+            app.ownership.daemon_presence(true),
+            claurst_tui::application::DaemonPresence::Unknown
+        );
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, instance, .. }
+                if session_id == "session-b" && instance == &ledger_test_instance(200)),
+            "{:?}",
+            app.ownership
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 2);
+        // Both are completed at exit.
+        assert_eq!(ledger.sent, ["session-a", "session-b"]);
+
+        // Registered with the daemon answering now: later probes agree.
+        app.ownership.observe_daemon(
+            &restarted,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        assert!(!app.ownership.registration_is_unknown());
+    }
+
+    /// A first registration that is refused, or whose task died, is shown as
+    /// failed and is not retried at a session start: policy B registers
+    /// again only what a daemon accepted and can no longer be tied to.
+    #[tokio::test]
+    async fn a_failed_registration_is_not_retried_at_a_session_start() {
+        use claurst_tui::application::SessionOwnership;
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let failed = SessionOwnership::LedgerFailed {
+            session_id: "session-a".to_string(),
+        };
+        for register in [
+            Box::new(|| Err("Coven daemon offline".to_string()))
+                as Box<dyn FnOnce() -> Result<_, String> + Send>,
+            Box::new(|| panic!("the registration task died")),
+        ] {
+            let mut ledger = LedgerRegistrations::default();
+            ledger.register(&mut app, "session-a", register);
+            settle_ledger(&mut ledger, &mut app).await;
+            assert_eq!(app.ownership, failed);
+            ledger.session_started(&mut app, "session-b", || panic!("retried"));
+            assert_eq!(app.ownership, failed);
+            assert_eq!(ledger.sent, ["session-a"]);
+        }
+
+        // Accepted by a daemon that could not be named: unknown at once,
+        // and so registered again at the next session start.
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(app.ownership.registration_is_unknown());
+        ledger.session_started(&mut app, "session-b", || Ok(Some(ledger_test_instance(7))));
+        settle_ledger(&mut ledger, &mut app).await;
+        assert!(
+            matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, .. }
+                if session_id == "session-b"),
+            "{:?}",
+            app.ownership
+        );
+    }
+
+    /// A registration sent again that is refused, lost or accepted by a
+    /// daemon that cannot be named leaves the state unknown, not failed and
+    /// not online, so the session start after it tries again.
+    #[tokio::test]
+    async fn a_registration_sent_again_that_fails_stays_unknown_and_is_tried_again() {
+        use claurst_tui::application::{DaemonPresence, SessionOwnership};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        for lost in [
+            Box::new(|| Err("Coven daemon offline".to_string()))
+                as Box<dyn FnOnce() -> Result<_, String> + Send>,
+            Box::new(|| panic!("the registration task died")),
+            Box::new(|| Ok(None)),
+        ] {
+            let mut ledger = LedgerRegistrations::default();
+            app.ownership = SessionOwnership::LedgerUnknown {
+                session_id: "session-a".to_string(),
+            };
+            ledger.session_started(&mut app, "session-b", lost);
+            assert_eq!(app.ownership.daemon_presence(true), DaemonPresence::Unknown);
+            settle_ledger(&mut ledger, &mut app).await;
+            assert_eq!(
+                app.ownership,
+                SessionOwnership::LedgerUnknown {
+                    session_id: "session-b".to_string()
+                }
+            );
+            assert_eq!(app.ownership.daemon_presence(true), DaemonPresence::Unknown);
+
+            ledger.session_started(&mut app, "session-c", || Ok(Some(ledger_test_instance(9))));
+            settle_ledger(&mut ledger, &mut app).await;
+            assert!(
+                matches!(&app.ownership, SessionOwnership::LedgerRegistered { session_id, .. }
+                    if session_id == "session-c"),
+                "{:?}",
+                app.ownership
+            );
+            assert_eq!(ledger.sent, ["session-b", "session-c"]);
+        }
+    }
+
+    /// At exit a registration still in flight finishes before its
+    /// completion is sent, every id sent is completed once, and a
+    /// registration that never answers holds the exit only for the wait.
+    #[tokio::test]
+    async fn exit_completes_every_id_after_a_registration_in_flight() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        let mut app = claurst_tui::app::App::new(
+            claurst_core::config::Config::default(),
+            claurst_core::cost::CostTracker::new(),
+        );
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let completing = |log: &Arc<Mutex<Vec<String>>>| {
+            let log = Arc::clone(log);
+            move |id: &str| log.lock().unwrap().push(format!("complete {id}"))
+        };
+
+        // Session A registered and went unknown; session B's registration
+        // is still in flight when the process exits.
+        let mut ledger = LedgerRegistrations::default();
+        ledger.register(&mut app, "session-a", || Ok(None));
+        settle_ledger(&mut ledger, &mut app).await;
+        {
+            let log = Arc::clone(&log);
+            ledger.session_started(&mut app, "session-b", move || {
+                std::thread::sleep(Duration::from_millis(300));
+                log.lock().unwrap().push("registered session-b".to_string());
+                Ok(Some(ledger_test_instance(7)))
+            });
+        }
+        assert!(ledger.answer.is_some());
+        ledger
+            .complete_all(Duration::from_secs(10), completing(&log))
+            .await;
+        let mut seen = log.lock().unwrap().clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("registered session-b")
+        );
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "complete session-a",
+                "complete session-b",
+                "registered session-b"
+            ]
+        );
+
+        // A registration that does not answer within the wait: the
+        // completion is sent anyway.
+        log.lock().unwrap().clear();
+        let mut ledger = LedgerRegistrations::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        ledger.register(&mut app, "session-a", move || {
+            let _ = held.recv();
+            Err("no answer".to_string())
+        });
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            ledger.complete_all(Duration::from_millis(100), completing(&log)),
+        )
+        .await
+        .expect("the exit waited for a registration that never answers");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(*log.lock().unwrap(), ["complete session-a"]);
+        drop(release);
     }
 
     #[test]
