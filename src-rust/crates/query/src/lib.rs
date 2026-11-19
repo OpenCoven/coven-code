@@ -7782,6 +7782,47 @@ mod tests {
             .all(|event| !matches!(event, QueryEvent::TurnComplete { .. })));
     }
 
+    /// #571: a response whose usage is over the auto-compact threshold, in a
+    /// history too short to have a head to summarise, is not compacted. The
+    /// turn ends as it would have, and no status claims a compaction.
+    #[tokio::test]
+    async fn a_full_window_in_a_short_history_is_not_reported_as_compacted() {
+        const FULL_WINDOW_SSE: &str = concat!(
+            "event: message_start\n",
+            "data: {\"message\":{\"id\":\"full-window\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":190000,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a full answer\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\n",
+            "data: {}\n\n",
+        );
+        let (outcome, events, messages) =
+            run_anthropic_sse(FULL_WINDOW_SSE, Config::default()).await;
+
+        assert!(
+            matches!(&outcome, QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let statuses: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::Status(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !statuses.iter().any(|text| text.contains("compacted")),
+            "nothing was compacted: {statuses:?}"
+        );
+        let texts: Vec<String> = messages.iter().map(Message::get_all_text).collect();
+        assert_eq!(texts, ["test Anthropic outcome", "a full answer"]);
+    }
+
     #[tokio::test]
     async fn anthropic_content_filtered_and_unknown_stops_are_non_successful_and_durable() {
         const CONTENT_FILTERED_SSE: &str = concat!(

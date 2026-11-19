@@ -1487,6 +1487,34 @@ mod tests {
         .unwrap()
     }
 
+    /// #571: over the threshold, a history of `KEEP_RECENT_MESSAGES + 1`
+    /// messages or fewer has no head to summarise. Nothing is sent, and it
+    /// counts as neither a compaction nor a failure.
+    #[tokio::test]
+    async fn auto_compact_of_a_short_history_is_not_a_compaction() {
+        // Nothing listens here, so a request that was sent would fail.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "test-key".into(),
+            api_base: format!("http://{address}"),
+            max_retries: 0,
+            request_timeout: std::time::Duration::from_secs(5),
+            ..Default::default()
+        })
+        .unwrap();
+        let messages: Vec<_> = (0..=KEEP_RECENT_MESSAGES)
+            .map(|i| Message::user(format!("message {i}")))
+            .collect();
+        let mut state = AutoCompactState::default();
+        let _outcome =
+            auto_compact_if_needed(&client, &messages, 190_000, "claude-sonnet-4-6", &mut state)
+                .await;
+        assert_eq!(state.compaction_count, 0, "nothing was compacted");
+        assert_eq!(state.consecutive_failures, 0, "no request was sent");
+    }
+
     #[tokio::test]
     async fn compaction_requires_complete_summary_before_replacing_history() {
         for ending in [
