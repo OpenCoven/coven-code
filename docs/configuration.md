@@ -14,7 +14,8 @@ the engine home. Global settings require **plain JSON**, without comments.
 
 Shared `<coven-home>/settings.json` supplies only `model`, `theme`, and
 `permission_mode` defaults when the engine-global values remain at defaults.
-Command-line overrides apply after settings loading.
+Command-line overrides apply after settings loading. Which starts use the
+saved permission mode is described under [Permission Modes](#permission-modes).
 
 ### Per-project settings
 
@@ -26,11 +27,13 @@ an unreadable or invalid file does not fall back to another file or parent.
 Project settings are sanitized before merging. Provider routing and credentials,
 MCP and LSP server definitions, hooks, hosted-review policy, persisted permission
 rules, and `workspace_paths` are discarded from this layer. Configure these
-in trusted engine-global settings instead.
+in trusted engine-global settings instead. `permission_mode` is not taken from
+this file either: a project file neither sets the mode nor resets the one you
+saved.
 
 Merging is field-specific: some lists concatenate and maps merge. Omission does
 not always preserve a global value: project defaults can replace fields such as
-`permission_mode`, `theme`, and `output_format`. Keep project settings minimal
+`theme` and `output_format`. Keep project settings minimal
 and verify the effective behavior before relying on a global preference.
 
 ---
@@ -79,7 +82,7 @@ The `config` object holds runtime behaviour options.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `permission_mode` | string | `"default"` | Controls how tool permissions are enforced. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`. |
+| `permission_mode` | string | `"default"` | The mode an interactive session starts in when `--permission-mode` is not given. One of `"default"`, `"acceptEdits"`, `"bypassPermissions"`, `"plan"`; a saved `"bypassPermissions"` is not restored. |
 
 See [Permission Modes](#permission-modes) for a full description of each value.
 
@@ -330,6 +333,42 @@ coven-code --permission-mode accept-edits "refactor the auth module"
 coven-code --permission-mode bypass-permissions "..."
 ```
 
+### Which mode a start uses
+
+1. `--dangerously-skip-permissions`, then `--permission-mode`, when given. A
+   run with a `--context` brief always bypasses permissions.
+2. Otherwise an interactive session starts in the saved `permission_mode`:
+   the one `/config set permission-mode` or `/permissions set` wrote to your
+   engine-global settings, or the shared default when that is `default`. A
+   notification says that a saved `acceptEdits` or `plan` was restored.
+3. A saved `bypassPermissions` is never restored at startup. The session
+   starts in `default` and a notification says so; pass
+   `--permission-mode bypass-permissions` to use it. The notification stops
+   when the saved mode is no longer `bypassPermissions`.
+4. Headless runs (`--print`, `--headless` or a prompt argument, whatever the
+   output format) ignore the saved mode: without the flag they run in
+   `default`.
+
+A value that is not one of the four modes counts as `default`; in engine-global
+settings it also makes the whole file invalid, so its other settings are not
+loaded. Changing the saved mode with the `Config` tool needs the same approval
+as any other write; a session in `bypassPermissions` gives it without asking.
+The settings screen never saves the session's mode.
+
+Two limits to know about:
+
+- `coven-code acp` takes no `--permission-mode` and is not covered by the list
+  above: it loads the mode saved in engine-global settings, including a saved
+  `bypassPermissions`, with `plan` treated as `default`. Its tool approvals
+  still go to the connected client; the saved mode reaches the keyless
+  `claude` transport and the PowerShell risk gate.
+- An engine-global `default` cannot be told apart from no saved mode, so it
+  does not override an `acceptEdits`, `plan` or `bypassPermissions` in the
+  shared file: `/config set permission-mode default` reports success and the
+  next start still acts on the shared mode (a shared `bypassPermissions` keeps
+  producing the not-restored notification). Change the shared file, or pass
+  `--permission-mode default`.
+
 ---
 
 ## AGENTS.md Memory Files
@@ -535,6 +574,7 @@ and `api_base` override the corresponding environment variables.
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api-base`. |
 | `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/coven goal` command and `GoalCompleteTool`). |
+| `COVEN_CODE_DISABLE_UPDATE_CHECK` | Set to skip the release check an interactive session makes at startup: a request to GitHub's releases API unless a result from the last 24 hours is cached, and the update notice that follows. The variable only has to be present, so `0` or an empty value also disables the check; unset it to restore the default. `/update` and `coven-code upgrade` still contact GitHub when you run them. The model catalog refresh at startup is separate: see `COVEN_CODE_DISABLE_MODELS_FETCH` in [providers.md](providers.md). |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |

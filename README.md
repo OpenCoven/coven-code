@@ -104,7 +104,7 @@ cargo build --release --locked --package claurst   # binary: coven-code
 | `--thinking <TOKENS>` | | Extended-thinking budget in tokens (enables extended thinking) |
 | `--resume [<ID>]` | | Resume a previous session by ID; omit ID to resume the most recent |
 | `--print` | `-p` | Print mode: send prompt and exit (non-interactive / headless) |
-| `--permission-mode <MODE>` | | `default`, `accept-edits`, `bypass-permissions`, or `plan` |
+| `--permission-mode <MODE>` | | `default`, `accept-edits`, `bypass-permissions`, or `plan`. When omitted, an interactive session starts in the saved mode (never a saved `bypass-permissions`); headless runs use `default` |
 | `--max-turns <N>` | | Maximum agentic turns before stopping (default: 10) |
 | `--system-prompt <PROMPT>` | `-s` | Override the system prompt |
 | `--append-system-prompt <PROMPT>` | | Append text to the system prompt |
