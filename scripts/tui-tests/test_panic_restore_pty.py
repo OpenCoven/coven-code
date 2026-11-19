@@ -42,7 +42,9 @@ def setup():
 def restore():
     termios.tcsetattr(fd, termios.TCSANOW, saved)
     pop = b"\x1b[<1u" if KEYBOARD or BEHAVIOUR == "unpushed-pop" else b""
-    title = {"title-kept": b"", "title-set-again": b"\x1b]0;\x07\x1b]0;Coven\x07"}.get(BEHAVIOUR, b"\x1b]0;\x07")
+    title = b"" if BEHAVIOUR == "title-kept" else b"\x1b]0;\x07"
+    if BEHAVIOUR == "title-set-again":
+        title += b"\x1b]0;Coven\x07"
     modes = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l"
     if BEHAVIOUR == "pop-after-leave":
         write(sys.stdout, title + b"\x1b[?1049l" + modes + pop + b"\x1b[?25h")
