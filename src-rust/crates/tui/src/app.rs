@@ -8616,17 +8616,17 @@ fn open_file_externally(
     #[cfg(target_os = "windows")]
     {
         let system_root = windows_system_root();
-        let mut command = tokio::process::Command::from(claurst_core::shell::start(
+        let mut shell = std::process::Command::new(
             std::path::Path::new(&system_root)
                 .join("System32")
                 .join("cmd.exe"),
-            path,
-        )?);
-        command
+        );
+        shell
             .env_clear()
             .env("SystemRoot", &system_root)
             .env("WINDIR", &system_root);
-        ExternalOpener::spawn(command)
+        let command = claurst_core::shell::start(shell, path)?;
+        ExternalOpener::spawn(tokio::process::Command::from(command))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

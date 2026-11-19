@@ -61,17 +61,37 @@ fn shell_command_passes_quotes_as_written() {
     }
 }
 
-/// `start` gets its target inside quotes, as written, and a target that
-/// would end those quotes is refused. What `start` then opens is covered by
-/// the callers' tests, in claurst-tui and claurst-mcp.
+/// `start` gets its target through a variable that `cmd.exe` expands after
+/// it has read the line, and a target that would split `start`'s argument
+/// is refused. What `start` then opens is covered by the callers' tests, in
+/// claurst-tui and claurst-mcp.
 #[test]
-fn shell_start_quotes_its_target() {
-    let shell = claurst_core::shell::start("cmd", r"C:\temp\safe & literal.txt").unwrap();
+fn shell_start_hands_over_its_target_in_a_variable() {
+    use claurst_core::shell::{start, START_TARGET_VARIABLE};
+    let target = r"C:\temp\safe & %PATH% ^ literal.txt";
+    let shell = start(std::process::Command::new("cmd"), target).unwrap();
     assert_eq!(shell.get_program(), "cmd");
+    let arguments: Vec<String> = shell
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
     assert_eq!(
-        shell.get_args().collect::<Vec<_>>(),
-        [r#"/C "start "" "C:\temp\safe & literal.txt"""#]
+        arguments,
+        [format!(
+            r#"/V:ON /C "start "" "!{START_TARGET_VARIABLE}!"""#
+        )]
     );
-    let error = claurst_core::shell::start("cmd", r#"x" & echo injected & ""#).unwrap_err();
+    assert_eq!(
+        shell.get_envs().collect::<Vec<_>>(),
+        [(
+            std::ffi::OsStr::new(START_TARGET_VARIABLE),
+            Some(std::ffi::OsStr::new(target))
+        )]
+    );
+    let error = start(
+        std::process::Command::new("cmd"),
+        r#"x" & echo injected & ""#,
+    )
+    .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }

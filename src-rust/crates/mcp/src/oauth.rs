@@ -890,7 +890,7 @@ pub fn initiate_xaa_login(server_name: &str, idp_url: &str) -> std::io::Result<X
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        claurst_core::shell::start("cmd", url)?.status()?;
+        claurst_core::shell::start(std::process::Command::new("cmd"), url)?.status()?;
     }
     #[cfg(target_os = "macos")]
     {

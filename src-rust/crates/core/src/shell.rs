@@ -25,7 +25,10 @@ use std::process::Command;
 pub fn command(line: &str) -> Command {
     #[cfg(windows)]
     {
-        cmd_c("cmd".as_ref(), line.as_ref())
+        use std::os::windows::process::CommandExt;
+        let mut shell = Command::new("cmd");
+        shell.raw_arg(format!("/C \"{line}\""));
+        shell
     }
     #[cfg(not(windows))]
     {
@@ -35,26 +38,34 @@ pub fn command(line: &str) -> Command {
     }
 }
 
-/// A command that opens `target`, a file or a URL, with the program Windows
-/// associates with it: `cmd` (a `cmd.exe`) runs `start "" "<target>"`.
-///
-/// The line reaches `cmd.exe` as [`command`] hands it over, so the quotes
-/// around `target` arrive as written (#517) and `cmd.exe` reads a space,
-/// `&`, `|`, `<`, `>` or `^` in it as text. `start` takes the first quoted
-/// argument as a window title, hence the empty one.
-///
-/// A target with a `"` in it is refused with `InvalidInput`: it would end
-/// the quoting, and what followed would be read as commands. Windows paths
-/// cannot contain one, and `url::Url` writes it percent-encoded. `cmd.exe`
-/// still expands `%NAME%` when `NAME` is a set environment variable.
-///
-/// Add no arguments to the returned command.
+/// The variable through which [`start`] hands `cmd.exe` its target.
 #[cfg(windows)]
-pub fn start(
-    cmd: impl AsRef<std::ffi::OsStr>,
-    target: impl AsRef<std::ffi::OsStr>,
-) -> std::io::Result<Command> {
-    use std::os::windows::ffi::OsStrExt;
+pub const START_TARGET_VARIABLE: &str = "COVEN_CODE_START_TARGET";
+
+/// Opens `target`, a file or a URL, with the program Windows associates
+/// with it: `shell`, a `cmd.exe` with its environment already set, runs
+/// `start "" "<target>"` (#517).
+///
+/// The target is not written into the command line. `cmd.exe` replaces
+/// `%NAME%` there with a variable's value before it reads quotes, and a
+/// value can hold a `"`, which would end the quoting and let what follows
+/// run as commands. Instead the line is `start "" "!VARIABLE!"`, appended
+/// as written like [`command`]'s, with delayed expansion on (`/V:ON`) and
+/// the target in [`START_TARGET_VARIABLE`]. `cmd.exe` puts that value in
+/// after it has split the line into commands and expanded `%NAME%`, and
+/// scans it for neither. `start` takes the first quoted argument as a
+/// window title, hence the empty one. The opened program inherits the
+/// variable.
+///
+/// A target with a `"` in it is refused with `InvalidInput`, because
+/// `start` would split it there. Windows paths cannot contain one, and
+/// `url::Url` writes it percent-encoded.
+///
+/// Add no arguments to the returned command, and do not clear its
+/// environment.
+#[cfg(windows)]
+pub fn start(mut shell: Command, target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<Command> {
+    use std::os::windows::{ffi::OsStrExt, process::CommandExt};
     let target = target.as_ref();
     if target.encode_wide().any(|unit| unit == u16::from(b'"')) {
         return Err(std::io::Error::new(
@@ -62,22 +73,10 @@ pub fn start(
             "a target to open contains a double quote",
         ));
     }
-    let mut line = std::ffi::OsString::from("start \"\" \"");
-    line.push(target);
-    line.push("\"");
-    Ok(cmd_c(cmd.as_ref(), &line))
-}
-
-/// `program /C "<line>"`, with `line` appended as written.
-#[cfg(windows)]
-fn cmd_c(program: &std::ffi::OsStr, line: &std::ffi::OsStr) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut argument = std::ffi::OsString::from("/C \"");
-    argument.push(line);
-    argument.push("\"");
-    let mut shell = Command::new(program);
-    shell.raw_arg(argument);
-    shell
+    shell.env(START_TARGET_VARIABLE, target).raw_arg(format!(
+        "/V:ON /C \"start \"\" \"!{START_TARGET_VARIABLE}!\"\""
+    ));
+    Ok(shell)
 }
 
 #[cfg(all(test, unix))]
