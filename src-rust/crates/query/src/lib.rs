@@ -30,9 +30,10 @@ pub use command_queue::{drain_command_queue, CommandPriority, CommandQueue, Queu
 pub use compact::{
     auto_compact_if_needed, calculate_messages_to_keep_index, calculate_token_warning_state,
     compact_conversation, context_collapse, context_window_for_model, format_compact_summary,
-    get_compact_prompt, group_messages_for_compact, micro_compact_if_needed, reactive_compact,
-    should_auto_compact, should_compact, should_context_collapse, snip_compact, AutoCompactState,
-    CompactResult, CompactTrigger, MessageGroup, MicroCompactConfig, TokenWarningState,
+    get_compact_prompt, group_messages_for_compact, has_messages_to_compact,
+    micro_compact_if_needed, reactive_compact, should_auto_compact, should_compact,
+    should_context_collapse, snip_compact, AutoCompactOutcome, AutoCompactState, CompactResult,
+    CompactTrigger, MessageGroup, MicroCompactConfig, TokenWarningState,
 };
 pub use cron_scheduler::start_cron_scheduler;
 pub use goal_loop::{
@@ -3600,8 +3601,6 @@ async fn run_query_loop_inner(
             }
         } else if stop == "end_turn" || stop == "tool_use" {
             // Proactive auto-compact (original path, used when reactive compact is off).
-            let compaction_required =
-                compact::should_auto_compact(usage.input_tokens, &config.model, &compact_state);
             let original_messages = messages.clone();
             let compaction_result = {
                 let compaction = compact::auto_compact_if_needed(
@@ -3631,7 +3630,7 @@ async fn run_query_loop_inner(
                     .await;
                     return QueryOutcome::Cancelled;
                 }
-                Some(Some(new_messages)) => {
+                Some(compact::AutoCompactOutcome::Compacted(new_messages)) => {
                     require_goal_work!(assistant_msg);
                     *messages = new_messages;
                     if let Some(ref tx) = event_tx {
@@ -3642,7 +3641,7 @@ async fn run_query_loop_inner(
                             .await;
                     }
                 }
-                Some(None) if compaction_required => {
+                Some(compact::AutoCompactOutcome::Failed) => {
                     *messages = original_messages;
                     require_goal_work!(assistant_msg);
                     finalize_terminal_assistant_with_unexecuted_tool_results(
@@ -3658,7 +3657,13 @@ async fn run_query_loop_inner(
                         "Auto-compaction failed after a completed response".to_string(),
                     ));
                 }
-                Some(None) => {}
+                // Over the threshold with too few messages to summarise
+                // (#571): nothing changed, so nothing is reported and the
+                // turn goes on exactly as below the threshold.
+                Some(
+                    compact::AutoCompactOutcome::NotNeeded
+                    | compact::AutoCompactOutcome::NothingToCompact,
+                ) => {}
             }
         }
 

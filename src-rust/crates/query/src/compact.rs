@@ -684,18 +684,26 @@ async fn summarise_head(
     Ok(new_messages)
 }
 
-/// Compact `messages` in-place, replacing the head with a summary.
-/// Returns the new messages vector on success.
+/// Whether `messages` has a head for `compact_conversation` to summarise. It
+/// keeps the last `KEEP_RECENT_MESSAGES` as they are, so a history of one more
+/// than that, or fewer, has nothing to compact however many tokens it holds.
+pub fn has_messages_to_compact(messages: &[Message]) -> bool {
+    messages.len() > KEEP_RECENT_MESSAGES + 1
+}
+
+/// Compact `messages`, replacing the head with a summary.
+/// Returns the new history, or `None` when there is nothing to compact
+/// (see `has_messages_to_compact`); no request is sent then.
 pub async fn compact_conversation(
     client: &claurst_api::AnthropicClient,
     messages: &[Message],
     model: &str,
-) -> Result<Vec<Message>, ClaudeError> {
+) -> Result<Option<Vec<Message>>, ClaudeError> {
     let total = messages.len();
 
-    if total <= KEEP_RECENT_MESSAGES + 1 {
+    if !has_messages_to_compact(messages) {
         debug!(total, "Too few messages to compact – keeping everything");
-        return Ok(messages.to_vec());
+        return Ok(None);
     }
 
     // Split: summarise everything except the most recent KEEP_RECENT_MESSAGES.
@@ -709,20 +717,36 @@ pub async fn compact_conversation(
     );
 
     // Use a generous token budget for the summary (20k mirrors TypeScript MAX_OUTPUT_TOKENS_FOR_SUMMARY)
-    summarise_head(client, messages, split_at, model, 20_000).await
+    summarise_head(client, messages, split_at, model, 20_000)
+        .await
+        .map(Some)
+}
+
+/// What `auto_compact_if_needed` did.
+#[derive(Debug)]
+pub enum AutoCompactOutcome {
+    /// Usage is below the threshold, or the circuit breaker is open.
+    NotNeeded,
+    /// The head was summarised; this is the new history.
+    Compacted(Vec<Message>),
+    /// Usage is over the threshold, but the history is too short to have a
+    /// head to summarise. Nothing was sent; it is neither a success nor a
+    /// failure for the circuit breaker.
+    NothingToCompact,
+    /// Compaction was needed and failed; counted toward the circuit breaker.
+    Failed,
 }
 
 /// Auto-compact `messages` if needed.  Updates `state` in place.
-/// Returns `Some(new_messages)` if compaction ran, `None` otherwise.
 pub async fn auto_compact_if_needed(
     client: &claurst_api::AnthropicClient,
     messages: &[Message],
     input_tokens: u64,
     model: &str,
     state: &mut AutoCompactState,
-) -> Option<Vec<Message>> {
+) -> AutoCompactOutcome {
     if !should_auto_compact(input_tokens, model, state) {
-        return None;
+        return AutoCompactOutcome::NotNeeded;
     }
 
     info!(
@@ -733,19 +757,20 @@ pub async fn auto_compact_if_needed(
     );
 
     match compact_conversation(client, messages, model).await {
-        Ok(new_msgs) => {
+        Ok(Some(new_msgs)) => {
             state.on_success();
             info!(
                 original_count = messages.len(),
                 new_count = new_msgs.len(),
                 "Auto-compact complete"
             );
-            Some(new_msgs)
+            AutoCompactOutcome::Compacted(new_msgs)
         }
+        Ok(None) => AutoCompactOutcome::NothingToCompact,
         Err(e) => {
             warn!(error = %e, "Auto-compact failed");
             state.on_failure();
-            None
+            AutoCompactOutcome::Failed
         }
     }
 }
@@ -1508,11 +1533,24 @@ mod tests {
             .map(|i| Message::user(format!("message {i}")))
             .collect();
         let mut state = AutoCompactState::default();
-        let _outcome =
+        let outcome =
             auto_compact_if_needed(&client, &messages, 190_000, "claude-sonnet-4-6", &mut state)
                 .await;
+        assert!(
+            matches!(outcome, AutoCompactOutcome::NothingToCompact),
+            "{outcome:?}"
+        );
         assert_eq!(state.compaction_count, 0, "nothing was compacted");
         assert_eq!(state.consecutive_failures, 0, "no request was sent");
+        assert!(matches!(
+            compact_conversation(&client, &messages, "claude-sonnet-4-6").await,
+            Ok(None)
+        ));
+        assert!(!has_messages_to_compact(&messages));
+        let one_more: Vec<_> = (0..=KEEP_RECENT_MESSAGES + 1)
+            .map(|i| Message::user(format!("message {i}")))
+            .collect();
+        assert!(has_messages_to_compact(&one_more));
     }
 
     #[tokio::test]
@@ -1530,7 +1568,9 @@ mod tests {
                     .collect();
                 let config = crate::QueryConfig::default();
                 let result = match flow {
-                    "proactive" => compact_conversation(&client, &messages, &config.model).await,
+                    "proactive" => compact_conversation(&client, &messages, &config.model)
+                        .await
+                        .map(|compacted| compacted.expect("12 messages have a head")),
                     "reactive" => reactive_compact(
                         messages.clone(),
                         &client,
