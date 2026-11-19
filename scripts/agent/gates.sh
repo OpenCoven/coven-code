@@ -28,7 +28,8 @@
 #   RUSTUP_HOME, CARGO_HOME  ($HOME/.rustup, $HOME/.cargo) kept for the test
 #                     gates, which run with a scratch HOME under <outdir>
 #   RUSTUP            rustup binary (rustup on PATH, else $CARGO_HOME/bin/rustup)
-#   ONLY_TESTS=1      run only the test and alloc gates
+#   GATES_ONLY_TESTS=1  run only the test and alloc gates; the result line
+#                     then names the gates skipped
 #   GATES_COMPUTER_USE  1 or 0 to force the computer-use clippy gate on or off
 #                     (on when uname -s is Darwin)
 #
@@ -77,6 +78,9 @@ fi
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
+# CI sets no compiler flags; a caller's RUSTFLAGS=--cap-lints=allow would let
+# the -D warnings gates pass. Flags in $CARGO_HOME/config.toml still apply.
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS CARGO_BUILD_RUSTFLAGS
 # Colour codes would break the test-count summary.
 export CARGO_TERM_COLOR=never
 COMPUTER_USE="${GATES_COMPUTER_USE:-}"
@@ -91,9 +95,13 @@ CARGO=("$RUSTUP" run "$TOOLCHAIN" cargo)
 fingerprint() {
   {
     git -C "$WORKTREE" rev-parse HEAD
-    git -C "$WORKTREE" diff HEAD --binary
-    git -C "$WORKTREE" ls-files -o --exclude-standard
-    git -C "$WORKTREE" ls-files -o --exclude-standard | (cd "$WORKTREE" && git hash-object --stdin-paths)
+    git -C "$WORKTREE" diff HEAD --binary --no-ext-diff --no-textconv
+    # One file at a time: a path git cannot hash (a nested repository shows
+    # up as "dir/") must not hide the files listed after it.
+    git -C "$WORKTREE" ls-files -z -o --exclude-standard | while IFS= read -r -d '' path; do
+      printf '%s ' "$path"
+      git -C "$WORKTREE" hash-object -- "$path" 2>/dev/null || echo unhashable
+    done
   } 2>&1 | cksum
 }
 
@@ -143,12 +151,14 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "cd $(printf '%q' "$PWD")"
   echo "toolchain=$TOOLCHAIN CARGO_TARGET_DIR=$CARGO_TARGET_DIR CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-}"
 fi
-if [ "${ONLY_TESTS:-}" = 1 ]; then
+SKIPPED=""
+if [ "${GATES_ONLY_TESTS:-}" = 1 ]; then
+  SKIPPED="fmt check clippy clippy-computer-use"
   for gate in fmt check clippy clippy-computer-use; do
     if [ "$DRY_RUN" = 1 ]; then
-      echo "$gate: skipped (ONLY_TESTS=1)"
+      echo "$gate: skipped (GATES_ONLY_TESTS=1)"
     else
-      echo "$gate skipped (ONLY_TESTS=1)" | tee -a "$OUT/summary.txt"
+      echo "$gate skipped (GATES_ONLY_TESTS=1)" | tee -a "$OUT/summary.txt"
     fi
   done
 else
@@ -162,6 +172,7 @@ else
     echo "clippy-computer-use: skipped (not macOS; set GATES_COMPUTER_USE=1 to run it)"
   else
     echo "clippy-computer-use skipped" | tee -a "$OUT/summary.txt"
+    SKIPPED="clippy-computer-use"
   fi
 fi
 run test "${TEST_ENV[@]}" "${CARGO[@]}" test --workspace --locked --no-fail-fast
@@ -196,5 +207,5 @@ if [ "$(fingerprint)" != "$IDENTITY" ]; then
   echo "result CHANGED (the worktree's head or files changed during the run)" | tee -a "$OUT/summary.txt"
   exit 3
 fi
-echo "result pass" | tee -a "$OUT/summary.txt"
+echo "result pass${SKIPPED:+ (skipped: $SKIPPED)}" | tee -a "$OUT/summary.txt"
 exit 0

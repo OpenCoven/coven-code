@@ -47,7 +47,7 @@ class GatesDryRunTests(unittest.TestCase):
         base = {
             k: v
             for k, v in os.environ.items()
-            if k not in ("COVEN_TOOLCHAIN", "CARGO_TARGET_DIR", "ONLY_TESTS", "GATES_COMPUTER_USE")
+            if k not in ("COVEN_TOOLCHAIN", "CARGO_TARGET_DIR", "GATES_ONLY_TESTS", "GATES_COMPUTER_USE")
         }
         base.update(RUSTUP="rustup", GATES_COMPUTER_USE="1")
         base.update(env)
@@ -83,12 +83,12 @@ class GatesDryRunTests(unittest.TestCase):
         self.assertIn("CARGO_TARGET_DIR=/elsewhere/t", result.stdout)
 
     def test_only_tests_skips_fmt_check_and_clippy(self):
-        result = self.dry_run(str(self.worktree), str(self.out), ONLY_TESTS="1")
+        result = self.dry_run(str(self.worktree), str(self.out), GATES_ONLY_TESTS="1")
         gates = self.gate_lines(result.stdout)
         run = [gate for gate, command in gates.items() if not command.startswith("skipped")]
         self.assertEqual(run, ["test", "alloc"])
         self.assertEqual(
-            [gate for gate, command in gates.items() if command == "skipped (ONLY_TESTS=1)"],
+            [gate for gate, command in gates.items() if command == "skipped (GATES_ONLY_TESTS=1)"],
             ["fmt", "check", "clippy", "clippy-computer-use"],
         )
 
@@ -133,7 +133,7 @@ FAKE_RUSTUP = textwrap.dedent(
     """\
     #!/bin/sh
     # Stands in for `rustup run <toolchain> cargo <subcommand> ...`.
-    echo "$* HOME=$HOME" >> "$FAKE_CALLS"
+    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}" >> "$FAKE_CALLS"
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
@@ -172,7 +172,7 @@ class GatesRunTests(unittest.TestCase):
 
     def gates(self, **env):
         base = dict(os.environ, RUSTUP=str(self.rustup), COVEN_TOOLCHAIN="9.9.9", FAKE_CALLS=str(self.calls))
-        base.pop("ONLY_TESTS", None)
+        base.pop("GATES_ONLY_TESTS", None)
         base.update(GATES_COMPUTER_USE="1")
         base.update(env)
         return subprocess.run(
@@ -225,7 +225,7 @@ class GatesRunTests(unittest.TestCase):
         self.out.mkdir()
         (self.out / "identity.txt").write_text("head old\n")
         (self.out / "fmt.log").write_text("old\n")
-        result = self.gates(ONLY_TESTS="1")
+        result = self.gates(GATES_ONLY_TESTS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.out / "fmt.log").exists())
         self.assertTrue((self.out / "test.log").exists())
@@ -240,6 +240,18 @@ class GatesRunTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["test.log"])
         self.out.joinpath("test.log").unlink()
         self.assertEqual(self.gates().returncode, 0)
+
+    def test_untracked_nested_repo_does_not_hide_later_edits(self):
+        subprocess.run(["git", "init", "-q", str(self.worktree / "aaa")], check=True)
+        notes = self.worktree / "src-rust" / "notes.txt"
+        notes.write_text("before\n")
+        result = self.gates(FAKE_TOUCH=str(notes))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+
+    def test_caller_rustflags_are_not_passed_to_cargo(self):
+        self.assertEqual(self.gates(RUSTFLAGS="--cap-lints=allow").returncode, 0)
+        for call in self.calls.read_text().splitlines():
+            self.assertTrue(call.endswith("RUSTFLAGS=unset"), call)
 
     def test_worktree_change_during_the_run_exits_3(self):
         result = self.gates(FAKE_TOUCH=str(self.worktree / "src-rust" / "new.rs"))
@@ -258,12 +270,15 @@ class GatesRunTests(unittest.TestCase):
         self.assertEqual(self.gates().returncode, 0)
 
     def test_only_tests_runs_two_gates(self):
-        result = self.gates(ONLY_TESTS="1")
+        result = self.gates(GATES_ONLY_TESTS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([line.split()[0] for line in self.summary() if " rc=" in line], ["test", "alloc"])
-        skipped = [line for line in self.summary() if "skipped" in line]
         self.assertEqual(
-            skipped, [f"{gate} skipped (ONLY_TESTS=1)" for gate in ("fmt", "check", "clippy", "clippy-computer-use")]
+            self.summary()[-1], "result pass (skipped: fmt check clippy clippy-computer-use)"
+        )
+        skipped = [line for line in self.summary()[:-1] if "skipped" in line]
+        self.assertEqual(
+            skipped, [f"{gate} skipped (GATES_ONLY_TESTS=1)" for gate in ("fmt", "check", "clippy", "clippy-computer-use")]
         )
 
 

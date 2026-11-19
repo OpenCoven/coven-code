@@ -152,6 +152,16 @@ def evaluate(
         and number not in [pr.get("number") for pr in run["pull_requests"]]
     }
     workflow_runs = [run for run in workflow_runs if run.get("check_suite_id") not in foreign]
+    # GitHub lists every open PR whose head matches, so a run naming several
+    # cannot be told apart from another PR's run of the same workflow.
+    for run in workflow_runs:
+        numbers = sorted(pr.get("number") for pr in run.get("pull_requests") or [])
+        if len(numbers) > 1:
+            listed = ", ".join(f"#{n}" for n in numbers)
+            reasons.append(
+                f"workflow {run.get('name')} run {run.get('id')} belongs to PRs {listed} "
+                "on one head; check by hand"
+            )
     check_runs = [
         run for run in check_runs if (run.get("check_suite") or {}).get("id") not in foreign
     ]

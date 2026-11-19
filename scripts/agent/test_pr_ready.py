@@ -196,6 +196,15 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("Rust CI / Format, lint, and test: failure", result)
         self.assertIn("workflow Rust CI: failure", result)
 
+    def test_run_shared_by_several_prs_is_not_ready(self):
+        shared = [w for w in WORKFLOWS if w["id"] != 102] + [
+            dict(workflow(102, "Rust CI", 2), pull_requests=[{"number": 8}, {"number": 7}])
+        ]
+        self.assertEqual(
+            verdict(checks=[run(1, "a")], workflows=shared),
+            "NOT READY: workflow Rust CI run 102 belongs to PRs #7, #8 on one head; check by hand",
+        )
+
     def test_required_workflow_without_a_run_is_not_ready(self):
         self.assertEqual(
             verdict(checks=[run(1, "a")], required=["TUI Tests"]),
