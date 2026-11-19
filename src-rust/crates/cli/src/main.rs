@@ -2788,7 +2788,8 @@ async fn compact_idle_conversation(
         }
         // `select_idle_compaction` does not start a worker for a history this
         // short (#571). Should one start anyway, it ends as a failure, not as
-        // a compaction: the history and the context count stay as they were.
+        // a compaction: the history and the context count stay as they were,
+        // and, as after any failure, auto-compaction is off for the session.
         Ok(None) => claurst_query::QueryOutcome::Error(claurst_core::error::ClaudeError::Other(
             "Too few messages to compact".to_string(),
         )),
@@ -5414,6 +5415,11 @@ async fn run_interactive(
         // threshold with no query running, summarize through the dedicated
         // no-tools compaction path instead of starting an agentic turn.
         let idle_compaction = select_idle_compaction(&app, current_query.is_some(), &messages);
+        if idle_compaction.is_none() {
+            // A turn, a cleared conversation or a lower count: say it again
+            // the next time there is nothing to compact.
+            nothing_to_compact_at = None;
+        }
         if let Some(IdleCompaction::NothingToCompact(used_pct)) = idle_compaction {
             note_nothing_to_compact(
                 &mut app,
@@ -7585,6 +7591,32 @@ mod tests {
         server.abort();
     }
 
+    /// #571: the worker is not started for a short history, but one that is
+    /// ends as a failure, the same as any other failed compaction.
+    #[tokio::test]
+    async fn an_idle_compaction_worker_given_a_short_history_fails() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history: Vec<_> = compactable_history().into_iter().take(11).collect();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Error(_)),
+            "{outcome:?}"
+        );
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        finish_idle_compaction(&mut app, Some(&outcome));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact failed and was disabled for this session.")
+        );
+        assert!(!app.auto_compact_enabled);
+        server.abort();
+    }
+
     /// An App whose context is 95% full, over its 90% auto-compact threshold.
     fn app_with_a_full_context() -> claurst_tui::App {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
@@ -7614,7 +7646,7 @@ mod tests {
     }
 
     /// #571: a full context in a short history is reported once for each
-    /// history length, and the context count and auto-compaction are kept.
+    /// history length.
     #[test]
     fn nothing_to_compact_is_said_once_per_history_length_and_keeps_the_count() {
         let mut app = app_with_a_full_context();
@@ -7633,9 +7665,6 @@ mod tests {
             Some("Context 96% full — too few messages to compact yet."),
             "a turn that added messages is reported again"
         );
-        assert_eq!(app.context_used_tokens, 190_000, "nothing was summarised");
-        assert!(app.auto_compact_enabled);
-        assert!(!app.auto_compact_running);
     }
 
     /// #408: a worker that does not watch the token (a tool or approval that

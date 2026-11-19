@@ -30,10 +30,9 @@ pub use command_queue::{drain_command_queue, CommandPriority, CommandQueue, Queu
 pub use compact::{
     auto_compact_if_needed, calculate_messages_to_keep_index, calculate_token_warning_state,
     compact_conversation, context_collapse, context_window_for_model, format_compact_summary,
-    get_compact_prompt, group_messages_for_compact, has_messages_to_compact,
-    micro_compact_if_needed, reactive_compact, should_auto_compact, should_compact,
-    should_context_collapse, snip_compact, AutoCompactOutcome, AutoCompactState, CompactResult,
-    CompactTrigger, MessageGroup, MicroCompactConfig, TokenWarningState,
+    get_compact_prompt, group_messages_for_compact, micro_compact_if_needed, reactive_compact,
+    should_auto_compact, should_compact, should_context_collapse, snip_compact, AutoCompactState,
+    CompactResult, CompactTrigger, MessageGroup, MicroCompactConfig, TokenWarningState,
 };
 pub use cron_scheduler::start_cron_scheduler;
 pub use goal_loop::{
@@ -8008,6 +8007,26 @@ mod tests {
     /// turn ends as it would have, and no status claims a compaction.
     #[tokio::test]
     async fn a_full_window_in_a_short_history_is_not_reported_as_compacted() {
+        // The proactive path runs only with reactive compaction off.
+        let _feature_gate_lock = REACTIVE_COMPACT_FEATURE_GATE_LOCK.lock().await;
+
+        struct FeatureGateGuard {
+            prior: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for FeatureGateGuard {
+            fn drop(&mut self) {
+                match self.prior.take() {
+                    Some(value) => std::env::set_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT", value),
+                    None => std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+                }
+            }
+        }
+
+        let _feature_gate = FeatureGateGuard {
+            prior: std::env::var_os("COVEN_CODE_FEATURE_REACTIVE_COMPACT"),
+        };
+        std::env::remove_var("COVEN_CODE_FEATURE_REACTIVE_COMPACT");
         const FULL_WINDOW_SSE: &str = concat!(
             "event: message_start\n",
             "data: {\"message\":{\"id\":\"full-window\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":190000,\"output_tokens\":0}}}\n\n",
