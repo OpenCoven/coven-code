@@ -208,7 +208,7 @@ fn stream_stall_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(45)
 }
 
-fn accumulate_and_publish_anthropic_event(
+async fn accumulate_and_publish_anthropic_event(
     accumulator: &mut StreamAccumulator,
     event_tx: Option<&QueryEventSink>,
     event: AnthropicStreamEvent,
@@ -217,7 +217,7 @@ fn accumulate_and_publish_anthropic_event(
 ) -> bool {
     accumulator.on_event(&event);
     if let Some(tx) = event_tx {
-        let _ = tx.send(QueryEvent::Stream(event.clone()));
+        let _ = tx.emit(QueryEvent::Stream(event.clone())).await;
     }
 
     match event {
@@ -269,7 +269,7 @@ async fn consume_anthropic_stream(
                         event,
                         effective_model,
                         terminal_stream_error,
-                    );
+                    ).await;
                 }
 
                 return AnthropicStreamOutcome::Cancelled;
@@ -290,9 +290,14 @@ async fn consume_anthropic_stream(
                             event,
                             effective_model,
                             terminal_stream_error,
-                        ) {
+                        ).await {
                             return AnthropicStreamOutcome::Completed;
                         }
+                        // Time spent waiting for a slow consumer to take the
+                        // event is not a stalled stream.
+                        stall_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + stall_timeout);
                     }
                     None => return AnthropicStreamOutcome::PrematureEof,
                 }
@@ -301,7 +306,7 @@ async fn consume_anthropic_stream(
     }
 }
 
-fn accumulate_and_publish_provider_result(
+async fn accumulate_and_publish_provider_result(
     accumulator: &mut StreamAccumulator,
     event_tx: Option<&QueryEventSink>,
     event: Result<claurst_api::StreamEvent, claurst_api::ProviderError>,
@@ -314,7 +319,7 @@ fn accumulate_and_publish_provider_result(
             accumulator.on_provider_event(&event);
             if let Some(tx) = event_tx {
                 if let Some(event) = map_to_anthropic_event(&event) {
-                    let _ = tx.send(QueryEvent::Stream(event));
+                    let _ = tx.emit(QueryEvent::Stream(event)).await;
                 }
             }
             match event {
@@ -373,7 +378,7 @@ async fn consume_provider_stream(
                                 context.provider_id,
                                 context.model_id,
                                 context.terminal_stream_error,
-                            );
+                            ).await;
                         }
                         Some(None) | None => return ProviderStreamOutcome::Cancelled,
                     }
@@ -393,9 +398,14 @@ async fn consume_provider_stream(
                             context.provider_id,
                             context.model_id,
                             context.terminal_stream_error,
-                        ) {
+                        ).await {
                             return ProviderStreamOutcome::Completed;
                         }
+                        // Time spent waiting for a slow consumer to take the
+                        // event is not a stalled stream.
+                        stall_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + stall_timeout);
                     }
                     None => return ProviderStreamOutcome::PrematureEof,
                 }
@@ -958,26 +968,30 @@ pub enum QueryEvent {
     DurableMessage { message: Message },
 }
 
-fn emit_durable_message(event_tx: Option<&QueryEventSink>, message: &Message) {
+async fn emit_durable_message(event_tx: Option<&QueryEventSink>, message: &Message) {
     if let Some(tx) = event_tx {
-        let _ = tx.send(QueryEvent::DurableMessage {
-            message: message.clone(),
-        });
+        let _ = tx
+            .emit(QueryEvent::DurableMessage {
+                message: message.clone(),
+            })
+            .await;
     }
 }
 
-fn emit_turn_complete(
+async fn emit_turn_complete(
     event_tx: Option<&QueryEventSink>,
     turn: u32,
     stop_reason: &str,
     usage: &UsageInfo,
 ) {
     if let Some(tx) = event_tx {
-        let _ = tx.send(QueryEvent::TurnComplete {
-            turn,
-            stop_reason: stop_reason.to_string(),
-            usage: Some(usage.clone()),
-        });
+        let _ = tx
+            .emit(QueryEvent::TurnComplete {
+                turn,
+                stop_reason: stop_reason.to_string(),
+                usage: Some(usage.clone()),
+            })
+            .await;
     }
 }
 
@@ -1036,7 +1050,7 @@ async fn finalize_terminal_assistant_message(
         }
     }
     let assistant_index = sync_finalized_assistant_message(messages, assistant_msg);
-    emit_durable_message(event_tx, assistant_msg);
+    emit_durable_message(event_tx, assistant_msg).await;
     assistant_index
 }
 
@@ -1115,7 +1129,7 @@ async fn finalize_terminal_assistant_with_unexecuted_tool_results(
         assistant_msg,
         reason,
     ) {
-        emit_durable_message(event_tx, &tool_result_message);
+        emit_durable_message(event_tx, &tool_result_message).await;
     }
 }
 
@@ -1888,9 +1902,11 @@ async fn run_query_loop_inner(
     if let Err(error) = turn_ctx.goal_turn.capture(&turn_ctx.session_id) {
         warn!(%error, "Could not capture goal turn");
         if let Some(tx) = &event_tx {
-            let _ = tx.send(QueryEvent::Status(format!(
-                "Goal error: could not capture turn: {error}"
-            )));
+            let _ = tx
+                .emit(QueryEvent::Status(format!(
+                    "Goal error: could not capture turn: {error}"
+                )))
+                .await;
         }
         return QueryOutcome::Error(ClaudeError::Api(format!("Goal authority failed: {error}")));
     }
@@ -2060,10 +2076,12 @@ async fn run_query_loop_inner(
         if turn >= budget.max_turns.get() {
             info!(turns = turn, "Model-round budget exhausted");
             if let Some(tx) = &event_tx {
-                let _ = tx.send(QueryEvent::Status(format!(
-                    "Model-round budget exhausted ({turn}/{}); work is unfinished.",
-                    budget.max_turns
-                )));
+                let _ = tx
+                    .emit(QueryEvent::Status(format!(
+                        "Model-round budget exhausted ({turn}/{}); work is unfinished.",
+                        budget.max_turns
+                    )))
+                    .await;
             }
             return QueryOutcome::TurnBudgetExhausted {
                 budget,
@@ -2112,10 +2130,12 @@ async fn run_query_loop_inner(
                     truncated
                 );
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(QueryEvent::Status(format!(
-                        "[{} older tool result(s) truncated to save context]",
-                        truncated
-                    )));
+                    let _ = tx
+                        .emit(QueryEvent::Status(format!(
+                            "[{} older tool result(s) truncated to save context]",
+                            truncated
+                        )))
+                        .await;
                 }
             }
         }
@@ -2414,7 +2434,7 @@ async fn run_query_loop_inner(
                         use claurst_core::sample_spinner_verb;
                         let seed = provider_id_str.len() ^ model_id_str.len();
                         let verb = sample_spinner_verb(seed);
-                        let _ = tx.send(QueryEvent::Status(format!("✳ {}…", verb)));
+                        let _ = tx.emit(QueryEvent::Status(format!("✳ {}…", verb))).await;
                     }
 
                     // Build ProviderRequest from the already-assembled request data.
@@ -2655,10 +2675,12 @@ async fn run_query_loop_inner(
                             let spent = cost_tracker.total_cost_usd();
                             if spent >= limit {
                                 if let Some(ref tx) = event_tx {
-                                    let _ = tx.send(QueryEvent::Status(format!(
+                                    let _ = tx
+                                        .emit(QueryEvent::Status(format!(
                                         "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
                                         limit, spent
-                                    )));
+                                    )))
+                                        .await;
                                 }
                                 return QueryOutcome::BudgetExceeded {
                                     cost_usd: spent,
@@ -2673,7 +2695,7 @@ async fn run_query_loop_inner(
                             return QueryOutcome::Error(ClaudeError::Api("Completed goal permits only a final response; tool calls were not executed".into()));
                         }
                         if stop_str == "end_turn" || stop_str == "stop_sequence" {
-                            emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
+                            emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage).await;
                             return QueryOutcome::EndTurn {
                                 message: assistant_msg,
                                 usage,
@@ -2707,10 +2729,12 @@ async fn run_query_loop_inner(
                         retries_left -= 1;
                         warn!(provider = %provider_id_str, model = %model_id_str, retries_left, "Provider stream stalled — retrying");
                         if let Some(ref tx) = event_tx {
-                            let _ = tx.send(QueryEvent::Status(format!(
-                                "No response for 45s — retrying ({} left)…",
-                                retries_left + 1
-                            )));
+                            let _ = tx
+                                .emit(QueryEvent::Status(format!(
+                                    "No response for 45s — retrying ({} left)…",
+                                    retries_left + 1
+                                )))
+                                .await;
                         }
                         continue;
                     }
@@ -2762,10 +2786,12 @@ async fn run_query_loop_inner(
                         let spent = cost_tracker.total_cost_usd();
                         if spent >= limit {
                             if let Some(ref tx) = event_tx {
-                                let _ = tx.send(QueryEvent::Status(format!(
-                                    "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
-                                    limit, spent
-                                )));
+                                let _ = tx
+                                    .emit(QueryEvent::Status(format!(
+                                        "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
+                                        limit, spent
+                                    )))
+                                    .await;
                             }
                             finalize_terminal_assistant_with_unexecuted_tool_results(
                                 messages,
@@ -2812,9 +2838,11 @@ async fn run_query_loop_inner(
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             if let Some(ref tx) = event_tx {
-                                let _ = tx.send(QueryEvent::Status(
-                                    "PostModelTurn hook vetoed continuation.".to_string(),
-                                ));
+                                let _ = tx
+                                    .emit(QueryEvent::Status(
+                                        "PostModelTurn hook vetoed continuation.".to_string(),
+                                    ))
+                                    .await;
                             }
                             finalize_terminal_assistant_with_unexecuted_tool_results(
                                 messages,
@@ -2898,7 +2926,7 @@ async fn run_query_loop_inner(
                     // block presence is authoritative here, but execution must still
                     // enforce PreToolUse/plugin policy and emit post-hook events.
                     if !tool_use_blocks.is_empty() {
-                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        emit_durable_message(event_tx.as_ref(), &assistant_msg).await;
                         let tool_results = execute_tool_blocks_with_hooks(
                             tool_use_blocks,
                             tools,
@@ -2915,7 +2943,7 @@ async fn run_query_loop_inner(
                             snapshot_patch: None,
                         };
                         messages.push(tool_result_message.clone());
-                        emit_durable_message(event_tx.as_ref(), &tool_result_message);
+                        emit_durable_message(event_tx.as_ref(), &tool_result_message).await;
                         if cancel_token.is_cancelled() {
                             return QueryOutcome::Cancelled;
                         }
@@ -2950,14 +2978,16 @@ async fn run_query_loop_inner(
                             "end_turn with announced-but-unexecuted work — injecting continuation nudge"
                         );
                         if let Some(ref tx) = event_tx {
-                            let _ = tx.send(QueryEvent::Status(format!(
-                                "Model announced work but ended the turn — nudging it to \
+                            let _ = tx
+                                .emit(QueryEvent::Status(format!(
+                                    "Model announced work but ended the turn — nudging it to \
                                  continue (attempt {}/{})",
-                                stall_recovery_count, STALL_RECOVERY_LIMIT
-                            )));
+                                    stall_recovery_count, STALL_RECOVERY_LIMIT
+                                )))
+                                .await;
                         }
                         if sampled_attempt_has_material(&assistant_msg) {
-                            emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                            emit_durable_message(event_tx.as_ref(), &assistant_msg).await;
                         } else {
                             messages.retain(|message| message.uuid != assistant_msg.uuid);
                         }
@@ -2978,14 +3008,16 @@ async fn run_query_loop_inner(
                             stop_str
                         );
                         if let Some(ref tx) = event_tx {
-                            let _ = tx.send(QueryEvent::Stream(
-                                AnthropicStreamEvent::ContentBlockDelta {
-                                    index: 0,
-                                    delta: claurst_api::streaming::ContentDelta::TextDelta {
-                                        text: placeholder.clone(),
+                            let _ = tx
+                                .emit(QueryEvent::Stream(
+                                    AnthropicStreamEvent::ContentBlockDelta {
+                                        index: 0,
+                                        delta: claurst_api::streaming::ContentDelta::TextDelta {
+                                            text: placeholder.clone(),
+                                        },
                                     },
-                                },
-                            ));
+                                ))
+                                .await;
                         }
                         if let claurst_core::types::MessageContent::Blocks(ref mut blocks) =
                             assistant_msg.content
@@ -3010,7 +3042,7 @@ async fn run_query_loop_inner(
                     .await;
 
                     if !(stalled_announcement && stall_recovery_count >= STALL_RECOVERY_LIMIT) {
-                        emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage);
+                        emit_turn_complete(event_tx.as_ref(), turn, &stop_str, &usage).await;
                     }
                     if stalled_announcement && stall_recovery_count >= STALL_RECOVERY_LIMIT {
                         return QueryOutcome::Error(ClaudeError::Api(format!(
@@ -3093,10 +3125,12 @@ async fn run_query_loop_inner(
                             "Primary model unavailable — switching to fallback"
                         );
                         if let Some(ref tx) = event_tx {
-                            let _ = tx.send(QueryEvent::Status(format!(
-                                "Model unavailable — switching to fallback ({})",
-                                fb
-                            )));
+                            let _ = tx
+                                .emit(QueryEvent::Status(format!(
+                                    "Model unavailable — switching to fallback ({})",
+                                    fb
+                                )))
+                                .await;
                         }
                         effective_model = fb.clone();
                         used_fallback = true;
@@ -3208,10 +3242,12 @@ async fn run_query_loop_inner(
                 let spent = cost_tracker.total_cost_usd();
                 if spent >= limit {
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::Status(format!(
-                            "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
-                            limit, spent
-                        )));
+                        let _ = tx
+                            .emit(QueryEvent::Status(format!(
+                                "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
+                                limit, spent
+                            )))
+                            .await;
                     }
                     return QueryOutcome::BudgetExceeded {
                         cost_usd: spent,
@@ -3229,7 +3265,7 @@ async fn run_query_loop_inner(
                 ));
             }
             if stop_str == "end_turn" || stop_str == "stop_sequence" {
-                emit_turn_complete(event_tx.as_ref(), turn, stop_str, &usage);
+                emit_turn_complete(event_tx.as_ref(), turn, stop_str, &usage).await;
                 return QueryOutcome::EndTurn {
                     message: assistant_msg,
                     usage,
@@ -3260,10 +3296,12 @@ async fn run_query_loop_inner(
             retries_left -= 1;
             warn!(model = %effective_model, retries_left, "Stream stalled — retrying request");
             if let Some(ref tx) = event_tx {
-                let _ = tx.send(QueryEvent::Status(format!(
-                    "No response for 45s — retrying ({} left)…",
-                    retries_left + 1
-                )));
+                let _ = tx
+                    .emit(QueryEvent::Status(format!(
+                        "No response for 45s — retrying ({} left)…",
+                        retries_left + 1
+                    )))
+                    .await;
             }
             continue;
         }
@@ -3317,10 +3355,12 @@ async fn run_query_loop_inner(
             let spent = cost_tracker.total_cost_usd();
             if spent >= limit {
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(QueryEvent::Status(format!(
-                        "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
-                        limit, spent
-                    )));
+                    let _ = tx
+                        .emit(QueryEvent::Status(format!(
+                            "Budget limit ${:.4} exceeded (spent ${:.4}) — stopping.",
+                            limit, spent
+                        )))
+                        .await;
                 }
                 finalize_terminal_assistant_with_unexecuted_tool_results(
                     messages,
@@ -3365,9 +3405,11 @@ async fn run_query_loop_inner(
                         .collect::<Vec<_>>()
                         .join("\n");
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::Status(
-                            "PostModelTurn hook vetoed continuation.".to_string(),
-                        ));
+                        let _ = tx
+                            .emit(QueryEvent::Status(
+                                "PostModelTurn hook vetoed continuation.".to_string(),
+                            ))
+                            .await;
                     }
                     finalize_terminal_assistant_with_unexecuted_tool_results(
                         messages,
@@ -3403,10 +3445,12 @@ async fn run_query_loop_inner(
                 if let Some(ref tx) = event_tx {
                     let window = compact::context_window_for_model(&config.model);
                     let pct_used = usage.input_tokens as f64 / window as f64;
-                    let _ = tx.send(QueryEvent::TokenWarning {
-                        state: warning_state,
-                        pct_used,
-                    });
+                    let _ = tx
+                        .emit(QueryEvent::TokenWarning {
+                            state: warning_state,
+                            pct_used,
+                        })
+                        .await;
                 }
             }
         }
@@ -3430,9 +3474,11 @@ async fn run_query_loop_inner(
             let context_limit = compact::context_window_for_model(&config.model);
             if compact::should_context_collapse(usage.input_tokens, context_limit) {
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(QueryEvent::Status(
-                        "Compacting context... (emergency collapse)".to_string(),
-                    ));
+                    let _ = tx
+                        .emit(QueryEvent::Status(
+                            "Compacting context... (emergency collapse)".to_string(),
+                        ))
+                        .await;
                 }
                 let original_messages = std::mem::take(messages);
                 let collapse_result = {
@@ -3492,7 +3538,9 @@ async fn run_query_loop_inner(
                 }
             } else if compact::should_compact(usage.input_tokens, context_limit) {
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(QueryEvent::Status("Compacting context...".to_string()));
+                    let _ = tx
+                        .emit(QueryEvent::Status("Compacting context...".to_string()))
+                        .await;
                 }
                 let original_messages = std::mem::take(messages);
                 match compact::reactive_compact(
@@ -3587,9 +3635,11 @@ async fn run_query_loop_inner(
                     require_goal_work!(assistant_msg);
                     *messages = new_messages;
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::Status(
-                            "Context compacted to stay within limits.".to_string(),
-                        ));
+                        let _ = tx
+                            .emit(QueryEvent::Status(
+                                "Context compacted to stay within limits.".to_string(),
+                            ))
+                            .await;
                     }
                 }
                 Some(None) if compaction_required => {
@@ -3661,18 +3711,20 @@ async fn run_query_loop_inner(
                         "end_turn with announced-but-unexecuted work — injecting continuation nudge"
                     );
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::Status(format!(
-                            "Model announced work but ended the turn — nudging it to continue \
+                        let _ = tx
+                            .emit(QueryEvent::Status(format!(
+                                "Model announced work but ended the turn — nudging it to continue \
                              (attempt {}/{})",
-                            stall_recovery_count, STALL_RECOVERY_LIMIT
-                        )));
+                                stall_recovery_count, STALL_RECOVERY_LIMIT
+                            )))
+                            .await;
                     }
                     // The stalled assistant message is already in the history,
                     // so the nudge reads in context. Stop hooks are not fired:
                     // the turn is not over.
                     sync_finalized_assistant_message(messages, &assistant_msg);
                     if sampled_attempt_has_material(&assistant_msg) {
-                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        emit_durable_message(event_tx.as_ref(), &assistant_msg).await;
                     } else {
                         messages.retain(|message| message.uuid != assistant_msg.uuid);
                     }
@@ -3694,88 +3746,74 @@ async fn run_query_loop_inner(
 
                 // Asynchronously extract and persist session memories if warranted.
                 // Runs in a detached Tokio task so it doesn't block the query loop.
-                if session_memory::SessionMemoryExtractor::should_extract(messages) {
+                //
+                // Only the direct Anthropic path reaches this point (provider
+                // dispatch returns from its own branch), so `client` is the
+                // client this turn was sent through. Extraction reuses it and
+                // sends the transcript to the same endpoint with the same
+                // credentials, never to a default endpoint. Without a
+                // credential it does not run.
+                if session_memory::SessionMemoryExtractor::should_extract(messages)
+                    && !client.api_key_is_empty()
+                {
                     let model_clone = config.model.clone();
                     let messages_clone = messages.clone();
                     let working_dir_clone = tool_ctx.working_dir.clone();
                     let runtime_mode = tool_ctx.config.runtime_mode();
                     let hosted_review_config = tool_ctx.config.hosted_review.clone();
                     let session_id_clone = tool_ctx.session_id.clone();
-
-                    // Build a fresh client using the same API key.  This avoids
-                    // requiring an Arc in the existing run_query_loop signature.
-                    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-                        if !api_key.is_empty() {
-                            if let Ok(sm_client) = claurst_api::AnthropicClient::new(
-                                claurst_api::client::ClientConfig {
-                                    api_key,
-                                    ..Default::default()
-                                },
-                            ) {
-                                let background_goal = tool_ctx.goal_turn.for_background_work();
-                                let sm_client = match background_goal.captured() {
-                                    Some(turn) => {
-                                        sm_client.for_goal_turn(turn, GoalTurnPermission::Work)
-                                    }
-                                    None => sm_client,
-                                };
-                                let sm_client = std::sync::Arc::new(sm_client);
-                                tokio::spawn(async move {
-                                    if background_goal.require_work(&session_id_clone).is_err() {
-                                        return;
-                                    }
-                                    let memory_provenance = build_session_memory_provenance(
-                                        &session_id_clone,
+                    let background_goal = tool_ctx.goal_turn.for_background_work();
+                    let sm_client = match background_goal.captured() {
+                        Some(turn) => client.for_goal_turn(turn, GoalTurnPermission::Work),
+                        None => client.clone(),
+                    };
+                    tokio::spawn(async move {
+                        if background_goal.require_work(&session_id_clone).is_err() {
+                            return;
+                        }
+                        let memory_provenance =
+                            build_session_memory_provenance(&session_id_clone, &working_dir_clone);
+                        let extractor = session_memory::SessionMemoryExtractor::new(&model_clone);
+                        match extractor
+                            .extract(&messages_clone, &working_dir_clone, &sm_client)
+                            .await
+                        {
+                            Ok(memories) if !memories.is_empty() => {
+                                if background_goal.require_work(&session_id_clone).is_err() {
+                                    return;
+                                }
+                                let target =
+                                    working_dir_clone.join(".coven-code").join("AGENTS.md");
+                                let candidate_store =
+                                    session_memory::MemoryCandidateStore::for_working_dir(
                                         &working_dir_clone,
                                     );
-                                    let extractor =
-                                        session_memory::SessionMemoryExtractor::new(&model_clone);
-                                    match extractor
-                                        .extract(&messages_clone, &working_dir_clone, &sm_client)
-                                        .await
-                                    {
-                                        Ok(memories) if !memories.is_empty() => {
-                                            if background_goal
-                                                .require_work(&session_id_clone)
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                            let target = working_dir_clone
-                                                .join(".coven-code")
-                                                .join("AGENTS.md");
-                                            let candidate_store =
-                                                session_memory::MemoryCandidateStore::for_working_dir(
-                                                    &working_dir_clone,
-                                                );
-                                            if let Err(e) = session_memory::SessionMemoryExtractor::persist_with_policy(
-                                                &memories,
-                                                &target,
-                                                &candidate_store,
-                                                runtime_mode,
-                                                &hosted_review_config,
-                                                &memory_provenance,
-                                            )
-                                            .await
-                                            {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    "Failed to store session memories"
-                                                );
-                                            }
-                                        }
-                                        Ok(_) => {} // no memories extracted
-                                        Err(e) => {
-                                            tracing::debug!(
-                                                error = %e,
-                                                "Session memory extraction failed (non-fatal)"
-                                            );
-                                        }
-                                    }
-                                });
+                                if let Err(e) =
+                                    session_memory::SessionMemoryExtractor::persist_with_policy(
+                                        &memories,
+                                        &target,
+                                        &candidate_store,
+                                        runtime_mode,
+                                        &hosted_review_config,
+                                        &memory_provenance,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to store session memories"
+                                    );
+                                }
+                            }
+                            Ok(_) => {} // no memories extracted
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = %e,
+                                    "Session memory extraction failed (non-fatal)"
+                                );
                             }
                         }
-                    }
+                    });
                 }
 
                 // Trigger AutoDream consolidation check (non-blocking, best-effort).
@@ -3861,7 +3899,7 @@ async fn run_query_loop_inner(
                 if !stall_recovery_exhausted
                     && should_emit_turn_complete(stop, max_tokens_recovery_count, false)
                 {
-                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage).await;
                 }
 
                 if stall_recovery_exhausted {
@@ -3888,17 +3926,19 @@ async fn run_query_loop_inner(
                         MAX_TOKENS_RECOVERY_LIMIT,
                     );
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(QueryEvent::Status(format!(
-                            "Output token limit hit — continuing (attempt {}/{})",
-                            max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
-                        )));
+                        let _ = tx
+                            .emit(QueryEvent::Status(format!(
+                                "Output token limit hit — continuing (attempt {}/{})",
+                                max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
+                            )))
+                            .await;
                     }
                     // Preserve sampled material for the continuation without
                     // manufacturing an empty durable assistant for a retry.
                     if sampled_attempt_has_material(&assistant_msg) {
                         let assistant_index =
                             sync_finalized_assistant_message(messages, &assistant_msg);
-                        emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                        emit_durable_message(event_tx.as_ref(), &assistant_msg).await;
                         if let Some(tool_result_message) =
                             insert_unexecuted_tool_result_after_assistant(
                                 messages,
@@ -3907,7 +3947,7 @@ async fn run_query_loop_inner(
                                 "maximum output tokens were reached",
                             )
                         {
-                            emit_durable_message(event_tx.as_ref(), &tool_result_message);
+                            emit_durable_message(event_tx.as_ref(), &tool_result_message).await;
                         }
                     } else {
                         messages.retain(|message| message.uuid != assistant_msg.uuid);
@@ -3930,7 +3970,7 @@ async fn run_query_loop_inner(
                 )
                 .await;
                 if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
-                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage).await;
                 }
                 return QueryOutcome::MaxTokens {
                     partial_message: assistant_msg,
@@ -3973,7 +4013,7 @@ async fn run_query_loop_inner(
                     })
                     .collect();
                 sync_finalized_assistant_message(messages, &assistant_msg);
-                emit_durable_message(event_tx.as_ref(), &assistant_msg);
+                emit_durable_message(event_tx.as_ref(), &assistant_msg).await;
                 let result_blocks = execute_tool_blocks_with_hooks(
                     tool_invocations,
                     tools,
@@ -3986,7 +4026,7 @@ async fn run_query_loop_inner(
                 // Append tool results as a user message
                 let tool_result_message = Message::user_blocks(result_blocks);
                 messages.push(tool_result_message.clone());
-                emit_durable_message(event_tx.as_ref(), &tool_result_message);
+                emit_durable_message(event_tx.as_ref(), &tool_result_message).await;
                 if cancel_token.is_cancelled() {
                     return QueryOutcome::Cancelled;
                 }
@@ -4013,7 +4053,7 @@ async fn run_query_loop_inner(
                 )
                 .await;
                 if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
-                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage).await;
                 }
                 return QueryOutcome::EndTurn {
                     message: assistant_msg,
@@ -4031,7 +4071,7 @@ async fn run_query_loop_inner(
                 )
                 .await;
                 if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
-                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage).await;
                 }
                 return QueryOutcome::Error(ClaudeError::Api(
                     "Provider content filter blocked the response".to_string(),
@@ -4056,7 +4096,7 @@ async fn run_query_loop_inner(
                 )
                 .await;
                 if should_emit_turn_complete(stop, max_tokens_recovery_count, false) {
-                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage);
+                    emit_turn_complete(event_tx.as_ref(), turn, stop, &usage).await;
                 }
                 return QueryOutcome::Error(ClaudeError::Api(format!(
                     "Provider returned unsupported stop reason '{other}'"
@@ -4111,11 +4151,13 @@ async fn execute_tool_blocks_with_hooks(
             continue;
         }
         if let Some(tx) = event_tx {
-            let _ = tx.send(QueryEvent::ToolStart {
-                tool_name: name.clone(),
-                tool_id: id.clone(),
-                input_json: input.to_string(),
-            });
+            let _ = tx
+                .emit(QueryEvent::ToolStart {
+                    tool_name: name.clone(),
+                    tool_id: id.clone(),
+                    input_json: input.to_string(),
+                })
+                .await;
         }
 
         let hook_ctx = claurst_core::hooks::HookContext {
@@ -4162,10 +4204,12 @@ async fn execute_tool_blocks_with_hooks(
         // A refused tool is over now: its row must not read as running while
         // the hooks of the tools after it run.
         if let (Some(result), Some(tx)) = (&blocked_result, event_tx) {
-            let _ = tx.send(QueryEvent::ToolFinished {
-                tool_id: id.clone(),
-                is_error: result.is_error,
-            });
+            let _ = tx
+                .emit(QueryEvent::ToolFinished {
+                    tool_id: id.clone(),
+                    is_error: result.is_error,
+                })
+                .await;
         }
 
         prepared.push(PreparedTool {
@@ -4202,9 +4246,9 @@ async fn execute_tool_blocks_with_hooks(
                         && tool.permission_level() == claurst_tools::PermissionLevel::Write
                 });
                 futures::future::Either::Right(claurst_tools::with_tool_call(call_id, async move {
-                    let report = |event| {
+                    let report = |event| async move {
                         if let Some(tx) = event_tx {
-                            let _ = tx.send(event);
+                            let _ = tx.emit(event).await;
                         }
                     };
                     let execute = async {
@@ -4214,7 +4258,8 @@ async fn execute_tool_blocks_with_hooks(
                                 Err(_) => {
                                     report(QueryEvent::ToolQueued {
                                         tool_id: tool_id.clone(),
-                                    });
+                                    })
+                                    .await;
                                     writer_turn.lock().await
                                 }
                             })
@@ -4223,7 +4268,8 @@ async fn execute_tool_blocks_with_hooks(
                         };
                         report(QueryEvent::ToolRunning {
                             tool_id: tool_id.clone(),
-                        });
+                        })
+                        .await;
                         execute_tool(&name, &input, tools, tool_ctx).await
                     };
                     // Cancel each unfinished call rather than dropping the
@@ -4274,7 +4320,8 @@ async fn execute_tool_blocks_with_hooks(
                     report(QueryEvent::ToolFinished {
                         tool_id,
                         is_error: result.is_error,
-                    });
+                    })
+                    .await;
                     (result, retrieval_content)
                 }))
             }
@@ -4323,12 +4370,14 @@ async fn execute_tool_blocks_with_hooks(
         }
 
         if let Some(tx) = event_tx {
-            let _ = tx.send(QueryEvent::ToolEnd {
-                tool_name: p.name.clone(),
-                tool_id: p.id.clone(),
-                result: result.content.clone(),
-                is_error: result.is_error,
-            });
+            let _ = tx
+                .emit(QueryEvent::ToolEnd {
+                    tool_name: p.name.clone(),
+                    tool_id: p.id.clone(),
+                    result: result.content.clone(),
+                    is_error: result.is_error,
+                })
+                .await;
         }
 
         result_blocks.push(ContentBlock::ToolResult {
@@ -5049,6 +5098,159 @@ mod tests {
         (outcome, events, messages, cost_tracker)
     }
 
+    /// #408 D2: a backpressured sink bounds the producer. While the consumer
+    /// takes nothing, the query loop stops pulling from the provider once
+    /// the sink is full, so what is held for the consumer stays bounded; a
+    /// slow consumer then receives every event, in order.
+    #[tokio::test]
+    async fn backpressured_sink_pauses_a_flooding_turn_and_delivers_every_event_in_order() {
+        const CAPACITY: usize = 8;
+        const DELTAS: usize = 2_000;
+        // The provider's own feed channel holds 32 events; allow a few more
+        // in hand between the feed, the loop and the sink.
+        const IN_FLIGHT_LIMIT: usize = CAPACITY + 32 + 8;
+        const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+        let (provider, feed) = ScriptedProvider::channel_after(vec![
+            StreamEvent::MessageStart {
+                id: "flood".to_string(),
+                model: "scripted".to_string(),
+                usage: UsageInfo::default(),
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                },
+            },
+        ]);
+        let pushed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let feeder_pushed = pushed.clone();
+        let feeder = tokio::spawn(async move {
+            for n in 0..DELTAS {
+                let delta = StreamEvent::TextDelta {
+                    index: 0,
+                    text: format!("{n},"),
+                };
+                if feed.send(Ok(delta)).await.is_err() {
+                    return;
+                }
+                feeder_pushed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            for event in [
+                StreamEvent::ContentBlockStop { index: 0 },
+                StreamEvent::MessageDelta {
+                    stop_reason: Some(ProviderStopReason::EndTurn),
+                    usage: Some(UsageInfo::default()),
+                },
+                StreamEvent::MessageStop,
+            ] {
+                if feed.send(Ok(event)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let (turn_tx, mut turn_rx) = mpsc::channel(CAPACITY);
+        let query = tokio::spawn(async move {
+            let temp = tempfile::tempdir().unwrap();
+            let mut registry = claurst_api::ProviderRegistry::new();
+            registry.register(Arc::new(provider));
+            let mut config = make_config(None, None);
+            config.model = "scripted".to_string();
+            config.provider_registry = Some(Arc::new(registry));
+            let cost_tracker = claurst_core::cost::CostTracker::new();
+            let tool_ctx = ToolContext {
+                working_dir: temp.path().to_path_buf(),
+                permission_mode: PermissionMode::BypassPermissions,
+                permission_handler: Arc::new(AutoPermissionHandler {
+                    mode: PermissionMode::BypassPermissions,
+                }),
+                cost_tracker: cost_tracker.clone(),
+                session_id: "provider-flood".to_string(),
+                goal_turn: Default::default(),
+                file_history: Default::default(),
+                current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                non_interactive: true,
+                mcp_manager: None,
+                config: Config {
+                    provider: Some(SCRIPTED_PROVIDER_ID.to_string()),
+                    permission_mode: PermissionMode::BypassPermissions,
+                    ..Config::default()
+                },
+                managed_agent_config: None,
+                completion_notifier: None,
+                pending_permissions: None,
+                permission_manager: None,
+                user_question_tx: None,
+            };
+            let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+                api_key: "unused-test-key".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+            let mut messages = vec![Message::user("flood the producer")];
+            // A short stall timeout: the consumer below holds the producer
+            // far longer, and that wait must not read as a stalled stream.
+            TEST_STREAM_STALL_TIMEOUT
+                .scope(
+                    STALL_TIMEOUT,
+                    run_query_loop_with_events(
+                        &client,
+                        &mut messages,
+                        &[],
+                        &tool_ctx,
+                        &config,
+                        cost_tracker,
+                        Some(QueryEventSink::from(turn_tx)),
+                        tokio_util::sync::CancellationToken::new(),
+                        None,
+                    ),
+                )
+                .await
+        });
+
+        // Stalled consumer: wait until the producer stops making progress,
+        // then hold it for several stall timeouts more.
+        tokio::time::sleep(STALL_TIMEOUT * 4).await;
+        let mut last = usize::MAX;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let now = pushed.load(std::sync::atomic::Ordering::SeqCst);
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+        let stalled_at = pushed.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            stalled_at <= IN_FLIGHT_LIMIT,
+            "producer ran ahead of a stalled consumer: {stalled_at} of {DELTAS} deltas pulled"
+        );
+        assert!(!query.is_finished(), "the turn waits for the consumer");
+
+        // Slow consumer: every event arrives, in order, within the bound.
+        let mut texts = Vec::new();
+        while let Some(event) = turn_rx.recv().await {
+            if let QueryEvent::Stream(AnthropicStreamEvent::ContentBlockDelta {
+                delta: claurst_api::streaming::ContentDelta::TextDelta { text },
+                ..
+            }) = event
+            {
+                texts.push(text);
+            }
+            tokio::task::yield_now().await;
+        }
+        let expected: Vec<String> = (0..DELTAS).map(|n| format!("{n},")).collect();
+        assert_eq!(texts, expected);
+        feeder.await.unwrap();
+        let outcome = query.await.unwrap();
+        assert!(
+            matches!(&outcome, QueryOutcome::EndTurn { message, .. }
+                if message.get_all_text() == expected.concat()),
+            "{outcome:?}"
+        );
+    }
+
     async fn run_scripted_provider_until_partial_then_cancel(
         provider: ScriptedProvider,
         queued_events: Option<QueuedScriptedEvents>,
@@ -5685,7 +5887,7 @@ mod tests {
         let mut messages = vec![assistant.clone()];
         assistant = Message::assistant("final placeholder");
         messages[0] = assistant.clone();
-        emit_durable_message(Some(&QueryEventSink::from(tx.clone())), &assistant);
+        emit_durable_message(Some(&QueryEventSink::from(tx.clone())), &assistant).await;
         messages = vec![Message::user("compacted summary")];
 
         let event = rx.recv().await.unwrap();
