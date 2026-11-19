@@ -11,11 +11,23 @@
 
 register_case tc_import_config_permission_mode
 
-# _import_mode_get <mode as /config get prints it> <label>
+# _import_mode_get <mode as /config get prints it> <label> <answers on screen>
+# Earlier answers stay in the transcript, so wait for this one to be drawn
+# (the count of answers reaches the third argument, unless older ones have
+# scrolled away) and judge only the newest.
 _import_mode_get() {
   tui_type "/config get permission-mode"; tui_keys Enter
-  if wait_for "permission-mode = $1" 10; then _pass "$2"
-  else _fail "$2" "$(tui_capture)"; fi
+  local shot i
+  for i in $(seq 1 50); do
+    shot="$(tui_capture)"
+    [ "$(grep -c 'permission-mode = ' <<<"$shot")" -ge "$3" ] && break
+    sleep 0.2
+  done
+  if [ "$(grep -o 'permission-mode = [A-Za-z]*' <<<"$shot" | tail -n 1)" = "permission-mode = $1" ]; then
+    _pass "$2"
+  else
+    _fail "$2" "$shot"
+  fi
 }
 
 # _import_mode_run <label>: /config import, pick settings.json, confirm.
@@ -60,7 +72,7 @@ _import_mode_renderer() {
   # reload; the session stays in default and says so once.
   printf '%s\n' '{"hasCompletedOnboarding": true}' >"$settings"
   if _import_mode_start; then
-    _import_mode_get Default "$name: the session starts in default"
+    _import_mode_get Default "$name: the session starts in default" 1
     printf '%s\n' '{"hasCompletedOnboarding": true, "config": {"permission_mode": "bypassPermissions"}}' >"$settings"
     if _import_mode_run "$name"; then
       local shot; shot="$(tui_capture)"
@@ -70,17 +82,17 @@ _import_mode_renderer() {
       tui_keys Escape
       if wait_absent "not restored" 10; then _pass "$name: the notification can be dismissed"
       else _fail "$name: the notification can be dismissed" "$(tui_capture)"; fi
-      _import_mode_get Default "$name: the session is still in default after the reload"
+      _import_mode_get Default "$name: the session is still in default after the reload" 2
     fi
     tui_stop
   fi
 
   # A launch flag survives the reload, whatever is saved.
   if _import_mode_start --permission-mode accept-edits; then
-    _import_mode_get AcceptEdits "$name: --permission-mode accept-edits at launch"
+    _import_mode_get AcceptEdits "$name: --permission-mode accept-edits at launch" 1
     if _import_mode_run "$name (flag)"; then
       assert_absent "$(tui_capture)" "restored" "$name: a flag session announces nothing"
-      _import_mode_get AcceptEdits "$name: the launch mode survives the reload"
+      _import_mode_get AcceptEdits "$name: the launch mode survives the reload" 2
     fi
     tui_stop
   fi
