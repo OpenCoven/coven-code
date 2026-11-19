@@ -370,6 +370,14 @@ finishing before the connection closes, and a row it never records stays
 `running`, as against a daemon that is down. Neither a registration nor a
 completion still waiting keeps the process alive after that.
 
+Until #580 the registration and completion requests had no total deadline:
+each read waited up to 5 s and that timer restarted with every byte, and the
+connect was not timed. Every request now has one 5 s deadline over the
+connect, the request and the whole answer. A registration therefore gives up
+within 9 s at worst (2 s health, 5 s request, 2 s health); against a daemon
+that never answers it takes 7 s, because the second health read is skipped
+once the request has failed.
+
 **Sessions that never registered** (`daemonLedger` off, the default) remember
 no instance. Their indicator reads online or offline as before, and nothing
 is registered at any time.
@@ -413,12 +421,6 @@ daemon.
   for its answer sends nothing: once that answer lands the state reads
   registered for the session sent first, and the session bound last is not
   registered until a later session start finds the state unknown.
-- Until #580 the registration and completion requests had no total deadline:
-  each read waited up to 5 s and that timer restarted with every byte, and the
-  connect was not timed. Every request now has one 5 s deadline over the
-  connect, the request and the whole answer, so a registration gives up
-  within 9 s (2 s health, 5 s request, 2 s health) however the daemon
-  behaves.
 
 **Observed on 2026-11-18** with Coven v0.5.0 in a disposable `HOME` and
 `COVEN_HOME`, `daemonLedger` on, Classic and Next at 120x40:
@@ -458,8 +460,10 @@ and the process then still waits for that registration's own task to end
 Since #580 (tmux case `37_silent_daemon_keeps_input.sh`): the three listings
 ask the daemon on a thread of their own, one at a time. Input and drawing go
 on; after 300 ms a notice says the daemon is being waited for, and the
-listing's result (here, the 5 s deadline's error) lands when it arrives. A
-second listing typed meanwhile is not sent, and the notice says so. Quitting
+listing's result (here, the 5 s deadline's error) lands when it arrives; one
+that arrives during a turn waits for the turn to end. A second listing typed
+meanwhile is not sent, and a toast says `Not sent; waiting on` the listing
+still waiting. Quitting
 waits at most 2 s for the completion, plus up to 2 s for a registration still
 in flight, and the process then ends at once.
 

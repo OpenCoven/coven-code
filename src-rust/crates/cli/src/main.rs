@@ -3389,17 +3389,28 @@ struct PendingListing {
     started: std::time::Instant,
     /// The waiting notice, once shown.
     notice: Option<String>,
+    /// The notices saying a later listing was not sent because of this one.
+    refusals: Vec<String>,
     answer: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
+impl PendingListing {
+    /// Take down the notices about this listing: once it has landed or been
+    /// forgotten, none of them is true any more.
+    fn clear_notices(self, app: &mut claurst_tui::App) {
+        app.notifications.notifications.retain(|shown| {
+            self.notice.as_deref() != Some(shown.message.as_str())
+                && !self.refusals.contains(&shown.message)
+        });
+    }
 }
 
 impl DaemonListings {
     /// Forget a listing still waiting, and its notice, when the transcript
     /// it was typed into is replaced: its answer would land in another one.
     fn forget(&mut self, app: &mut claurst_tui::App) {
-        if let Some(notice) = self.pending.take().and_then(|pending| pending.notice) {
-            app.notifications
-                .notifications
-                .retain(|shown| shown.message != notice);
+        if let Some(pending) = self.pending.take() {
+            pending.clear_notices(app);
         }
     }
 
@@ -3413,15 +3424,13 @@ impl DaemonListings {
     ) {
         use claurst_tui::notifications::NotificationKind;
 
-        if let Some(pending) = &self.pending {
-            app.push_notification(
-                NotificationKind::Warning,
-                format!(
-                    "Still waiting for the Coven daemon to answer {}; {command} was not sent.",
-                    pending.command
-                ),
-                Some(5),
-            );
+        if let Some(pending) = &mut self.pending {
+            // Short enough for the toast (about 40 columns) in both renderers.
+            let refusal = format!("Not sent; waiting on {}", pending.command);
+            if !pending.refusals.contains(&refusal) {
+                pending.refusals.push(refusal.clone());
+            }
+            app.push_notification(NotificationKind::Warning, refusal, Some(5));
             return;
         }
         let (answer_tx, answer) = std::sync::mpsc::channel();
@@ -3434,21 +3443,29 @@ impl DaemonListings {
             command,
             started: std::time::Instant::now(),
             notice: None,
+            refusals: Vec::new(),
             answer,
         });
     }
 
     /// Show the listing's outcome once it has landed, and say the daemon is
     /// being waited for once it has taken longer than
-    /// [`DAEMON_LISTING_NOTICE_AFTER`].
-    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant) {
+    /// [`DAEMON_LISTING_NOTICE_AFTER`]. While `turn_running`, an answer that
+    /// has landed waits too: slash command output never lands between a
+    /// prompt and its reply.
+    fn settle(&mut self, app: &mut claurst_tui::App, now: std::time::Instant, turn_running: bool) {
         use claurst_tui::notifications::NotificationKind;
         use std::sync::mpsc::TryRecvError;
 
         let Some(pending) = &mut self.pending else {
             return;
         };
-        let answer = match pending.answer.try_recv() {
+        let answer = if turn_running {
+            Err(TryRecvError::Empty)
+        } else {
+            pending.answer.try_recv()
+        };
+        let answer = match answer {
             Ok(answer) => answer,
             Err(TryRecvError::Disconnected) => {
                 Err(format!("{} stopped without an answer", pending.command))
@@ -3457,22 +3474,17 @@ impl DaemonListings {
                 if pending.notice.is_none()
                     && now.saturating_duration_since(pending.started) >= DAEMON_LISTING_NOTICE_AFTER
                 {
-                    let notice = format!(
-                        "Waiting for the Coven daemon to answer {}…",
-                        pending.command
-                    );
+                    // Short enough for the toast in both renderers.
+                    let notice = format!("Waiting for Coven: {}", pending.command);
                     app.push_notification(NotificationKind::Info, notice.clone(), None);
                     pending.notice = Some(notice);
                 }
                 return;
             }
         };
-        if let Some(notice) = pending.notice.take() {
-            app.notifications
-                .notifications
-                .retain(|shown| shown.message != notice);
+        if let Some(pending) = self.pending.take() {
+            pending.clear_notices(app);
         }
-        self.pending = None;
         match answer {
             Ok(message) => app.push_message(claurst_core::types::Message::assistant(message)),
             Err(error) => app.show_command_error(format!("Error: {error}")),
@@ -4206,7 +4218,8 @@ async fn run_interactive(
             &mut memory_poll,
             spawn_memory_read,
         );
-        daemon_listings.settle(&mut app, std::time::Instant::now());
+        let turn_running = app.is_streaming || current_query.is_some();
+        daemon_listings.settle(&mut app, std::time::Instant::now(), turn_running);
 
         if app.next_shell.take_suspend_request() {
             suspend_job(&mut terminal, &mut app, renderer)?;
@@ -9532,7 +9545,7 @@ mod tests {
             let _ = held.recv_timeout(Duration::from_secs(5));
             Ok("the daemon's sessions".to_string())
         });
-        listings.settle(&mut app, Instant::now());
+        listings.settle(&mut app, Instant::now(), false);
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "starting and checking a listing took {:?}",
@@ -9540,11 +9553,15 @@ mod tests {
         );
         assert!(app.notifications.current().is_none(), "no notice at once");
 
-        listings.settle(&mut app, Instant::now() + DAEMON_LISTING_NOTICE_AFTER);
+        listings.settle(
+            &mut app,
+            Instant::now() + DAEMON_LISTING_NOTICE_AFTER,
+            false,
+        );
         let notice = app.notifications.current().expect("a waiting notice");
         assert_eq!(
-            notice.message,
-            "Waiting for the Coven daemon to answer /coven sessions…"
+            notice.message, "Waiting for Coven: /coven sessions",
+            "the notice fits the toast"
         );
 
         let second_ran = Arc::new(AtomicBool::new(false));
@@ -9559,17 +9576,22 @@ mod tests {
             app.notifications
                 .current()
                 .map(|shown| shown.message.as_str()),
-            Some(
-                "Still waiting for the Coven daemon to answer /coven sessions; \
-                 /coven familiars was not sent."
-            )
+            Some("Not sent; waiting on /coven sessions"),
+            "the refusal fits the toast"
         );
 
+        // An answer that lands while a turn runs waits for the turn to end.
         release.send(()).unwrap();
+        let held_until = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < held_until {
+            listings.settle(&mut app, Instant::now(), true);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(listings.pending.is_some(), "the answer landed mid-turn");
         let deadline = Instant::now() + Duration::from_secs(5);
         while listings.pending.is_some() {
             assert!(Instant::now() < deadline, "the listing never landed");
-            listings.settle(&mut app, Instant::now());
+            listings.settle(&mut app, Instant::now(), false);
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
@@ -9580,8 +9602,9 @@ mod tests {
             !app.notifications
                 .notifications
                 .iter()
-                .any(|shown| shown.message.starts_with("Waiting for the Coven daemon")),
-            "the waiting notice is gone"
+                .any(|shown| shown.message.starts_with("Waiting for Coven")
+                    || shown.message.starts_with("Not sent;")),
+            "the waiting notice and the refusal are gone"
         );
         assert!(
             !second_ran.load(Ordering::Acquire),
@@ -9594,7 +9617,7 @@ mod tests {
         });
         while listings.pending.is_some() {
             assert!(Instant::now() < deadline, "the listing never landed");
-            listings.settle(&mut app, Instant::now());
+            listings.settle(&mut app, Instant::now(), false);
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
@@ -9609,12 +9632,16 @@ mod tests {
             let _ = held.recv_timeout(Duration::from_secs(5));
             Ok("late sessions".to_string())
         });
-        listings.settle(&mut app, Instant::now() + DAEMON_LISTING_NOTICE_AFTER);
+        listings.settle(
+            &mut app,
+            Instant::now() + DAEMON_LISTING_NOTICE_AFTER,
+            false,
+        );
         let waiting = |app: &claurst_tui::app::App| {
             app.notifications
                 .notifications
                 .iter()
-                .any(|shown| shown.message.starts_with("Waiting for the Coven daemon"))
+                .any(|shown| shown.message.starts_with("Waiting for Coven"))
         };
         assert!(waiting(&app), "a waiting notice");
         listings.forget(&mut app);
@@ -9625,7 +9652,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while listings.pending.is_some() {
             assert!(Instant::now() < deadline, "the listing never landed");
-            listings.settle(&mut app, Instant::now());
+            listings.settle(&mut app, Instant::now(), false);
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(app.messages.len(), count + 1);

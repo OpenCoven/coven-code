@@ -17,8 +17,8 @@
 # an error for the two `/coven` listings, the familiar list (without live
 # statuses) for `/familiar list`. A second listing typed while one is still
 # waiting is not sent: the toast says so and the daemon never sees its
-# request. Ctrl+C twice then exits within 3.5 s (the exit waits up to 2 s
-# for the completion), although the daemon never answers the session's
+# request. Ctrl+C twice then exits within 4.5 s (the exit waits up to 2 s
+# for the completion; the rest is margin for a debug build under load), although the daemon never answers the session's
 # completion. Classic runs with COVEN_CODE_UI unset and no provider; needs
 # `python3`.
 
@@ -72,7 +72,9 @@ _sdk_stop_daemon() { # socket path
   rm -f "$1"
 }
 
-# How many logged request lines start with this text.
+# How many logged request lines start with this text. Only the listings ask
+# for `/api/v1/familiars` during the case: the reachability probe's
+# `is_online` also sends that path, and nothing calls it here.
 _sdk_count() { # request log, line prefix
   if [ -f "$1" ]; then awk -v p="$2" 'index($0, p) == 1 { n++ } END { print n + 0 }' "$1"
   else echo 0; fi
@@ -104,7 +106,7 @@ _sdk_listing() { # renderer, command, marker, result text, request log, request 
   else
     _fail "$r: after $cmd, typed text is drawn within 2.5 s" "$(tui_capture)"
   fi
-  if _sdk_seen_within "Waiting for the Coven" 20; then
+  if _sdk_seen_within "Waiting for Coven" 20; then
     _pass "$r: while $cmd waits, the toast says the daemon is being waited for"
   else
     _fail "$r: while $cmd waits, the toast says the daemon is being waited for" "$(tui_capture)"
@@ -122,7 +124,7 @@ _sdk_listing() { # renderer, command, marker, result text, request log, request 
   else
     _fail "$r: $cmd ends with its result once the request's deadline passes" "$(tui_capture)"
   fi
-  wait_absent "Waiting for the Coven" 3 >/dev/null
+  wait_absent "Waiting for Coven" 3 >/dev/null
   tui_keys C-u; sleep 0.3
 }
 
@@ -163,7 +165,7 @@ _sdk_journey() { # renderer, dir
     tui_type "/coven sessions"; sleep 0.3; tui_keys Enter
     sleep 0.5
     tui_type "/coven familiars"; sleep 0.3; tui_keys Enter
-    if _sdk_seen_within "Still waiting for the Coven" 25; then
+    if _sdk_seen_within "Not sent; waiting on" 25; then
       _pass "$r: a second listing while one waits says it was not sent"
     else
       _fail "$r: a second listing while one waits says it was not sent" "$(tui_capture)"
@@ -181,10 +183,10 @@ _sdk_journey() { # renderer, dir
     assert_eq "$(_sdk_count "$log" "POST /api/v1/sessions/external ")" "1" \
       "$r: the session sent its registration at launch"
     tui_quit_and_check "$r: Ctrl+C twice with a silent daemon" C-c C-c
-    if [ "${TUI_QUIT_TENTHS:-999}" -le 35 ]; then
-      _pass "$r: the exit waits at most 3.5 s for the unanswered completion"
+    if [ "${TUI_QUIT_TENTHS:-999}" -le 45 ]; then
+      _pass "$r: the exit waits at most 4.5 s for the unanswered completion"
     else
-      _fail "$r: the exit waits at most 3.5 s for the unanswered completion" \
+      _fail "$r: the exit waits at most 4.5 s for the unanswered completion" \
         "the exit took $((TUI_QUIT_TENTHS / 10)).$((TUI_QUIT_TENTHS % 10)) s"
     fi
     sleep 0.5

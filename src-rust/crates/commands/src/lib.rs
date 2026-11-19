@@ -14330,6 +14330,11 @@ mod tests {
     /// daemon that accepts every connection and never answers used to hold
     /// each of them for the whole request timeout, with nothing drawn or
     /// read meanwhile.
+    //
+    // The env guard is held across `.await` on purpose, as in
+    // `coven_command_integrates_with_daemon_mock`: `COVEN_HOME` must stay
+    // pinned to this test's directory throughout, and the lock only
+    // serializes tests in this file.
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]

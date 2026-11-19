@@ -426,7 +426,18 @@ impl DaemonClient {
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         // socket2 passes a timeout under 1 µs as zero, which means none.
         socket.set_write_timeout(Some(time_left(deadline)?.max(Duration::from_millis(1))))?;
-        socket.connect(&SockAddr::unix(&self.sock_path)?)?;
+        socket
+            .connect(&SockAddr::unix(&self.sock_path)?)
+            .map_err(|e| match e.kind() {
+                // With a send timeout set, Linux does not restart a connect
+                // waiting on a full queue after a signal (a terminal resize):
+                // the daemon is busy, not gone.
+                std::io::ErrorKind::Interrupted => std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the connect to the daemon was interrupted while it waited",
+                ),
+                _ => e,
+            })?;
         let stream = UnixStream::from(OwnedFd::from(socket));
         // A daemon that has already answered and closed makes these fail on
         // macOS (EINVAL); its answer is still there to read, and reading a
@@ -748,12 +759,13 @@ impl DaemonClient {
             let mut chunk = [0_u8; 4096];
             loop {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero()
-                    || raw.len() > LARGEST_ANSWER
-                    || stream.set_read_timeout(Some(left)).is_err()
-                {
+                if left.is_zero() || raw.len() > LARGEST_ANSWER {
                     break;
                 }
+                // Fails on macOS once the daemon has answered and closed;
+                // its answer is still there to read, and that read does not
+                // wait.
+                let _ = stream.set_read_timeout(Some(left));
                 match stream.read(&mut chunk) {
                     Ok(0) if raw.is_empty() => return DaemonSighting::Gone,
                     Ok(0) => break,
