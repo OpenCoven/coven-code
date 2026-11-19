@@ -49,9 +49,13 @@ ANY_STATE_HEADING = re.compile(r"\s{0,3}(#{1,6}\s*|<h[1-6][^>]*>\s*)Current stat
 NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
 # Lines that could start or end a block GitHub renders as structure: ATX and
 # setext headings, rules, code fences, HTML (headings, <details>, comments).
-RISKY = re.compile(
-    r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<)|.*-->"
-)
+RISKY = re.compile(r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<)")
+# HTML that hides or reflows what follows it, wherever it appears in a line.
+CONTAINERS = ("<!--", "-->", "<details", "</details", "<pre", "</pre", "<textarea",
+              "</textarea", "<script", "</script", "<style", "</style")
+PAIRS = (("<!--", "-->"), ("<details", "</details"), ("<pre", "</pre"),
+         ("<textarea", "</textarea"), ("<script", "</script"), ("<style", "</style"))
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")
 
 
 class SectionError(Exception):
@@ -60,7 +64,14 @@ class SectionError(Exception):
 
 def lines_of(text):
     """Split on "\n" only; str.splitlines also splits on form feeds and others."""
+    if "\r" in text:
+        raise SectionError("a lone carriage return is a line break on GitHub; fix it by hand")
     return text.split("\n")
+
+
+def risky(line):
+    lowered = line.lower()
+    return bool(RISKY.match(line)) or any(token in lowered for token in CONTAINERS)
 
 
 def section_lines(lines, start, what):
@@ -68,6 +79,8 @@ def section_lines(lines, start, what):
     for index in range(start + 1, len(lines)):
         line = lines[index]
         if NEXT_ACTION.match(line):
+            if any(token in line.lower() for token in CONTAINERS):
+                raise SectionError(f"{what}'s **Next action:** line holds HTML; edit it by hand")
             following = lines[index + 1] if index + 1 < len(lines) else ""
             if following.strip():
                 raise SectionError(
@@ -75,7 +88,7 @@ def section_lines(lines, start, what):
                     f"({following.strip()[:60]!r}); edit it by hand"
                 )
             return index
-        if RISKY.match(line):
+        if risky(line):
             raise SectionError(
                 f"{what} has {line.strip()[:60]!r} before its **Next action:** line, "
                 "so its end is not certain; edit it by hand"
@@ -85,7 +98,7 @@ def section_lines(lines, start, what):
 
 def normalize_section(text):
     """Check the new section so that a later run finds exactly where it ends."""
-    text = text.replace("\r\n", "\n").lstrip("﻿").strip()
+    text = text.replace("\r\n", "\n").lstrip("\ufeff").strip()
     lines = lines_of(text)
     if not HEADING.fullmatch(lines[0]):
         raise SectionError(
@@ -95,6 +108,35 @@ def normalize_section(text):
     if action != len(lines) - 1:
         raise SectionError("the section file must end with its **Next action:** line")
     return text + "\n"
+
+
+def contained(prefix_lines):
+    """Why the line after prefix_lines would not be a top-level heading, or None."""
+    fence = None
+    for line in prefix_lines:
+        match = FENCE.match(line)
+        if fence is None:
+            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+                fence = match.group(1)
+        elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) \
+                and not match.group(2).strip():
+            fence = None
+    if fence is not None:
+        return "inside a code fence"
+    text = "\n".join(prefix_lines).lower()
+    for opener, closer in PAIRS:
+        position = 0
+        while True:
+            opened = text.find(opener, position)
+            if opened == -1:
+                break
+            closed = text.find(closer, opened + len(opener))
+            if closed == -1:
+                return f"inside an unclosed {opener}"
+            position = closed + len(closer)
+    if prefix_lines and prefix_lines[-1].strip():
+        return "not after a blank line"
+    return None
 
 
 def splice(body, section, insert):
@@ -114,15 +156,12 @@ def splice(body, section, insert):
                 "the body has no '## Current state: YYYY-MM-DD' section; "
                 "pass --insert to add one at the top"
             )
-        rest = body.lstrip("﻿\n")
+        rest = body.lstrip("\n")
         return section + ("\n" + rest if rest else "")
     start = found[0]
-    before = "\n".join(lines[:start])
-    for opener, closer in (("<!--", "-->"), ("<details", "</details")):
-        if before.lower().count(opener) > before.lower().count(closer):
-            raise SectionError(
-                f"the Current state heading is inside an unclosed {opener} block; edit it by hand"
-            )
+    reason = contained(lines[:start])
+    if reason:
+        raise SectionError(f"the Current state heading is {reason}; edit it by hand")
     action = section_lines(lines, start, "the old Current state section")
     head = "\n".join(lines[:start])
     tail = "\n".join(lines[action + 1 :]).lstrip("\n")
@@ -131,7 +170,7 @@ def splice(body, section, insert):
 
 def replace_section(body, section, insert=False):
     """Return body with its dated Current state section replaced by section."""
-    body = (body or "").replace("\r\n", "\n")
+    body = (body or "").replace("\r\n", "\n").lstrip("\ufeff")
     section = normalize_section(section)
     out = splice(body, section, insert)
     # The next run must find the same boundary, or it would take original

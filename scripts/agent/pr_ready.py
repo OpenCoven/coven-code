@@ -257,9 +257,13 @@ def main(argv=None):
     except ApiError as error:
         print(f"pr-ready: {error}", file=sys.stderr)
         return 2
-    lines, reasons = evaluate(
-        pull, compare, check_runs, statuses, workflow_runs, used, args.min_checks
-    )
+    try:
+        lines, reasons = evaluate(
+            pull, compare, check_runs, statuses, workflow_runs, used, args.min_checks
+        )
+    except (AttributeError, KeyError, TypeError) as error:
+        print(f"pr-ready: unexpected API response: {error!r}", file=sys.stderr)
+        return 2
     if now != head:
         reasons.append(f"the head moved to {now} during the check; rerun")
     print("\n".join(lines))

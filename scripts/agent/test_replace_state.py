@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("replace_state", HERE / "replace-state.py")
@@ -66,6 +67,43 @@ class ReplaceSectionTests(unittest.TestCase):
         for opener, closer in (("<!--", "-->"), ("<details>", "</details>")):
             body = f"Intro.\n{opener}\n{OLD}{closer}\n\nKEEP\n"
             self.refused(body, pattern="unclosed")
+
+    def test_heading_inside_a_fence_or_html_block_is_refused(self):
+        example = "## Current state: 2026-11-18\n\nOld.\n\n**Next action:** x.\n"
+        for opener, closer in (("```", "```"), ("~~~", "~~~"), ("````md", "````"), ("<pre>", "</pre>"),
+                               ("<textarea>", "</textarea>")):
+            body = f"How to write one:\n\n{opener}\n\n{example}\n{closer}\n\nKeep.\n"
+            self.refused(body, pattern="edit it by hand")
+            self.refused(body, pattern="edit it by hand", insert=True)
+
+    def test_an_arrow_does_not_close_a_later_comment(self):
+        body = "```mermaid\nA --> B\n```\n\n<!--\n\n" + OLD + "\nHIDDEN\n-->\nKeep\n"
+        self.refused(body, pattern="unclosed <!--")
+
+    def test_heading_must_follow_a_blank_line(self):
+        self.refused("Intro text\n" + OLD, pattern="blank line")
+
+    def test_lone_carriage_return_is_refused(self):
+        self.refused("## Current state: 2026-11-18\n\nOld.\r## Original\r\rTEXT\n\n**Next action:** x.\n")
+        self.refused(OLD.replace("review #1.", "x.\rORIGINAL CONTINUATION"))
+        with self.assertRaises(replace_state.SectionError):
+            replace_state.normalize_section(NEW.replace("New facts.", "New.\rfacts."))
+
+    def test_html_anywhere_in_a_line_is_refused(self):
+        for line in ("New. <details><summary>s</summary>", "text <!-- hide", "a --> b"):
+            section = f"## Current state: 2026-11-19\n\n{line}\n\n**Next action:** y.\n"
+            with self.assertRaises(replace_state.SectionError, msg=line):
+                replace_state.normalize_section(section)
+            self.refused(OLD.replace("Old facts.", line))
+        with self.assertRaises(replace_state.SectionError):
+            replace_state.normalize_section(NEW.replace("merge #1.", "y <!--"))
+
+    def test_second_rewrite_guard_refuses_a_result_that_moves(self):
+        with mock.patch.object(replace_state, "splice", side_effect=["A\n", "B\n"]):
+            self.refused(OLD, pattern="second rewrite")
+
+    def test_bom_at_the_start_of_the_body_is_dropped(self):
+        self.assertEqual(self.replaced("\ufeff" + OLD + "\nKeep.\n"), NEW + "\nKeep.\n")
 
     def test_unusual_line_separators_do_not_split_lines(self):
         body = OLD + "\nOld. ```\n\n## Original\n\nKEEP\n"
@@ -132,15 +170,22 @@ class ReplaceSectionTests(unittest.TestCase):
     def test_random_bodies_either_refuse_or_keep_prefix_and_tail(self):
         import random
 
-        blocks = [
-            "Plain.", "- item", "## Heading", "### Sub", "Title\n===", "Title\n---", "---", "* * *",
+        safe = ["Plain.", "- item", "| a | b |", "> quote", "   ", "\t"]
+        blocks = safe + [
+            "## Heading", "### Sub", "Title\n===", "Title\n---", "---", "* * *",
             "```\n## fenced\n```", "~~~\ncode\n~~~", "<details>\nx\n</details>", "<!-- c -->",
-            "<h2>H</h2>", "| a | b |", "> quote", "**Next action:** stray.", "   ", "\t",
+            "<h2>H</h2>", "**Next action:** stray.", "A --> B", "x <!-- y",
         ]
+        openers = ["```", "~~~", "<!--", "<details>", "<pre>"]
         rng = random.Random(406)
-        for _ in range(2000):
-            prefix = "\n\n".join(rng.sample(blocks, rng.randint(0, 3)))
-            middle = "\n\n".join(rng.sample(blocks, rng.randint(0, 3)))
+        accepted = 0
+        for _ in range(3000):
+            prefix_blocks = rng.sample(blocks, rng.randint(0, 3))
+            if rng.random() < 0.2:
+                prefix_blocks.append(rng.choice(openers))
+            prefix = "\n\n".join(prefix_blocks)
+            middle_blocks = rng.sample(blocks, rng.randint(0, 3))
+            middle = "\n\n".join(middle_blocks)
             tail = "\n\n".join(rng.sample(blocks, rng.randint(0, 4)))
             old = "## Current state: 2026-11-18\n\nOld.\n\n" + (middle + "\n\n" if middle else "")
             old += "**Next action:** old.\n" if rng.random() < 0.8 else ""
@@ -149,12 +194,22 @@ class ReplaceSectionTests(unittest.TestCase):
                 out = self.replaced(body)
             except replace_state.SectionError:
                 continue
+            accepted += 1
+            # Accepted only if nothing before the Next action line could be structure.
+            self.assertNotIn(prefix_blocks[-1] if prefix_blocks else None, openers, body)
+            before_action = []
+            for block in middle_blocks:
+                if block.startswith("**Next action:**"):
+                    break
+                before_action.append(block)
+            self.assertTrue(set(before_action) <= set(safe), body)
             # Everything before the heading and after the first Next action
             # line it accepted must survive verbatim.
             start = body.index("## Current state:")
             action_end = body.index("\n", body.index("**Next action:**", start))
             kept = body[action_end + 1 :].lstrip("\n")
             self.assertEqual(out, body[:start] + NEW + ("\n" + kept if kept else ""), body)
+        self.assertGreater(accepted, 300)
 
     def test_same_section_is_unchanged(self):
         body = NEW + "\nKeep.\n"

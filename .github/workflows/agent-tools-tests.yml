@@ -9,6 +9,10 @@ on:
       - '.github/workflows/rust-ci.yml'
   workflow_dispatch:
 
+concurrency:
+  group: agent-tools-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
