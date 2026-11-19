@@ -156,6 +156,13 @@ with tempfile.TemporaryDirectory() as root:
         pop, leave = output.find(b"\x1b[<1u"), output.find(b"\x1b[?1049l")
         report(0 <= pop < leave, "keyboard flags are popped on the alternate screen",
                f"pop at {pop}, leave at {leave}")
+        # Nothing stopped, so the engine takes the terminal again at once.
+        # In between it is on the main screen, which has a keyboard stack of
+        # its own that belongs to the shell.
+        back = output.find(b"\x1b[?1049h", leave)
+        report(0 <= leave < back and b"\x1b[<" not in output[leave:back],
+               "no keyboard pop is sent on the main screen",
+               f"leave at {leave}, back at {back}")
         os.write(s.master, b"q")
         report(s.wait_for([b"q"], 5) is not None, "keys still reach the composer")
     finally:
