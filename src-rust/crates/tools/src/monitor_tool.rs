@@ -141,23 +141,10 @@ impl Tool for MonitorTool {
                     None => ToolResult::error(format!("Task {} not found", id)),
                     Some(t) => {
                         if let TaskStatus::Running = t.status {
-                            // Kill by PID if available.
-                            if let Some(pid) = t.pid {
-                                // On Windows use taskkill; on Unix send SIGTERM.
-                                #[cfg(windows)]
-                                {
-                                    let _ = std::process::Command::new("taskkill")
-                                        .args(["/PID", &pid.to_string(), "/F"])
-                                        .output();
-                                }
-                                #[cfg(unix)]
-                                {
-                                    use std::process::Command;
-                                    let _ = Command::new("kill")
-                                        .args(["-TERM", &pid.to_string()])
-                                        .output();
-                                }
-                            }
+                            // The cancel makes a background shell kill its
+                            // whole process group or job itself (#373).
+                            // Killing the shell first would end the task as
+                            // an ordinary exit, which keeps what it started.
                             if global_registry().finish_if_running(&id, TaskStatus::Cancelled) {
                                 ToolResult::success(format!("Task {} cancelled.", id))
                             } else {

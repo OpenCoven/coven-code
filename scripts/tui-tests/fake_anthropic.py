@@ -13,15 +13,22 @@ every 0.2 s, until a file named `release` appears in MARKER_DIR, so a journey
 can act while text is still arriving; a `release` file already there means no
 hold.
 Any other word after the count is an error.
-Each streamed request appends one JSON line to LOG_FILE for later checks,
+A session memory extraction request is answered with no memories and is kept
+out of LOG_FILE and MESSAGES_LOG. Each other streamed request appends one JSON line to LOG_FILE for later checks,
 whose "last" holds the request's last message. Given MESSAGES_LOG, it also
 appends there a JSON line whose "messages" holds all of them, in order. That
 is a file of its own, because cases search LOG_FILE's lines for text that the
-history of a later request would repeat.
+history of a later request would repeat. Given CONNECTIONS_LOG too, it appends
+there a JSON line for every request it answers, once the reply is sent:
+the method, path, whether it streamed, a number unique to the TCP
+connection it came on (counting from 1), and when it started and ended, in
+seconds since the epoch. Only the connection pool that opened a connection
+can send a later request on it.
 
-Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG]
+Usage: fake_anthropic.py PORT_FILE LOG_FILE MARKER_DIR [MESSAGES_LOG [CONNECTIONS_LOG]]
 """
 import http.server
+import itertools
 import json
 import os
 import sys
@@ -41,6 +48,11 @@ HOLD_LIMIT_SECONDS = 300
 # the client, which retries a stream that sends nothing for 45 s, keeps it.
 HOLD_DELTA_SECONDS = 0.2
 HELD_TEXT = "held line\n"
+# Session memory extraction runs after a turn once the conversation has 20
+# user and assistant messages, and goes to the same API base as the turn.
+# It is answered with no memories and kept out of LOG_FILE and MESSAGES_LOG
+# (CONNECTIONS_LOG still records it): it is not part of the turn a case checks.
+EXTRACTION_SYSTEM_PREFIX = "You are a memory extraction assistant."
 
 
 def sse(event, data):
@@ -196,10 +208,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
     log_path = ""
     marker_dir = ""
     messages_log_path = ""
+    connections_log_path = ""
+    connection_numbers = itertools.count(1)
     turn = 0
+
+    def setup(self):
+        super().setup()
+        # One handler serves every request on its connection.
+        self.connection_number = next(Handler.connection_numbers)
 
     def log_message(self, *_):
         pass
+
+    def log_connection(self, started, streamed):
+        if not self.connections_log_path:
+            return
+        with open(self.connections_log_path, "a", encoding="utf-8") as log:
+            log.write(json.dumps({
+                "method": self.command, "path": self.path, "stream": streamed,
+                "connection": self.connection_number,
+                "started": started, "ended": time.time(),
+            }) + "\n")
 
     def respond(self, status, content_type, body):
         self.send_response(status)
@@ -209,11 +238,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        started = time.time()
         self.respond(200, "application/json", b'{"data":[]}')
+        self.log_connection(started, False)
 
     def do_POST(self):
+        started = time.time()
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
+        streamed = bool(request.get("stream"))
+        self.reply_to(request)
+        self.log_connection(started, streamed)
+
+    def reply_to(self, request):
         if not request.get("stream"):
             # Side requests such as title generation are not part of the turn.
             self.respond(200, "application/json", json.dumps({
@@ -222,6 +259,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "stop_reason": "end_turn", "stop_sequence": None,
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }).encode())
+            return
+        system = request.get("system")
+        if isinstance(system, list):
+            system = " ".join(
+                block.get("text", "") for block in system if isinstance(block, dict)
+            )
+        if isinstance(system, str) and system.startswith(EXTRACTION_SYSTEM_PREFIX):
+            self.respond(200, "text/event-stream", text_turn("[]"))
             return
         messages = request.get("messages") or [{}]
         with open(self.log_path, "a", encoding="utf-8") as log:
@@ -263,6 +308,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def main():
     port_file, Handler.log_path, Handler.marker_dir = sys.argv[1:4]
     Handler.messages_log_path = sys.argv[4] if len(sys.argv) > 4 else ""
+    Handler.connections_log_path = sys.argv[5] if len(sys.argv) > 5 else ""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     with open(port_file + ".tmp", "w", encoding="utf-8") as f:
         f.write(str(server.server_address[1]))

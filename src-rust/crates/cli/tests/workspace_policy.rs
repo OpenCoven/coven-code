@@ -8,15 +8,16 @@ use nix::{
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
+    io::Write,
     os::unix::process::{CommandExt, ExitStatusExt},
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
+
+mod workspace_policy_fixture;
+use workspace_policy_fixture::{final_text, messages_fixture, model_reply, scope, user_frame};
 
 #[test]
 fn installed_entrypoint_reports_exact_kernel_scope_and_rejects_a_changed_root() {
@@ -110,13 +111,6 @@ fn scoped_turn_does_not_delegate_to_an_unqualified_claude_cli() {
     assert!(!marker.exists());
 }
 
-fn scope(run_id: &str, work: &Path, writable: &[&Path], read_only: &[&Path]) -> Value {
-    json!({
-        "version": 1, "runId": run_id, "access": "workspace-write",
-        "primaryRoot": work, "writableRoots": writable, "readOnlyRoots": read_only,
-    })
-}
-
 /// The admission the engine must report for `policy` before any model work.
 fn receipt(policy: &Value) -> Value {
     let mut receipt = policy.clone();
@@ -132,84 +126,6 @@ fn admission(frames: &[Value]) -> Option<&Value> {
         .and_then(|frame| frame.get("effectiveAccess"))
 }
 
-/// A loopback stand-in for the Messages API. Each connection is answered
-/// with the next scripted reply, and its request line is sent to the test.
-/// A thread whose replies a correct run never asks for stays blocked in
-/// `accept` until the test binary exits.
-fn messages_fixture(replies: Vec<String>) -> (String, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let (requests, received) = mpsc::channel();
-    // A stopped run may drop its connection part way; the thread then ends.
-    thread::spawn(move || {
-        for reply in replies {
-            let Ok((mut socket, _)) = listener.accept() else {
-                return;
-            };
-            let Ok(clone) = socket.try_clone() else {
-                return;
-            };
-            let mut reader = BufReader::new(clone);
-            let mut request = String::new();
-            if reader.read_line(&mut request).is_err() {
-                return;
-            }
-            let mut length = 0;
-            loop {
-                let mut header = String::new();
-                match reader.read_line(&mut header) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) if header == "\r\n" => break,
-                    Ok(_) => {}
-                }
-                if let Some((name, value)) = header.split_once(':') {
-                    if name.eq_ignore_ascii_case("content-length") {
-                        let Ok(value) = value.trim().parse() else {
-                            return;
-                        };
-                        length = value;
-                    }
-                }
-            }
-            if reader.read_exact(&mut vec![0; length]).is_err() {
-                return;
-            }
-            let _ = requests.send(request);
-            let _ = write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            );
-        }
-    });
-    (base, received)
-}
-
-/// One streamed model reply holding a single content block, in the wire
-/// shape of the Messages API.
-fn model_reply(block: Value, delta: Value, stop_reason: &str) -> String {
-    [
-        json!({"type": "message_start", "message": {
-            "id": "fixture", "type": "message", "role": "assistant", "content": [],
-            "model": "fixture", "usage": {"input_tokens": 1, "output_tokens": 0},
-        }}),
-        json!({"type": "content_block_start", "index": 0, "content_block": block}),
-        json!({"type": "content_block_delta", "index": 0, "delta": delta}),
-        json!({"type": "content_block_stop", "index": 0}),
-        json!({"type": "message_delta", "delta": {"stop_reason": stop_reason},
-            "usage": {"output_tokens": 1}}),
-        json!({"type": "message_stop"}),
-    ]
-    .into_iter()
-    .map(|data| {
-        format!(
-            "event: {}\ndata: {data}\n\n",
-            data["type"].as_str().unwrap()
-        )
-    })
-    .collect()
-}
-
 /// A model reply calling the tool `name` with the call id `id`.
 fn tool_call(id: &str, name: &str, input: Value) -> String {
     model_reply(
@@ -217,22 +133,6 @@ fn tool_call(id: &str, name: &str, input: Value) -> String {
         json!({"type": "input_json_delta", "partial_json": input.to_string()}),
         "tool_use",
     )
-}
-
-fn final_text(text: &str) -> String {
-    model_reply(
-        json!({"type": "text", "text": ""}),
-        json!({"type": "text_delta", "text": text}),
-        "end_turn",
-    )
-}
-
-fn user_frame(text: &str) -> Vec<u8> {
-    format!(
-        "{}\n",
-        json!({"type": "user", "message": {"role": "user", "content": text}})
-    )
-    .into_bytes()
 }
 
 /// A scoped engine run. If it is dropped before exiting, for example by a
@@ -840,5 +740,289 @@ fn a_scoped_launch_refuses_a_scope_it_cannot_apply_exactly() {
     refused(
         "locked",
         "The workspace sandbox did not allow exactly the saved folders.",
+    );
+}
+
+/// Launch one scoped reply under `admitted`, which the host saves as its
+/// current policy first. Return the run's frames once the reply has finished
+/// and reported exactly that scope.
+fn finished_reply(
+    base: &Path,
+    work: &Path,
+    admitted: &Value,
+    replies: Vec<String>,
+    log: &str,
+) -> Vec<Value> {
+    let policy = base.join("policy.json");
+    fs::write(&policy, admitted.to_string()).unwrap();
+    let (api, _requests) = messages_fixture(replies);
+    let mut engine = scoped_stream(base, work, &policy, &api, log);
+    let mut stdin = engine.0.stdin.take().unwrap();
+    stdin.write_all(&user_frame("Edit the files")).unwrap();
+    drop(stdin);
+    let status = exit_within(&mut engine.0, Duration::from_secs(30));
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the reply did not finish\n{}",
+        logs(base, log)
+    );
+    let frames = frames(base, log);
+    assert_eq!(
+        admission(&frames),
+        Some(&receipt(admitted)),
+        "the reply was not admitted with the host's current scope\n{}",
+        logs(base, log)
+    );
+    frames
+}
+
+/// The same downgrade as `a_downgraded_scope_governs_the_next_reply`, for the
+/// file tools other than Write. Each tool first edits its own file while the
+/// project is granted, so its later refusal is the scope's and not a bad call.
+/// Once the project is read-only, the scope decision refuses each one with the
+/// message that points back to Chat, and no file changes.
+#[test]
+fn a_downgraded_scope_refuses_every_file_edit_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let work = base.join("a-work");
+    let project = base.join("b-project");
+    for root in [&work, &project] {
+        fs::create_dir(root).unwrap();
+    }
+    let (edit, patch, batch, notebook) = (
+        project.join("edit.txt"),
+        project.join("patch.txt"),
+        project.join("batch.txt"),
+        project.join("cells.ipynb"),
+    );
+    for file in [&edit, &patch, &batch] {
+        fs::write(file, "one").unwrap();
+    }
+    let cells = |source: &str| {
+        json!({
+            "cells": [{"cell_type": "markdown", "id": "only", "metadata": {}, "source": [source]}],
+            "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+        })
+    };
+    fs::write(&notebook, cells("one").to_string()).unwrap();
+    // One reply in which each tool changes its own file from `from` to `to`.
+    let calls = |from: &str, to: &str| {
+        vec![
+            tool_call(
+                "Edit",
+                "Edit",
+                json!({"file_path": edit, "old_string": from, "new_string": to}),
+            ),
+            tool_call(
+                "ApplyPatch",
+                "ApplyPatch",
+                json!({"patch": format!("--- {0}\n+++ {0}\n@@ -1 +1 @@\n-{from}\n+{to}\n", patch.display())}),
+            ),
+            tool_call(
+                "BatchEdit",
+                "BatchEdit",
+                json!({"edits": [{"file_path": batch, "old_string": from, "new_string": to}]}),
+            ),
+            tool_call(
+                "NotebookEdit",
+                "NotebookEdit",
+                json!({"notebook_path": notebook, "cell_id": "only", "new_source": to}),
+            ),
+            final_text("Done."),
+        ]
+    };
+    let files = [
+        ("Edit", &edit),
+        ("ApplyPatch", &patch),
+        ("BatchEdit", &batch),
+        ("NotebookEdit", &notebook),
+    ];
+    // What a file holds, a notebook as JSON. A missing file reads as empty so
+    // the failure still prints the run's logs.
+    let holds = |file: &Path| {
+        let text = fs::read_to_string(file).unwrap_or_default();
+        if file == notebook {
+            serde_json::from_str(&text).unwrap_or(Value::Null)
+        } else {
+            json!(text)
+        }
+    };
+    let holding = |file: &Path, text: &str| {
+        if file == notebook {
+            cells(text)
+        } else {
+            json!(text)
+        }
+    };
+
+    let writable = scope("edits-granted", &work, &[&work, &project], &[]);
+    let frames = finished_reply(&base, &work, &writable, calls("one", "two"), "granted");
+    let log = logs(&base, "granted");
+    for (tool, file) in files {
+        let result = tool_result(&frames, tool);
+        assert!(
+            result.is_object() && result["is_error"] != true,
+            "{tool} failed while the project was granted\n{result}\n{log}"
+        );
+        assert_eq!(
+            holds(file),
+            holding(file, "two"),
+            "{tool} did not edit the granted project\n{log}"
+        );
+    }
+
+    // The host withdraws write access to the project for the next reply.
+    let read_only = scope("edits-downgraded", &work, &[&work], &[&project]);
+    let frames = finished_reply(
+        &base,
+        &work,
+        &read_only,
+        calls("two", "three"),
+        "downgraded",
+    );
+    let log = logs(&base, "downgraded");
+    for (tool, file) in files {
+        assert_eq!(
+            holds(file),
+            holding(file, "two"),
+            "{tool} changed a file in the downgraded project\n{log}"
+        );
+        let result = tool_result(&frames, tool);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            result["is_error"] == true
+                && text.contains(&format!("Permission denied for tool '{tool}'"))
+                && text.contains("Ask for the folder explicitly in Chat"),
+            "the scope decision did not refuse {tool}\n{result}\n{log}"
+        );
+    }
+}
+
+/// A granted project changes during a reply: after admission, while the
+/// reply's first shell runs, and before its next shell starts. The test renames
+/// the project to `d-moved` and, with `symlink`, then points the project's
+/// path at an ungranted folder. The engine checks every saved folder again
+/// before each shell launch, so it refuses the next shell outright, even that
+/// shell's write to the workspace. The Write tool is refused too, by the scope
+/// decision or by the same pre-launch check on its sandboxed write (see each
+/// test). Nothing lands. `shell_refusal` and `write_refusal` are the errors
+/// those two calls report.
+fn granted_folder_changes_mid_reply(symlink: bool, shell_refusal: &str, write_refusal: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let work = base.join("a-work");
+    let project = base.join("b-project");
+    let outside = base.join("c-outside");
+    let moved = base.join("d-moved");
+    for root in [&work, &project, &outside] {
+        fs::create_dir(root).unwrap();
+    }
+    let policy = base.join("policy.json");
+    let granted = scope("changed-root", &work, &[&work, &project], &[]);
+    fs::write(&policy, granted.to_string()).unwrap();
+    let (ready, go) = (work.join("ready"), work.join("go"));
+    // The first shell writes into the project, then holds the reply until the
+    // test has changed the project (bounded at 30 s).
+    let hold = format!(
+        "printf one > '{}'; printf ready > '{}'; for _ in $(seq 600); do [ -e '{}' ] && break; sleep 0.05; done",
+        project.join("before").display(),
+        ready.display(),
+        go.display()
+    );
+    let next = format!(
+        "printf two > '{}'; printf two > '{}'",
+        work.join("after").display(),
+        project.join("after").display()
+    );
+    let (api, _requests) = messages_fixture(vec![
+        tool_call("hold", "Bash", json!({"command": hold})),
+        tool_call("next", "Bash", json!({"command": next})),
+        tool_call(
+            "write",
+            "Write",
+            json!({"file_path": project.join("by-tool"), "content": "three"}),
+        ),
+        final_text("Done."),
+    ]);
+    let mut engine = scoped_stream(&base, &work, &policy, &api, "changed");
+    let mut stdin = engine.0.stdin.take().unwrap();
+    stdin.write_all(&user_frame("Write the files")).unwrap();
+    drop(stdin);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        let running = engine.0.try_wait().unwrap().is_none();
+        assert!(
+            running && Instant::now() < deadline,
+            "the first shell never started\n{}",
+            logs(&base, "changed")
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::rename(&project, &moved).unwrap();
+    if symlink {
+        std::os::unix::fs::symlink(&outside, &project).unwrap();
+    }
+    fs::write(&go, "").unwrap();
+    let status = exit_within(&mut engine.0, Duration::from_secs(30));
+    let log = logs(&base, "changed");
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the reply did not finish\n{log}"
+    );
+    let frames = frames(&base, "changed");
+    assert_eq!(admission(&frames), Some(&receipt(&granted)), "{log}");
+    assert_eq!(
+        fs::read_to_string(moved.join("before")).unwrap_or_default(),
+        "one",
+        "the first shell could not write to the granted project\n{log}"
+    );
+    assert!(
+        !work.join("after").exists(),
+        "a shell launched after the granted folder changed\n{log}"
+    );
+    assert!(
+        fs::read_dir(&outside).unwrap().next().is_none(),
+        "the ungranted folder was written\n{log}"
+    );
+    if !symlink {
+        assert!(
+            project.symlink_metadata().is_err(),
+            "the moved project was created again at its granted path\n{log}"
+        );
+    }
+    for (id, refusal) in [("next", shell_refusal), ("write", write_refusal)] {
+        let result = tool_result(&frames, id);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            result["is_error"] == true && text.contains(refusal),
+            "the {id} call was not refused with {refusal:?}\n{result}\n{log}"
+        );
+    }
+}
+
+/// The renamed project no longer exists at its saved path, so the pre-launch
+/// check cannot resolve it and refuses the shell. The Write tool passes the
+/// scope decision, because its path is still under the saved folder, and is
+/// refused by the same pre-launch check when it tries to create the missing
+/// project folder. Both calls report the changed-folder message (#531).
+#[test]
+fn a_granted_folder_renamed_mid_reply_refuses_the_next_shell() {
+    granted_folder_changes_mid_reply(
+        false,
+        "A saved workspace folder changed before launch.",
+        "A saved workspace folder changed before launch.",
+    );
+}
+
+/// The project's saved path now resolves to an ungranted folder. The
+/// pre-launch check refuses the shell, and the scope decision, which resolves
+/// the path first, refuses the Write tool with its Chat message.
+#[test]
+fn a_granted_folder_replaced_by_a_symlink_mid_reply_refuses_the_next_shell() {
+    granted_folder_changes_mid_reply(
+        true,
+        "A saved workspace folder changed before launch.",
+        "Ask for the folder explicitly in Chat",
     );
 }
