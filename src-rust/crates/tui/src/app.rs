@@ -5731,6 +5731,15 @@ impl App {
                 self.complete_current_turn_snapshot(self.last_turn_elapsed.clone(), true);
             }
 
+            // ---- ESC: vim leaves Insert, Visual, a pending command or the
+            // `:` and `/` lines (#569). Everything above takes Escape first:
+            // modals and overlays, notices, key bindings, transcript focus
+            // and a running turn's cancel.
+            KeyCode::Esc if self.prompt_input.vim_enabled => {
+                self.prompt_input.vim_command("Escape");
+                self.refresh_prompt_input();
+            }
+
             // ---- Quit / cancel ----------------------------------------
             // Accept both 'c' and 'C' so Shift+Ctrl+C also triggers copy
             // (issue #149 follow-up).

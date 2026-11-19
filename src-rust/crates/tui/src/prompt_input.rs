@@ -2031,8 +2031,9 @@ pub struct PromptInputState {
     pub vim_marks: std::collections::HashMap<char, (String, usize)>,
     /// The last modifying command for dot-repeat.
     pub vim_dot_action: Option<DotRepeatAction>,
-    /// Pending insert-mode text (accumulates between entering and leaving insert mode).
-    vim_insert_text_before: Option<String>,
+    /// The cursor and the text length when Insert was last entered from a
+    /// vim command, for dot-repeat of what is typed before Escape.
+    vim_insert_start: Option<(usize, usize)>,
     /// Command-line buffer for `:` command mode.
     pub vim_command_buf: String,
     /// In-prompt search buffer for `/` search mode.
@@ -2073,7 +2074,7 @@ impl PromptInputState {
             vim_macro_content: std::collections::HashMap::new(),
             vim_marks: std::collections::HashMap::new(),
             vim_dot_action: None,
-            vim_insert_text_before: None,
+            vim_insert_start: None,
             vim_command_buf: String::new(),
             vim_search_buf: String::new(),
             vim_search_last: None,
@@ -2442,27 +2443,24 @@ impl PromptInputState {
     pub fn vim_command(&mut self, key: &str) {
         // ---- Escape always cancels recording, pending state, returns to Normal ----
         if key == "Escape" {
-            // If leaving insert mode, finalise dot-repeat insert action
+            // Leaving Insert records what was typed since entering it, for
+            // dot-repeat: the text from the cursor at entry to the cursor now.
+            // That span is only the typed text while it is exactly what the
+            // text grew by; after the cursor moved away from the insert, or
+            // a delete before it, nothing is recorded.
             if self.vim_mode == VimMode::Insert {
-                if let Some(before) = self.vim_insert_text_before.take() {
-                    // Compute inserted text as the new characters added since mode entry
-                    let inserted = if self.text.len() >= before.len() {
-                        // Simple case: text only grew (cursor at end of inserted span)
-                        let from = before.len().min(self.cursor);
-                        let _ = from; // use cursor-based diff below
-                                      // Find the diff between before/after texts at current cursor
-                                      // Inserted = text[insert_start..cursor] but we don't track start.
-                                      // Approximate: whole text minus before, substring at cursor.
-                                      // Better: store cursor-at-entry and extract.
-                        self.text
-                            [before.len().min(self.text.len())..self.cursor.min(self.text.len())]
-                            .to_string()
-                    } else {
-                        String::new()
+                if let Some((start, len_at_entry)) = self.vim_insert_start.take() {
+                    let grown = self.text.len().checked_sub(len_at_entry);
+                    let typed = self.cursor.checked_sub(start);
+                    let inserted = match (grown, typed) {
+                        (Some(grown), Some(typed)) if grown == typed => {
+                            self.text.get(start..self.cursor)
+                        }
+                        _ => None,
                     };
-                    if !inserted.is_empty() {
+                    if let Some(inserted) = inserted.filter(|text| !text.is_empty()) {
                         self.vim_dot_action = Some(DotRepeatAction::Insert {
-                            text: inserted,
+                            text: inserted.to_string(),
                             mode_after_insert: false,
                         });
                     }
@@ -2832,7 +2830,7 @@ impl PromptInputState {
                         self.cursor = sel_start;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.len()));
                         self.normalize();
                         return;
                     }
@@ -2876,7 +2874,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.len()));
                         self.normalize();
                         return;
                     }
@@ -2919,7 +2917,7 @@ impl PromptInputState {
                         self.cursor = from;
                         self.vim_mode = VimMode::Insert;
                         self.visual_anchor = None;
-                        self.vim_insert_text_before = Some(self.text.clone());
+                        self.vim_insert_start = Some((self.cursor, self.text.len()));
                         self.normalize();
                         return;
                     }
@@ -2961,9 +2959,10 @@ impl PromptInputState {
             }
         }
 
-        // If we just entered insert mode from normal mode, record text snapshot for dot-repeat
+        // If we just entered insert mode from normal mode, record where the
+        // insert starts for dot-repeat
         if was_normal && self.vim_mode == VimMode::Insert {
-            self.vim_insert_text_before = Some(self.text.clone());
+            self.vim_insert_start = Some((self.cursor, self.text.len()));
         }
 
         // Handle `r` replace pending → after confirm, store dot action
