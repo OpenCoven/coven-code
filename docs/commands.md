@@ -1110,9 +1110,9 @@ These commands integrate Coven Code with the local Coven daemon
 (the socket `$COVEN_HOME/coven.sock`, or `~/.coven/coven.sock` when
 `COVEN_HOME` is unset or empty; contract `coven.daemon.v1`). They degrade
 gracefully when the daemon is absent — the daemon makes coven-code
-richer; it is not required. This build has a daemon client on Unix (macOS,
-Linux) only; on Windows it never connects, so the commands that need the
-daemon report it as absent.
+richer; it is not required. Coven Code has a daemon client only on Unix
+platforms (macOS, Linux); on Windows it never connects, so the commands that
+need the daemon report it as absent.
 
 ### /coven
 
@@ -1216,7 +1216,7 @@ for the canonical error code list.
 ### /handoff
 
 Hand off the current session context to a Coven familiar. Sends the
-recent transcript to `~/.coven/coven.sock` as a new session under
+recent transcript to the Coven daemon (see [Coven Substrate](#coven-substrate)) as a new session under
 the named familiar, returning the session id.
 
 ```
