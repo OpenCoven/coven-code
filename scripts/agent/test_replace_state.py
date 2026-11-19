@@ -105,6 +105,9 @@ class ReplaceSectionTests(unittest.TestCase):
             "## Current state: 2026-11-19\n\n---\n\n**Next action:** a.\n",
         )
         for section in bad:
+            # normalize_section itself, not only the second-rewrite guard behind it.
+            with self.assertRaisesRegex(replace_state.SectionError, "section file", msg=section):
+                replace_state.normalize_section(section)
             with self.assertRaises(replace_state.SectionError, msg=section):
                 replace_state.replace_section(OLD, section)
         ok = "## Current state: 2026-11-19\n\n### Done\n\n```\n## fenced\n```\n\n**Next action:** a.\n"
