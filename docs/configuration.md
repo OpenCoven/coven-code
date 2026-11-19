@@ -535,6 +535,7 @@ and `api_base` override the corresponding environment variables.
 | `COVEN_CODE_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `COVEN_CODE_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api-base`. |
 | `COVEN_CODE_GOALS` | Set to `0` to disable the goal system (`/coven goal` command and `GoalCompleteTool`). |
+| `COVEN_CODE_DISABLE_UPDATE_CHECK` | Set to skip the release check an interactive session makes at startup: a request to GitHub's releases API unless a result from the last 24 hours is cached, and the update notice that follows. The variable only has to be present, so `0` or an empty value also disables the check; unset it to restore the default. `/update` and `coven-code upgrade` still contact GitHub when you run them. The model catalog refresh at startup is separate: see `COVEN_CODE_DISABLE_MODELS_FETCH` in [providers.md](providers.md). |
 | `COVEN_CODE_BRIDGE_URL` | Enable the remote-control bridge by setting the server URL. |
 | `COVEN_CODE_BRIDGE_TOKEN` | Bearer token for the remote-control bridge. |
 | `RUST_LOG` | Tracing filter (e.g. `debug`, `claurst_core=trace`). |

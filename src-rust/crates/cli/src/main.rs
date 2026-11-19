@@ -1599,6 +1599,36 @@ fn spawn_models_cache_refresh() {
     });
 }
 
+/// Turns off the startup release check when present, whatever its value
+/// (`0` and the empty string included), like `COVEN_CODE_DISABLE_MODELS_FETCH`
+/// for the model list.
+const UPDATE_CHECK_OPT_OUT_ENV: &str = "COVEN_CODE_DISABLE_UPDATE_CHECK";
+
+/// Start an interactive session's background release check and return where
+/// its answer arrives: the newer version, if there is one.
+///
+/// `opt_out` is the value of [`UPDATE_CHECK_OPT_OUT_ENV`]. When it is set,
+/// `check` is never called, so no request is made and no update is announced.
+/// `/update` and `coven-code upgrade` make their own requests and do not come
+/// through here.
+fn spawn_update_check<F>(
+    opt_out: Option<&std::ffi::OsStr>,
+    check: impl FnOnce() -> F,
+) -> tokio::sync::mpsc::Receiver<Option<String>>
+where
+    F: std::future::Future<Output = Option<claurst_core::UpdateInfo>> + Send + 'static,
+{
+    let (update_tx, update_rx) = tokio::sync::mpsc::channel(1);
+    if opt_out.is_none() {
+        let check = check();
+        tokio::spawn(async move {
+            let version = check.await.map(|info| info.latest_version);
+            let _ = update_tx.send(version).await;
+        });
+    }
+    update_rx
+}
+
 async fn remove_file_if_exists(path: &std::path::Path) -> anyhow::Result<()> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
@@ -3610,13 +3640,12 @@ async fn run_interactive(
     // goal-absolute token total only after a successful EndTurn.
     let mut goal_turn: Option<InteractiveTurn> = None;
 
-    // Background update check: spawned once at startup; result delivered via channel.
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
-    tokio::spawn(async move {
-        let info = claurst_core::check_for_updates().await;
-        let version = info.map(|i| i.latest_version);
-        let _ = update_tx.send(version).await;
-    });
+    // Background update check: spawned once at startup unless the user opted
+    // out; result delivered via channel.
+    let mut update_rx = spawn_update_check(
+        std::env::var_os(UPDATE_CHECK_OPT_OUT_ENV).as_deref(),
+        claurst_core::check_for_updates,
+    );
 
     // Device code / OAuth auth channel — background tasks send events here
     // so the main loop can update the device_auth_dialog state.
@@ -8043,6 +8072,46 @@ mod tests {
     fn engine_notice_suppressed_when_not_a_tty() {
         // Piped stdout/stderr (e.g. CI, script)
         assert!(!should_show_engine_notice(true, false, false));
+    }
+
+    // --- startup release check (#516) ---
+
+    fn newer_release(version: &str) -> Option<claurst_core::UpdateInfo> {
+        Some(claurst_core::UpdateInfo {
+            current_version: "0.0.1".to_string(),
+            latest_version: version.to_string(),
+            release_url: String::new(),
+            has_update: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_startup_release_check_runs_once_and_reports_the_newer_version_by_default() {
+        let calls = std::cell::Cell::new(0);
+        let mut answer = spawn_update_check(None, || {
+            calls.set(calls.get() + 1);
+            async { newer_release("9.9.9") }
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(answer.recv().await, Some(Some("9.9.9".to_string())));
+    }
+
+    /// The opt-out is presence-based: `0` and an empty value disable the
+    /// check as well. A check that had run would deliver its answer; here
+    /// the channel closes with nothing sent.
+    #[tokio::test]
+    async fn the_startup_release_check_never_runs_once_the_opt_out_variable_is_present() {
+        for value in ["1", "0", ""] {
+            let calls = std::cell::Cell::new(0);
+            let mut answer = spawn_update_check(Some(std::ffi::OsStr::new(value)), || {
+                calls.set(calls.get() + 1);
+                async { newer_release("9.9.9") }
+            });
+
+            assert_eq!(calls.get(), 0, "opt-out value {value:?}");
+            assert_eq!(answer.recv().await, None, "opt-out value {value:?}");
+        }
     }
 
     fn accounting_goal(
