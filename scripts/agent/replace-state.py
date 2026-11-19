@@ -6,13 +6,14 @@ usage: replace-state.py <issue> <section-file> [--apply] [--insert]
 
 It replaces only a section whose end is certain, and refuses anything else,
 so it never drops original issue text. The old section must:
-- be the body's only "## Current state: YYYY-MM-DD" line, not inside an
-  unclosed <!-- comment or <details> block;
+- be the body's only "## Current state: YYYY-MM-DD" line, after a blank
+  line, with no code fence or HTML anywhere before it;
 - hold, after its heading, only plain lines (paragraphs, lists, tables) up to
   a single-line "**Next action:**" paragraph, followed by a blank line or the
-  end of the body. A heading of any kind (including setext and HTML), a rule,
-  a code fence, an HTML line or a "-->" before the Next action line is
-  refused, as is a Next action paragraph that runs on to a second line.
+  end of the body. A heading of any kind (including setext), a rule, a code
+  fence, HTML anywhere in a line, a link or footnote definition, or a lone
+  carriage return is refused, as is a Next action paragraph that runs on to
+  a second line or text after it that starts indented.
 The old section ends after that Next action line. Everything after it (the
 original report, acceptance, prompts) is kept byte for byte.
 
@@ -28,7 +29,8 @@ copies could be committed by accident). Earlier copies are never overwritten.
 just before writing and refuses if it changed; GitHub offers no atomic check,
 so a concurrent edit in that last second can still be overwritten. --insert
 puts the section at the top of a body that has none; without it, a missing
-section is an error. CRLF line endings in the body become LF.
+section is an error. CRLF line endings in the body become LF, and a leading
+byte-order mark is dropped.
 
 Exit status: 0 on success (or no change), 1 when the body or the section's
 content cannot be handled, 2 on usage errors, an unreadable section file, a
@@ -48,14 +50,12 @@ HEADING = re.compile(r"## Current state: \d{4}-\d{2}-\d{2}[ \t]*")
 ANY_STATE_HEADING = re.compile(r"\s{0,3}(#{1,6}\s*|<h[1-6][^>]*>\s*)Current state\b", re.I)
 NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
 # Lines that could start or end a block GitHub renders as structure: ATX and
-# setext headings, rules, code fences, HTML (headings, <details>, comments).
-RISKY = re.compile(r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<)")
-# HTML that hides or reflows what follows it, wherever it appears in a line.
-CONTAINERS = ("<!--", "-->", "<details", "</details", "<pre", "</pre", "<textarea",
-              "</textarea", "<script", "</script", "<style", "</style")
-PAIRS = (("<!--", "-->"), ("<details", "</details"), ("<pre", "</pre"),
-         ("<textarea", "</textarea"), ("<script", "</script"), ("<style", "</style"))
-FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")
+# setext headings, rules, code fences, HTML, link and footnote definitions.
+RISKY = re.compile(
+    r"\s{0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$|([-*_])(\s*\3){2,}\s*$|```|~~~|<|\[[^\]]+\]:)"
+)
+# HTML anywhere in a line: a tag, comment, declaration or processing instruction.
+HTML = re.compile(r"<[A-Za-z!/?]|-->")
 
 
 class SectionError(Exception):
@@ -70,8 +70,7 @@ def lines_of(text):
 
 
 def risky(line):
-    lowered = line.lower()
-    return bool(RISKY.match(line)) or any(token in lowered for token in CONTAINERS)
+    return bool(RISKY.match(line) or HTML.search(line))
 
 
 def section_lines(lines, start, what):
@@ -79,7 +78,7 @@ def section_lines(lines, start, what):
     for index in range(start + 1, len(lines)):
         line = lines[index]
         if NEXT_ACTION.match(line):
-            if any(token in line.lower() for token in CONTAINERS):
+            if HTML.search(line):
                 raise SectionError(f"{what}'s **Next action:** line holds HTML; edit it by hand")
             following = lines[index + 1] if index + 1 < len(lines) else ""
             if following.strip():
@@ -111,29 +110,17 @@ def normalize_section(text):
 
 
 def contained(prefix_lines):
-    """Why the line after prefix_lines would not be a top-level heading, or None."""
-    fence = None
+    """Why the line after prefix_lines might not be a top-level heading, or None.
+
+    Fences and HTML can wrap a heading in ways that are hard to track (list
+    items, comments, nested blocks), so any of them before the heading is
+    refused. No real Current state section has either before it.
+    """
     for line in prefix_lines:
-        match = FENCE.match(line)
-        if fence is None:
-            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
-                fence = match.group(1)
-        elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) \
-                and not match.group(2).strip():
-            fence = None
-    if fence is not None:
-        return "inside a code fence"
-    text = "\n".join(prefix_lines).lower()
-    for opener, closer in PAIRS:
-        position = 0
-        while True:
-            opened = text.find(opener, position)
-            if opened == -1:
-                break
-            closed = text.find(closer, opened + len(opener))
-            if closed == -1:
-                return f"inside an unclosed {opener}"
-            position = closed + len(closer)
+        if "```" in line or "~~~" in line:
+            return "after a code fence"
+        if HTML.search(line):
+            return "after HTML"
     if prefix_lines and prefix_lines[-1].strip():
         return "not after a blank line"
     return None
@@ -165,6 +152,12 @@ def splice(body, section, insert):
     action = section_lines(lines, start, "the old Current state section")
     head = "\n".join(lines[:start])
     tail = "\n".join(lines[action + 1 :]).lstrip("\n")
+    first_text = next((line for line in tail.split("\n") if line.strip()), "")
+    if first_text[:1] in (" ", "\t"):
+        raise SectionError(
+            "the text after the section starts indented, and could render differently "
+            "next to a new section; edit it by hand"
+        )
     return (head + "\n" if start else "") + section + ("\n" + tail if tail else "")
 
 
@@ -235,7 +228,11 @@ def main(argv=None):
     except SectionError as error:
         print(f"replace-state: #{args.issue}: {error}", file=sys.stderr)
         return 1
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"replace-state: cannot create {args.out_dir}: {error}", file=sys.stderr)
+        return 2
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     prefix = args.out_dir / f"{args.issue}.{stamp}"
     suffix = 1
@@ -244,8 +241,12 @@ def main(argv=None):
         prefix = args.out_dir / f"{args.issue}.{stamp}-{suffix}"
     before_file = prefix.with_name(prefix.name + ".before.md")
     after_file = prefix.with_name(prefix.name + ".after.md")
-    before_file.write_text(before, encoding="utf-8")
-    after_file.write_text(after, encoding="utf-8")
+    try:
+        before_file.write_text(before, encoding="utf-8")
+        after_file.write_text(after, encoding="utf-8")
+    except OSError as error:
+        print(f"replace-state: cannot write the copies: {error}", file=sys.stderr)
+        return 2
     sys.stdout.writelines(
         difflib.unified_diff(
             before.splitlines(True),

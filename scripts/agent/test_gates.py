@@ -115,6 +115,8 @@ class GatesDryRunTests(unittest.TestCase):
         sneaky = self.worktree.parent / "elsewhere" / ".." / "wt" / "gates"
         (self.worktree.parent / "elsewhere").mkdir()
         self.assertEqual(self.dry_run(str(self.worktree), str(sneaky)).returncode, 2)
+        missing = self.worktree.parent / "missing" / ".." / "wt" / "gates"
+        self.assertEqual(self.dry_run(str(self.worktree), str(missing)).returncode, 2)
         (self.worktree / ".github" / "workflows" / "rust-ci.yml").write_text("no pin\n")
         result = self.dry_run(str(self.worktree), str(self.out))
         self.assertEqual(result.returncode, 2)

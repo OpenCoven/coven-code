@@ -44,10 +44,11 @@ def run(id, name, conclusion="success", status="completed", suite=1, started="20
 
 
 AHEAD = {"status": "ahead", "ahead_by": 2, "behind_by": 0}
-def workflow(id, name, suite, conclusion="success", status="completed", path=None):
+def workflow(id, name, suite, conclusion="success", status="completed", path=None, event="pull_request"):
     return {
         "id": id,
         "name": name,
+        "event": event,
         "path": path or f".github/workflows/{name.lower().replace(' ', '-')}.yml",
         "check_suite_id": suite,
         "status": status,
@@ -62,9 +63,9 @@ WORKFLOWS = [
 ]
 
 
-def verdict(p=None, compare=AHEAD, checks=(), statuses=(), tries=1, min_checks=1, workflows=WORKFLOWS):
+def verdict(p=None, compare=AHEAD, checks=(), statuses=(), tries=1, min_checks=1, workflows=WORKFLOWS, required=()):
     _, reasons = pr_ready.evaluate(
-        p or pull(), compare, list(checks), list(statuses), list(workflows), tries, min_checks
+        p or pull(), compare, list(checks), list(statuses), list(workflows), tries, min_checks, required
     )
     return pr_ready.verdict_line(reasons)
 
@@ -169,6 +170,25 @@ class VerdictTests(unittest.TestCase):
         ]
         result = verdict(checks=[run(1, "a")], workflows=workflows)
         self.assertEqual(result, "NOT READY: workflow Tests: failure")
+
+    def test_dispatched_run_does_not_stand_in_for_a_failed_pr_run(self):
+        workflows = WORKFLOWS + [workflow(110, "Rust CI", 10, event="workflow_dispatch")]
+        checks = [
+            run(1, "Format, lint, and test", "failure", suite=2),
+            run(5, "Format, lint, and test", "success", suite=10),
+        ]
+        result = verdict(checks=checks, workflows=workflows)
+        self.assertEqual(result, "NOT READY: Rust CI / Format, lint, and test: failure")
+        failed_pr_run = [w for w in WORKFLOWS if w["id"] != 102] + [workflow(102, "Rust CI", 2, "failure")]
+        result = verdict(checks=[run(1, "a")], workflows=failed_pr_run + workflows[-1:])
+        self.assertEqual(result, "NOT READY: workflow Rust CI: failure")
+
+    def test_required_workflow_without_a_run_is_not_ready(self):
+        self.assertEqual(
+            verdict(checks=[run(1, "a")], required=["TUI Tests"]),
+            "NOT READY: workflow TUI Tests: no run on the head yet",
+        )
+        self.assertEqual(verdict(checks=[run(1, "a")], required=["Rust CI"]), "READY")
 
     def test_unstable_is_not_ready_and_has_hooks_is_ready(self):
         self.assertEqual(verdict(p=pull(merge_state="unstable"), checks=[run(1, "a")]), "NOT READY: mergeable_state=unstable")
@@ -311,6 +331,12 @@ class ScriptTests(unittest.TestCase):
         result = self.script("7")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(f"the head moved to {'b' * 40} during the check", result.stdout)
+
+    def test_require_workflow_option(self):
+        self.write("pulls.json", [pull()])
+        result = self.script("7", "--require-workflow", "TUI Tests", "--require-workflow", "Rust CI")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("NOT READY: workflow TUI Tests: no run on the head yet", result.stdout)
 
     def test_api_failure_exits_2(self):
         self.write("pulls.json", [pull()])

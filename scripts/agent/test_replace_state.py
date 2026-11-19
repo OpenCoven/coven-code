@@ -65,8 +65,8 @@ class ReplaceSectionTests(unittest.TestCase):
 
     def test_heading_inside_a_comment_or_details_is_refused(self):
         for opener, closer in (("<!--", "-->"), ("<details>", "</details>")):
-            body = f"Intro.\n{opener}\n{OLD}{closer}\n\nKEEP\n"
-            self.refused(body, pattern="unclosed")
+            body = f"Intro.\n{opener}\n\n{OLD}{closer}\n\nKEEP\n"
+            self.refused(body, pattern="after HTML")
 
     def test_heading_inside_a_fence_or_html_block_is_refused(self):
         example = "## Current state: 2026-11-18\n\nOld.\n\n**Next action:** x.\n"
@@ -78,7 +78,35 @@ class ReplaceSectionTests(unittest.TestCase):
 
     def test_an_arrow_does_not_close_a_later_comment(self):
         body = "```mermaid\nA --> B\n```\n\n<!--\n\n" + OLD + "\nHIDDEN\n-->\nKeep\n"
-        self.refused(body, pattern="unclosed <!--")
+        self.refused(body, pattern="after a code fence")
+        self.refused("A --> B\n\n<!--\n\n" + OLD + "\nHIDDEN\n-->\nKeep\n", pattern="after HTML")
+
+    def test_fences_in_lists_or_html_before_the_heading_are_refused(self):
+        example = "## Current state: 2026-01-01\n\nBlocked.\n\n**Next action:** do Y\n\nMORE\n```\n"
+        for prefix in (
+            "- ```sh\n  cargo test\n  ```\n\nTemplate:\n\n```\n\n",
+            "<!--\n```\n-->\n\n```\n\n",
+            "<div>\n```\n</div>\n\n```\n\n",
+            "````\n```\n\n",
+            "<?php\n\n",
+            "<![CDATA[\n\n",
+            "<!DOCTYPE x\n\n",
+        ):
+            self.refused(prefix + example, pattern="edit it by hand")
+
+    def test_link_and_footnote_definitions_are_refused(self):
+        for line in ("[docs]: https://other.example", "[^1]: a note", "  [1]: https://x.example"):
+            with self.assertRaises(replace_state.SectionError, msg=line):
+                replace_state.normalize_section(NEW.replace("New facts.", line))
+            self.refused(OLD.replace("Old facts.", line))
+
+    def test_html_heading_inside_a_line_of_the_old_section_is_refused(self):
+        self.refused(OLD.replace("Old facts.", "state <h2>Original report</h2>"))
+        self.refused(OLD.replace("Old facts.", "a rule <hr> here"))
+
+    def test_indented_text_after_the_section_is_refused(self):
+        self.refused(OLD + "\n    indented code or list continuation\n", pattern="indented")
+        self.assertEqual(self.replaced(OLD + "\n   \nKeep.\n"), NEW + "\n   \nKeep.\n")
 
     def test_heading_must_follow_a_blank_line(self):
         self.refused("Intro text\n" + OLD, pattern="blank line")
@@ -106,9 +134,9 @@ class ReplaceSectionTests(unittest.TestCase):
         self.assertEqual(self.replaced("\ufeff" + OLD + "\nKeep.\n"), NEW + "\nKeep.\n")
 
     def test_unusual_line_separators_do_not_split_lines(self):
-        body = OLD + "\nOld. ```\n\n## Original\n\nKEEP\n"
-        out = self.replaced(body)
-        self.assertTrue(out.endswith("\nOld. ```\n\n## Original\n\nKEEP\n"))
+        prefix = "Intro\x0cpage\u2028line\x85end.\n\n"
+        tail = "Old.\u2028```\x0c\n\n## Original\x1c\n\nKEEP\n"
+        self.assertEqual(self.replaced(prefix + OLD + "\n" + tail), prefix + NEW + "\n" + tail)
 
     def test_absent_section_is_an_error_without_insert(self):
         body = "## What happens\n\nKeep.\n"
@@ -176,7 +204,7 @@ class ReplaceSectionTests(unittest.TestCase):
             "```\n## fenced\n```", "~~~\ncode\n~~~", "<details>\nx\n</details>", "<!-- c -->",
             "<h2>H</h2>", "**Next action:** stray.", "A --> B", "x <!-- y",
         ]
-        openers = ["```", "~~~", "<!--", "<details>", "<pre>"]
+        openers = ["```", "~~~", "<!--", "<details>", "<pre>", "- ```sh", "<div>", "<?x", "    ```"]
         rng = random.Random(406)
         accepted = 0
         for _ in range(3000):

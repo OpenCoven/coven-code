@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage: scripts/agent/pr-ready.sh <pr> [--repo OWNER/NAME] [--min-checks N]
+# usage: scripts/agent/pr-ready.sh <pr> [--repo OWNER/NAME] [--min-checks N] [--require-workflow NAME]...
 #
 # Prints a pull request's head SHA, whether its base branch (origin/main) is
 # an ancestor of it, mergeable and mergeable_state (retried for about two

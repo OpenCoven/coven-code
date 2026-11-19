@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report whether a pull request is ready to merge. Never merges, pushes or edits.
 
-usage: pr-ready.sh <pr> [--repo OWNER/NAME] [--min-checks N]
+usage: pr-ready.sh <pr> [--repo OWNER/NAME] [--min-checks N] [--require-workflow NAME]...
 
 Reads the pull request through the REST API (`gh api`) and prints:
 - the head SHA;
@@ -14,7 +14,13 @@ then one verdict line, READY or NOT READY with the reasons.
 
 A check name is keyed by its workflow ("Rust CI / Format, lint, and test"), so
 same-named jobs in two workflows stay apart, while a cancelled duplicate and a
-later rerun of the same job collapse into the later one.
+later rerun of the same job collapse into the later one. Runs from another
+trigger (a workflow_dispatch run on the branch) are kept apart from the
+pull_request runs, so they cannot stand in for a failed one.
+
+READY covers only the runs that exist. Right after a push GitHub may not have
+created every workflow run yet, so pass --require-workflow for the workflows
+the change must run (for example "Rust CI" and "TUI Tests" for src-rust/).
 
 Environment: PR_READY_TRIES (default 12) and PR_READY_DELAY (seconds, default
 10) bound the wait for a known mergeable state, about two minutes in all.
@@ -88,7 +94,16 @@ def check_key(run, workflows):
     return f"{name} ({app})" if app and app != "github-actions" else name
 
 
-def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_checks=1):
+def workflow_label(run):
+    """A workflow run's name, with its trigger when that is not the PR itself."""
+    name = run.get("name") or "?"
+    event = run.get("event")
+    return name if event in (None, "pull_request") else f"{name} ({event})"
+
+
+def evaluate(
+    pull, compare, check_runs, statuses, workflow_runs, tries, min_checks=1, required=()
+):
     """Return (report lines, reasons). READY when reasons is empty."""
     reasons = []
     lines = []
@@ -127,8 +142,10 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
         elif state not in MERGEABLE_OK:
             reasons.append(f"mergeable_state={state}")
 
+    # A dispatched or pushed run of the same workflow is kept apart from the
+    # pull_request run, so it cannot stand in for a failed one.
     workflows = {
-        run.get("check_suite_id"): run.get("name")
+        run.get("check_suite_id"): workflow_label(run)
         for run in workflow_runs
         if run.get("check_suite_id") is not None
     }
@@ -158,14 +175,17 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
     # Keyed by the workflow file, since two workflows can share a display name.
     newest_workflows = latest(
         workflow_runs,
-        key=lambda run: run.get("path") or run.get("workflow_id") or run.get("name") or "?",
+        key=lambda run: (
+            run.get("path") or run.get("workflow_id") or run.get("name") or "?",
+            run.get("event") or "",
+        ),
         order=lambda run: run.get("id") or 0,
     )
     if newest_workflows:
         lines.append(f"workflows: {len(newest_workflows)} workflow runs")
     for key in sorted(newest_workflows, key=str):
         run = newest_workflows[key]
-        name = run.get("name") or str(key)
+        name = workflow_label(run)
         if run.get("status") != "completed":
             result = run.get("status") or "pending"
         else:
@@ -173,6 +193,11 @@ def evaluate(pull, compare, check_runs, statuses, workflow_runs, tries, min_chec
         if run.get("status") != "completed" or result not in PASSING:
             reasons.append(f"workflow {name}: {result}")
         lines.append(f"  {result:<16} {name}")
+    # Right after a push GitHub may not have created every workflow run yet.
+    present = {run.get("name") for run in workflow_runs}
+    for name in required:
+        if name not in present:
+            reasons.append(f"workflow {name}: no run on the head yet")
 
     contexts = latest(
         statuses,
@@ -213,6 +238,14 @@ def main(argv=None):
         type=int,
         default=1,
         help="NOT READY with fewer check names than this (default 1; 0 allows none)",
+    )
+    parser.add_argument(
+        "--require-workflow",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="NOT READY until a run of this workflow exists on the head (repeatable), "
+        "e.g. 'Rust CI' for a Rust change",
     )
     args = parser.parse_args(argv)
     if args.min_checks < 0:
@@ -259,7 +292,14 @@ def main(argv=None):
         return 2
     try:
         lines, reasons = evaluate(
-            pull, compare, check_runs, statuses, workflow_runs, used, args.min_checks
+            pull,
+            compare,
+            check_runs,
+            statuses,
+            workflow_runs,
+            used,
+            args.min_checks,
+            args.require_workflow,
         )
     except (AttributeError, KeyError, TypeError) as error:
         print(f"pr-ready: unexpected API response: {error!r}", file=sys.stderr)

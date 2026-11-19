@@ -48,7 +48,11 @@ WORKTREE="$(cd "$1" 2>/dev/null && pwd -P)" || { echo "gates: no such worktree: 
 case "$2" in /*) OUT="$2" ;; *) OUT="$PWD/$2" ;; esac
 # Resolve symlinks and .. in the existing part of the path.
 OUT_PARENT="$(dirname "$OUT")"
-if [ -d "$OUT_PARENT" ]; then OUT="$(cd "$OUT_PARENT" && pwd -P)/$(basename "$OUT")"; fi
+if [ -d "$OUT_PARENT" ]; then
+  OUT="$(cd "$OUT_PARENT" && pwd -P)/$(basename "$OUT")"
+else
+  case "/$OUT/" in */../*|*/./*) echo "gates: give <outdir> without . or .. when its parent does not exist" >&2; exit 2 ;; esac
+fi
 # Inside the worktree the logs would show up in identity.txt's git status.
 case "$OUT/" in "$WORKTREE"/*) echo "gates: put <outdir> outside the worktree" >&2; exit 2 ;; esac
 
