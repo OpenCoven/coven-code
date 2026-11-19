@@ -6081,6 +6081,27 @@ mod tests {
         assert_eq!(s.cursor, 3);
     }
 
+    /// Up from a row below one that a wide character ended early lands on
+    /// that row (#410). With width 4, `abc漢d` is drawn as `abc` and `漢d`:
+    /// the end of `abc` is the start of `漢d`, so the cursor stops on `c`.
+    #[test]
+    fn up_onto_a_row_a_wide_character_ended_early_stays_on_that_row() {
+        let text = "abc\u{6F22}d";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(4), (1, 3));
+        assert!(s.move_visual_up(4));
+        assert_eq!(s.cursor_visual_pos(4).0, 0);
+        assert_eq!(s.cursor, 2);
+
+        // On a line's last row the end of the row is the end of the line,
+        // drawn on that row, so the cursor may still go there.
+        let text = "abcd\n\u{6F22}\u{6F22}x";
+        let mut s = composer(text, text.len());
+        assert_eq!(s.cursor_visual_pos(8), (1, 5));
+        assert!(s.move_visual_up(8));
+        assert_eq!((s.cursor, s.cursor_visual_pos(8)), (4, (0, 4)));
+    }
+
     #[test]
     fn moving_up_and_down_stops_before_a_crlf() {
         // The CR is not drawn, so column 3 of "ab\r" is past its end: the
