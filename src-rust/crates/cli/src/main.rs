@@ -2757,6 +2757,77 @@ fn adopt_in_app_rewind(
     }
 }
 
+/// Idle auto-compaction's worker (decision 4, #406). It honours the turn's
+/// token: a cancel seen before the summary returns leaves `messages` exactly
+/// as it was and reports `Cancelled`. Once the summary is in hand it is
+/// applied and reported as finished, so a cancel that arrives after that
+/// does not undo it.
+async fn compact_idle_conversation(
+    client: &claurst_api::AnthropicClient,
+    messages: &MessagesArc,
+    model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> claurst_query::QueryOutcome {
+    let original = messages.lock().await.clone();
+    let compacted = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return claurst_query::QueryOutcome::Cancelled,
+        result = claurst_query::compact_conversation(client, &original, model) => result,
+    };
+    match compacted {
+        Ok(compacted) => {
+            let message = compacted
+                .first()
+                .cloned()
+                .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
+            *messages.lock().await = compacted;
+            claurst_query::QueryOutcome::EndTurn {
+                message,
+                usage: claurst_core::types::UsageInfo::default(),
+            }
+        }
+        Err(err) => claurst_query::QueryOutcome::Error(err),
+    }
+}
+
+/// Report how an idle auto-compaction ended (decision 4, #406).
+///
+/// - Finished: the compaction stands, so a cancel requested while it ran is
+///   settled here without saying "Cancelled.".
+/// - Cancelled: the conversation was left as it was. Auto-compaction stays
+///   off for the session, as after a failure, so it does not start again at
+///   once on the same history, and the status says both.
+/// - Failed (or the worker panicked): auto-compaction is turned off for the
+///   session and the status says so.
+fn finish_idle_compaction(
+    app: &mut claurst_tui::App,
+    outcome: Option<&claurst_query::QueryOutcome>,
+) {
+    app.auto_compact_running = false;
+    match outcome {
+        Some(claurst_query::QueryOutcome::EndTurn { .. }) => {
+            // Settles a pending cancel now, so the loop's later settle finds
+            // nothing to report. A compaction has no tool rows, so the row
+            // bookkeeping in the settle does nothing here.
+            app.settle_cancellation();
+            // After auto-compact the context was summarised — reset usage.
+            app.context_used_tokens = 0;
+            app.status_message = Some("Auto-compact complete.".to_string());
+        }
+        Some(claurst_query::QueryOutcome::Cancelled) => {
+            app.settle_cancellation();
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Cancelled. Auto-compact is off for this session.".to_string());
+        }
+        _ => {
+            app.auto_compact_enabled = false;
+            app.status_message =
+                Some("Auto-compact failed and was disabled for this session.".to_string());
+        }
+    }
+}
+
 /// Tag one turn's events with its session generation and deliver them to the
 /// bounded interactive queue in order. Waits for queue space rather than
 /// dropping; ends when the turn's sender is dropped or the loop is gone.
@@ -5307,31 +5378,13 @@ async fn run_interactive(
             goal_turn = None;
 
             let handle = tokio::spawn(async move {
-                if ct.is_cancelled() {
-                    return QueryOutcome::Cancelled;
-                }
-
-                let msgs = msgs_arc_clone.lock().await.clone();
-                match claurst_query::compact_conversation(
+                compact_idle_conversation(
                     client_clone.as_ref(),
-                    &msgs,
+                    &msgs_arc_clone,
                     &compact_model,
+                    &ct,
                 )
                 .await
-                {
-                    Ok(compacted) => {
-                        let message = compacted
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| claurst_core::types::Message::assistant(""));
-                        *msgs_arc_clone.lock().await = compacted;
-                        QueryOutcome::EndTurn {
-                            message,
-                            usage: claurst_core::types::UsageInfo::default(),
-                        }
-                    }
-                    Err(err) => QueryOutcome::Error(err),
-                }
             });
             current_query = Some((handle, msgs_arc));
         }
@@ -6021,7 +6074,6 @@ async fn run_interactive(
                 };
                 let completed_end_turn = matches!(&query_outcome, Ok(QueryOutcome::EndTurn { .. }));
                 let was_auto_compact = app.auto_compact_running;
-                let auto_compact_succeeded = completed_end_turn;
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -6039,17 +6091,7 @@ async fn run_interactive(
                     app.pending_auto_submit = true;
                 }
                 if app.auto_compact_running {
-                    app.auto_compact_running = false;
-                    if !auto_compact_succeeded {
-                        app.auto_compact_enabled = false;
-                        app.status_message = Some(
-                            "Auto-compact failed and was disabled for this session.".to_string(),
-                        );
-                    } else {
-                        // After auto-compact the context was summarised — reset usage.
-                        app.context_used_tokens = 0;
-                        app.status_message = Some("Auto-compact complete.".to_string());
-                    }
+                    finish_idle_compaction(&mut app, query_outcome.as_ref().ok());
                 }
 
                 rollback_unattempted_turn(
@@ -7262,10 +7304,200 @@ mod tests {
         assert_eq!(session.messages.len(), 1, "the prompt is kept");
     }
 
-    /// #408: a worker that does not watch the token, as auto-compaction does
-    /// not, is waited for. If it finishes within `TURN_EXIT_WAIT`, the
-    /// conversation it wrote is what is kept. This models the compaction
-    /// worker's shape, not `compact_conversation` itself.
+    /// A Messages API stand-in for idle compaction. With `reply`, it answers
+    /// every request with a one-line summary; without, it holds each request
+    /// open and never answers. Reports each request it has read in full.
+    async fn compaction_fixture(
+        reply: bool,
+    ) -> (
+        Arc<claurst_api::AnthropicClient>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "fixture connection closed before request");
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|length| length.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let _ = seen.send(());
+                if !reply {
+                    held.push(socket);
+                    continue;
+                }
+                let body = "event: message_start\ndata: {\"message\":{\"id\":\"summary\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n\
+                    event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                    event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"The summary.\"}}\n\n\
+                    event: content_block_stop\ndata: {\"index\":0}\n\n\
+                    event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
+                    event: message_stop\ndata: {}\n\n";
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        let client = claurst_api::AnthropicClient::new(claurst_api::client::ClientConfig {
+            api_key: "fake-local-key".into(),
+            api_base: format!("http://{address}"),
+            max_retries: 0,
+            request_timeout: std::time::Duration::from_secs(30),
+            ..Default::default()
+        })
+        .unwrap();
+        (Arc::new(client), requests, server)
+    }
+
+    /// Enough history for `compact_conversation` to summarise a head.
+    fn compactable_history() -> Vec<claurst_core::types::Message> {
+        (0..16)
+            .map(|n| {
+                if n % 2 == 0 {
+                    claurst_core::types::Message::user(format!("question {n}"))
+                } else {
+                    claurst_core::types::Message::assistant(format!("answer {n}"))
+                }
+            })
+            .collect()
+    }
+
+    /// An App whose idle auto-compaction is running and whose user has asked
+    /// to cancel it; the loop has cancelled the token.
+    fn app_cancelling_idle_compaction() -> claurst_tui::App {
+        let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
+        app.auto_compact_enabled = true;
+        app.auto_compact_running = true;
+        app.context_used_tokens = 9_000;
+        app.cancellation = claurst_tui::application::TurnCancellation::AwaitingRuntime;
+        app
+    }
+
+    /// Decision 4 (#406): a cancel during idle auto-compaction stops it. The
+    /// conversation is exactly what it was, and the status says it was
+    /// cancelled and that auto-compaction is now off.
+    #[tokio::test]
+    async fn idle_compaction_cancelled_mid_summary_leaves_history_and_says_cancelled() {
+        let (client, mut requests, server) = compaction_fixture(false).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let worker = {
+            let (messages, cancel) = (messages.clone(), cancel.clone());
+            tokio::spawn(async move {
+                compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await
+            })
+        };
+        // The summary request is in flight and will never be answered.
+        tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+            .await
+            .expect("the summary request reaches the fixture");
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .expect("a cancel stops the compaction instead of waiting for the summary")
+            .unwrap();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::Cancelled),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&*messages.lock().await).unwrap(),
+            serde_json::to_value(&history).unwrap(),
+            "no half-applied compaction"
+        );
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cancelled. Auto-compact is off for this session.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 9_000, "nothing was summarised");
+        assert!(
+            !app.auto_compact_enabled,
+            "it does not start again at once on the same history"
+        );
+        server.abort();
+    }
+
+    /// Decision 4 (#406): a cancel that arrives once the compaction has
+    /// finished keeps the compacted conversation, and the status does not
+    /// call the compaction cancelled.
+    #[tokio::test]
+    async fn idle_compaction_finished_before_the_cancel_keeps_its_result_and_status() {
+        let (client, _requests, server) = compaction_fixture(true).await;
+        let history = compactable_history();
+        let messages: MessagesArc = Arc::new(tokio::sync::Mutex::new(history.clone()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let outcome =
+            compact_idle_conversation(&client, &messages, "claude-sonnet-4-6", &cancel).await;
+        cancel.cancel();
+        assert!(
+            matches!(outcome, claurst_query::QueryOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        let compacted = messages.lock().await.clone();
+        assert!(compacted.len() < history.len(), "the summary was applied");
+        assert!(compacted
+            .iter()
+            .any(|message| message.get_all_text().contains("The summary.")));
+
+        let mut app = app_cancelling_idle_compaction();
+        finish_idle_compaction(&mut app, Some(&outcome));
+        // The loop settles once no worker is left running.
+        app.settle_cancellation();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Auto-compact complete.")
+        );
+        assert_eq!(
+            app.cancellation,
+            claurst_tui::application::TurnCancellation::Idle
+        );
+        assert_eq!(app.context_used_tokens, 0);
+        assert!(app.auto_compact_enabled);
+        server.abort();
+    }
+
+    /// #408: a worker that does not watch the token (a tool or approval that
+    /// ignores it) is waited for. If it finishes within `TURN_EXIT_WAIT`, the
+    /// conversation it wrote is what is kept. Idle auto-compaction watches the
+    /// token since decision 4; see the `idle_compaction_*` tests.
     #[tokio::test]
     async fn quitting_keeps_what_a_worker_that_ignores_the_stop_wrote_if_it_finishes_in_time() {
         let mut app = claurst_tui::App::new(Config::default(), CostTracker::new());
