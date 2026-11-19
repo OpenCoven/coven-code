@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# /resume of a session whose id is not a UUID (#573), in Classic and in Next.
+# Resuming a session whose id is not a UUID (#573), in Classic and in Next.
 # `--session-id` takes any string, and the history keeps it as given. Two
 # sessions are saved, one with the 2-byte id `ab` and one with
 # `日本語セッション`, whose byte 8 falls inside its third character. A third
-# launch resumes each with `/resume <id>`. The app keeps running and shows the
-# resumed transcript; Next also shows the shortened id in its status. A fake
+# launch resumes each with `/session resume <id>`, which replaced `/resume`.
+# The app keeps running and shows the resumed transcript; Next also shows the
+# shortened id in its status. A fake
 # `claude` answers each turn at once; no network or model. Classic shows the
 # status row only before its first turn, so there only the transcript and the
 # running process are checked.
@@ -40,13 +41,13 @@ _rss_save() { # renderer, id, prompt
 # Resume one saved session in the running app.
 _rss_resume() { # renderer, id, prompt of that session, running process name
   local r="$1" id="$2" prompt="$3" running="$4"
-  tui_type "/resume $id"; sleep 0.3; tui_keys Enter
-  if wait_for "$prompt" 10; then _pass "$r: /resume $id shows that session's transcript"
-  else _fail "$r: /resume $id shows that session's transcript" "$(tui_capture)"; fi
+  tui_type "/session resume $id"; sleep 0.3; tui_keys Enter
+  if wait_for "$prompt" 10; then _pass "$r: /session resume $id shows that session's transcript"
+  else _fail "$r: /session resume $id shows that session's transcript" "$(tui_capture)"; fi
   sleep 0.5
   assert_eq "$(_tmux display-message -p -t "$TUI_SESSION" '#{pane_current_command}')" \
-    "$running" "$r: the app is still running after /resume $id"
-  assert_absent "$(tui_capture)" "panicked" "$r: /resume $id does not panic"
+    "$running" "$r: the app is still running after /session resume $id"
+  assert_absent "$(tui_capture)" "panicked" "$r: /session resume $id does not panic"
   if [ "$r" = next ]; then
     if wait_for "Resumed session $id." 5; then _pass "$r: the status names session $id"
     else _fail "$r: the status names session $id" "$(tui_capture)"; fi
@@ -90,7 +91,7 @@ _rss_journey() { # renderer
 }
 
 tc_resume_short_session_id() {
-  describe "/resume of a short or non-ASCII session id does not panic"
+  describe "/session resume of a short or non-ASCII session id does not panic"
   if ! have_tmux; then _skip "tmux not installed"; return 0; fi
   _rss_journey classic
   _rss_journey next
