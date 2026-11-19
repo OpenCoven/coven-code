@@ -53,8 +53,15 @@ ANY_STATE_HEADING = re.compile(r"\s{0,3}(#{1,6}\s*|<h[1-6][^>]*>\s*)Current stat
 NEXT_ACTION = re.compile(r"\*\*Next action:\*\*")
 # A hand-typed variant ("**Next Action:**", "Next action:") before the exact
 # marker would let the section run on into the original text.
-# Prose such as "the previous next action is done" has no colon and is fine.
-NEAR_NEXT_ACTION = re.compile(r"next[\s_*-]*action\W{0,4}:", re.I)
+# Caught: "**Next Action:**", "**Next actions:**", "**Next action (Val):**",
+# "Next action: x", "- next-action: x", and any bold text naming a next
+# action. Prose such as "the previous next action is done" is fine.
+NEAR_NEXT_ACTION = re.compile(
+    r"next[\s_*-]*actions?\W{0,4}:"
+    r"|^\s*(?:[-*+>]\s*|\d+[.)]\s*)*[*_]*\s*next[\s_*-]*actions?\b[^:\n]{0,40}:"
+    r"|\*\*[^*\n]*next[\s_-]*actions?\b[^*\n]*\*\*",
+    re.I,
+)
 # Lines that could start or end a block GitHub renders as structure: ATX and
 # setext headings, rules, code fences, HTML, link and footnote definitions.
 RISKY = re.compile(

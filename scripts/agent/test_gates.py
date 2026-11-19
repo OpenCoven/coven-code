@@ -134,7 +134,7 @@ FAKE_RUSTUP = textwrap.dedent(
     """\
     #!/bin/sh
     # Stands in for `rustup run <toolchain> cargo <subcommand> ...`.
-    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}" >> "$FAKE_CALLS"
+    echo "$* HOME=$HOME RUSTFLAGS=${RUSTFLAGS-unset}${CARGO_TARGET_X_RUSTFLAGS-}${CARGO_PROFILE_TEST_DEBUG_ASSERTIONS-}${COVEN_HOME-}${COVEN_CODE_TEST_HOME-}" >> "$FAKE_CALLS"
     case "$4" in
       clippy) exit "${FAKE_CLIPPY_RC:-0}" ;;
       test)
@@ -216,6 +216,13 @@ class GatesRunTests(unittest.TestCase):
             self.assertIn(f"HOME={self.out}/home.", call)
         self.assertEqual(list(self.out.glob("home.*")), [])
 
+    def test_worktree_without_git_exits_2_before_writing(self):
+        shutil.rmtree(self.worktree / ".git")
+        result = self.gates()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("not a git worktree", result.stderr)
+        self.assertFalse(self.out.exists())
+
     def test_missing_toolchain_exits_2_before_writing(self):
         result = self.gates(RUSTUP=shutil.which("false") or "/usr/bin/false")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
@@ -251,7 +258,14 @@ class GatesRunTests(unittest.TestCase):
 
     def test_caller_rustflags_are_not_passed_to_cargo(self):
         flags = "--cap-lints=allow"
-        self.assertEqual(self.gates(RUSTFLAGS=flags, CARGO_TARGET_X_RUSTFLAGS=flags).returncode, 0)
+        result = self.gates(
+            RUSTFLAGS=flags,
+            CARGO_TARGET_X_RUSTFLAGS=flags,
+            CARGO_PROFILE_TEST_DEBUG_ASSERTIONS="false",
+            COVEN_HOME="/real/home",
+            COVEN_CODE_TEST_HOME="/real/test-home",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for call in self.calls.read_text().splitlines():
             self.assertTrue(call.endswith("RUSTFLAGS=unset"), call)
 

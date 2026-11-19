@@ -149,6 +149,7 @@ def evaluate(
         run.get("check_suite_id")
         for run in workflow_runs
         if run.get("pull_requests")
+        and run.get("check_suite_id") is not None
         and number not in [pr.get("number") for pr in run["pull_requests"]]
     }
     workflow_runs = [run for run in workflow_runs if run.get("check_suite_id") not in foreign]

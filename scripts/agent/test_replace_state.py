@@ -112,7 +112,16 @@ class ReplaceSectionTests(unittest.TestCase):
 
     def test_near_miss_next_action_markers_are_refused(self):
         tail = "\nOriginal report: crash.\n\n**Next action:** (template) fill in.\n\nKeep.\n"
-        for marker in ("**Next Action:** review", "**Next action**: review", "Next action: review", "- next-action: x"):
+        for marker in (
+            "**Next Action:** review",
+            "**Next action**: review",
+            "Next action: review",
+            "- next-action: x",
+            "**Next actions:** review.",
+            "**Next action (Val):** review.",
+            "Next steps. **Next action** is review.",
+            "> Next Actions (owner Val): review",
+        ):
             body = OLD.replace("**Next action:** review #1.", marker) + tail
             self.assertNotEqual(body, OLD + tail)
             self.refused(body, pattern="looks like a Next action")

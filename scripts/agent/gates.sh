@@ -78,11 +78,18 @@ fi
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKTREE/src-rust/target}"
-# CI sets no compiler flags; a caller's RUSTFLAGS=--cap-lints=allow would let
-# the -D warnings gates pass. Flags in $CARGO_HOME/config.toml still apply.
-unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS CARGO_BUILD_RUSTFLAGS
+# CI sets none of these. A caller's RUSTFLAGS=--cap-lints=allow or
+# CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false would let a gate pass that fails
+# in CI, and a Coven agent shell's COVEN_HOME would point the tests at a real
+# home instead of the scratch one. Settings in $CARGO_HOME/config.toml still
+# apply. (COVEN_TOOLCHAIN was read above.)
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS \
+  CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET RUSTC CLIPPY_CONF_DIR
 for var in $(compgen -e); do
-  case "$var" in CARGO_TARGET_*_RUSTFLAGS) unset "$var" ;; esac
+  case "$var" in
+    CARGO_TARGET_*_RUSTFLAGS | CARGO_PROFILE_* | COVEN_* | CLAURST_* | ANTHROPIC_* | OPENAI_* | CODEX_*)
+      unset "$var" ;;
+  esac
 done
 # Colour codes would break the test-count summary.
 export CARGO_TERM_COLOR=never
@@ -112,6 +119,11 @@ fingerprint() {
 if [ "$DRY_RUN" = 1 ]; then
   SCRATCH_HOME="$OUT/home.XXXXXX"
 else
+  # Without git the change check below would compare two identical errors.
+  git -C "$WORKTREE" rev-parse --verify -q HEAD >/dev/null || {
+    echo "gates: $WORKTREE is not a git worktree with a commit" >&2
+    exit 2
+  }
   "$RUSTUP" run "$TOOLCHAIN" cargo --version >/dev/null 2>&1 || {
     echo "gates: '$RUSTUP run $TOOLCHAIN cargo' does not run; install the toolchain or set RUSTUP" >&2
     exit 2
